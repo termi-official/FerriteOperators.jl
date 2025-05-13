@@ -1,0 +1,35 @@
+name = "FerriteOperators"
+uuid = "27d9367a-5072-424e-9c5f-fe582399bac3"
+authors = ["termi-official <termi-official@users.noreply.github.com> and contributors"]
+version = "1.0.0-DEV"
+
+[deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+Ferrite = "c061ca5d-56c9-439f-9c0e-210fe06d3992"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Polyester = "f517fe37-dbe3-4b94-8317-1923a5111588"
+Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
+UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
+Unrolled = "9602ed7d-8fef-5bc8-8597-8f21381861e8"
+
+[compat]
+Adapt = "4.3.0"
+Ferrite = "1.1.0"
+LinearAlgebra = "1.11.0"
+Polyester = "0.7.16"
+Reexport = "1.2.2"
+SparseArrays = "1.11.0"
+StaticArrays = "1.9.13"
+TimerOutputs = "0.5.28"
+UnPack = "1.0.2"
+Unrolled = "0.1.5"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
