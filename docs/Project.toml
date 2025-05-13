@@ -1,0 +1,3 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+FerriteOperators = "27d9367a-5072-424e-9c5f-fe582399bac3"
