@@ -2,6 +2,12 @@
 # TODO energy based operator?
 # TODO maybe a trait system for operators?
 
+struct SubdomainCache
+    sdh
+    element_cache
+    strategy_cache
+end
+
 """
     AbstractNonlinearOperator
 
