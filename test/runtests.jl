@@ -104,4 +104,82 @@ using SparseArrays
             end
         end
     end
+
+    @testset "Nonlinear" begin
+        struct NeoHookean
+            E::Float64
+            ν::Float64
+        end
+        function (p::NeoHookean)(F)
+            (; E, ν) = p
+            μ = E / (2(1 + ν))
+            λ = (E * ν) / ((1 + ν) * (1 - 2ν))
+            C = tdot(F)
+            Ic = tr(C)
+            J = sqrt(det(C))
+            return μ / 2 * (Ic - 3 - 2 * log(J)) + λ / 2 * (J - 1)^2
+        end
+
+        # Setup
+        grid = generate_grid(Hexahedron, (3,3,3))
+        Ferrite.transform_coordinates!(grid, x->Vec{3}(sign.(x.-0.5) .* (x.-0.5).^2))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefHexahedron,1}()^3)
+        close!(dh)
+
+        residual = zeros(ndofs(dh))
+        u = zeros(ndofs(dh))
+        apply_analytical!(u, dh, :u, x->0.01x.^2)
+
+        for integrator in [
+            FerriteOperators.SimpleHyperelasticityIntegrator(
+                NeoHookean(10.0, 0.3),
+                QuadratureRuleCollection(2),
+                :u
+            ),
+        ]
+            nlop_base = setup_assembled_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+            # Check that assembly works
+            @test norm(nlop_base.J) ≈ 0.0
+            update_linearization!(nlop_base, u, 0.0)
+            Jnorm_baseline = norm(nlop_base.J)
+            @test Jnorm_baseline > 0.0
+            # Also querying the residual should not change the outcome
+            update_linearization!(nlop_base, residual, u, 0.0)
+            @test Jnorm_baseline ≈ norm(nlop_base.J)
+            rnorm_baseline = norm(residual)
+            @test rnorm_baseline > 0.0
+            # Now just the residual
+            nlop_base(residual, u, 0.0)
+            @test rnorm_baseline ≈ norm(residual)
+            # Idempotency
+            update_linearization!(nlop_base, u, 0.0)
+            @test Jnorm_baseline ≈ norm(nlop_base.J)
+            nlop_base(residual, u, 0.0)
+            @test Jnorm_baseline ≈ norm(nlop_base.J)
+            @test rnorm_baseline ≈ norm(residual)
+            residual_baseline = copy(residual)
+
+            @testset "Strategy $strategy" for strategy in (
+                    PerColorAssemblyStrategy(SequentialCPUDevice()),
+                    PerColorAssemblyStrategy(PolyesterDevice(1)),
+                    PerColorAssemblyStrategy(PolyesterDevice(2)),
+                    PerColorAssemblyStrategy(PolyesterDevice(3)),
+            )
+                nlop = setup_assembled_operator(strategy, integrator, dh)
+                # Consistency and Idempotency
+                for i in 1:2
+                    update_linearization!(nlop, u, 0.0)
+                    @test nlop.J ≈ nlop_base.J
+
+                    update_linearization!(nlop, residual, u, 0.0)
+                    @test nlop.J ≈ nlop_base.J
+                    @test residual ≈ residual_baseline
+
+                    nlop(residual, u, 0.0)
+                    @test residual ≈ residual_baseline
+                end
+            end
+        end
+    end
 end

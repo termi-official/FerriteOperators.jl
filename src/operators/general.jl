@@ -27,26 +27,26 @@ Interface:
 abstract type AbstractNonlinearOperator end
 
 """
-    update_linearization!(op, residual, u, t)
+    update_linearization!(op, residual, u, p)
 
 Setup the linearized operator `Jᵤ(u) := dᵤF(u)` in op and its residual `F(u)` in
 preparation to solve for the increment `Δu` with the linear problem `J(u) Δu = F(u)`.
 """
-update_linearization!(Jᵤ::AbstractNonlinearOperator, residual::AbstractVector, u::AbstractVector, t)
+update_linearization!(Jᵤ::AbstractNonlinearOperator, residual::AbstractVector, u::AbstractVector, p)
 
 """
-    update_linearization!(op, u, t)
+    update_linearization!(op, u, p)
 
 Setup the linearized operator `Jᵤ(u)` in op.
 """
-update_linearization!(Jᵤ::AbstractNonlinearOperator, u::AbstractVector, t)
+update_linearization!(Jᵤ::AbstractNonlinearOperator, u::AbstractVector, p)
 
 """
-    update_residual!(op, residual, u, problem, t)
+    update_residual!(op, residual, u, problem, p)
 
 Evaluate the residual `F(u)` of the problem.
 """
-update_residual!(op::AbstractNonlinearOperator, residual::AbstractVector, u::AbstractVector, t)
+update_residual!(op::AbstractNonlinearOperator, residual::AbstractVector, u::AbstractVector, p)
 
 
 abstract type AbstractBlockOperator <: AbstractNonlinearOperator end
@@ -160,7 +160,7 @@ Base.size(op::DiagonalOperator, axis) = length(op.values)
 
 get_matrix(op::DiagonalOperator) = spdiagm(op.values)
 
-update_linearization!(::DiagonalOperator, ::AbstractVector, ::AbstractVector, t) = nothing
+update_linearization!(::DiagonalOperator, ::AbstractVector, ::AbstractVector, p) = nothing
 
 """
     NullOperator <: AbstractBilinearOperator
@@ -178,7 +178,7 @@ Base.size(op::NullOperator{T,S1,S2}, axis) where {T,S1,S2} = axis == 1 ? S1 : (a
 
 get_matrix(op::NullOperator{T, SIN, SOUT}) where {T, SIN, SOUT} = spzeros(T,SIN,SOUT)
 
-update_linearization!(::NullOperator, ::AbstractVector, ::AbstractVector, t) = nothing
+update_linearization!(::NullOperator, ::AbstractVector, ::AbstractVector, p) = nothing
 
 #########################################################################################################################
 
