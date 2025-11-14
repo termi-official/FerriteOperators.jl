@@ -1,45 +1,117 @@
 @doc raw"""
-    SimpleHyperelasticityIntegrator{CoefficientType}
-
-Represents the integrand of the bilinear form ``a(u,v) = -\int \nabla v(x) \cdot D \nabla u(x) dx`` for a given diffusion value ``D`` and ``u,v`` from the same function space.
+    SimpleHyperelasticityIntegrator{EnergyType}
 """
-struct SimpleHyperelasticityIntegrator{EnergyType} <: AbstractBilinearIntegrator
+struct SimpleHyperelasticityIntegrator{EnergyType} <: AbstractNonlinearIntegrator
     # This is specific to our model
     ψ::EnergyType
     # Every integrator needs these
-    ipc::VectorInterpolationCollection
     qrc::QuadratureRuleCollection
     field_name::Symbol
 end
 
-"""
-The cache associated with [`BilinearDiffusionIntegrator`](@ref) to assemble element diffusion matrices.
-"""
 struct SimpleHyperelasticityElementCache{EnergyType, CV <: CellValues} <: AbstractVolumetricElementCache
     ψ::EnergyType
-    cellvalues::CV
+    cv::CV
 end
 
 function duplicate_for_device(device, cache::SimpleHyperelasticityElementCache)
     return SimpleHyperelasticityElementCache(
         cache.ψ,
-        duplicate_for_device(device, cache.cellvalues),
+        duplicate_for_device(device, cache.cv),
     )
 end
 
-function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleHyperelasticityElementCache, time)
-    (; cellvalues, D) = element_cache
-    n_basefuncs = getnbasefunctions(cellvalues)
+# Element residual
+function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, element_cache::SimpleHyperelasticityElementCache, p)
+    (; ψ, cv) = element_cache
 
-    reinit!(cellvalues, cell)
+    ndofs = getnbasefunctions(cv)
 
-    for qp in 1:getnquadpoints(cellvalues)
-        dΩ = getdetJdV(cellvalues, qp)
-        for i in 1:n_basefuncs
-            ∇Nᵢ = shape_gradient(cellvalues, qp, i)
-            for j in 1:n_basefuncs
-                ∇Nⱼ = shape_gradient(cellvalues, qp, j)
-                Kₑ[i,j] -= D * ∇Nⱼ ⋅ ∇Nᵢ * dΩ
+    reinit!(cv, cell)
+
+    @inbounds for qp ∈ 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+
+        # Compute deformation gradient F
+        ∇u = function_gradient(cv, qp, uₑ)
+        F = one(∇u) + ∇u
+
+        # Compute stress and tangent
+        P = Tensors.gradient(F_ad -> ψ(F_ad), F)
+
+        # Loop over test functions
+        for i in 1:ndofs
+            ∇δui = shape_gradient(cv, qp, i)
+
+            # Add contribution to the residual from this test function
+            residualₑ[i] += ∇δui ⊡ P * dΩ
+        end
+    end
+end
+
+
+# jac
+function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, element_cache::SimpleHyperelasticityElementCache, p)
+    (; ψ, cv) = element_cache
+
+    ndofs = getnbasefunctions(cv)
+
+    reinit!(cv, cell)
+
+    @inbounds for qp ∈ 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+
+        # Compute deformation gradient F
+        ∇u = function_gradient(cv, qp, uₑ)
+        F = one(∇u) + ∇u
+
+        # Compute stress and tangent
+        ∂P∂F = Tensors.hessian(F_ad -> ψ(F_ad), F)
+
+        # Loop over test functions
+        for i in 1:ndofs
+            ∇δui = shape_gradient(cv, qp, i)
+
+            ∇δui∂P∂F = ∇δui ⊡ ∂P∂F # Hoisted computation
+            for j in 1:ndofs
+                ∇δuj = shape_gradient(cv, qp, j)
+                # Add contribution to the tangent
+                Kₑ[i, j] += ( ∇δui∂P∂F ⊡ ∇δuj ) * dΩ
+            end
+        end
+    end
+end
+
+# Combined residual and jac
+function assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, element_cache::SimpleHyperelasticityElementCache, p)
+    (; ψ, cv) = element_cache
+
+    ndofs = getnbasefunctions(cv)
+
+    reinit!(cv, cell)
+
+    @inbounds for qp ∈ 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+
+        # Compute deformation gradient F
+        ∇u = function_gradient(cv, qp, uₑ)
+        F = one(∇u) + ∇u
+
+        # Compute stress and tangent
+        ∂P∂F, P = Tensors.hessian(F_ad -> ψ(F_ad), F, :all)
+
+        # Loop over test functions
+        for i in 1:ndofs
+            ∇δui = shape_gradient(cv, qp, i)
+
+            # Add contribution to the residual from this test function
+            residualₑ[i] += ∇δui ⊡ P * dΩ
+
+            ∇δui∂P∂F = ∇δui ⊡ ∂P∂F # Hoisted computation
+            for j in 1:ndofs
+                ∇δuj = shape_gradient(cv, qp, j)
+                # Add contribution to the tangent
+                Kₑ[i, j] += ( ∇δui∂P∂F ⊡ ∇δuj ) * dΩ
             end
         end
     end
@@ -50,5 +122,5 @@ function setup_element_cache(element_model::SimpleHyperelasticityIntegrator, sdh
     field_name = element_model.field_name
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
-    return SimpleHyperelasticityElementCache(element_model.D, CellValues(qr, ip, ip_geo))
+    return SimpleHyperelasticityElementCache(element_model.ψ, CellValues(qr, ip, ip_geo))
 end

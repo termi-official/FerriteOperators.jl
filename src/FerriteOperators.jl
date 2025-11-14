@@ -1,6 +1,6 @@
 module FerriteOperators
 
-using Reexport, UnPack # TODO remove unpack
+using Reexport
 @reexport using Ferrite
 using TimerOutputs
 using Adapt
@@ -29,9 +29,12 @@ include("core/ferrite-addons/collections.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
 
 abstract type AbstractBilinearIntegrator end
+abstract type AbstractNonlinearIntegrator end
+
 include("elements/composite_elements.jl")
 include("elements/simple_diffusion.jl")
 include("elements/simple_mass.jl")
+include("elements/simple_hyperelasticity.jl")
 
 include("operators/general.jl")
 include("operators/assembled.jl")
@@ -39,7 +42,7 @@ include("operators/setup.jl")
 
 export QuadratureRuleCollection
 
-export setup_assembled_operator, update_operator!
+export setup_assembled_operator, update_operator!, update_linearization!
 
 export NullOperator, DiagonalOperator
 
