@@ -1,12 +1,13 @@
 @doc raw"""
-    SimpleBilinearDiffusionIntegrator{CoefficientType}
+    SimpleHyperelasticityIntegrator{CoefficientType}
 
 Represents the integrand of the bilinear form ``a(u,v) = -\int \nabla v(x) \cdot D \nabla u(x) dx`` for a given diffusion value ``D`` and ``u,v`` from the same function space.
 """
-struct SimpleBilinearDiffusionIntegrator <: AbstractBilinearIntegrator
+struct SimpleHyperelasticityIntegrator{EnergyType} <: AbstractBilinearIntegrator
     # This is specific to our model
-    D::Float64
+    ψ::EnergyType
     # Every integrator needs these
+    ipc::VectorInterpolationCollection
     qrc::QuadratureRuleCollection
     field_name::Symbol
 end
@@ -14,19 +15,19 @@ end
 """
 The cache associated with [`BilinearDiffusionIntegrator`](@ref) to assemble element diffusion matrices.
 """
-struct SimpleBilinearDiffusionElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
-    D::Float64
+struct SimpleHyperelasticityElementCache{EnergyType, CV <: CellValues} <: AbstractVolumetricElementCache
+    ψ::EnergyType
     cellvalues::CV
 end
 
-function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache)
-    return SimpleBilinearDiffusionElementCache(
-        cache.D,
+function duplicate_for_device(device, cache::SimpleHyperelasticityElementCache)
+    return SimpleHyperelasticityElementCache(
+        cache.ψ,
         duplicate_for_device(device, cache.cellvalues),
     )
 end
 
-function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBilinearDiffusionElementCache, time)
+function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleHyperelasticityElementCache, time)
     (; cellvalues, D) = element_cache
     n_basefuncs = getnbasefunctions(cellvalues)
 
@@ -44,10 +45,10 @@ function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBili
     end
 end
 
-function setup_element_cache(element_model::SimpleBilinearDiffusionIntegrator, sdh::SubDofHandler)
+function setup_element_cache(element_model::SimpleHyperelasticityIntegrator, sdh::SubDofHandler)
     qr         = getquadraturerule(element_model.qrc, sdh)
     field_name = element_model.field_name
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
-    return SimpleBilinearDiffusionElementCache(element_model.D, CellValues(qr, ip, ip_geo))
+    return SimpleHyperelasticityElementCache(element_model.D, CellValues(qr, ip, ip_geo))
 end

@@ -1,53 +1,101 @@
+struct StandardOperatorSpecification
+end
+
 abstract type AbstractAssemblyStrategy end
+# This one is the super type for strategies giving us a full matrix with indexing and stuff
+abstract type AbstractFullAssemblyStrategy <: AbstractAssemblyStrategy end
+# This one is the super type for strategies giving us an object which we ONLY can multiply a vector with
+abstract type AbstractMatrixFreeStrategy <: AbstractAssemblyStrategy end
 
 """
     SequentialAssemblyStrategy()
 """
-struct SequentialAssemblyStrategy{DeviceType} <: AbstractAssemblyStrategy
+struct SequentialAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
     device::DeviceType
+    operator_specification
 end
+SequentialAssemblyStrategy(device) = SequentialAssemblyStrategy(device, StandardOperatorSpecification())
 
-struct SequentialAssemblyStrategyCache{DeviceCacheType}
+struct SequentialAssemblyStrategyCache{DeviceType, DeviceCacheType}
+    device::DeviceType
     # Scratch for the device to store its data
     device_cache::DeviceCacheType
 end
 
+setup_strategy_cache(strategy::SequentialAssemblyStrategy, element_cache, sdh) = SequentialAssemblyStrategyCache(strategy.device, nothing)
 
 """
     PerColorAssemblyStrategy(chunksize, coloralg)
 """
-struct PerColorAssemblyStrategy{DeviceType} <: AbstractAssemblyStrategy
+struct PerColorAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
     device::DeviceType
-    # coloralg::Symbol # TODO
+    coloralg
+    operator_specification
 end
+PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = PerColorAssemblyStrategy(device, alg, StandardOperatorSpecification())
 
-struct PerColorAssemblyStrategyCache{DeviceCacheType, ColorCacheType}
+@concrete struct PerColorAssemblyStrategyCache
+    device
     # Scratch for the device to store its data
-    device_cache::DeviceCacheType
-    # Everythign related to the coloring is stored here
-    color_cache::ColorCacheType
+    device_cache
+    # Everything related to the coloring is stored here
+    colors
 end
 
-function create_dh_coloring(dh::DofHandler; alg = Ferrite.ColoringAlgorithm.WorkStream)
-    grid = get_grid(dh)
-    return [Ferrite.create_coloring(grid, sdh.cellset; alg) for sdh in dh.subdofhandlers]
+@concrete struct ThreadedColorCache
+    tlds
+    Aes
+    ues
+    res
+end
+
+function setup_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, element_cache, sdh)
+    return _setup_strategy_cache_cpu(strategy, element_cache, sdh, 1)
+end
+
+function setup_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, element_cache, sdh)
+    return _setup_strategy_cache_cpu(strategy, element_cache, sdh, strategy.device.chunksize)
+end
+
+function _setup_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, element_cache, sdh, chunksize)
+    (;  device) = strategy
+    (; dh)      = sdh
+    grid        = get_grid(dh)
+
+    colors = Ferrite.create_coloring(grid, sdh.cellset; alg=strategy.coloralg)
+
+    ncellsmax = maximum(length.(colors))
+    nchunksmax = ceil(Int, ncellsmax / chunksize)
+
+    tlds = [ChunkLocalAssemblyData(CellCache(sdh), duplicate_for_device(device, element_cache)) for tid in 1:nchunksmax]
+    Aes  = [allocate_element_matrix(element_cache, sdh) for tid in 1:nchunksmax]
+    ues  = [allocate_element_unknown_vector(element_cache, sdh) for tid in 1:nchunksmax]
+    res  = [allocate_element_residual_vector(element_cache, sdh) for tid in 1:nchunksmax]
+    PerColorAssemblyStrategyCache(strategy.device, ThreadedColorCache(tlds, Aes, ues, res), colors)
 end
 
 """
     ElementAssemblyStrategy
 """
-struct ElementAssemblyStrategy{DeviceType} <: AbstractAssemblyStrategy
+struct ElementAssemblyStrategy{DeviceType} <: AbstractMatrixFreeStrategy
     device::DeviceType
 end
 
-struct ElementAssemblyStrategyCache{DeviceCacheType, EADataType}
+@concrete struct ElementAssemblyStrategyCache
+    device
     # Scratch for the device to store its data
-    device_cache::DeviceCacheType
-    # Everythign related to the coloring is stored here
-    ea_data::EADataType
+    device_cache
+    # Everything related to the elements is stored here
+    ea_data
 end
 
+function setup_strategy_cache(strategy::ElementAssemblyStrategy, element_cache, sdh)
+    error("Not implemented yet")
+end
 
 function Adapt.adapt_structure(::AbstractAssemblyStrategy, dh::DofHandler)
     error("Device specific implementation for `adapt_structure(to,dh::DofHandler)` is not implemented yet")
 end
+
+matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)
+matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}

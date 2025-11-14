@@ -66,34 +66,42 @@ using SparseArrays
         close!(dh)
         qrc = QuadratureRuleCollection{2}()
 
-        integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(
-            1.0,
-            QuadratureRuleCollection(2),
-            :u
-        )
-        bilinop_base = setup_assembled_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
-        # Check that assembly works
-        @test norm(bilinop_base.A) ≈ 0.0
-        update_operator!(bilinop_base,0.0)
-        norm_baseline = norm(bilinop_base.A)
-        @test norm_baseline > 0.0
-        # Idempotency
-        update_operator!(bilinop_base,0.0)
-        @test norm_baseline == norm(bilinop_base.A)
-
-        @testset "Strategy $strategy" for strategy in (
-                PerColorAssemblyStrategy(SequentialCPUDevice()),
-                PerColorAssemblyStrategy(PolyesterDevice(1)),
-                PerColorAssemblyStrategy(PolyesterDevice(2)),
-                PerColorAssemblyStrategy(PolyesterDevice(3)),
-        )
-            bilinop = setup_assembled_operator(strategy, integrator, dh)
-            # Consistency
-            update_operator!(bilinop,0.0)
-            @test bilinop.A ≈ bilinop_base.A
+        for integrator in [
+            FerriteOperators.SimpleBilinearDiffusionIntegrator(
+                1.0,
+                QuadratureRuleCollection(2),
+                :u
+            ),
+            FerriteOperators.SimpleBilinearMassIntegrator(
+                1.0,
+                QuadratureRuleCollection(1),
+                :u
+            )
+        ]
+            bilinop_base = setup_assembled_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+            # Check that assembly works
+            @test norm(bilinop_base.A) ≈ 0.0
+            update_operator!(bilinop_base, 0.0)
+            norm_baseline = norm(bilinop_base.A)
+            @test norm_baseline > 0.0
             # Idempotency
-            update_operator!(bilinop,0.0)
-            @test bilinop.A ≈ bilinop_base.A
+            update_operator!(bilinop_base, 0.0)
+            @test norm_baseline == norm(bilinop_base.A)
+
+            @testset "Strategy $strategy" for strategy in (
+                    PerColorAssemblyStrategy(SequentialCPUDevice()),
+                    PerColorAssemblyStrategy(PolyesterDevice(1)),
+                    PerColorAssemblyStrategy(PolyesterDevice(2)),
+                    PerColorAssemblyStrategy(PolyesterDevice(3)),
+            )
+                bilinop = setup_assembled_operator(strategy, integrator, dh)
+                # Consistency
+                update_operator!(bilinop, 0.0)
+                @test bilinop.A ≈ bilinop_base.A
+                # Idempotency
+                update_operator!(bilinop, 0.0)
+                @test bilinop.A ≈ bilinop_base.A
+            end
         end
     end
 end

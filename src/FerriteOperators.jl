@@ -7,6 +7,8 @@ using Adapt
 using Unrolled
 using SparseArrays, StaticArrays
 
+using ConcreteStructs
+
 import LinearAlgebra: mul!
 
 import Base: *, +, -, @kwdef
@@ -29,9 +31,11 @@ include("core/ferrite-addons/parallel_duplication_api.jl")
 abstract type AbstractBilinearIntegrator end
 include("elements/composite_elements.jl")
 include("elements/simple_diffusion.jl")
+include("elements/simple_mass.jl")
 
 include("operators/general.jl")
 include("operators/assembled.jl")
+include("operators/setup.jl")
 
 export QuadratureRuleCollection
 
