@@ -1,15 +1,22 @@
 
-create_system_matrix(system_matrix_type, dh) = allocate_matrix(system_matrix_type, dh)
+create_system_matrix(strategy, dh) = allocate_matrix(matrix_type(strategy), dh)
 
-function setup_assembled_operator(strategy::AbstractFullAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler, system_matrix_type::Type = matrix_type(strategy))
-    A  = create_system_matrix(system_matrix_type, dh)
+function setup_element_caches(integrator, dh)
+    return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
+end
 
-    element_caches = [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
+function setup_strategy_caches(strategy, element_caches, dh)
+    return [setup_strategy_cache(strategy, element_cache, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
+end
 
-    strategy_caches = [setup_strategy_cache(strategy, element_cache, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
+function setup_operator(strategy::AbstractFullAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
+    A               = create_system_matrix(strategy, dh)
+    element_caches  = setup_element_caches(integrator, dh)
+    strategy_caches = setup_strategy_caches(strategy, element_caches, dh)
 
-    return AssembledBilinearFerriteOperator(
+    return BilinearFerriteOperator(
         A,
+        strategy,
         [SubdomainCache(
             sdh,
             element_cache,
@@ -18,15 +25,14 @@ function setup_assembled_operator(strategy::AbstractFullAssemblyStrategy, integr
     )
 end
 
-function setup_assembled_operator(strategy::AbstractFullAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler, system_matrix_type::Type = matrix_type(strategy))
-    J  = create_system_matrix(system_matrix_type, dh)
+function setup_operator(strategy::AbstractFullAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
+    J               = create_system_matrix(system_matrix_type, dh)
+    element_caches  = setup_element_caches(integrator, dh)
+    strategy_caches = setup_strategy_caches(strategy, element_caches, dh)
 
-    element_caches = [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
-
-    strategy_caches = [setup_strategy_cache(strategy, element_cache, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
-
-    return AssembledLinearizedFerriteOperator(
+    return LinearizedFerriteOperator(
         J,
+        strategy,
         [SubdomainCache(
             sdh,
             element_cache,

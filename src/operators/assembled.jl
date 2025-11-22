@@ -1,18 +1,19 @@
 """
-    AssembledLinearizedFerriteOperator(J, caches)
+    LinearizedFerriteOperator(J, caches)
 
 A model for a function with its fully assembled linearization.
 
 Comes with one entry point for each cache type to handle the most common cases:
     assemble_element! -> update jacobian/residual contribution with internal state variables
 """
-struct AssembledLinearizedFerriteOperator{MatrixType <: AbstractSparseMatrix} <: AbstractNonlinearOperator
+struct LinearizedFerriteOperator{MatrixType <: AbstractSparseMatrix} <: AbstractNonlinearOperator
     J::MatrixType
+    strategy::AbstractAssemblyStrategy
     subdomain_caches::Vector{SubdomainCache}
 end
 
 # Interface
-function update_linearization!(op::AssembledLinearizedFerriteOperator, u::AbstractVector, p)
+function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector, p)
     (; J, subdomain_caches) = op
 
     assembler = start_assemble(J)
@@ -22,7 +23,7 @@ function update_linearization!(op::AssembledLinearizedFerriteOperator, u::Abstra
         _update_linearization_J!(assembler, u, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
     end
 end
-function update_linearization!(op::AssembledLinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
+function update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
     (; J, subdomain_caches) = op
 
     assembler = start_assemble(J, residual)
@@ -32,7 +33,7 @@ function update_linearization!(op::AssembledLinearizedFerriteOperator, residual:
         _update_linearization_Jr!(assembler, u, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
     end
 end
-function residual!(op::AssembledLinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
+function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
     (; subdomain_caches) = op
     fill!(residual, 0.0)
 
@@ -43,16 +44,16 @@ function residual!(op::AssembledLinearizedFerriteOperator, residual::AbstractVec
 end
 
 """
-    mul!(out::AbstractVector, op::AssembledLinearizedFerriteOperator, in::AbstractVector)
-    mul!(out::AbstractVector, op::AssembledLinearizedFerriteOperator, in::AbstractVector, α, β)
+    mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector)
+    mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β)
 
 Apply the (scaled) action of the linearization of the contained nonlinear form to the vector `in`.
 """
-mul!(out::AbstractVector, op::AssembledLinearizedFerriteOperator, in::AbstractVector) = mul!(out, op.J, in)
-mul!(out::AbstractVector, op::AssembledLinearizedFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.J, in, α, β)
-(op::AssembledLinearizedFerriteOperator)(residual, u, p) = residual!(op, residual, u, p)
-Base.eltype(op::AssembledLinearizedFerriteOperator) = eltype(op.J)
-Base.size(op::AssembledLinearizedFerriteOperator, axis) = size(op.J, axis)
+mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector) = mul!(out, op.J, in)
+mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.J, in, α, β)
+(op::LinearizedFerriteOperator)(residual, u, p) = residual!(op, residual, u, p)
+Base.eltype(op::LinearizedFerriteOperator) = eltype(op.J)
+Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)
 
 # -------------------------------------------------- Sequential on CPU --------------------------------------------------
 
@@ -74,7 +75,7 @@ function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cac
     end
 end
 
-function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache,p)
+function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache, p)
     # Prepare standard values
     ndofs = ndofs_per_cell(sdh)
     # TODO query from strategy_cache
@@ -303,12 +304,13 @@ end
 
 #################################################################################################
 
-struct AssembledBilinearFerriteOperator{MatrixType} <: AbstractBilinearOperator
+struct BilinearFerriteOperator{MatrixType} <: AbstractBilinearOperator
     A::MatrixType
+    strategy::AbstractAssemblyStrategy
     subdomain_caches::Vector{SubdomainCache}
 end
 
-function update_operator!(op::AssembledBilinearFerriteOperator, p)
+function update_operator!(op::BilinearFerriteOperator, p)
     (; A, subdomain_caches)  = op
 
     assembler = start_assemble(A)
@@ -398,21 +400,21 @@ function _update_bilinear_operator_on_subdomain!(assembler, sdh, element_cache, 
     error("Element assembly not implemented yet for bilinear operators.")
 end
 
-mul!(out::AbstractVector, op::AssembledBilinearFerriteOperator, in::AbstractVector) = mul!(out, op.A, in)
-mul!(out::AbstractVector, op::AssembledBilinearFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.A, in, α, β)
-Base.eltype(op::AssembledBilinearFerriteOperator) = eltype(op.A)
-Base.size(op::AssembledBilinearFerriteOperator, axis) = sisze(op.A, axis)
+mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector) = mul!(out, op.A, in)
+mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.A, in, α, β)
+Base.eltype(op::BilinearFerriteOperator) = eltype(op.A)
+Base.size(op::BilinearFerriteOperator, axis) = sisze(op.A, axis)
 
 
 ###############################################################################
 
-struct AssembledLinearFerriteOperator{VectorType} <: AbstractLinearOperator
+struct LinearFerriteOperator{VectorType} <: AbstractLinearOperator
     b::VectorType
     subdomain_caches::Vector{SubdomainCache}
 end
 
 # Control dispatch for assembly strategy
-function update_operator!(op::AssembledLinearFerriteOperator, p)
+function update_operator!(op::LinearFerriteOperator, p)
     (; b, subdomain_caches) = op
 
     fill!(b, 0.0)
