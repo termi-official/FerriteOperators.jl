@@ -1,23 +1,27 @@
-struct GenericE2EVectorIndex{IndexType}
+struct GenericEAVectorIndex{IndexType}
     offset::Index
     length::Index
 end
+Base.zero(GenericEAVectorIndex{T}) where T = GenericEAVectorIndex(zero(T), zero(T))
 
-struct GenericE2EMatrixIndex{IndexType}
+
+struct GenericEAMatrixIndex{IndexType}
     offset::IndexType
     nrows::IndexType
     ncols::IndexType
 end
-Base.zero(GenericE2EMatrixIndex{T}) where T = GenericE2EMatrixIndex(zero(T), zero(T), zero(T))
+Base.zero(GenericEAMatrixIndex{T}) where T = GenericEAMatrixIndex(zero(T), zero(T), zero(T))
 
-@concrete struct GenericIndexdData
-    data
-    index_structure
+
+struct GenericIndexdData{IndexType, DataType, IndexStructureType <: AbstractVector{IndexType}}
+    data::DataType
+    index_structure::IndexStructureType
 end
 
 # Generic Element Assembly Data Type
-@concrete struct E2EOperator
+@concrete struct EAOperator
     device
+    device_cache
     # Local matrices
     element_matrices
     # input vector index -> local matrix index
@@ -26,50 +30,103 @@ end
     element_vector_map
 end
 
-function mul!(out::AbstractVector{T}, operator::E2EOperator, in::AbstractVector) where T
+getnelements(indexed_data::GenericIndexdData) = length(indexed_data.index_structure)
+getnelements(ea::EAOperator) = getnelements(ea.element_matrices)
+
+
+
+function mul!(out::AbstractVector{T}, operator::EAOperator, in::AbstractVector) where T
     fill!(out, zero(T))
     matrix_free_product!(out, operator, in, operator.device)
 end
 
-function matrix_free_product!(out::AbstractVector, A::E2EOperator, in::AbstractVector, device::SequentialCPUDevice)
+function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::SequentialCPUDevice)
     # Element loop
     # TODO abstraction layer via iterator
-    for (ei, (offset, nrows, ncols)) in enumerate(A.element_matrices.index_structure)
-        # TODO abstraction layer for this operation here. A might be computed on-the-fly.
-        Aₑ_flattened = @view A.data[offset:(offset+nrows*ncols-1)]
-        Aₑ = reshape(matrix_flattened, (nrows, ncols))
-
-        # TODO add function to dispatch on
-        in_index_struct = A.vector_element_map.index_structure[ei]
-        inₑ_indices = @view in_index_struct.data[in_index_struct.offset:(in_index_struct.offset + in_index_struct.length - 1)]
-        # TODO device buffer to store local copy into
-        inₑ = @view in[inₑ_indices]
-
-        # TODO add function to dispatch on
-        out_index_struct = A.element_vector_map.index_structure[ei]
-        outₑ_indices = @view out_index_struct.data[out_index_struct.offset:(out_index_struct.offset + out_index_struct.length - 1)]
-        # TODO device buffer to store local copy into
-        outₑ = @view out[outₑ_indices]
+    for ei in 1:getnelements(A)
+        # Query Data
+        Aₑ   = read_data(A.element_matrices, ei, A.device, A.device_cache)
+        inₑ  = read_data(A.vector_element_map, ei, A.device, A.device_cache)
+        outₑ = read_data(A.element_vector_map, ei, A.device, A.device_cache)
 
         # Local product kernel
         mul!(outₑ, Aₑ, inₑ)
+
+        # Maybe write data back
+        store_data!(out, outₑ, A.element_vector_map, ei, A.device, A.device_cache)
     end
 end
 
-@concrete struct E2EOperatorAssembler
-    system_matrix::E2EOperator
+
+@concrete struct EAViewCache
+end
+
+function read_data(indexed_data::GenericIndexdData{<:GenericEAMatrixIndex}, i::Integer, device, device_cache::EAViewCache)
+    (; offset, nrows, ncols) = indexed_data.index_structure[i]
+    Aₑ_flattened = @view A.data[offset:(offset+nrows*ncols-1)]
+    Aₑ = reshape(matrix_flattened, (nrows, ncols))
+    return Aₑ
+end
+
+function read_data(indexed_data::GenericIndexdData{<:GenericEAVectorIndex}, i::Integer, device, device_cache::EAViewCache)
+    (; offset, length) = indexed_data.index_structure[i]
+    vₑ = @view A.data[offset:(offset+length-1)]
+    return vₑ
+end
+
+function store_data!(A::AbstractMatrix, Aₑ::AbstractMatrix, indexed_data::GenericIndexdData{<:GenericEAMatrixIndex}, i::Integer, device, device_cache::EAViewCache)
+    return nothing
+end
+
+function store_data!(out::AbstractVector, outₑ::AbstractVector, indexed_data::GenericIndexdData{<:GenericEAVectorIndex}, i::Integer, device, device_cache::EAViewCache)
+    return nothing
+end
+
+
+
+@concrete struct PerInstanceEACache
+    inₑs
+    outₑs
+end
+
+function read_data(indexed_data::GenericIndexdData{<:GenericEAMatrixIndex}, i::Integer, device, device_cache::PerInstanceEACache)
+    error("Not implemented")
+end
+
+function read_data(indexed_data::GenericIndexdData{<:GenericEAVectorIndex}, i::Integer, device, device_cache::PerInstanceEACache)
+    error("Not implemented")
+end
+
+
+
+@concrete struct EARecomputeCache
+    # TODO more info about assembly
+end
+
+function read_data(indexed_data::GenericIndexdData{<:GenericEAMatrixIndex}, i::Integer, device, device_cache::EARecomputeCache)
+    error("Not implemented")
+end
+
+function read_data(indexed_data::GenericIndexdData{<:GenericEAVectorIndex}, i::Integer, device, device_cache::EARecomputeCache)
+    error("Not implemented")
+end
+
+
+
+@concrete struct EAOperatorAssembler
+    system_matrix::EAOperator
     residual
 end
 
-function Ferrite.start_assemble(element_matrix::E2EOperator)
-    return E2EOperatorAssembler(element_matrix, nothing)
+function Ferrite.start_assemble(element_matrix::EAOperator)
+    return EAOperatorAssembler(element_matrix, nothing)
 end
 
-function Ferrite.assemble!(assembler::E2EOperatorAssembler, cell, Kₑ::AbstractMatrix)
+function Ferrite.assemble!(assembler::EAOperatorAssembler, cell, Kₑ::AbstractMatrix)
     i = cellid(cell)
 end
 
-# function Ferrite.assemble!(assembler::E2EOperatorAssembler, cell, Kₑ::AbstractMatrix, rₑ::AbstractVector)
+# function Ferrite.assemble!(assembler::EAOperatorAssembler, cell, Kₑ::AbstractMatrix, rₑ::AbstractVector)
 #     #
 # end
 
@@ -80,17 +137,17 @@ function create_system_matrix(strategy::ElementAssemblyStrategy, dh) where {Valu
     IndexType = index_type(device)
 
     grid = get_grid(dh)
-    index_structure = index_structure = zeros(IndexType, getncells(grid))
+    index_structure = zeros(IndexType, getncells(grid))
 
     next_index = 1
     for sdh in enumerate(dh.subdofhandlers)
         ndofs = ndofs_per_cell(sdh)
         for cell in CellIterator(sdh)
-            
+            # TODO
         end
     end
 
     data = zeros(ValueType, total_data_size)
 
-    return E2EOperator(device, data, index_structure)
+    return EAOperator(device, data, index_structure)
 end
