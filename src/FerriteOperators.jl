@@ -43,7 +43,7 @@ include("elements/simple_hyperelasticity.jl")
 
 include("operators/general.jl")
 include("operators/matrix-free.jl")
-include("operators/ferrite.jl")
+include("operators/assembly_loops.jl")
 include("operators/setup.jl")
 
 export QuadratureRuleCollection
