@@ -175,20 +175,28 @@ using SparseArrays
                 :u
             ),
         ]
-            nlop_base = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+            nlop_base = setup_assembled_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+
             # Check that assembly works
             @test norm(nlop_base.J) ≈ 0.0
+            nlop_base.J .= NaN
             update_linearization!(nlop_base, u, 0.0)
             Jnorm_baseline = norm(nlop_base.J)
             @test Jnorm_baseline > 0.0
+
             # Also querying the residual should not change the outcome
+            residual .= NaN
+            nlop_base.J .= NaN
             update_linearization!(nlop_base, residual, u, 0.0)
             @test Jnorm_baseline ≈ norm(nlop_base.J)
             rnorm_baseline = norm(residual)
             @test rnorm_baseline > 0.0
+
             # Now just the residual
+            residual .= NaN
             nlop_base(residual, u, 0.0)
             @test rnorm_baseline ≈ norm(residual)
+
             # Idempotency
             update_linearization!(nlop_base, u, 0.0)
             @test Jnorm_baseline ≈ norm(nlop_base.J)
@@ -203,16 +211,20 @@ using SparseArrays
                     PerColorAssemblyStrategy(PolyesterDevice(2)),
                     PerColorAssemblyStrategy(PolyesterDevice(3)),
             )
-                nlop = setup_operator(strategy, integrator, dh)
+                nlop = setup_assembled_operator(strategy, integrator, dh)
                 # Consistency and Idempotency
                 for i in 1:2
+                    nlop.J .= NaN
                     update_linearization!(nlop, u, 0.0)
                     @test nlop.J ≈ nlop_base.J
 
+                    nlop.J .= NaN
+                    residual .= NaN
                     update_linearization!(nlop, residual, u, 0.0)
                     @test nlop.J ≈ nlop_base.J
                     @test residual ≈ residual_baseline
 
+                    residual .= NaN
                     nlop(residual, u, 0.0)
                     @test residual ≈ residual_baseline
                 end
