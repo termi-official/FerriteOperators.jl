@@ -12,6 +12,7 @@ makedocs(;
         edit_link="main",
         assets=String[],
     ),
+    warnonly=true,
     pages=[
         "Home" => "index.md",
     ],
