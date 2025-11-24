@@ -5,6 +5,7 @@ version = "0.0.1-DEV"
 
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
 ConcreteStructs = "2569d6c7-a4a2-43d3-a901-331e8e4be471"
 Ferrite = "c061ca5d-56c9-439f-9c0e-210fe06d3992"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
@@ -17,6 +18,7 @@ Unrolled = "9602ed7d-8fef-5bc8-8597-8f21381861e8"
 
 [compat]
 Adapt = "4.3.0"
+Atomix = "1.1.2"
 ConcreteStructs = "0.2.3"
 Ferrite = "1.2"
 LinearAlgebra = "1.10.0"

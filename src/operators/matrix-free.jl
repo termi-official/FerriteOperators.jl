@@ -45,7 +45,6 @@ product_kernel!(outₑ, Aₑ, inₑ, device_cache) = mul!(outₑ, Aₑ, inₑ)
 function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::SequentialCPUDevice)
     (; device_cache) = A
     # Element loop
-    # TODO abstraction layer via iterator
     for ei in 1:getnelements(A)
         # Query Data
         Aₑ   = read_data(A.element_matrices, ei, device, device_cache)
@@ -60,12 +59,39 @@ function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVe
     end
 end
 
+function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::PolyesterDevice)
+    (; device_cache) = A
+    (; chunksize) = device
+    # Element loop
+    @batch for ei_base in 1:chunksize:getnelements(A)
+        for ei in ei_base:min(ei_base+chunksize-1, getnelements(A))
+            # Query Data
+            Aₑ   = read_data(A.element_matrices, ei, device, device_cache)
+            inₑ  = read_data(A.vector_element_map, in, ei, device, device_cache)
+            outₑ = read_data(A.element_vector_map, out, ei, device, device_cache)
 
-struct EAViewCache
+            # Local product kernel
+            product_kernel!(outₑ, Aₑ, inₑ, device_cache)
+
+            # Maybe write data back
+            store_data!(out, outₑ, A.element_vector_map, ei, device, device_cache)
+        end
+    end
 end
 
-# TODO atomic flag
-product_kernel!(outₑ, Aₑ, inₑ, device_cache::EAViewCache) = mul!(outₑ, Aₑ, inₑ, 1, 1)
+struct EAViewCache{IsAtomic}
+end
+
+product_kernel!(outₑ, Aₑ, inₑ, ::EAViewCache{false}) = mul!(outₑ, Aₑ, inₑ, 1, 1)
+function product_kernel!(outₑ, Aₑ, inₑ, ::EAViewCache{true})
+    for i in eachindex(outₑ)
+        tmp = zero(eltype(outₑ))
+        for j in eachindex(inₑ)
+            tmp += Aₑ[i,j] * inₑ[j]
+        end
+        Atomix.@atomic outₑ[i] += tmp
+    end
+end
 
 function read_data(indexed_data::GenericIndexdData{<:GenericEAMatrixIndex}, i::Integer, device, device_cache::EAViewCache)
     (; offset, nrows, ncols) = indexed_data.index_structure[i]

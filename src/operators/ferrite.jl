@@ -8,39 +8,46 @@ Comes with one entry point for each cache type to handle the most common cases:
 """
 struct LinearizedFerriteOperator{MatrixType <: AbstractSparseMatrix} <: AbstractNonlinearOperator
     J::MatrixType
-    strategy::AbstractAssemblyStrategy
+    strategy
     subdomain_caches::Vector{SubdomainCache}
 end
 
 # Interface
 function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector, p)
-    (; J, subdomain_caches) = op
+    (; J, strategy, subdomain_caches) = op
 
-    assembler = start_assemble(J)
+    assembler = start_assemble(strategy, J)
 
     for sudomain_cache in subdomain_caches
         # Function barrier
         _update_linearization_J!(assembler, u, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
     end
+
+    finalize_assembly!(assembler)
 end
 function update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
-    (; J, subdomain_caches) = op
+    (; J, strategy, subdomain_caches) = op
 
-    assembler = start_assemble(J, residual)
+    assembler = start_assemble(strategy, J, residual)
 
     for sudomain_cache in subdomain_caches
         # Function barrier
         _update_linearization_Jr!(assembler, u, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
     end
+
+    finalize_assembly!(assembler)
 end
 function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
-    (; subdomain_caches) = op
-    fill!(residual, 0.0)
+    (; strategy, subdomain_caches) = op
+
+    assembler = start_assemble(strategy, residual)
 
     for sudomain_cache in subdomain_caches
         # Function barrier
-        _residual!(residual, u, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
+        _residual!(assembler, u, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
     end
+
+    finalize_assembly!(assembler)
 end
 
 """
@@ -71,7 +78,7 @@ function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cac
         # Fill buffers
         @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, cell, element_cache, p)
 
-        assemble!(assembler, celldofs(cell), Jₑ)
+        assemble!(assembler, cell, Jₑ)
     end
 end
 
@@ -89,7 +96,7 @@ function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_ca
 
         @timeit_debug "assemble element" assemble_element!(Jₑ, rₑ, uₑ, cell, element_cache, p)
 
-        assemble!(assembler, celldofs(cell), Jₑ, rₑ)
+        assemble!(assembler, cell, Jₑ, rₑ)
     end
 end
 
@@ -109,7 +116,7 @@ function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_ca
 
         @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, cell, element_cache, p)
 
-        residual[celldofs(cell)] .+= rₑ
+        assemble!(residual, cell, rₑ)
     end
 end
 
@@ -117,7 +124,7 @@ end
 
 # This function is defined to control the dispatch
 function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::PerColorAssemblyStrategyCache{<:SequentialCPUDevice}, p)
-    (; colors)= strategy_cache
+    (; colors) = strategy_cache
 
     # Prepare standard values
     ndofs = ndofs_per_cell(sdh)
@@ -133,7 +140,7 @@ function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cac
             # Fill buffers
             @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, cell, element_cache, p)
 
-            assemble!(assembler, celldofs(cell), Jₑ)
+            assemble!(assembler, cell, Jₑ)
         end
     end
 end
@@ -172,7 +179,7 @@ function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cac
                 # Fill buffers
                 assemble_element!(Jₑ, uₑ, cell, tld.ec, p)
 
-                assemble!(assembler, celldofs(cell), Jₑ)
+                assemble!(assembler, cell, Jₑ)
             end
         end
     end
@@ -197,7 +204,7 @@ function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_ca
             # Fill buffers
             @timeit_debug "assemble element" assemble_element!(Jₑ, rₑ, uₑ, cell, element_cache, p)
 
-            assemble!(assembler, celldofs(cell), Jₑ, rₑ)
+            assemble!(assembler, cell, Jₑ, rₑ)
         end
     end
 end
@@ -237,7 +244,7 @@ function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_ca
                 # Fill buffers
                 assemble_element!(Jₑ, rₑ, uₑ, cell, tld.ec, p)
 
-                assemble!(assembler, celldofs(cell), Jₑ, rₑ)
+                assemble!(assembler, cell, Jₑ, rₑ)
             end
         end
     end
@@ -261,7 +268,7 @@ function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_ca
             # Fill buffers
             @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, cell, element_cache, p)
 
-            residual[celldofs(cell)] .+= rₑ
+            assemble!(residual, cell, rₑ)
         end
     end
 end
@@ -296,7 +303,7 @@ function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_ca
                 # Fill buffers
                 assemble_element!(rₑ, uₑ, cell, tld.ec, p)
 
-                residual[celldofs(cell)] .+= rₑ
+                assemble!(residual, cell, rₑ)
             end
         end
     end
@@ -306,19 +313,21 @@ end
 
 struct BilinearFerriteOperator{MatrixType} <: AbstractBilinearOperator
     A::MatrixType
-    strategy::AbstractAssemblyStrategy
+    strategy
     subdomain_caches::Vector{SubdomainCache}
 end
 
 function update_operator!(op::BilinearFerriteOperator, p)
-    (; A, subdomain_caches)  = op
+    (; A, strategy, subdomain_caches)  = op
 
-    assembler = start_assemble(A)
+    assembler = start_assemble(strategy, A)
 
     for sudomain_cache in subdomain_caches
         # Function barrier
         _update_bilinear_operator_on_subdomain!(assembler, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
     end
+
+    finalize_assembly!(assembler)
 end
 
 function _update_bilinear_operator_on_subdomain!(assembler, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache, p)
@@ -331,7 +340,7 @@ function _update_bilinear_operator_on_subdomain!(assembler, sdh, element_cache, 
         fill!(Aₑ, 0)
         # TODO instead of "cell" pass object with geometry information only
         @timeit_debug "assemble element" assemble_element!(Aₑ, cell, element_cache, p)
-        assemble!(assembler, celldofs(cell), Aₑ)
+        assemble!(assembler, cell, Aₑ)
     end
 end
 
@@ -410,20 +419,23 @@ Base.size(op::BilinearFerriteOperator, axis) = sisze(op.A, axis)
 
 struct LinearFerriteOperator{VectorType} <: AbstractLinearOperator
     b::VectorType
+    strategy
     subdomain_caches::Vector{SubdomainCache}
 end
 
 # Control dispatch for assembly strategy
 function update_operator!(op::LinearFerriteOperator, p)
-    (; b, subdomain_caches) = op
+    (; b, strategy, subdomain_caches) = op
 
-    fill!(b, 0.0)
+    assembler = start_assemble(strategy, b)
 
     for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
         (; sdh, element_cache, strategy_cache) = subdomain_caches
         # Function barrier
-        @timeit_debug "assemble subdomain $subdomain_id" _update_linear_operator!(b, sdh, element_cache, strategy_cache, p)
+        @timeit_debug "assemble subdomain $subdomain_id" _update_linear_operator!(assembler, sdh, element_cache, strategy_cache, p)
     end
+
+    finalize_assembly!(assembler)
 end
 
 function _update_linear_operator!(b, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache{<:AbstractCPUDevice}, p)
@@ -432,7 +444,7 @@ function _update_linear_operator!(b, sdh, element_cache, strategy_cache::Sequent
     @inbounds for cell in CellIterator(sdh)
         fill!(bₑ, 0)
         assemble_element!(bₑ, cell, element_cache, p)
-        b[celldofs(cell)] .+= bₑ
+        assemble!(b, cell, bₑ)
     end
 end
 
@@ -442,7 +454,7 @@ function _update_linear_operator!(b, sdh, element_cache, strategy_cache::Element
     @inbounds for cell in CellIterator(sdh)
         fill!(bₑ, 0)
         assemble_element!(bₑ, cell, element_cache, p)
-        b[celldofs(cell)] .+= bₑ
+        assemble!(b, cell, bₑ)
     end
 end
 
@@ -453,7 +465,7 @@ function _update_linear_operator!(b, sdh, element_cache, strategy_cache::Element
         assemble_element!(bₑ, cell, element_cache, p)
     end
 
-    ea_collapse!(b, strategy_cache.ea_data)
+    finalize_assembly!(assembler)
 end
 
 function _update_linear_operator!(b, sdh, element_cache, strategy_cache::ElementAssemblyStrategyCache{<:PolyesterDevice}, p)
@@ -475,7 +487,8 @@ function _update_linear_operator!(b, sdh, element_cache, strategy_cache::Element
             assemble_element!(bₑ, tld.cc, tld.ec, p)
         end
     end
-    ea_collapse!(b, strategy_cache.ea_data)
+
+    finalize_assembly!(assembler)
 end
 
 function _update_linear_operator!(b, sdh, element_cache, strategy_cache::PerColorAssemblyStrategyCache{<:SequentialCPUDevice}, p)
@@ -486,7 +499,7 @@ function _update_linear_operator!(b, sdh, element_cache, strategy_cache::PerColo
         @timeit_debug "assemble subdomain" @inbounds for cell in CellIterator(sdh.dh, color)
             fill!(bₑ, 0)
             assemble_element!(bₑ, cell, element_cache, p)
-            b[celldofs(cell)] .+= bₑ
+            assemble!(b, cell, bₑ)
         end
     end
 end
@@ -521,7 +534,7 @@ function _update_linear_operator!(b, sdh, element_cache, strategy_cache::PerColo
 
                 fill!(bₑ, 0)
                 assemble_element!(bₑ, tld.cc, tld.ec, p)
-                b[celldofs(tld.cc)] .+= bₑ
+                assemble!(b, celldofs(tld.cc), bₑ)
             end
         end
     end

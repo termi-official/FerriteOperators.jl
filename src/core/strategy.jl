@@ -22,7 +22,9 @@ struct SequentialAssemblyStrategyCache{DeviceType, DeviceCacheType}
     device_cache::DeviceCacheType
 end
 
-setup_strategy_cache(strategy::SequentialAssemblyStrategy, element_cache, sdh) = SequentialAssemblyStrategyCache(strategy.device, nothing)
+# TODO
+setup_operator_strategy_cache(strategy, integrator, A, dh) = strategy
+setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, element_cache, sdh) = SequentialAssemblyStrategyCache(strategy.device, nothing)
 
 """
     PerColorAssemblyStrategy(chunksize, coloralg)
@@ -49,15 +51,15 @@ end
     res
 end
 
-function setup_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, element_cache, sdh)
-    return _setup_strategy_cache_cpu(strategy, element_cache, sdh, 1)
+function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, element_cache, sdh)
+    return _setup_element_strategy_cache_cpu(strategy, element_cache, sdh, 1)
 end
 
-function setup_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, element_cache, sdh)
-    return _setup_strategy_cache_cpu(strategy, element_cache, sdh, strategy.device.chunksize)
+function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, element_cache, sdh)
+    return _setup_element_strategy_cache_cpu(strategy, element_cache, sdh, strategy.device.chunksize)
 end
 
-function _setup_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, element_cache, sdh, chunksize)
+function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, element_cache, sdh, chunksize)
     (;  device) = strategy
     (; dh)      = sdh
     grid        = get_grid(dh)
@@ -89,7 +91,7 @@ end
     ea_data
 end
 
-function setup_strategy_cache(strategy::ElementAssemblyStrategy, element_cache, sdh)
+function setup_element_strategy_cache(strategy::ElementAssemblyStrategy, element_cache, sdh)
     error("Not implemented yet")
 end
 
