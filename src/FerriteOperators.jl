@@ -15,6 +15,8 @@ import Base: *, +, -, @kwdef
 
 using Polyester # TODO extension
 
+import Atomix
+
 import Ferrite: AbstractDofHandler, AbstractGrid, AbstractRefShape, AbstractCell, get_grid, get_coordinate_eltype
 import Ferrite: vertices, edges, faces, sortedge, sortface
 import Ferrite: get_coordinate_type, getspatialdim
@@ -26,10 +28,12 @@ include("core/element_interface.jl")
 include("core/utils.jl")
 
 include("core/ferrite-addons/collections.jl")
+include("core/ferrite-addons/assembly.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
 
 abstract type AbstractBilinearIntegrator end
 abstract type AbstractNonlinearIntegrator end
+abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")
 include("elements/simple_diffusion.jl")
@@ -38,7 +42,7 @@ include("elements/simple_hyperelasticity.jl")
 
 include("operators/general.jl")
 include("operators/matrix-free.jl")
-include("operators/assembled.jl")
+include("operators/ferrite.jl")
 include("operators/setup.jl")
 
 export QuadratureRuleCollection
