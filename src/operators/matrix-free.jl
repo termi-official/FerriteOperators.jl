@@ -1,8 +1,8 @@
 struct GenericEAVectorIndex{IndexType}
-    offset::Index
-    length::Index
+    offset::IndexType
+    length::IndexType
 end
-Base.zero(GenericEAVectorIndex{T}) where T = GenericEAVectorIndex(zero(T), zero(T))
+Base.zero(::GenericEAVectorIndex{T}) where T = GenericEAVectorIndex(zero(T), zero(T))
 
 
 struct GenericEAMatrixIndex{IndexType}
@@ -10,7 +10,7 @@ struct GenericEAMatrixIndex{IndexType}
     nrows::IndexType
     ncols::IndexType
 end
-Base.zero(GenericEAMatrixIndex{T}) where T = GenericEAMatrixIndex(zero(T), zero(T), zero(T))
+Base.zero(::GenericEAMatrixIndex{T}) where T = GenericEAMatrixIndex(zero(T), zero(T), zero(T))
 
 
 struct GenericIndexdData{IndexType, DataType, IndexStructureType <: AbstractVector{IndexType}}
@@ -40,45 +40,59 @@ function mul!(out::AbstractVector{T}, operator::EAOperator, in::AbstractVector) 
     matrix_free_product!(out, operator, in, operator.device)
 end
 
+product_kernel!(outₑ, Aₑ, inₑ, device_cache) = mul!(outₑ, Aₑ, inₑ)
+
 function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::SequentialCPUDevice)
+    (; device_cache) = A
     # Element loop
     # TODO abstraction layer via iterator
     for ei in 1:getnelements(A)
         # Query Data
-        Aₑ   = read_data(A.element_matrices, ei, A.device, A.device_cache)
-        inₑ  = read_data(A.vector_element_map, ei, A.device, A.device_cache)
-        outₑ = read_data(A.element_vector_map, ei, A.device, A.device_cache)
+        Aₑ   = read_data(A.element_matrices, ei, device, device_cache)
+        inₑ  = read_data(A.vector_element_map, in, ei, device, device_cache)
+        outₑ = read_data(A.element_vector_map, out, ei, device, device_cache)
 
         # Local product kernel
-        mul!(outₑ, Aₑ, inₑ)
+        product_kernel!(outₑ, Aₑ, inₑ, device_cache)
 
         # Maybe write data back
-        store_data!(out, outₑ, A.element_vector_map, ei, A.device, A.device_cache)
+        store_data!(out, outₑ, A.element_vector_map, ei, device, device_cache)
     end
 end
 
 
-@concrete struct EAViewCache
+struct EAViewCache
 end
+
+# TODO atomic flag
+product_kernel!(outₑ, Aₑ, inₑ, device_cache::EAViewCache) = mul!(outₑ, Aₑ, inₑ, 1, 1)
 
 function read_data(indexed_data::GenericIndexdData{<:GenericEAMatrixIndex}, i::Integer, device, device_cache::EAViewCache)
     (; offset, nrows, ncols) = indexed_data.index_structure[i]
-    Aₑ_flattened = @view A.data[offset:(offset+nrows*ncols-1)]
-    Aₑ = reshape(matrix_flattened, (nrows, ncols))
+    Aₑ_flattened = @view indexed_data.data[offset:(offset+nrows*ncols-1)]
+    Aₑ = reshape(Aₑ_flattened, (nrows, ncols))
     return Aₑ
+end
+
+function read_data(indices::AbstractVector{<:GenericEAVectorIndex}, data::AbstractVector, i::Integer, device, device_cache::EAViewCache)
+    data_with_indices = GenericIndexdData(
+        data,
+        indices,
+    )
+    return read_data(data_with_indices, i, device, device_cache)
 end
 
 function read_data(indexed_data::GenericIndexdData{<:GenericEAVectorIndex}, i::Integer, device, device_cache::EAViewCache)
     (; offset, length) = indexed_data.index_structure[i]
-    vₑ = @view A.data[offset:(offset+length-1)]
+    vₑ = @view indexed_data.data[offset:(offset+length-1)]
     return vₑ
 end
 
-function store_data!(A::AbstractMatrix, Aₑ::AbstractMatrix, indexed_data::GenericIndexdData{<:GenericEAMatrixIndex}, i::Integer, device, device_cache::EAViewCache)
+function store_data!(A::AbstractMatrix, Aₑ::AbstractMatrix, indexed_data::AbstractVector{<:GenericEAMatrixIndex}, i::Integer, device, device_cache::EAViewCache)
     return nothing
 end
 
-function store_data!(out::AbstractVector, outₑ::AbstractVector, indexed_data::GenericIndexdData{<:GenericEAVectorIndex}, i::Integer, device, device_cache::EAViewCache)
+function store_data!(out::AbstractVector, outₑ::AbstractVector, indexed_data::AbstractVector{<:GenericEAVectorIndex}, i::Integer, device, device_cache::EAViewCache)
     return nothing
 end
 
@@ -130,7 +144,7 @@ end
 #     #
 # end
 
-function create_system_matrix(strategy::ElementAssemblyStrategy, dh) where {ValueType, IndexType}
+function create_system_matrix(strategy::ElementAssemblyStrategy, dh)
     (; device) = strategy
 
     ValueType = value_type(device)

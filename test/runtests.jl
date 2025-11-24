@@ -5,6 +5,43 @@ import LinearAlgebra: mul!
 using SparseArrays
 
 @testset "FerriteOperators.jl" begin
+    @testset "Element Assembly Matrix" begin
+        Aₑ = [1.0 -1.0; -1.0 1.0]
+        Aₑflat = [1.0, -1.0, -1.0, 1.0]
+        device = SequentialCPUDevice()
+        N = 10
+
+        # Assemble reference
+        A = zeros(N,N)
+        for i in 1:N-1
+            A[i:i+1,i:i+1] .+= Aₑ
+        end
+        x = collect(1.0:N).^2
+        yref = A*x
+
+        # Generic action of H1 discretization
+        vindices = [
+            FerriteOperators.GenericEAVectorIndex(i, 2) for i in 1:(N-1)
+        ]
+        mindices = [
+            FerriteOperators.GenericEAMatrixIndex(4i-3, 2, 2) for i in 1:(N-1)
+        ]
+        op = FerriteOperators.EAOperator(
+            device,
+            FerriteOperators.EAViewCache(),
+            FerriteOperators.GenericIndexdData(
+                repeat(Aₑflat, N),
+                mindices,
+            ),
+            vindices,
+            vindices,
+        )
+        y = zeros(N)
+        mul!(y, op, x)
+
+        @test y ≈ yref
+    end
+
     @testset "Actions" begin
         vin = ones(5)
         vout = ones(5)
@@ -78,7 +115,7 @@ using SparseArrays
                 :u
             )
         ]
-            bilinop_base = setup_assembled_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+            bilinop_base = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
             # Check that assembly works
             @test norm(bilinop_base.A) ≈ 0.0
             update_operator!(bilinop_base, 0.0)
@@ -94,7 +131,7 @@ using SparseArrays
                     PerColorAssemblyStrategy(PolyesterDevice(2)),
                     PerColorAssemblyStrategy(PolyesterDevice(3)),
             )
-                bilinop = setup_assembled_operator(strategy, integrator, dh)
+                bilinop = setup_operator(strategy, integrator, dh)
                 # Consistency
                 update_operator!(bilinop, 0.0)
                 @test bilinop.A ≈ bilinop_base.A
@@ -138,7 +175,7 @@ using SparseArrays
                 :u
             ),
         ]
-            nlop_base = setup_assembled_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+            nlop_base = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
             # Check that assembly works
             @test norm(nlop_base.J) ≈ 0.0
             update_linearization!(nlop_base, u, 0.0)
@@ -166,7 +203,7 @@ using SparseArrays
                     PerColorAssemblyStrategy(PolyesterDevice(2)),
                     PerColorAssemblyStrategy(PolyesterDevice(3)),
             )
-                nlop = setup_assembled_operator(strategy, integrator, dh)
+                nlop = setup_operator(strategy, integrator, dh)
                 # Consistency and Idempotency
                 for i in 1:2
                     update_linearization!(nlop, u, 0.0)
