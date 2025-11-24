@@ -37,12 +37,13 @@ include("elements/simple_mass.jl")
 include("elements/simple_hyperelasticity.jl")
 
 include("operators/general.jl")
+include("operators/matrix-free.jl")
 include("operators/assembled.jl")
 include("operators/setup.jl")
 
 export QuadratureRuleCollection
 
-export setup_assembled_operator, update_operator!, update_linearization!
+export setup_operator, update_operator!, update_linearization!
 
 export NullOperator, DiagonalOperator
 

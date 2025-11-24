@@ -26,7 +26,7 @@ function setup_operator(strategy::AbstractFullAssemblyStrategy, integrator::Abst
 end
 
 function setup_operator(strategy::AbstractFullAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
-    J               = create_system_matrix(system_matrix_type, dh)
+    J               = create_system_matrix(strategy, dh)
     element_caches  = setup_element_caches(integrator, dh)
     strategy_caches = setup_strategy_caches(strategy, element_caches, dh)
 
