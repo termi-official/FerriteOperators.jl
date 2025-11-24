@@ -440,6 +440,7 @@ function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_ca
     for cell in CellIterator(sdh)
         # Prepare buffers
         fill!(Jₑ, 0)
+        fill!(rₑ, 0)
         load_element_unknowns!(uₑ, u, cell, element_cache)
 
         # Fill buffers
