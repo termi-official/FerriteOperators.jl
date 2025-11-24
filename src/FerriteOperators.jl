@@ -28,6 +28,7 @@ include("core/element_interface.jl")
 include("core/utils.jl")
 
 include("core/ferrite-addons/collections.jl")
+include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
 

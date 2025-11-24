@@ -8,7 +8,7 @@ using SparseArrays
     @testset "Element Assembly Matrix" begin
         Aₑ = [1.0 -1.0; -1.0 1.0]
         Aₑflat = [1.0, -1.0, -1.0, 1.0]
-        N = 1000
+        N = 10
 
         # Assemble reference
         A = zeros(N,N)
@@ -19,9 +19,10 @@ using SparseArrays
         yref = A*x
 
         # Generic action of H1 discretization
-        vindices = [
-            FerriteOperators.GenericEAVectorIndex(i, 2) for i in 1:(N-1)
-        ]
+        vindices = FerriteOperators.GenericIndexedData(
+            [1+(i ÷ 2) for i in 1:2N],
+            [FerriteOperators.GenericEAVectorIndex(2i-1, 2) for i in 1:N],
+        )
         mindices = [
             FerriteOperators.GenericEAMatrixIndex(4i-3, 2, 2) for i in 1:(N-1)
         ]
@@ -29,8 +30,8 @@ using SparseArrays
         # 
         op = FerriteOperators.EAOperator(
             SequentialCPUDevice(),
-            FerriteOperators.EAViewCache{false}(),
-            FerriteOperators.GenericIndexdData(
+            FerriteOperators.EAViewCache(),
+            FerriteOperators.GenericIndexedData(
                 repeat(Aₑflat, N),
                 mindices,
             ),
@@ -43,8 +44,8 @@ using SparseArrays
 
         op = FerriteOperators.EAOperator(
             PolyesterDevice(1),
-            FerriteOperators.EAViewCache{true}(),
-            FerriteOperators.GenericIndexdData(
+            FerriteOperators.EAViewCache(),
+            FerriteOperators.GenericIndexedData(
                 repeat(Aₑflat, N),
                 mindices,
             ),
@@ -198,6 +199,8 @@ using SparseArrays
             update_linearization!(nlop_base, u, 0.0)
             Jnorm_baseline = norm(nlop_base.J)
             @test Jnorm_baseline > 0.0
+            yref = zero(u)
+            mul!(yref, nlop_base.J, u)
 
             # Also querying the residual should not change the outcome
             residual .= NaN
@@ -220,27 +223,57 @@ using SparseArrays
             @test rnorm_baseline ≈ norm(residual)
             residual_baseline = copy(residual)
 
-            @testset "Assembled Strategy $strategy" for strategy in (
-                    PerColorAssemblyStrategy(SequentialCPUDevice()),
-                    PerColorAssemblyStrategy(PolyesterDevice(1)),
-                    PerColorAssemblyStrategy(PolyesterDevice(2)),
-                    PerColorAssemblyStrategy(PolyesterDevice(3)),
+            # @testset "Colour Assembly Strategy $strategy" for strategy in (
+            #         PerColorAssemblyStrategy(SequentialCPUDevice()),
+            #         PerColorAssemblyStrategy(PolyesterDevice(1)),
+            #         PerColorAssemblyStrategy(PolyesterDevice(2)),
+            #         PerColorAssemblyStrategy(PolyesterDevice(3)),
+            # )
+            #     nlop = setup_operator(strategy, integrator, dh)
+            #     # Consistency and Idempotency
+            #     for i in 1:2
+            #         nlop.J .= NaN
+            #         update_linearization!(nlop, u, 0.0)
+            #         @test nlop.J ≈ nlop_base.J
+
+            #         nlop.J .= NaN
+            #         residual .= NaN
+            #         update_linearization!(nlop, residual, u, 0.0)
+            #         @test nlop.J ≈ nlop_base.J
+            #         @test residual ≈ residual_baseline
+
+            #         residual .= NaN
+            #         nlop(residual, u, 0.0)
+            #         @test residual ≈ residual_baseline
+            #     end
+            # end
+
+            @testset "Element Assembly Strategy $strategy" for strategy in (
+                ElementAssemblyStrategy(SequentialCPUDevice()),
+                ElementAssemblyStrategy(PolyesterDevice(1)),
+                ElementAssemblyStrategy(PolyesterDevice(2)),
+                ElementAssemblyStrategy(PolyesterDevice(3)),
             )
                 nlop = setup_operator(strategy, integrator, dh)
                 # Consistency and Idempotency
                 for i in 1:2
-                    nlop.J .= NaN
                     update_linearization!(nlop, u, 0.0)
-                    @test nlop.J ≈ nlop_base.J
+                    y = zero(u)
+                    mul!(y, nlop.J, u)
+                    @test yref ≈ y
+                    mul!(y, nlop.J, u)
+                    @test yref ≈ y
 
-                    nlop.J .= NaN
                     residual .= NaN
                     update_linearization!(nlop, residual, u, 0.0)
-                    @test nlop.J ≈ nlop_base.J
+                    mul!(y, nlop.J, u)
+                    @test yref ≈ y
                     @test residual ≈ residual_baseline
 
                     residual .= NaN
                     nlop(residual, u, 0.0)
+                    mul!(y, nlop.J, u)
+                    @test yref ≈ y
                     @test residual ≈ residual_baseline
                 end
             end

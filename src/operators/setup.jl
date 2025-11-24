@@ -10,53 +10,49 @@ function setup_element_strategy_caches(strategy, element_caches, dh)
     return [setup_element_strategy_cache(strategy, element_cache, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
 end
 
-function setup_operator(strategy::AbstractFullAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
-    A                 = create_system_matrix(strategy, dh)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, A, dh)
-    element_caches    = setup_element_caches(integrator, dh)
-    strategy_caches   = setup_element_strategy_caches(operator_strategy, element_caches, dh)
+function setup_subdomain_caches(strategy, integrator, dh)
+    # TODO this can be optimized by passing the device in, so we do not need to duplicate stuff
+    element_caches  = setup_element_caches(integrator, dh)
+    strategy_caches = setup_element_strategy_caches(strategy, element_caches, dh)
+    return [SubdomainCache(
+            sdh,
+            element_cache,
+            strategy_cache,
+        ) for (sdh, element_cache, strategy_cache) in zip(dh.subdofhandlers, element_caches, strategy_caches)]
+end
+
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
+    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    A                 = create_system_matrix(operator_strategy, dh)
+    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 
     return BilinearFerriteOperator(
         A,
         operator_strategy,
-        [SubdomainCache(
-            sdh,
-            element_cache,
-            strategy_cache,
-        ) for (sdh, element_cache, strategy_cache) in zip(dh.subdofhandlers, element_caches, strategy_caches)],
+        subdomain_caches,
     )
 end
 
-function setup_operator(strategy::AbstractFullAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
-    J                 = create_system_matrix(strategy, dh)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, J, dh)
-    element_caches    = setup_element_caches(integrator, dh)
-    strategy_caches   = setup_element_strategy_caches(operator_strategy, element_caches, dh)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
+    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    J                 = create_system_matrix(operator_strategy, dh)
+    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 
     return LinearizedFerriteOperator(
         J,
         operator_strategy,
-        [SubdomainCache(
-            sdh,
-            element_cache,
-            strategy_cache,
-        ) for (sdh, element_cache, strategy_cache) in zip(dh.subdofhandlers, element_caches, strategy_caches)],
+        subdomain_caches,
     )
 end
 
-function setup_operator(strategy::AbstractFullAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler)
-    b                 = create_system_vector(strategy, dh)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, b, dh)
-    element_caches    = setup_element_caches(integrator, dh)
-    strategy_caches   = setup_element_strategy_caches(operator_strategy, element_caches, dh)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler)
+    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    b                 = create_system_vector(operator_strategy, dh)
+    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 
     return LinearFerriteOperator(
         b,
         operator_strategy,
-        [SubdomainCache(
-            sdh,
-            element_cache,
-            strategy_cache,
-        ) for (sdh, element_cache, strategy_cache) in zip(dh.subdofhandlers, element_caches, strategy_caches)],
+        subdomain_caches
     )
 end

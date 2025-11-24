@@ -6,7 +6,7 @@ A model for a function with its fully assembled linearization.
 Comes with one entry point for each cache type to handle the most common cases:
     assemble_element! -> update jacobian/residual contribution with internal state variables
 """
-struct LinearizedFerriteOperator{MatrixType <: AbstractSparseMatrix} <: AbstractNonlinearOperator
+struct LinearizedFerriteOperator{MatrixType} <: AbstractNonlinearOperator
     J::MatrixType
     strategy
     subdomain_caches::Vector{SubdomainCache}
@@ -102,7 +102,7 @@ end
 
 
 # This function is defined to control the dispatch
-function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache,p)
+function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache, p)
     # Prepare standard values
     ndofs = ndofs_per_cell(sdh)
     # TODO query from strategy_cache
@@ -250,7 +250,6 @@ function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_ca
     end
 end
 
-
 function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_cache, strategy_cache::PerColorAssemblyStrategyCache{<:SequentialCPUDevice}, p)
     (; colors) = strategy_cache
 
@@ -308,6 +307,187 @@ function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_ca
         end
     end
 end
+
+# -------------------------------------------------- EA on CPU --------------------------------------------------
+
+function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::ElementAssemblyStrategyCache{<:SequentialCPUDevice}, p)
+    (; device, device_cache) = strategy_cache
+
+    ndofs = ndofs_per_cell(sdh)
+    # Prepare standard values
+    ndofs = ndofs_per_cell(sdh)
+    # TODO query from strategy_cache
+    Jₑ = allocate_element_matrix(element_cache, sdh)
+    uₑ = allocate_element_unknown_vector(element_cache, sdh)
+
+    for cell in CellIterator(sdh)
+        # Prepare buffers
+        fill!(Jₑ, 0)
+        load_element_unknowns!(uₑ, u, cell, element_cache)
+
+        # Fill buffers
+        assemble_element!(Jₑ, uₑ, cell, element_cache, p)
+
+        assemble!(assembler, cell, Jₑ)
+    end
+end
+
+function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::ElementAssemblyStrategyCache{<:PolyesterDevice}, p)
+    (; device, device_cache) = strategy_cache
+    (; chunksize) = device
+
+    ndofs = ndofs_per_cell(sdh)
+    (; tlds, Aes, ues)  = device_cache
+
+    assemblers = [duplicate_for_device(device, assembler) for tid in 1:length(tlds)]
+
+    ncells  = length(sdh.cellset)
+    nchunks = ceil(Int, ncells / chunksize)
+    @batch for chunk in 1:nchunks
+        chunkbegin = (chunk-1)*chunksize+1
+        chunkbound = min(ncells, chunk*chunksize)
+
+        # Unpack chunk scratch
+        Jₑ        = Aes[chunk]
+        uₑ        = ues[chunk]
+        tld       = tlds[chunk]
+        assembler = assemblers[chunk]
+
+        for i in chunkbegin:chunkbound
+            eid = sdh.cellset[i]
+            cell = tld.cc
+            reinit!(cell, eid)
+
+            # Prepare buffers
+            fill!(Jₑ, 0)
+            load_element_unknowns!(uₑ, u, cell, tld.ec)
+
+            # Fill buffers
+            assemble_element!(Jₑ, uₑ, cell, tld.ec, p)
+
+            assemble!(assembler, cell, Jₑ)
+        end
+    end
+end
+
+function _residual!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::ElementAssemblyStrategyCache{<:SequentialCPUDevice}, p)
+    (; device, device_cache) = strategy_cache
+
+    ndofs = ndofs_per_cell(sdh)
+    # Prepare standard values
+    ndofs = ndofs_per_cell(sdh)
+    # TODO query from strategy_cache
+    uₑ = allocate_element_unknown_vector(element_cache, sdh)
+    rₑ = allocate_element_residual_vector(element_cache, sdh)
+
+    for cell in CellIterator(sdh)
+        # Prepare buffers
+        fill!(rₑ, 0)
+        load_element_unknowns!(uₑ, u, cell, element_cache)
+
+        # Fill buffers
+        assemble_element!(rₑ, uₑ, cell, element_cache, p)
+
+        assemble!(assembler, cell, rₑ)
+    end
+end
+
+function _residual!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::ElementAssemblyStrategyCache{<:PolyesterDevice}, p)
+    (; device, device_cache) = strategy_cache
+    (; chunksize) = device
+
+    (; tlds, ues, res)  = device_cache
+
+    ncells  = length(sdh.cellset)
+    nchunks = ceil(Int, ncells / chunksize)
+    @batch for chunk in 1:nchunks
+        chunkbegin = (chunk-1)*chunksize+1
+        chunkbound = min(ncells, chunk*chunksize)
+
+        # Unpack chunk scratch
+        uₑ        = ues[chunk]
+        rₑ        = res[chunk]
+        tld       = tlds[chunk]
+
+        for i in chunkbegin:chunkbound
+            eid = sdh.cellset[i]
+            cell = tld.cc
+            reinit!(cell, eid)
+
+            # Prepare buffers
+            fill!(rₑ, 0)
+            load_element_unknowns!(uₑ, u, cell, tld.ec)
+
+            # Fill buffers
+            assemble_element!(rₑ, uₑ, cell, tld.ec, p)
+
+            assemble!(assembler, cell, rₑ)
+        end
+    end
+end
+
+function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::ElementAssemblyStrategyCache{<:SequentialCPUDevice}, p)
+    (; device, device_cache) = strategy_cache
+
+    ndofs = ndofs_per_cell(sdh)
+    # Prepare standard values
+    ndofs = ndofs_per_cell(sdh)
+    # TODO query from strategy_cache
+    Jₑ = allocate_element_matrix(element_cache, sdh)
+    uₑ = allocate_element_unknown_vector(element_cache, sdh)
+    rₑ = allocate_element_residual_vector(element_cache, sdh)
+
+    for cell in CellIterator(sdh)
+        # Prepare buffers
+        fill!(Jₑ, 0)
+        load_element_unknowns!(uₑ, u, cell, element_cache)
+
+        # Fill buffers
+        assemble_element!(Jₑ, rₑ, uₑ, cell, element_cache, p)
+
+        assemble!(assembler, cell, Jₑ, rₑ)
+    end
+end
+
+function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::ElementAssemblyStrategyCache{<:PolyesterDevice}, p)
+    (; device, device_cache) = strategy_cache
+    (; chunksize) = device
+
+    (; tlds, Aes, ues, res)  = device_cache
+
+    assemblers = [duplicate_for_device(device, assembler) for tid in 1:length(tlds)]
+
+    ncells  = length(sdh.cellset)
+    nchunks = ceil(Int, ncells / chunksize)
+    @batch for chunk in 1:nchunks
+        chunkbegin = (chunk-1)*chunksize+1
+        chunkbound = min(ncells, chunk*chunksize)
+
+        # Unpack chunk scratch
+        Jₑ        = Aes[chunk]
+        uₑ        = ues[chunk]
+        rₑ        = res[chunk]
+        tld       = tlds[chunk]
+        assembler = assemblers[chunk]
+
+        for i in chunkbegin:chunkbound
+            eid = sdh.cellset[i]
+            cell = tld.cc
+            reinit!(cell, eid)
+
+            # Prepare buffers
+            fill!(Jₑ, 0)
+            fill!(rₑ, 0)
+            load_element_unknowns!(uₑ, u, cell, tld.ec)
+
+            # Fill buffers
+            assemble_element!(Jₑ, rₑ, uₑ, cell, tld.ec, p)
+
+            assemble!(assembler, cell, Jₑ, rₑ)
+        end
+    end
+end
+
 
 #################################################################################################
 

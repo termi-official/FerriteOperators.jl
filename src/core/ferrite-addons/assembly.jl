@@ -11,43 +11,7 @@ Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, Ke::Abs
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, fe::AbstractVector) = assemble!(assembler, celldofs(cell), fe)
 Ferrite.assemble!(f::AbstractVector, cell::CellCache, fe::AbstractVector) = assemble!(f, celldofs(cell), fe)
 
-finalize_assembly!(assembler) = nothing
+finalize_assembly!(assembler::Ferrite.AbstractAssembler) = nothing
+finalize_assembly!(assembler::AbstractVector) = nothing
 
 allocate_vector(::Vector{T}, dh) where T = zeros(T, ndofs(dh))
-
-# @concrete struct PerElementMatrixAssembler
-#     element_matrix::PerElementMatrix
-#     residual
-# end
-
-# function Ferrite.start_assemble(element_matrix::PerElementMatrix)
-#     PerElementMatrixAssembler(element_matrix)
-# end
-
-# function Ferrite.assemble!(assembler::PerElementMatrixAssembler, cell, Kₑ::AbstractMatrix)
-# end
-
-# function Ferrite.assemble!(assembler::PerElementMatrixAssembler, cell, Kₑ::AbstractMatrix, rₑ::AbstractVector)
-# end
-
-# function create_system_matrix(strategy::ElementAssemblyStrategy, dh) where {ValueType, IndexType}
-#     (; device) = strategy
-
-#     ValueType = value_type(device)
-#     IndexType = index_type(device)
-
-#     grid = get_grid(dh)
-#     offsets = zeros(IndexType, getncells(grid))
-
-#     next_index = 1
-#     for sdh in enumerate(dh.subdofhandlers)
-#         ndofs = ndofs_per_cell(sdh)
-#         for cell in CellIterator(sdh)
-            
-#         end
-#     end
-
-#     data = zeros(ValueType, total_data_size)
-
-#     PerElementMatrix{ValueType, IndexType, Vector{ValueType}, Vector{IndexType}}
-# end
