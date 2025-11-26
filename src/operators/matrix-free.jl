@@ -190,7 +190,6 @@ end
     f_element
     f
 end
-
 duplicate_for_device(device, assembler::EAOperatorAssembler) = assembler
 
 function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, f::Vector{T}; fillzero::Bool=true) where T

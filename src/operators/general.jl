@@ -4,7 +4,7 @@
 
 struct SubdomainCache
     sdh
-    element
+    element # TODO remove this and query from device cache.
     strategy_cache
 end
 

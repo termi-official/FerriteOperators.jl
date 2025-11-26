@@ -15,6 +15,16 @@ struct SequentialCPUDevice{ValueType, IndexType} <: AbstractCPUDevice{ValueType,
 end
 SequentialCPUDevice() = SequentialCPUDevice{Float64, Int64}()
 
+function execute_task_on_device!(task, device::SequentialCPUDevice, cache)
+    task_buffer = get_task_buffer(task, cache, 1)
+    for chunk in get_items(task, cache)
+        for taskid in chunk
+            reinit!(task_buffer, taskid)
+            execute_task_on_single_cell!(task, task_buffer)
+        end
+    end
+end
+
 
 """
     PolyesterDevice
@@ -27,9 +37,35 @@ end
 PolyesterDevice() = PolyesterDevice{Float64, Int64}(32)
 PolyesterDevice(i::Int) = PolyesterDevice{Float64, Int64}(i)
 
-struct ChunkLocalAssemblyData{CellCacheType, ElementCacheType}
-    cc::CellCacheType
-    ec::ElementCacheType
+function execute_task_on_device!(task, device::PolyesterDevice, cache)
+    (; chunksize) = device
+    itemsets = get_items(task, cache)
+    num_items_max = maximum(length.(itemsets))
+    num_tasks_max = ceil(Int, num_items_max / chunksize)
+
+    # TODO can we sneak this into the device cache?
+    tasks = [duplicate_for_device(device, task) for tid in 1:num_tasks_max]
+
+    for items in itemsets
+        num_items   = length(items)
+        num_tasks   = ceil(Int, num_items / chunksize)
+        @batch for tasksetid in 1:num_tasks
+            # Query the local task and buffer
+            local_task = tasks[tasksetid]
+            local_task_buffer = get_task_buffer(local_task, cache, tasksetid)
+
+            # Compute the range of tasks
+            first_itemid = (tasksetid-1)*chunksize+1
+            last_itemid  = min(num_items, tasksetid*chunksize)
+
+            # These are the local tasks
+            for itemid in first_itemid:last_itemid
+                taskid = items[itemid]
+                reinit!(local_task_buffer, taskid)
+                execute_task_on_single_cell!(local_task, local_task_buffer)
+            end
+        end
+    end
 end
 
 
