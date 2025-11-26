@@ -13,7 +13,7 @@ Sequential algorithms on CPU.
 """
 struct SequentialCPUDevice{ValueType, IndexType} <: AbstractCPUDevice{ValueType, IndexType}
 end
-SequentialCPUDevice() = SequentialCPUDevice{Float64, Int64}()
+SequentialCPUDevice() = SequentialCPUDevice{Float64, Int}()
 
 function execute_task_on_device!(task, device::SequentialCPUDevice, cache)
     task_buffer = get_task_buffer(task, cache, 1)
@@ -34,8 +34,8 @@ Threaded algorithms via Polyester.jl .
 struct PolyesterDevice{ValueType, IndexType} <: AbstractCPUDevice{ValueType, IndexType}
     chunksize::IndexType
 end
-PolyesterDevice() = PolyesterDevice{Float64, Int64}(32)
-PolyesterDevice(i::Int) = PolyesterDevice{Float64, Int64}(i)
+PolyesterDevice() = PolyesterDevice{Float64, Int}(32)
+PolyesterDevice(i::Int) = PolyesterDevice{Float64, Int}(i)
 
 function execute_task_on_device!(task, device::PolyesterDevice, cache)
     (; chunksize) = device

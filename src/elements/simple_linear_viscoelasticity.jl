@@ -19,8 +19,8 @@ end
 
 struct SimpleCondensedLinearViscoelasticityCache{EnergyType, CV <: CellValues} <: AbstractVolumetricElementCache
     material_parameters::MaxwellParameters
-    displacement_range::UnitRange{Int64}
-    viscosity_range::UnitRange{Int64}
+    displacement_range::UnitRange{Int}
+    viscosity_range::UnitRange{Int}
     cv::CV
 end
 
