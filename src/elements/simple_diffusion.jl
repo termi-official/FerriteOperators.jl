@@ -38,7 +38,7 @@ function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBili
             ∇Nᵢ = shape_gradient(cellvalues, qp, i)
             for j in 1:n_basefuncs
                 ∇Nⱼ = shape_gradient(cellvalues, qp, j)
-                Kₑ[i,j] -= D * ∇Nⱼ ⋅ ∇Nᵢ * dΩ
+                Kₑ[i,j] += D * ∇Nⱼ ⋅ ∇Nᵢ * dΩ
             end
         end
     end
