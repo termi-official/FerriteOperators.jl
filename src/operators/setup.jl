@@ -2,7 +2,7 @@
 create_system_matrix(strategy, dh) = allocate_matrix(matrix_type(strategy), dh)
 create_system_vector(strategy, dh) = allocate_vector(vector_type(strategy), dh)
 
-function setup_element_caches(integrator, dh)
+function setup_elements(integrator, dh)
     return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
 end
 
@@ -11,8 +11,7 @@ function setup_element_strategy_caches(strategy, element_caches, dh)
 end
 
 function setup_subdomain_caches(strategy, integrator, dh)
-    # TODO this can be optimized by passing the device in, so we do not need to duplicate stuff
-    element_caches  = setup_element_caches(integrator, dh)
+    element_caches  = setup_elements(integrator, dh)
     strategy_caches = setup_element_strategy_caches(strategy, element_caches, dh)
     return [SubdomainCache(
             sdh,

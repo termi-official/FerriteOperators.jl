@@ -9,8 +9,9 @@ end
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, Ke::AbstractMatrix, fe::AbstractVector) = assemble!(assembler, celldofs(cell), Ke, fe)
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, Ke::AbstractMatrix) = assemble!(assembler, celldofs(cell), Ke)
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, fe::AbstractVector) = assemble!(assembler, celldofs(cell), fe)
-Ferrite.assemble!(f::AbstractVector, cell::CellCache, fe::AbstractVector) = assemble!(f, celldofs(cell), fe)
-
+function Ferrite.assemble!(f::AbstractVector, cell::CellCache, fe::AbstractVector)
+    assemble!(f, celldofs(cell), fe)
+end
 finalize_assembly!(assembler::Ferrite.AbstractAssembler) = nothing
 finalize_assembly!(assembler::AbstractVector) = nothing
 

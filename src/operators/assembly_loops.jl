@@ -1,3 +1,181 @@
+@concrete struct SubdomainAssemblyTaskBuffer
+    u
+    p
+    subdomain
+end
+
+@concrete struct ElementAssemblyTaskBuffer
+    # Static parts
+    u
+    p
+    element
+    # Moving parts
+    Ke
+    ue
+    re
+    geometry_cache
+end
+
+function load_element_unknowns!(uₑ, buffer::ElementAssemblyTaskBuffer)
+    load_element_unknowns!(uₑ, buffer.u, buffer.geometry_cache, buffer.element)
+end
+function store_condensed_element_unknowns!(uₑ, buffer::ElementAssemblyTaskBuffer)
+    store_condensed_element_unknowns!(uₑ, buffer.u, buffer.geometry_cache, buffer.element)
+end
+
+query_element_matrix(b::ElementAssemblyTaskBuffer) = b.Ke
+query_element_residual_buffer(b::ElementAssemblyTaskBuffer) = b.re
+query_element_unknown_buffer(b::ElementAssemblyTaskBuffer) = b.ue
+query_element_parameters(b::ElementAssemblyTaskBuffer) = b.p
+query_geometry_cache(b::ElementAssemblyTaskBuffer) = b.geometry_cache
+query_element(b::ElementAssemblyTaskBuffer) = b.element
+
+function execute_task_on_device!(task, device::SequentialCPUDevice, cache)
+    # @inbounds for chunk in get_chunks(task, cache)
+    #     @inbounds for task_buffer in EntityIterator(task, chunk)
+    #         execute_task_on_single_cell!(task, task_buffer)
+    #     end
+    # end
+
+    (; u, p, subdomain) = cache
+    (; sdh, element, strategy_cache) = subdomain
+    (; device_cache) = strategy_cache
+
+    (; Ke, ue, re)  = device_cache
+
+    # This iteration is the first specific to the sequential strategy
+    for cell in CellIterator(sdh)
+        local_task_buffer = ElementAssemblyTaskBuffer(u, p, element, Ke, ue, re, cell)
+        # This is specific to the sequential device
+        local_task        = task
+        execute_task_on_single_cell!(local_task, local_task_buffer)
+    end
+end
+
+function execute_task_on_device!(task, device::PolyesterDevice, cache)
+    # @inbounds for chunk in get_chunks(task, cache)
+    #     num_items = length(chunk)
+    #     @batch for local_chunk in chunk
+    #         chunkbegin = (chunk-1)*chunksize+1
+    #         chunkbound = min(ncells, chunk*chunksize)
+
+    #         local_task_buffer = do_something(other_task_specific_stuff) #...?
+    #         execute_task_on_single_cell!(local_task, local_task_buffer)
+    #     end
+    # end
+
+    (; u, p, subdomain) = cache
+    (; sdh, strategy_cache) = subdomain
+
+    (; device, device_cache) = strategy_cache
+
+    (; tlds, sacs)  = device_cache
+    tasks = [duplicate_for_device(device, task) for tid in 1:length(tlds)]
+
+    # This iteration is the first specific to the coloring strategy
+    (; colors) = strategy_cache
+    (; chunksize) = device
+    @inbounds for color in colors
+        ncells  = maximum(length(color))
+        nchunks = ceil(Int, ncells / chunksize)
+        @batch for chunk in 1:nchunks
+            chunkbegin = (chunk-1)*chunksize+1
+            chunkbound = min(ncells, chunk*chunksize)
+
+            # Unpack chunk scratch
+            Jₑ        = sacs[chunk].Ke
+            rₑ        = sacs[chunk].re
+            uₑ        = sacs[chunk].ue
+            cell      = tlds[chunk].cc
+            element   = tlds[chunk].ec
+            local_task= tasks[chunk]
+            local_task_buffer = ElementAssemblyTaskBuffer(u, p, element, Jₑ, uₑ, rₑ, cell)
+
+            # These are the local tasks
+            for i in chunkbegin:chunkbound
+                eid = color[i]
+                reinit!(cell, eid)
+                execute_task_on_single_cell!(local_task, local_task_buffer)
+            end
+        end
+    end
+end
+
+
+struct AssembleLinearizationJR{A}
+    inner_assembler::A
+end
+duplicate_for_device(device, task::AssembleLinearizationJR) = AssembleLinearizationJR(duplicate_for_device(device, task.inner_assembler))
+function Ferrite.assemble!(task::AssembleLinearizationJR, task_buffer::ElementAssemblyTaskBuffer)
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.Ke, task_buffer.re)
+end
+function execute_task_on_single_cell!(task::AssembleLinearizationJR, task_buffer)
+    Jₑ = query_element_matrix(task_buffer)
+    rₑ = query_element_residual_buffer(task_buffer)
+    uₑ = query_element_unknown_buffer(task_buffer)
+    pₑ = query_element_parameters(task_buffer)
+
+    fill!(Jₑ, 0.0)
+    fill!(rₑ, 0.0)
+
+    cell_cache = query_geometry_cache(task_buffer)
+    element    = query_element(task_buffer)
+
+    load_element_unknowns!(uₑ, task_buffer)
+    @timeit_debug "assemble element" assemble_element!(Jₑ, rₑ, uₑ, cell_cache, element, pₑ)
+    store_condensed_element_unknowns!(uₑ, task_buffer)
+
+    assemble!(task, task_buffer)
+end
+
+struct AssembleLinearizationJ{A}
+    inner_assembler::A
+end
+duplicate_for_device(device, task::AssembleLinearizationJ) = AssembleLinearizationJ(duplicate_for_device(device, task.inner_assembler))
+function Ferrite.assemble!(task::AssembleLinearizationJ, task_buffer::ElementAssemblyTaskBuffer)
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.Ke)
+end
+function execute_task_on_single_cell!(task::AssembleLinearizationJ, task_buffer)
+    Jₑ = query_element_matrix(task_buffer)
+    uₑ = query_element_unknown_buffer(task_buffer)
+    pₑ = query_element_parameters(task_buffer)
+
+    fill!(Jₑ, 0.0)
+
+    cell_cache = query_geometry_cache(task_buffer)
+    element    = query_element(task_buffer)
+
+    load_element_unknowns!(uₑ, task_buffer)
+    @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, cell_cache, element, pₑ)
+    store_condensed_element_unknowns!(uₑ, task_buffer)
+
+    assemble!(task, task_buffer)
+end
+
+struct AssembleLinearizationR{A <: AbstractVector}
+    inner_assembler::A
+end
+duplicate_for_device(device, task::AssembleLinearizationR) = task
+function Ferrite.assemble!(task::AssembleLinearizationR, task_buffer::ElementAssemblyTaskBuffer)
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.re)
+end
+function execute_task_on_single_cell!(task::AssembleLinearizationR, task_buffer)
+    rₑ = query_element_residual_buffer(task_buffer)
+    uₑ = query_element_unknown_buffer(task_buffer)
+    pₑ = query_element_parameters(task_buffer)
+
+    fill!(rₑ, 0.0)
+
+    cell_cache = query_geometry_cache(task_buffer)
+    element    = query_element(task_buffer)
+
+    load_element_unknowns!(uₑ, task_buffer)
+    @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, cell_cache, element, pₑ)
+    store_condensed_element_unknowns!(uₑ, task_buffer)
+
+    assemble!(task, task_buffer)
+end
+
 """
     LinearizedFerriteOperator(J, caches)
 
@@ -13,14 +191,54 @@ struct LinearizedFerriteOperator{MatrixType} <: AbstractNonlinearOperator
 end
 
 # Interface
+# function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector, p)
+#     (; J, strategy, subdomain_caches) = op
+
+#     assembler = start_assemble(strategy, J)
+
+#     for subdomain_cache in subdomain_caches
+#         # Function barrier
+#         _update_linearization_J!(assembler, u, subdomain_cache.sdh, subdomain_cache.element, subdomain_cache.strategy_cache, p)
+#     end
+
+#     finalize_assembly!(assembler)
+# end
+# function update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
+#     (; J, strategy, subdomain_caches) = op
+
+#     assembler = start_assemble(strategy, J, residual)
+
+#     for subdomain_cache in subdomain_caches
+#         # Function barrier
+#         _update_linearization_Jr!(assembler, u, subdomain_cache.sdh, subdomain_cache.element, subdomain_cache.strategy_cache, p)
+#     end
+
+#     finalize_assembly!(assembler)
+# end
+# function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
+#     (; strategy, subdomain_caches) = op
+
+#     assembler = start_assemble(strategy, residual)
+
+#     for subdomain_cache in subdomain_caches
+#         # Function barrier
+#         _residual!(assembler, u, subdomain_cache.sdh, subdomain_cache.element, subdomain_cache.strategy_cache, p)
+#     end
+
+#     finalize_assembly!(assembler)
+# end
+
+# Interface
 function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector, p)
     (; J, strategy, subdomain_caches) = op
 
     assembler = start_assemble(strategy, J)
+    task = AssembleLinearizationJ(assembler)
 
-    for sudomain_cache in subdomain_caches
+    for subdomain_cache in subdomain_caches
         # Function barrier
-        _update_linearization_J!(assembler, u, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
+        task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
+        execute_task_on_device!(task, strategy.device, task_cache)
     end
 
     finalize_assembly!(assembler)
@@ -29,10 +247,12 @@ function update_linearization!(op::LinearizedFerriteOperator, residual::Abstract
     (; J, strategy, subdomain_caches) = op
 
     assembler = start_assemble(strategy, J, residual)
+    task = AssembleLinearizationJR(assembler)
 
-    for sudomain_cache in subdomain_caches
+    for subdomain_cache in subdomain_caches
         # Function barrier
-        _update_linearization_Jr!(assembler, u, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
+        task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
+        execute_task_on_device!(task, strategy.device, task_cache)
     end
 
     finalize_assembly!(assembler)
@@ -41,10 +261,12 @@ function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::A
     (; strategy, subdomain_caches) = op
 
     assembler = start_assemble(strategy, residual)
+    task = AssembleLinearizationR(assembler)
 
-    for sudomain_cache in subdomain_caches
+    for subdomain_cache in subdomain_caches
         # Function barrier
-        _residual!(assembler, u, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
+        task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
+        execute_task_on_device!(task, strategy.device, task_cache)
     end
 
     finalize_assembly!(assembler)
@@ -64,61 +286,61 @@ Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)
 
 # -------------------------------------------------- Sequential on CPU --------------------------------------------------
 
-function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache, p)
-    # Prepare standard values
-    ndofs = ndofs_per_cell(sdh)
-    # TODO query from strategy_cache
-    Jₑ = allocate_element_matrix(element_cache, sdh)
-    uₑ = allocate_element_unknown_vector(element_cache, sdh)
-    @inbounds for cell in CellIterator(sdh)
-        # Prepare buffers
-        fill!(Jₑ, 0.0)
-        load_element_unknowns!(uₑ, u, cell, element_cache)
+# function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache, p)
+#     # Prepare standard values
+#     ndofs = ndofs_per_cell(sdh)
+#     # TODO query from strategy_cache
+#     Jₑ = allocate_element_matrix(element_cache, sdh)
+#     uₑ = allocate_element_unknown_vector(element_cache, sdh)
+#     @inbounds for cell in CellIterator(sdh)
+#         # Prepare buffers
+#         fill!(Jₑ, 0.0)
+#         load_element_unknowns!(uₑ, u, cell, element_cache)
 
-        # Fill buffers
-        @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, cell, element_cache, p)
+#         # Fill buffers
+#         @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, cell, element_cache, p)
 
-        assemble!(assembler, cell, Jₑ)
-    end
-end
+#         assemble!(assembler, cell, Jₑ)
+#     end
+# end
 
-function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache, p)
-    # Prepare standard values
-    ndofs = ndofs_per_cell(sdh)
-    # TODO query from strategy_cache
-    Jₑ = allocate_element_matrix(element_cache, sdh)
-    uₑ = allocate_element_unknown_vector(element_cache, sdh)
-    rₑ = allocate_element_residual_vector(element_cache, sdh)
-    @inbounds for cell in CellIterator(sdh)
-        fill!(Jₑ, 0.0)
-        fill!(rₑ, 0.0)
-        load_element_unknowns!(uₑ, u, cell, element_cache)
+# function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache, p)
+#     # Prepare standard values
+#     ndofs = ndofs_per_cell(sdh)
+#     # TODO query from strategy_cache
+#     Jₑ = allocate_element_matrix(element_cache, sdh)
+#     uₑ = allocate_element_unknown_vector(element_cache, sdh)
+#     rₑ = allocate_element_residual_vector(element_cache, sdh)
+#     @inbounds for cell in CellIterator(sdh)
+#         fill!(Jₑ, 0.0)
+#         fill!(rₑ, 0.0)
+#         load_element_unknowns!(uₑ, u, cell, element_cache)
 
-        @timeit_debug "assemble element" assemble_element!(Jₑ, rₑ, uₑ, cell, element_cache, p)
+#         @timeit_debug "assemble element" assemble_element!(Jₑ, rₑ, uₑ, cell, element_cache, p)
 
-        assemble!(assembler, cell, Jₑ, rₑ)
-    end
-end
+#         assemble!(assembler, cell, Jₑ, rₑ)
+#     end
+# end
 
 
-# This function is defined to control the dispatch
-function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache, p)
-    # Prepare standard values
-    ndofs = ndofs_per_cell(sdh)
-    # TODO query from strategy_cache
-    Jₑ = allocate_element_matrix(element_cache, sdh)
-    uₑ = allocate_element_unknown_vector(element_cache, sdh)
-    rₑ = allocate_element_residual_vector(element_cache, sdh)
-    @inbounds for cell in CellIterator(sdh)
-        fill!(Jₑ, 0.0)
-        fill!(rₑ, 0.0)
-        load_element_unknowns!(uₑ, u, cell, element_cache)
+# # This function is defined to control the dispatch
+# function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_cache, strategy_cache::SequentialAssemblyStrategyCache, p)
+#     # Prepare standard values
+#     ndofs = ndofs_per_cell(sdh)
+#     # TODO query from strategy_cache
+#     Jₑ = allocate_element_matrix(element_cache, sdh)
+#     uₑ = allocate_element_unknown_vector(element_cache, sdh)
+#     rₑ = allocate_element_residual_vector(element_cache, sdh)
+#     @inbounds for cell in CellIterator(sdh)
+#         fill!(Jₑ, 0.0)
+#         fill!(rₑ, 0.0)
+#         load_element_unknowns!(uₑ, u, cell, element_cache)
 
-        @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, cell, element_cache, p)
+#         @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, cell, element_cache, p)
 
-        assemble!(residual, cell, rₑ)
-    end
-end
+#         assemble!(residual, cell, rₑ)
+#     end
+# end
 
 # -------------------------------------------------- Colored on CPU --------------------------------------------------
 
@@ -150,7 +372,7 @@ function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cac
     (; chunksize) = device
 
     ndofs = ndofs_per_cell(sdh)
-    (; tlds, Aes, ues)  = device_cache
+    (; tlds, sacs)  = device_cache
 
     assemblers = [duplicate_for_device(device, assembler) for tid in 1:length(tlds)]
 
@@ -162,8 +384,8 @@ function _update_linearization_J!(assembler, u::AbstractVector, sdh, element_cac
             chunkbound = min(ncells, chunk*chunksize)
 
             # Unpack chunk scratch
-            Jₑ        = Aes[chunk]
-            uₑ        = ues[chunk]
+            Jₑ        = sacs[chunk].Ke
+            uₑ        = sacs[chunk].ue
             tld       = tlds[chunk]
             assembler = assemblers[chunk]
 
@@ -213,7 +435,7 @@ function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_ca
     (; device, device_cache, colors) = strategy_cache
     (; chunksize) = device
 
-    (; tlds, Aes, ues, res)  = device_cache
+    (; tlds, sacs)  = device_cache
 
     assemblers = [duplicate_for_device(device, assembler) for tid in 1:length(tlds)]
 
@@ -225,9 +447,9 @@ function _update_linearization_Jr!(assembler, u::AbstractVector, sdh, element_ca
             chunkbound = min(ncells, chunk*chunksize)
 
             # Unpack chunk scratch
-            Jₑ        = Aes[chunk]
-            uₑ        = ues[chunk]
-            rₑ        = res[chunk]
+            uₑ        = sacs[chunk].ue
+            Jₑ        = sacs[chunk].Ke
+            rₑ        = sacs[chunk].re
             tld       = tlds[chunk]
             assembler = assemblers[chunk]
 
@@ -276,7 +498,7 @@ function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_ca
     (; device, device_cache, colors) = strategy_cache
     (; chunksize) = device
 
-    (; tlds, ues, res)  = device_cache
+    (; tlds, sacs)  = device_cache
 
     @inbounds for color in colors
         ncells  = maximum(length(color))
@@ -286,8 +508,8 @@ function _residual!(residual::AbstractVector, u::AbstractVector, sdh, element_ca
             chunkbound = min(ncells, chunk*chunksize)
 
             # Unpack chunk scratch
-            uₑ        = ues[chunk]
-            rₑ        = res[chunk]
+            uₑ        = sacs[chunk].ue
+            rₑ        = sacs[chunk].re
             tld       = tlds[chunk]
 
             for i in chunkbegin:chunkbound
@@ -503,9 +725,9 @@ function update_operator!(op::BilinearFerriteOperator, p)
 
     assembler = start_assemble(strategy, A)
 
-    for sudomain_cache in subdomain_caches
+    for subdomain_cache in subdomain_caches
         # Function barrier
-        _update_bilinear_operator_on_subdomain!(assembler, sudomain_cache.sdh, sudomain_cache.element_cache, sudomain_cache.strategy_cache, p)
+        _update_bilinear_operator_on_subdomain!(assembler, subdomain_cache.sdh, subdomain_cache.element, subdomain_cache.strategy_cache, p)
     end
 
     finalize_assembly!(assembler)

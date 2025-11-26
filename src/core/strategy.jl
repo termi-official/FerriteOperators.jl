@@ -22,9 +22,19 @@ struct SequentialAssemblyStrategyCache{DeviceType, DeviceCacheType}
     device_cache::DeviceCacheType
 end
 
-# TODO
 setup_operator_strategy_cache(strategy, integrator, dh) = strategy
-setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, element_cache, sdh) = SequentialAssemblyStrategyCache(strategy.device, nothing)
+
+@concrete struct SimpleAssemblyCache
+    Ke
+    ue
+    re
+end
+function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, element_cache, sdh)
+    Ke = allocate_element_matrix(element_cache, sdh)
+    ue = allocate_element_unknown_vector(element_cache, sdh)
+    re = allocate_element_residual_vector(element_cache, sdh)
+    return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(Ke, ue, re))
+end
 
 """
     PerColorAssemblyStrategy(chunksize, coloralg)
@@ -46,9 +56,7 @@ end
 
 @concrete struct ThreadedAssemblyCache
     tlds
-    Aes
-    ues
-    res
+    sacs
 end
 
 function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, element_cache, sdh)
@@ -70,10 +78,14 @@ function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, e
     nchunksmax = ceil(Int, ncellsmax / chunksize)
 
     tlds = [ChunkLocalAssemblyData(CellCache(sdh), duplicate_for_device(device, element_cache)) for tid in 1:nchunksmax]
-    Aes  = [allocate_element_matrix(element_cache, sdh) for tid in 1:nchunksmax]
-    ues  = [allocate_element_unknown_vector(element_cache, sdh) for tid in 1:nchunksmax]
-    res  = [allocate_element_residual_vector(element_cache, sdh) for tid in 1:nchunksmax]
-    PerColorAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(tlds, Aes, ues, res), colors)
+    sacs = [
+        SimpleAssemblyCache(
+            allocate_element_matrix(element_cache, sdh),
+            allocate_element_unknown_vector(element_cache, sdh),
+            allocate_element_residual_vector(element_cache, sdh),
+        )
+    for tid in 1:nchunksmax]
+    PerColorAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(tlds, sacs), colors)
 end
 
 """
@@ -119,10 +131,10 @@ function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStra
     nchunksmax = ceil(Int, ncellsmax / chunksize)
 
     tlds = [ChunkLocalAssemblyData(CellCache(sdh), duplicate_for_device(device, element_cache)) for tid in 1:nchunksmax]
-    Aes  = [allocate_element_matrix(element_cache, sdh) for tid in 1:nchunksmax]
+    Kes  = [allocate_element_matrix(element_cache, sdh) for tid in 1:nchunksmax]
     ues  = [allocate_element_unknown_vector(element_cache, sdh) for tid in 1:nchunksmax]
     res  = [allocate_element_residual_vector(element_cache, sdh) for tid in 1:nchunksmax]
-    ElementAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(tlds, Aes, ues, res))
+    ElementAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(tlds, Kes, ues, res))
 end
 
 matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)

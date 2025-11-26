@@ -6,6 +6,10 @@ function duplicate_for_device(device, asm::Ferrite.SymmetricCSCAssembler)
     return Ferrite.SymmetricCSCAssembler(asm.K, asm.f, duplicate_for_device(device, asm.permutation), duplicate_for_device(device, asm.sorteddofs))
 end
 
+function duplicate_for_device(device, asm::Ferrite.CSRAssembler)
+    return Ferrite.CSRAssembler(asm.K, asm.f, duplicate_for_device(device, asm.permutation), duplicate_for_device(device, asm.sorteddofs))
+end
+
 function duplicate_for_device(device, fv::FacetValues)
     return FacetValues(
         duplicate_for_device(device, fv.fun_values),
