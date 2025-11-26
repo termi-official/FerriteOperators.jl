@@ -12,6 +12,7 @@ allocate_element_matrix(element_cache::AbstractVolumetricElementCache, sdh)     
 allocate_element_unknown_vector(element_cache::AbstractVolumetricElementCache, sdh)  = zeros(ndofs_per_cell(sdh))
 allocate_element_residual_vector(element_cache::AbstractVolumetricElementCache, sdh) = zeros(ndofs_per_cell(sdh))
 load_element_unknowns!(uₑ, u, cell, element_cache::AbstractVolumetricElementCache)   = uₑ .= @view u[celldofs(cell)]
+store_condensed_element_unknowns!(uₑ, u, cell, element_cache::AbstractVolumetricElementCache) = nothing
 
 @doc raw"""
     assemble_element!(Kₑ::AbstractMatrix, cell::CellCache, element_cache::AbstractVolumetricElementCache, time)

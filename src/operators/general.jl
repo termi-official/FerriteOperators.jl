@@ -4,7 +4,7 @@
 
 struct SubdomainCache
     sdh
-    element_cache
+    element
     strategy_cache
 end
 
