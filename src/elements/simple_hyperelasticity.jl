@@ -49,7 +49,6 @@ function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, ce
     end
 end
 
-
 # jac
 function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, element_cache::SimpleHyperelasticityElementCache, p)
     (; ψ, cv) = element_cache
