@@ -223,30 +223,31 @@ using SparseArrays
             @test rnorm_baseline ≈ norm(residual)
             residual_baseline = copy(residual)
 
-            # @testset "Colour Assembly Strategy $strategy" for strategy in (
-            #         PerColorAssemblyStrategy(SequentialCPUDevice()),
-            #         PerColorAssemblyStrategy(PolyesterDevice(1)),
-            #         PerColorAssemblyStrategy(PolyesterDevice(2)),
-            #         PerColorAssemblyStrategy(PolyesterDevice(3)),
-            # )
-            #     nlop = setup_operator(strategy, integrator, dh)
-            #     # Consistency and Idempotency
-            #     for i in 1:2
-            #         nlop.J .= NaN
-            #         update_linearization!(nlop, u, 0.0)
-            #         @test nlop.J ≈ nlop_base.J
+            @testset "Full Assembly Strategy $strategy" for strategy in (
+                SequentialAssemblyStrategy(SequentialCPUDevice()),
+                PerColorAssemblyStrategy(SequentialCPUDevice()),
+                PerColorAssemblyStrategy(PolyesterDevice(1)),
+                PerColorAssemblyStrategy(PolyesterDevice(2)),
+                PerColorAssemblyStrategy(PolyesterDevice(3)),
+            )
+                nlop = setup_operator(strategy, integrator, dh)
+                # Consistency and Idempotency
+                for i in 1:2
+                    nlop.J .= NaN
+                    update_linearization!(nlop, u, 0.0)
+                    @test nlop.J ≈ nlop_base.J
 
-            #         nlop.J .= NaN
-            #         residual .= NaN
-            #         update_linearization!(nlop, residual, u, 0.0)
-            #         @test nlop.J ≈ nlop_base.J
-            #         @test residual ≈ residual_baseline
+                    nlop.J .= NaN
+                    residual .= NaN
+                    update_linearization!(nlop, residual, u, 0.0)
+                    @test nlop.J ≈ nlop_base.J
+                    @test residual ≈ residual_baseline
 
-            #         residual .= NaN
-            #         nlop(residual, u, 0.0)
-            #         @test residual ≈ residual_baseline
-            #     end
-            # end
+                    residual .= NaN
+                    nlop(residual, u, 0.0)
+                    @test residual ≈ residual_baseline
+                end
+            end
 
             @testset "Element Assembly Strategy $strategy" for strategy in (
                 ElementAssemblyStrategy(SequentialCPUDevice()),

@@ -28,12 +28,14 @@ setup_operator_strategy_cache(strategy, integrator, dh) = strategy
     Ke
     ue
     re
+    cell
+    element
 end
 function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, element_cache, sdh)
     Ke = allocate_element_matrix(element_cache, sdh)
     ue = allocate_element_unknown_vector(element_cache, sdh)
     re = allocate_element_residual_vector(element_cache, sdh)
-    return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(Ke, ue, re))
+    return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(Ke, ue, re, CellCache(sdh), element_cache))
 end
 
 """
@@ -55,8 +57,7 @@ PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = PerColorA
 end
 
 @concrete struct ThreadedAssemblyCache
-    tlds
-    sacs
+    task_local_caches
 end
 
 function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, element_cache, sdh)
@@ -77,15 +78,16 @@ function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, e
     ncellsmax = maximum(length.(colors))
     nchunksmax = ceil(Int, ncellsmax / chunksize)
 
-    tlds = [ChunkLocalAssemblyData(CellCache(sdh), duplicate_for_device(device, element_cache)) for tid in 1:nchunksmax]
-    sacs = [
+    task_local_caches = [
         SimpleAssemblyCache(
             allocate_element_matrix(element_cache, sdh),
             allocate_element_unknown_vector(element_cache, sdh),
             allocate_element_residual_vector(element_cache, sdh),
+            CellCache(sdh),
+            duplicate_for_device(device, element_cache),
         )
     for tid in 1:nchunksmax]
-    PerColorAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(tlds, sacs), colors)
+    return PerColorAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(task_local_caches), colors)
 end
 
 """
@@ -130,11 +132,16 @@ function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStra
     ncellsmax  = getncells(grid)
     nchunksmax = ceil(Int, ncellsmax / chunksize)
 
-    tlds = [ChunkLocalAssemblyData(CellCache(sdh), duplicate_for_device(device, element_cache)) for tid in 1:nchunksmax]
-    Kes  = [allocate_element_matrix(element_cache, sdh) for tid in 1:nchunksmax]
-    ues  = [allocate_element_unknown_vector(element_cache, sdh) for tid in 1:nchunksmax]
-    res  = [allocate_element_residual_vector(element_cache, sdh) for tid in 1:nchunksmax]
-    ElementAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(tlds, Kes, ues, res))
+    task_local_caches = [
+        SimpleAssemblyCache(
+            allocate_element_matrix(element_cache, sdh),
+            allocate_element_unknown_vector(element_cache, sdh),
+            allocate_element_residual_vector(element_cache, sdh),
+            CellCache(sdh),
+            duplicate_for_device(device, element_cache)
+        )
+    for tid in 1:nchunksmax]
+    return ElementAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(task_local_caches))
 end
 
 matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)
