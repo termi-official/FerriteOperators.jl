@@ -280,4 +280,50 @@ using SparseArrays
             end
         end
     end
+
+    @testset "Condensed Elements" begin
+        integrator = FerriteOperators.SimpleCondensedLinearViscoelasticity(
+            FerriteOperators.MaxwellParameters(),
+            QuadratureRuleCollection(2),
+            :u,
+            :εᵛ,
+        )
+
+        grid = generate_grid(Hexahedron, (3,3,3))
+        Ferrite.transform_coordinates!(grid, x->Vec{3}(sign.(x.-0.5) .* (x.-0.5).^2))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefHexahedron,1}()^3)
+        close!(dh)
+
+        residual = zeros(ndofs(dh))
+        u        = zeros(ndofs(dh) + 6*8*(3*3*3)) # TODO get via interface
+        uprev    = zeros(ndofs(dh) + 6*8*(3*3*3)) # TODO get via interface
+        apply_analytical!(u, dh, :u, x->0.01x.^2)
+
+        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        nlop = setup_operator(strategy, integrator, dh)
+        update_linearization!(nlop, residual, u, FerriteOperators.ImplicitEulerInfo(uprev, π, 0.0))
+
+        ∂Ω = union(
+            getfacetset(grid, "left"),
+            getfacetset(grid, "right"),
+            getfacetset(grid, "top"),
+            getfacetset(grid, "bottom"),
+        );
+        ch = ConstraintHandler(dh);
+        dbc = Dirichlet(:u, ∂Ω, (x, t) -> (0,0,0))
+        add!(ch, dbc);
+        close!(ch)
+
+        apply!(nlop.J, residual, ch)
+        Δd = nlop.J \ residual
+        d = @view u[1:ndofs(dh)]
+        d .-= Δd
+
+        update_linearization!(nlop, residual, u, FerriteOperators.ImplicitEulerInfo(uprev, π, 0.0))
+
+        apply!(nlop.J, residual, ch)
+        Δd = nlop.J \ residual
+        @test norm(Δd) ≈ 0.0 atol=1e-16
+    end
 end

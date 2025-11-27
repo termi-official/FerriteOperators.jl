@@ -46,6 +46,7 @@ include("elements/composite_elements.jl")     # This is the key component to all
 include("elements/simple_diffusion.jl")       # Example element for diffusion
 include("elements/simple_mass.jl")            # Example element for mass matrices
 include("elements/simple_hyperelasticity.jl") # Example element for hyperelasticity
+include("elements/simple_linear_viscoelasticity.jl")
 
 include("operators/general.jl")         # Some general operators which might be handy
 include("operators/matrix_free.jl")     # Everything related to the fundamental decomposition
