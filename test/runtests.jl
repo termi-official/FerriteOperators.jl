@@ -295,35 +295,35 @@ using SparseArrays
         add!(dh, :u, Lagrange{RefHexahedron,1}()^3)
         close!(dh)
 
+        ch = ConstraintHandler(dh);
+        add!(ch, Dirichlet(:u, getfacetset(grid, "left"), (x, t) -> (0,0,0)));
+        add!(ch, Dirichlet(:u, getfacetset(grid, "right"), (x, t) -> (0.01,0,0)));
+        close!(ch)
+
         residual = zeros(ndofs(dh))
         u        = zeros(ndofs(dh) + 6*8*(3*3*3)) # TODO get via interface
         uprev    = zeros(ndofs(dh) + 6*8*(3*3*3)) # TODO get via interface
-        apply_analytical!(u, dh, :u, x->0.01x.^2)
+        apply_analytical!(u, dh, :u, x->0.01x.^2 .+ 0.01)
 
         strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
         nlop = setup_operator(strategy, integrator, dh)
+        apply!(u, ch)
         update_linearization!(nlop, residual, u, FerriteOperators.ImplicitEulerInfo(uprev, π, 0.0))
 
-        ∂Ω = union(
-            getfacetset(grid, "left"),
-            getfacetset(grid, "right"),
-            getfacetset(grid, "top"),
-            getfacetset(grid, "bottom"),
-        );
-        ch = ConstraintHandler(dh);
-        dbc = Dirichlet(:u, ∂Ω, (x, t) -> (0,0,0))
-        add!(ch, dbc);
-        close!(ch)
-
-        apply!(nlop.J, residual, ch)
+        apply!(u, ch)
+        apply_zero!(nlop.J, residual, ch)
         Δd = nlop.J \ residual
         d = @view u[1:ndofs(dh)]
         d .-= Δd
 
         update_linearization!(nlop, residual, u, FerriteOperators.ImplicitEulerInfo(uprev, π, 0.0))
 
-        apply!(nlop.J, residual, ch)
+        apply_zero!(nlop.J, residual, ch)
         Δd = nlop.J \ residual
         @test norm(Δd)/length(Δd) ≈ 0.0 atol=1e-12
+
+        @test norm(d) ≈ 0.059623465672897884
+        @test norm(u[ndofs(dh)+1:end]) ≈ 0.062203435313135984
+        @test norm(uprev) ≈ 0.0
     end
 end

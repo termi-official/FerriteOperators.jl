@@ -33,69 +33,145 @@ function duplicate_for_device(device, cache::SimpleCondensedLinearViscoelasticit
     )
 end
 
-# # Element residual
-# function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p)
-#     (; material_parameters, displacement_range, viscosity_range cv) = element_cache
-#     (; dt, t, uₑprev) = p
+# Element residual
+function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p)
+    (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
+    (; dt, uₑprev) = p
+    Δt = dt
+    (; E₀, E₁, μ, η₁, ν) = material_parameters
 
-#     dₑ = @view uₑ[displacement_range]
-#     vₑ = @view uₑ[viscosity_range]
+    nqp = getnquadpoints(cv)
+    ndofs = getnbasefunctions(cv)
 
-#     ndofs = getnbasefunctions(cv)
+    dₑ = @view uₑ[displacement_range]
+    qₑ = @view uₑ[viscosity_range]
+    qₑmat = reshape(qₑ, (6, nqp))
+    qprevₑ = @view uₑprev[viscosity_range]
+    qₑprevmat = reshape(qprevₑ, (6, nqp))
 
-#     reinit!(cv, cell)
+    reinit!(cv, cell)
 
-#     @inbounds for qp ∈ 1:getnquadpoints(cv)
-#         dΩ = getdetJdV(cv, qp)
+    @inbounds for qp ∈ 1:nqp
+        dΩ = getdetJdV(cv, qp)
 
-#         # Compute deformation gradient F
-#         ∇u = function_gradient(cv, qp, dₑ)
-#         F = one(∇u) + ∇u
+        # Compute strain tensor
+        ∇u = function_gradient(cv, qp, dₑ)
+        ε = symmetric(∇u)
 
-#         # Compute stress and tangent
-#         P = Tensors.gradient(F_ad -> ψ(F_ad), F)
+        # Extract viscous strain tensor
+        εᵛ₀flat = @view qₑprevmat[:, qp]
+        εᵛ₀ = SymmetricTensor{2,3}(εᵛ₀flat)
 
-#         # Loop over test functions
-#         for i in 1:ndofs
-#             ∇δui = shape_gradient(cv, qp, i)
+        # This is the used discretization:
+        #     dεᵛdt = E₁/η₁ c : (ε - εᵛ)
+        # <=> (εᵛ₁ - εᵛ₀) / Δt = E₁/η₁ c : (ε - εᵛ₁) = E₁/η₁ c : ε - E₁/η₁ c : εᵛ₁
+        # <=> εᵛ₁ / Δt + E₁/η₁ c : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
+        # <=> (𝐈 / Δt + E₁/η₁ c) : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
 
-#             # Add contribution to the residual from this test function
-#             residualₑ[i] += ∇δui ⊡ P * dΩ
-#         end
-#     end
-# end
+        # Predictor
+        I = one(ε)
+        c₁ = ν / ((ν + 1)*(1-2ν)) * I ⊗ I
+        c₂ = 1 / (1+ν) * one(c₁)
+        ℂ = c₁ + c₂
 
-# # jac
-# function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p)
-#     (; ψ, cv) = element_cache
+        # FIXME non-allocating version by using state_cache nlsolver
+        A = tomandel(SMatrix, one(ℂ)/Δt + E₁/η₁ * ℂ)
+        b = tomandel(SVector, εᵛ₀/Δt + E₁/η₁ * ℂ ⊡ ε)
+        εᵛ₁flat = @view qₑmat[:, qp]
+        εᵛ₁ = frommandel(typeof(ε), A \ b)
 
-#     ndofs = getnbasefunctions(cv)
+        # Store solution
+        εᵛ₁flat .= εᵛ₁.data
 
-#     reinit!(cv, cell)
+        # Compute stress and tangent
+        σ = E₀ * ℂ ⊡ ε + E₁ * ℂ ⊡ (ε - εᵛ₁)
 
-#     @inbounds for qp ∈ 1:getnquadpoints(cv)
-#         dΩ = getdetJdV(cv, qp)
+        # Loop over test functions
+        for i in 1:ndofs
+            ∇δui = shape_gradient(cv, qp, i)
 
-#         # Compute deformation gradient F
-#         ∇u = function_gradient(cv, qp, uₑ)
-#         F = one(∇u) + ∇u
+            # Add contribution to the residual from this test function
+            residualₑ[i] += ∇δui ⊡ σ * dΩ
+        end
+    end
+end
 
-#         # Compute stress and tangent
-#         ∂P∂F = Tensors.hessian(F_ad -> ψ(F_ad), F)
+# jac
+function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p)
+    (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
+    (; dt, uₑprev) = p
+    Δt = dt
+    (; E₀, E₁, μ, η₁, ν) = material_parameters
 
-#         # Loop over test functions
-#         for i in 1:ndofs
-#             ∇δui = shape_gradient(cv, qp, i)
+    nqp = getnquadpoints(cv)
+    ndofs = getnbasefunctions(cv)
 
-#             ∇δui∂P∂F = ∇δui ⊡ ∂P∂F # Hoisted computation
-#             for j in 1:ndofs
-#                 ∇δuj = shape_gradient(cv, qp, j)
-#                 # Add contribution to the tangent
-#                 Kₑ[i, j] += ( ∇δui∂P∂F ⊡ ∇δuj ) * dΩ
-#             end
-#         end
-#     end
-# end
+    dₑ = @view uₑ[displacement_range]
+    qₑ = @view uₑ[viscosity_range]
+    qₑmat = reshape(qₑ, (6, nqp))
+    qprevₑ = @view uₑprev[viscosity_range]
+    qₑprevmat = reshape(qprevₑ, (6, nqp))
+
+    reinit!(cv, cell)
+
+    @inbounds for qp ∈ 1:nqp
+        dΩ = getdetJdV(cv, qp)
+
+        # Compute strain tensor
+        ∇u = function_gradient(cv, qp, dₑ)
+        ε = symmetric(∇u)
+
+        # Extract viscous strain tensor
+        εᵛ₀flat = @view qₑprevmat[:, qp]
+        εᵛ₀ = SymmetricTensor{2,3}(εᵛ₀flat)
+
+        # This is the used discretization:
+        #     dεᵛdt = E₁/η₁ c : (ε - εᵛ)
+        # <=> (εᵛ₁ - εᵛ₀) / Δt = E₁/η₁ c : (ε - εᵛ₁) = E₁/η₁ c : ε - E₁/η₁ c : εᵛ₁
+        # <=> εᵛ₁ / Δt + E₁/η₁ c : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
+        # <=> (𝐈 / Δt + E₁/η₁ c) : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
+
+        # Predictor
+        I = one(ε)
+        c₁ = ν / ((ν + 1)*(1-2ν)) * I ⊗ I
+        c₂ = 1 / (1+ν) * one(c₁)
+        ℂ = c₁ + c₂
+
+        # FIXME non-allocating version by using state_cache nlsolver
+        A = tomandel(SMatrix, one(ℂ)/Δt + E₁/η₁ * ℂ)
+        b = tomandel(SVector, εᵛ₀/Δt + E₁/η₁ * ℂ ⊡ ε)
+        εᵛ₁flat = @view qₑmat[:, qp]
+        εᵛ₁ = frommandel(typeof(ε), A \ b)
+
+        # Store solution
+        εᵛ₁flat .= εᵛ₁.data
+
+        # Corrector
+        # Local problem: (𝐈 / Δt + E₁/η₁ c) : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
+        # =>  dLdQ = 𝐈 / Δt + E₁/η₁ c   := A
+        # => -dLdF = E₁/η₁ c            := B
+
+        # FIXME non-allocating version by using state_cache nlsolver
+        B = tomandel(SMatrix, E₁/η₁ * ℂ)
+        dqdε = frommandel(typeof(ℂ), A \ B)
+        ∂σ∂q = - E₁ * ℂ
+
+        # Compute tangent
+        ∂σ∂ε = (E₀ + E₁) * ℂ + ∂σ∂q ⊡ dqdε
+
+        # Loop over test functions
+        for i in 1:ndofs
+            ∇δui = shape_gradient(cv, qp, i)
+
+            ∇δui∂σ∂ε = ∇δui ⊡ ∂σ∂ε # Hoisted computation
+            for j in 1:ndofs
+                ∇δuj = shape_gradient(cv, qp, j)
+                # Add contribution to the tangent
+                Kₑ[i, j] += ( ∇δui∂σ∂ε ⊡ ∇δuj ) * dΩ
+            end
+        end
+    end
+end
 
 # Combined residual and jac
 function assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p)
@@ -204,7 +280,7 @@ function load_element_unknowns!(uₑ, u, cell, element::SimpleCondensedLinearVis
     return nothing
 end
 
-function store_element_unknowns!(uₑ, u, cell, element::SimpleCondensedLinearViscoelasticityCache)
+function store_condensed_element_unknowns!(uₑ, u, cell, element::SimpleCondensedLinearViscoelasticityCache)
     nqp                           = getnquadpoints(element.cv)
     id                            = cellid(cell)
     viscoidx_beg                  = ndofs(cell.dh.dh)+(id-1)*6nqp+1

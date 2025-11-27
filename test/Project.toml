@@ -1,0 +1,9 @@
+[deps]
+ConcreteStructs = "2569d6c7-a4a2-43d3-a901-331e8e4be471"
+FerriteOperators = "27d9367a-5072-424e-9c5f-fe582399bac3"
+LinearSolve = "7ed4a6bd-45f5-4d41-b270-4a48e9bafcae"
+NonlinearSolve = "8913a72c-1f9b-4ce2-8d82-65094dcecaec"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[sources]
+FerriteOperators = {path = "../"}
