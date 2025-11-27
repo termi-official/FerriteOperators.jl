@@ -1,7 +1,7 @@
 name = "FerriteOperators"
 uuid = "27d9367a-5072-424e-9c5f-fe582399bac3"
 authors = ["Dennis Ogiermann <termi-official@users.noreply.github.com> and contributors"]
-version = "0.1"
+version = "0.1.0"
 
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
@@ -34,4 +34,4 @@ julia = "1.10"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Test"]
+test = ["LinearAlgebra", "SparseArrays", "Test"]
