@@ -1,7 +1,7 @@
 name = "FerriteOperators"
 uuid = "27d9367a-5072-424e-9c5f-fe582399bac3"
-authors = ["termi-official <termi-official@users.noreply.github.com> and contributors"]
-version = "0.0.1-DEV"
+authors = ["Dennis Ogiermann <termi-official@users.noreply.github.com> and contributors"]
+version = "0.1"
 
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
