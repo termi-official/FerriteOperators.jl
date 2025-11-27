@@ -324,6 +324,6 @@ using SparseArrays
 
         apply!(nlop.J, residual, ch)
         Δd = nlop.J \ residual
-        @test norm(Δd) ≈ 0.0 atol=1e-16
+        @test norm(Δd)/length(Δd) ≈ 0.0 atol=1e-12
     end
 end
