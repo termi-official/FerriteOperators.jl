@@ -13,6 +13,7 @@ end
     Ke
     ue
     re
+    # pe
     geometry_cache
 end
 Ferrite.reinit!(buffer::GenericTaskBuffer, taskid) = reinit!(buffer.geometry_cache, taskid)
@@ -37,8 +38,10 @@ end
 
 query_element_matrix(b::GenericTaskBuffer) = b.Ke
 query_element_residual_buffer(b::GenericTaskBuffer) = b.re
-query_element_unknown_buffer(b::GenericTaskBuffer) = b.ue
-query_element_parameters(b::GenericTaskBuffer) = b.p
+query_element_unknown_buffer(b::GenericTaskBuffer) = query_element_unknown_buffer(b.element, b.ue)
+query_element_unknown_buffer(element, ue) = ue
+query_element_parameters(b::GenericTaskBuffer) = query_element_parameters(b.element, b.geometry_cache, b.p)
+query_element_parameters(element, geometry_cache, p) = p
 query_geometry_cache(b::GenericTaskBuffer) = b.geometry_cache
 query_element(b::GenericTaskBuffer) = b.element
 
