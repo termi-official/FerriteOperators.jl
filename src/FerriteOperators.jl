@@ -43,6 +43,8 @@ abstract type AbstractNonlinearIntegrator end
 abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
+include("elements/generic_first_order_time_element.jl")
+
 include("elements/simple_diffusion.jl")       # Example element for diffusion
 include("elements/simple_mass.jl")            # Example element for mass matrices
 include("elements/simple_hyperelasticity.jl") # Example element for hyperelasticity
