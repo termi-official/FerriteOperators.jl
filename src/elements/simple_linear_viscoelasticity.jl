@@ -17,7 +17,7 @@ struct SimpleCondensedLinearViscoelasticity <: AbstractNonlinearIntegrator
     viscosity_name::Symbol
 end
 
-struct SimpleCondensedLinearViscoelasticityCache{CV <: CellValues} <: AbstractVolumetricElementCache
+struct SimpleCondensedLinearViscoelasticityCache{CV <: CellValues} <: AbstractGenericFirstOrderTimeVolumetricElementCache
     material_parameters::MaxwellParameters
     displacement_range::UnitRange{Int}
     viscosity_range::UnitRange{Int}
@@ -34,10 +34,8 @@ function duplicate_for_device(device, cache::SimpleCondensedLinearViscoelasticit
 end
 
 # Element residual
-function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p)
+function assemble_element_gto1!(residualₑ::AbstractVector, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p, t, Δt)
     (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
-    (; dt, uₑprev) = p
-    Δt = dt
     (; E₀, E₁, μ, η₁, ν) = material_parameters
 
     nqp = getnquadpoints(cv)
@@ -97,10 +95,8 @@ function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, ce
 end
 
 # jac
-function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p)
+function assemble_element_gto1!(Kₑ::AbstractMatrix, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p, t, Δt)
     (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
-    (; dt, uₑprev) = p
-    Δt = dt
     (; E₀, E₁, μ, η₁, ν) = material_parameters
 
     nqp = getnquadpoints(cv)
@@ -174,10 +170,8 @@ function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, ele
 end
 
 # Combined residual and jac
-function assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p)
+function assemble_element_gto1!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p, t, Δt)
     (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
-    (; dt, uₑprev) = p
-    Δt = dt
     (; E₀, E₁, μ, η₁, ν) = material_parameters
 
     nqp = getnquadpoints(cv)
@@ -289,25 +283,4 @@ function store_condensed_element_unknowns!(uₑ, u, cell, element::SimpleCondens
     return nothing
 end
 
-@concrete struct ImplicitEulerInfo
-    uprev
-    dt
-    t
-end
-
-@concrete struct ImplicitEulerElementInfo
-    uₑprev
-    dt
-    t
-end
-
-allocate_element_unknown_vector(element::SimpleCondensedLinearViscoelasticityCache, sdh) = zeros(getnbasefunctions(element.cv)+6getnquadpoints(element.cv))
-
-function query_element_parameters(element::SimpleCondensedLinearViscoelasticityCache, cell, p)
-    (; cv) = element
-    (; uprev, dt, t) = p
-    # TODO query pe from taskbuffer
-    uₑprev = zeros(getnbasefunctions(cv)+6getnquadpoints(cv))
-    load_element_unknowns!(uₑprev, uprev, cell, element)
-    return ImplicitEulerElementInfo(uₑprev, dt, t)
-end
+allocate_element_unknown_vector(element::SimpleCondensedLinearViscoelasticityCache, cell) = zeros(getnbasefunctions(element.cv)+6getnquadpoints(element.cv))
