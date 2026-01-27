@@ -10,3 +10,9 @@ function get_first_cell(sdh::SubDofHandler)
     grid = get_grid(sdh.dh)
     return getcells(grid, first(sdh.cellset))
 end
+
+struct LocalSolveInfo
+    converged::Bool
+end
+
+LocalSolveInfo() = LocalSolveInfo(true)

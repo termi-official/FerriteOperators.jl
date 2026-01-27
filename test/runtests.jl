@@ -308,7 +308,7 @@ using SparseArrays
         strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
         nlop = setup_operator(strategy, integrator, dh)
         apply!(u, ch)
-        update_linearization!(nlop, residual, u, FerriteOperators.GenericFirstOrderTimeParameters(nothing, 0.0, π, uprev))
+        update_linearization!(nlop, residual, u, FerriteOperators.GenericFirstOrderTimeParameters(nothing, 0.0, π, uprev, nothing))
 
         apply!(u, ch)
         apply_zero!(nlop.J, residual, ch)
@@ -316,7 +316,7 @@ using SparseArrays
         d = @view u[1:ndofs(dh)]
         d .-= Δd
 
-        update_linearization!(nlop, residual, u, FerriteOperators.GenericFirstOrderTimeParameters(nothing, 0.0, π, uprev))
+        update_linearization!(nlop, residual, u, FerriteOperators.GenericFirstOrderTimeParameters(nothing, 0.0, π, uprev, nothing))
 
         apply_zero!(nlop.J, residual, ch)
         Δd = nlop.J \ residual
