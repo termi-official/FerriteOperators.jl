@@ -34,7 +34,7 @@ function duplicate_for_device(device, cache::SimpleCondensedLinearViscoelasticit
 end
 
 # Element residual
-function assemble_element_gto1!(residualₑ::AbstractVector, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, local_solve_infos, p, t, Δt)
+function assemble_element_gto1!(residualₑ::AbstractVector, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p, t, Δt)
     (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
     (; E₀, E₁, μ, η₁, ν) = material_parameters
 
@@ -95,7 +95,7 @@ function assemble_element_gto1!(residualₑ::AbstractVector, uₑ::AbstractVecto
 end
 
 # jac
-function assemble_element_gto1!(Kₑ::AbstractMatrix, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, local_solve_infos, p, t, Δt)
+function assemble_element_gto1!(Kₑ::AbstractMatrix, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p, t, Δt)
     (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
     (; E₀, E₁, μ, η₁, ν) = material_parameters
 
@@ -170,7 +170,7 @@ function assemble_element_gto1!(Kₑ::AbstractMatrix, uₑ::AbstractVector, uₑ
 end
 
 # Combined residual and jac
-function assemble_element_gto1!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, local_solve_infos, p, t, Δt)
+function assemble_element_gto1!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p, t, Δt)
     (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
     (; E₀, E₁, μ, η₁, ν) = material_parameters
 
