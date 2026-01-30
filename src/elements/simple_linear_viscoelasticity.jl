@@ -9,7 +9,7 @@ end
 @doc raw"""
     SimpleCondensedLinearViscoelasticity
 """
-struct SimpleCondensedLinearViscoelasticity <: AbstractNonlinearIntegrator
+struct SimpleCondensedLinearViscoelasticity <: AbstractCondensedNonlinearIntegrator
     material_parameters::MaxwellParameters
     # Every integrator needs these
     qrc::QuadratureRuleCollection
@@ -31,6 +31,10 @@ function duplicate_for_device(device, cache::SimpleCondensedLinearViscoelasticit
         cache.viscosity_range,
         duplicate_for_device(device, cache.cv),
     )
+end
+
+function get_number_of_internal_dofs_per_element(element_model, cache::SimpleCondensedLinearViscoelasticityCache, sdh)
+    return [length(cache.viscosity_range) for i in sdh.cellset]
 end
 
 # Element residual
@@ -264,31 +268,25 @@ function setup_element_cache(element_model::SimpleCondensedLinearViscoelasticity
     )
 end
 
-# TODO I think this should be moved into the more generic CellCache
-function get_element_internal_index_range(cell, element::SimpleCondensedLinearViscoelasticityCache)
+function get_element_internal_index_range(cell, ivh, element::SimpleCondensedLinearViscoelasticityCache)
     nqp = getnquadpoints(element.cv)
     id  = cellid(cell)
-    internal_beg = (id-1)*6nqp+1
-    internal_end = (id-0)*6nqp
+    offset = internal_variable_offset(ivh, id)
+    internal_beg = offset+1
+    internal_end = offset+6nqp
     return internal_beg:internal_end
 end
 
-function load_element_unknowns!(uₑ, u, cell, element::SimpleCondensedLinearViscoelasticityCache)
-    internal_range                    = get_element_internal_index_range(cell, element)
-    viscoidx_beg                      = ndofs(cell.dh.dh)+first(internal_range)
-    viscoidx_end                      = ndofs(cell.dh.dh)+last(internal_range)
-
+function load_element_unknowns!(uₑ, u, cell, ivh, element::SimpleCondensedLinearViscoelasticityCache)
+    internal_range                         = get_element_internal_index_range(cell, ivh, element)
     @views uₑ[element.displacement_range] .= u[celldofs(cell)]
-    @views uₑ[element.viscosity_range]    .= u[viscoidx_beg:viscoidx_end]
+    @views uₑ[element.viscosity_range]    .= u[internal_range]
     return nothing
 end
 
-function store_condensed_element_unknowns!(uₑ, u, cell, element::SimpleCondensedLinearViscoelasticityCache)
-    nqp                           = getnquadpoints(element.cv)
-    id                            = cellid(cell)
-    viscoidx_beg                  = ndofs(cell.dh.dh)+(id-1)*6nqp+1
-    viscoidx_end                  = ndofs(cell.dh.dh)+(id-0)*6nqp
-    u[viscoidx_beg:viscoidx_end] .= uₑ[element.viscosity_range]
+function store_condensed_element_unknowns!(uₑ, u, cell, ivh, element::SimpleCondensedLinearViscoelasticityCache)
+    internal_range    = get_element_internal_index_range(cell, ivh, element)
+    u[internal_range] .= uₑ[element.viscosity_range]
     return nothing
 end
 

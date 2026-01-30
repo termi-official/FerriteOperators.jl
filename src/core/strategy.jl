@@ -29,13 +29,14 @@ setup_operator_strategy_cache(strategy, integrator, dh) = strategy
     ue
     re
     cell
+    ivh
     element
 end
-function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, element_cache, sdh)
+function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, element_cache, ivh, sdh)
     Ke = allocate_element_matrix(element_cache, sdh)
     ue = allocate_element_unknown_vector(element_cache, sdh)
     re = allocate_element_residual_vector(element_cache, sdh)
-    return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(Ke, ue, re, CellCache(sdh), element_cache))
+    return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(Ke, ue, re, CellCache(sdh), ivh, element_cache))
 end
 
 """
@@ -60,15 +61,15 @@ end
     task_local_caches
 end
 
-function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, element_cache, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, element_cache, sdh, 1)
+function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, element_cache, ivh, sdh)
+    return _setup_element_strategy_cache_cpu(strategy, element_cache, ivh, sdh, 1)
 end
 
-function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, element_cache, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, element_cache, sdh, strategy.device.chunksize)
+function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, element_cache, ivh, sdh)
+    return _setup_element_strategy_cache_cpu(strategy, element_cache, ivh, sdh, strategy.device.chunksize)
 end
 
-function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, element_cache, sdh, chunksize)
+function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, element_cache, ivh, sdh, chunksize)
     (; device) = strategy
     (; dh)     = sdh
     grid       = get_grid(dh)
@@ -84,6 +85,7 @@ function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, e
             allocate_element_unknown_vector(element_cache, sdh),
             allocate_element_residual_vector(element_cache, sdh),
             CellCache(sdh),
+            duplicate_for_device(device, ivh),
             duplicate_for_device(device, element_cache),
         )
     for tid in 1:nchunksmax]
@@ -116,15 +118,15 @@ function Adapt.adapt_structure(::AbstractAssemblyStrategy, dh::DofHandler)
     error("Device specific implementation for `adapt_structure(::AbstractAssemblyStrategy,dh::DofHandler)` is not implemented yet")
 end
 
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:SequentialCPUDevice}, element_cache, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, element_cache, sdh, getncells(get_grid(sdh.dh)))
+function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:SequentialCPUDevice}, element_cache, ivh, sdh)
+    return _setup_element_strategy_cache_cpu(strategy, element_cache, ivh, sdh, getncells(get_grid(sdh.dh)))
 end
 
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:PolyesterDevice}, element_cache, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, element_cache, sdh, strategy.device.chunksize)
+function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:PolyesterDevice}, element_cache, ivh, sdh)
+    return _setup_element_strategy_cache_cpu(strategy, element_cache, ivh, sdh, strategy.device.chunksize)
 end
 
-function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStrategy, element_cache, sdh, chunksize)
+function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStrategy, element_cache, ivh, sdh, chunksize)
     (; device) = strategy
     (; dh)     = sdh
     grid       = get_grid(dh)
@@ -138,7 +140,8 @@ function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStra
             allocate_element_unknown_vector(element_cache, sdh),
             allocate_element_residual_vector(element_cache, sdh),
             CellCache(sdh),
-            duplicate_for_device(device, element_cache)
+            duplicate_for_device(device, ivh),
+            duplicate_for_device(device, element_cache),
         )
     for tid in 1:nchunksmax]
     return ElementAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(task_local_caches))

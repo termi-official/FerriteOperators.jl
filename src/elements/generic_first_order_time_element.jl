@@ -30,13 +30,13 @@ function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, ele
     assemble_element_gto1!(Kₑ, uₑ, uₑprev, cell, element_cache, pₑ, t, Δt)
 end
 
-function query_element_parameters(element::AbstractGenericFirstOrderTimeVolumetricElementCache, cell, p::GenericFirstOrderTimeParameters)
+function query_element_parameters(element::AbstractGenericFirstOrderTimeVolumetricElementCache, cell, ivh, p::GenericFirstOrderTimeParameters)
     (; cv) = element
     (; uprev, Δt, t) = p
     uₑprev = allocate_element_unknown_vector(element, cell)
-    load_element_unknowns!(uₑprev, uprev, cell, element)
-    pₑ = query_element_parameters(element, cell, p.p)
-    return GenericFirstOrderTimeElementParameters(query_element_parameters(element, cell, pₑ), t, Δt, uₑprev)
+    load_element_unknowns!(uₑprev, uprev, cell, ivh, element)
+    pₑ = query_element_parameters(element, cell, ivh, p.p)
+    return GenericFirstOrderTimeElementParameters(pₑ, t, Δt, uₑprev)
 end
 
 
@@ -58,11 +58,11 @@ function assemble_face!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, local_
 end
 
 
-function query_element_parameters(element::AbstractGenericFirstOrderTimeSurfaceElementCache, cell, p::GenericFirstOrderTimeParameters)
+function query_element_parameters(element::AbstractGenericFirstOrderTimeSurfaceElementCache, cell, ivh, p::GenericFirstOrderTimeParameters)
     (; cv) = element
     (; uprev, Δt, t) = p
     uₑprev = allocate_element_unknown_vector(element, cell)
-    load_element_unknowns!(uₑprev, uprev, cell, element)
-    pₑ = query_element_parameters(element, cell, p.p)
+    load_element_unknowns!(uₑprev, uprev, cell, ivh, element)
+    pₑ = query_element_parameters(element, cell, ivh, p.p)
     return GenericFirstOrderTimeElementParameters(pₑ, t, Δt, uₑprev)
 end

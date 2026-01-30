@@ -282,9 +282,10 @@ using SparseArrays
     end
 
     @testset "Condensed Elements" begin
+        qrc = QuadratureRuleCollection(2)
         integrator = FerriteOperators.SimpleCondensedLinearViscoelasticity(
             FerriteOperators.MaxwellParameters(),
-            QuadratureRuleCollection(2),
+            qrc,
             :u,
             :εᵛ,
         )
@@ -300,13 +301,16 @@ using SparseArrays
         add!(ch, Dirichlet(:u, getfacetset(grid, "right"), (x, t) -> (0.01,0,0)));
         close!(ch)
 
-        residual = zeros(ndofs(dh))
-        u        = zeros(ndofs(dh) + 6*8*(3*3*3)) # TODO get via interface
-        uprev    = zeros(ndofs(dh) + 6*8*(3*3*3)) # TODO get via interface
-        apply_analytical!(u, dh, :u, x->0.01x.^2 .+ 0.01)
-
         strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
         nlop = setup_operator(strategy, integrator, dh)
+
+        residual = zeros(residual_size(nlop))
+        u        = zeros(unknown_size(nlop))
+        uprev    = zeros(unknown_size(nlop))
+        apply_analytical!(u, dh, :u, x->0.01x.^2 .+ 0.01)
+        @test length(residual) == 3 * (3+1)*(3+1)*(3+1)
+        @test length(u)        == 3 * (3+1)*(3+1)*(3+1) + 6 * 8 * 3*3*3 # vdim=3, 4 nodes in each dim, 8 quadrature points, 6 unknowns for the symmetric viscosity tensor, 3*3*3 elements
+
         apply!(u, ch)
         update_linearization!(nlop, residual, u, FerriteOperators.GenericFirstOrderTimeParameters(nothing, 0.0, π, uprev))
 

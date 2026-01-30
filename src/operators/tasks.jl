@@ -143,6 +143,9 @@ mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α,
 Base.eltype(op::LinearizedFerriteOperator) = eltype(op.J)
 Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)
 
+residual_size(op::LinearizedFerriteOperator) = ndofs(op.subdomain_caches[1].sdh.dh)
+unknown_size(op::LinearizedFerriteOperator)  = ndofs(op.subdomain_caches[1].sdh.dh) + ndofs(op.subdomain_caches[1].ivh)
+
 #################################################################################################
 
 struct BilinearFerriteOperator{MatrixType} <: AbstractBilinearOperator

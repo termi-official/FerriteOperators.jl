@@ -6,42 +6,43 @@ end
 
 @concrete struct GenericTaskBuffer
     # Static parts
-    u
-    p
-    element
+    u # <: AbstractVector
+    p # global parameters
+    element # <: Abstract*ElementCache
     # Moving parts
-    Ke
-    ue
-    re
+    Ke # <: AbstractMatrix
+    ue # <: AbstractVector
+    re # <: AbstractVector
     # pe
-    geometry_cache
+    geometry_cache # <: CellCache
+    ivh # <: InternalVariableHandler
 end
 Ferrite.reinit!(buffer::GenericTaskBuffer, taskid) = reinit!(buffer.geometry_cache, taskid)
 
 function get_task_buffer_for_device(task, u, p, device_cache::SimpleAssemblyCache, chunkid)
-    (; element, Ke, ue, re, cell) = device_cache
-    GenericTaskBuffer(u, p, element, Ke, ue, re, cell)
+    (; element, Ke, ue, re, cell, ivh) = device_cache
+    GenericTaskBuffer(u, p, element, Ke, ue, re, cell, ivh)
 end
 
 function get_task_buffer_for_device(task, u, p, device_cache::ThreadedAssemblyCache, chunkid)
     (; task_local_caches)  = device_cache
-    (; cell, element, Ke, re, ue) = task_local_caches[chunkid]
-    GenericTaskBuffer(u, p, element, Ke, ue, re, cell)
+    (; cell, element, Ke, re, ue, ivh) = task_local_caches[chunkid]
+    GenericTaskBuffer(u, p, element, Ke, ue, re, cell, ivh)
 end
 
 function load_element_unknowns!(uₑ, buffer::GenericTaskBuffer)
-    load_element_unknowns!(uₑ, buffer.u, buffer.geometry_cache, buffer.element)
+    load_element_unknowns!(uₑ, buffer.u, buffer.geometry_cache, buffer.ivh, buffer.element)
 end
 function store_condensed_element_unknowns!(uₑ, buffer::GenericTaskBuffer)
-    store_condensed_element_unknowns!(uₑ, buffer.u, buffer.geometry_cache, buffer.element)
+    store_condensed_element_unknowns!(uₑ, buffer.u, buffer.geometry_cache, buffer.ivh, buffer.element)
 end
 
 query_element_matrix(b::GenericTaskBuffer) = b.Ke
 query_element_residual_buffer(b::GenericTaskBuffer) = b.re
 query_element_unknown_buffer(b::GenericTaskBuffer) = query_element_unknown_buffer(b.element, b.ue)
 query_element_unknown_buffer(element, ue) = ue
-query_element_parameters(b::GenericTaskBuffer) = query_element_parameters(b.element, b.geometry_cache, b.p)
-query_element_parameters(element, geometry_cache, p) = p
+query_element_parameters(b::GenericTaskBuffer) = query_element_parameters(b.element, b.geometry_cache, b.ivh, b.p)
+query_element_parameters(element, geometry_cache, ivh, p) = p
 query_geometry_cache(b::GenericTaskBuffer) = b.geometry_cache
 query_element(b::GenericTaskBuffer) = b.element
 
