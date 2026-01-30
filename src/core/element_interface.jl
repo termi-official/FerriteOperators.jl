@@ -1,9 +1,13 @@
 """
 Supertype for all caches to integrate over volumes.
 
-Interface:
+General Interface:
 
     setup_element_cache(model, qr, sdh)
+
+Specialized Interface for Condensed Problems:
+
+    get_number_of_internal_dofs_per_element(model, element_cache, sdh)
 
 """
 abstract type AbstractVolumetricElementCache end
@@ -11,8 +15,8 @@ abstract type AbstractVolumetricElementCache end
 allocate_element_matrix(element_cache::AbstractVolumetricElementCache, sdh)          = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
 allocate_element_unknown_vector(element_cache::AbstractVolumetricElementCache, sdh)  = zeros(ndofs_per_cell(sdh))
 allocate_element_residual_vector(element_cache::AbstractVolumetricElementCache, sdh) = zeros(ndofs_per_cell(sdh))
-load_element_unknowns!(uₑ, u, cell, element_cache::AbstractVolumetricElementCache)   = uₑ .= @view u[celldofs(cell)]
-store_condensed_element_unknowns!(uₑ, u, cell, element_cache::AbstractVolumetricElementCache) = nothing
+load_element_unknowns!(uₑ, u, cell, ivh, element_cache::AbstractVolumetricElementCache)   = uₑ .= @view u[celldofs(cell)]
+store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache::AbstractVolumetricElementCache) = nothing
 
 @doc raw"""
     assemble_element!(Kₑ::AbstractMatrix, cell::CellCache, element_cache::AbstractVolumetricElementCache, time)

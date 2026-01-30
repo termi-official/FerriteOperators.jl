@@ -36,10 +36,14 @@ include("core/ferrite-addons/collections.jl")
 include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
+include("core/ferrite-addons/internal_variable_handler.jl")
 
-# Some generic integrators
+# Some generic integrator types
 abstract type AbstractBilinearIntegrator end
 abstract type AbstractNonlinearIntegrator end
+abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
+# Simple means that it has a constant number of dofs per quadrature point
+abstract type AbstractSimpleCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
 abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
@@ -52,12 +56,16 @@ include("elements/simple_linear_viscoelasticity.jl")
 
 include("operators/general.jl")         # Some general operators which might be handy
 include("operators/matrix_free.jl")     # Everything related to the fundamental decomposition
-include("operators/tasks.jl")           # Here are all the tasks to handle the assembly and action of operators
+include("operators/nonlinear.jl")       # Here are all the tasks to handle the assembly and action of operators
+include("operators/bilinear.jl")
+include("operators/linear.jl")
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
 
-export QuadratureRuleCollection
+export QuadratureRuleCollection, QuadratureInterpolation, InternalVariableHandler
 
 export setup_operator, update_operator!, update_linearization!
+
+export residual_size, unknown_size
 
 export NullOperator, DiagonalOperator
 
