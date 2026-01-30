@@ -56,7 +56,9 @@ include("elements/simple_linear_viscoelasticity.jl")
 
 include("operators/general.jl")         # Some general operators which might be handy
 include("operators/matrix_free.jl")     # Everything related to the fundamental decomposition
-include("operators/tasks.jl")           # Here are all the tasks to handle the assembly and action of operators
+include("operators/nonlinear.jl")       # Here are all the tasks to handle the assembly and action of operators
+include("operators/bilinear.jl")
+include("operators/linear.jl")
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
 
 export QuadratureRuleCollection, QuadratureInterpolation, InternalVariableHandler
