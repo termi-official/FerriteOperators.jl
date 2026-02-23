@@ -25,6 +25,25 @@ function execute_task_on_single_cell!(task::AssembleBilinearTerm, task_buffer)
     assemble!(task, task_buffer)
 end
 
+# GPU element assembly: launch kernel when GPUElementAssemblyStrategyCache is available
+function execute_task_on_device!(task::AssembleBilinearTerm, device::AbstractGPUDevice, cache)
+    strategy_cache = cache.subdomain.strategy_cache
+    if strategy_cache isa GPUElementAssemblyStrategyCache
+        ea_operator = task.inner_assembler.K_element
+        element_cache = cache.subdomain.element
+        _launch_gpu_bilinear_assembly!(device, ea_operator, strategy_cache, element_cache)
+    else
+        # Fallback: assemble on CPU using sequential cell loop
+        task_buffer = get_task_buffer(task, cache, 1)
+        for chunk in get_items(task, cache)
+            for taskid in chunk
+                reinit!(task_buffer, taskid)
+                execute_task_on_single_cell!(task, task_buffer)
+            end
+        end
+    end
+end
+
 function update_operator!(op::BilinearFerriteOperator, p)
     (; A, strategy, subdomain_caches) = op
 

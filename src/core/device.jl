@@ -15,7 +15,7 @@ struct SequentialCPUDevice{ValueType, IndexType} <: AbstractCPUDevice{ValueType,
 end
 SequentialCPUDevice() = SequentialCPUDevice{Float64, Int}()
 
-function execute_task_on_device!(task, device::SequentialCPUDevice, cache)
+function execute_task_on_device!(task, ::SequentialCPUDevice, cache)
     task_buffer = get_task_buffer(task, cache, 1)
     for chunk in get_items(task, cache)
         for taskid in chunk
@@ -82,6 +82,34 @@ end
 CudaDevice() = CudaDevice{Float32, Int32}(nothing, nothing)
 CudaDevice(threads::IndexType, blocks::IndexType) where IndexType = CudaDevice{Float32, IndexType}(threads, blocks)
 
+"""
+    RocDevice
+
+Please add AMDGPU.jl to your Project to make this device work.
+"""
+struct RocDevice{ValueType, IndexType} <: AbstractGPUDevice{ValueType, IndexType}
+    threads::Union{IndexType, Nothing}
+    blocks::Union{IndexType, Nothing}
+end
+
+RocDevice() = RocDevice{Float64, Int32}(nothing, nothing)
+RocDevice(threads::IndexType, blocks::IndexType) where IndexType = RocDevice{Float64, IndexType}(threads, blocks)
+
+# Fallback for GPU: sequential CPU cell loop (used for tasks without a GPU kernel dispatch)
+function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
+    task_buffer = get_task_buffer(task, cache, 1)
+    for chunk in get_items(task, cache)
+        for taskid in chunk
+            reinit!(task_buffer, taskid)
+            execute_task_on_single_cell!(task, task_buffer)
+        end
+    end
+end
+
 # KA compat
-default_backend(::SequentialCPUDevice) = KA.CPU()
-default_backend(::PolyesterDevice) = KA.CPU()
+KA.backend(::AbstractCPUDevice) = KA.CPU()
+KA.backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
+KA.functional(::AbstractCPUDevice) = KA.functional(KA.CPU())
+KA.functional(device::AbstractGPUDevice) = default_backend(device) |> KA.functional
+#TODO: remove when AMDGPU.jl creates new release that includes (https://github.com/JuliaGPU/AMDGPU.jl/pull/884)
+KA.functional(device::RocDevice) = true 

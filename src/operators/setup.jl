@@ -39,6 +39,10 @@ function setup_subdomain_caches(strategy, integrator, dh)
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
+    # Check device availability
+    (;device) = strategy
+    KA.functional(device) || error("Device $(typeof(device)) is not functional. Please check your device setup and drivers.")
+
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     A                 = create_system_matrix(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
@@ -51,6 +55,10 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
+    # Check device availability
+    (;device) = strategy
+    KA.functional(device) || error("Device $(typeof(device)) is not functional. Please check your device setup and drivers.")
+
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     J                 = create_system_matrix(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
@@ -63,6 +71,10 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler)
+    # Check device availability
+    (;device) = strategy
+    KA.functional(device) || error("Device $(typeof(device)) is not functional. Please check your device setup and drivers.")
+
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     b                 = create_system_vector(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)

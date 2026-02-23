@@ -104,7 +104,7 @@ end
     eadata
 end
 
-function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy{<:AbstractCPUDevice}, integrator, dh)
+function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy, integrator, dh)
     return ElementAssemblyOperatorStrategy(strategy.device, EAVector(dh))
 end
 
@@ -124,6 +124,25 @@ end
 
 function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:PolyesterDevice}, element_cache, ivh, sdh)
     return _setup_element_strategy_cache_cpu(strategy, element_cache, ivh, sdh, strategy.device.chunksize)
+end
+
+# GPU element assembly strategy cache — replaces ElementAssemblyStrategyCache for GPU devices
+@concrete struct GPUElementAssemblyStrategyCache
+    device
+    cv_data       # DeviceCellValuesData (adapted to device)
+    device_grid   # DeviceGrid (adapted to device)
+    cellset_gpu   # GPU array of Int32 cell IDs
+end
+
+# GPU: build device data, adapt to GPU, and store in strategy cache
+function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, element_cache, ivh, sdh)
+    (; device) = strategy
+    (; dh) = sdh
+    grid = get_grid(dh)
+    cv_data     = Adapt.adapt(device, build_device_cv_data(element_cache.cellvalues))
+    device_grid = Adapt.adapt(device, build_device_grid(grid))
+    cellset_gpu = Adapt.adapt(device, Int32.(collect(sdh.cellset)))
+    return GPUElementAssemblyStrategyCache(device, cv_data, device_grid, cellset_gpu)
 end
 
 function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStrategy, element_cache, ivh, sdh, chunksize)
