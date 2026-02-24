@@ -38,6 +38,7 @@ include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
 include("core/ferrite-addons/internal_variable_handler.jl")
+include("core/ferrite-addons/adapt.jl")
 
 # Some generic integrator types
 abstract type AbstractBilinearIntegrator end
@@ -57,6 +58,7 @@ include("elements/simple_linear_viscoelasticity.jl")
 
 include("operators/general.jl")         # Some general operators which might be handy
 include("operators/matrix_free.jl")     # Everything related to the fundamental decomposition
+include("operators/adapt.jl")           # Adapt.jl integration for GPU support
 include("operators/nonlinear.jl")       # Here are all the tasks to handle the assembly and action of operators
 include("operators/bilinear.jl")
 include("operators/linear.jl")

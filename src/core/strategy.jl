@@ -105,17 +105,15 @@ end
 end
 
 function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy{<:AbstractCPUDevice}, integrator, dh)
-    return ElementAssemblyOperatorStrategy(strategy.device, EAVector(dh))
+    (;device) = strategy
+    eadata = Adapt.adapt(device, EAVector(dh)) # will only adapt if device <: AbstractGPUDevice
+    return ElementAssemblyOperatorStrategy(device, eadata)
 end
 
 @concrete struct ElementAssemblyStrategyCache
     device
     # Scratch for the device to store its data
     device_cache
-end
-
-function Adapt.adapt_structure(::AbstractAssemblyStrategy, dh::DofHandler)
-    error("Device specific implementation for `adapt_structure(::AbstractAssemblyStrategy,dh::DofHandler)` is not implemented yet")
 end
 
 function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:SequentialCPUDevice}, element_cache, ivh, sdh)

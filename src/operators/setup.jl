@@ -45,7 +45,7 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     A                 = create_system_matrix(operator_strategy, dh)
-    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
+    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh) #TODO: Here! 
 
     return BilinearFerriteOperator(
         A,

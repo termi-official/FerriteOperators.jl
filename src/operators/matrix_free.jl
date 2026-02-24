@@ -284,5 +284,6 @@ function create_system_matrix(strategy::ElementAssemblyOperatorStrategy, dh)
     element_vector_info = GenericIndexedData(dh.cell_dofs, vector_index_structure)
     element_matrices = GenericIndexedData(zeros(ValueType, element_offset-1), matrix_index_structure)
     # FIXME pass EA info down via device cache instead of hardcoded EAViewCache
-    return EAOperator(device, EAViewCache(), element_matrices, element_vector_info, element_vector_info)
+    op = EAOperator(device, EAViewCache(), element_matrices, element_vector_info, element_vector_info)
+    return Adapt.adapt(device, op)
 end
