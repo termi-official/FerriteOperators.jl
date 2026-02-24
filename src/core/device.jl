@@ -95,14 +95,60 @@ end
 RocDevice() = RocDevice{Float64, Int32}(nothing, nothing)
 RocDevice(threads::IndexType, blocks::IndexType) where IndexType = RocDevice{Float64, IndexType}(threads, blocks)
 
-# Fallback for GPU: sequential CPU cell loop (used for tasks without a GPU kernel dispatch)
+# Logic-agnostic grid-stride iterator
+struct DeviceStridedIterator{Ti <: Integer}
+    start::Ti
+    stride::Ti
+    stop::Ti
+end
+
+@inline function Base.iterate(iter::DeviceStridedIterator)
+    iter.start > iter.stop ? nothing : (iter.start, iter.start)
+end
+
+@inline function Base.iterate(iter::DeviceStridedIterator, state)
+    next = state + iter.stride
+    next > iter.stop ? nothing : (next, next)
+end
+
+# GPU kernel: grid-stride loop, each thread processes one or more elements
+KA.@kernel function _execute_task_kernel!(task, buffer_pool, @Const(items), num_items::Ti, nblocks::Ti, nthreads::Ti) where {Ti <: Integer}
+    thread_id = KA.@index(Global)
+    stride = nblocks * nthreads
+
+    # Per-thread buffer (same concept as task_local_caches[tasksetid] on CPU)
+    local_task_buffer = get_task_buffer(task, buffer_pool, thread_id)
+
+    for idx in DeviceStridedIterator(thread_id, stride, num_items)
+        taskid = items[idx]
+        reinit!(local_task_buffer, taskid)
+        execute_task_on_single_cell!(task, local_task_buffer)
+    end
+end
+
 function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
-    task_buffer = get_task_buffer(task, cache, 1)
-    for chunk in get_items(task, cache)
-        for taskid in chunk
-            reinit!(task_buffer, taskid)
-            execute_task_on_single_cell!(task, task_buffer)
-        end
+    #Note: cache here encapsulates three things: 1) subdomain cache, 2) global params, 3) previous solution (case nonlinear)
+    backend = default_backend(device)
+    itemsets = get_items(task, cache) # aka what cells to iterate over
+
+    Ti = index_type(device)
+    for items in itemsets
+        num_items         = convert(Ti, length(items))
+        threads_per_block = convert(Ti, min(num_items, something(device.threads, convert(Ti, 256))))
+        # TODO: should we cap the number of blocks to avoid oversubscription?
+        nblocks           = convert(Ti, something(device.blocks, cld(num_items, threads_per_block)))
+
+        kernel = _execute_task_kernel!(backend, threads_per_block)
+        kernel(
+            task,
+            cache,
+            items,
+            num_items,
+            nblocks,
+            threads_per_block;
+            ndrange = nblocks * threads_per_block
+        )
+        KA.synchronize(backend)
     end
 end
 
@@ -112,4 +158,4 @@ KA.backend(device::AbstractGPUDevice) = error("Load the GPU package associated w
 KA.functional(::AbstractCPUDevice) = KA.functional(KA.CPU())
 KA.functional(device::AbstractGPUDevice) = default_backend(device) |> KA.functional
 #TODO: remove when AMDGPU.jl creates new release that includes (https://github.com/JuliaGPU/AMDGPU.jl/pull/884)
-KA.functional(device::RocDevice) = true 
+KA.functional(device::RocDevice) = true

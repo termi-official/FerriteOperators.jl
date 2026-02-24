@@ -251,3 +251,44 @@ println("  y (ref) = ", y2_ref)
 println("  match?  = ", y2 ≈ y2_ref)
 
 println("\n" * "="^70)
+
+# ---- Debug: trace execute_task_on_device! internals ----
+println("\n" * "="^70)
+println("DEBUG: execute_task_on_device! internals (Sequential CPU, ElementAssembly)")
+println("="^70)
+
+# Reconstruct the objects that execute_task_on_device! sees
+strategy2 = op2.strategy
+assembler2 = Ferrite.start_assemble(strategy2, op2.A)
+task2 = FerriteOperators.AssembleBilinearTerm(assembler2)
+
+subdomain_cache2 = op2.subdomain_caches[1]
+task_cache2 = FerriteOperators.SubdomainAssemblyTaskBuffer(nothing, 0.0, subdomain_cache2)
+
+# 1. get_items — what cells to iterate over
+itemsets2 = FerriteOperators.get_items(task2, task_cache2)
+println("\n--- get_items ---")
+println("  type     = ", typeof(itemsets2))
+println("  ngroups  = ", length(itemsets2))
+for (gi, group) in enumerate(itemsets2)
+    println("  group $gi: $(length(group)) cells → ", collect(group))
+end
+
+# 2. get_task_buffer — the per-thread scratch workspace
+task_buffer2 = FerriteOperators.get_task_buffer(task2, task_cache2, 1)
+println("\n--- get_task_buffer (chunkid=1) ---")
+println("  type = ", typeof(task_buffer2))
+println("  fields = ", propertynames(task_buffer2))
+println("  Ke size   = ", size(FerriteOperators.query_element_matrix(task_buffer2)))
+println("  element   = ", typeof(FerriteOperators.query_element(task_buffer2)))
+println("  geometry  = ", typeof(FerriteOperators.query_geometry_cache(task_buffer2)))
+
+# 3. Walk through the first 2 cells manually
+println("\n--- Manual cell loop (first 2 cells) ---")
+for taskid in collect(first(itemsets2))[1:2]
+    reinit!(task_buffer2, taskid)
+    cell = FerriteOperators.query_geometry_cache(task_buffer2)
+    println("  cell $taskid: dofs = ", celldofs(cell), ", coords[1] = ", getcoordinates(cell)[1])
+end
+
+println("\n" * "="^70)

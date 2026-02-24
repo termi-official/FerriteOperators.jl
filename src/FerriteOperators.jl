@@ -16,9 +16,7 @@ import Base: *, +, -, @kwdef
 using Polyester # TODO extension
 
 import Atomix
-
 import KernelAbstractions as KA
-using KernelAbstractions: @kernel, @Const, @index
 
 import Ferrite: AbstractDofHandler, AbstractGrid, AbstractRefShape, AbstractCell, get_grid, get_coordinate_eltype
 import Ferrite: vertices, edges, faces, sortedge, sortface
@@ -40,9 +38,6 @@ include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
 include("core/ferrite-addons/internal_variable_handler.jl")
-include("core/ferrite-addons/gpu/device_grid.jl")       # DeviceGrid <: AbstractGrid
-include("core/ferrite-addons/gpu/device_FEValues.jl")   # DeviceCellValuesData
-include("core/ferrite-addons/gpu/adapt.jl")              # Adapt.adapt_structure for device types
 
 # Some generic integrator types
 abstract type AbstractBilinearIntegrator end

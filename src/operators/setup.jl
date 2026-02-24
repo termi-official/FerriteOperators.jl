@@ -41,7 +41,7 @@ end
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
     # Check device availability
     (;device) = strategy
-    KA.functional(device) || error("Device $(typeof(device)) is not functional. Please check your device setup and drivers.")
+    KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
 
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     A                 = create_system_matrix(operator_strategy, dh)
@@ -57,7 +57,7 @@ end
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
     # Check device availability
     (;device) = strategy
-    KA.functional(device) || error("Device $(typeof(device)) is not functional. Please check your device setup and drivers.")
+    KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
 
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     J                 = create_system_matrix(operator_strategy, dh)
@@ -73,7 +73,7 @@ end
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler)
     # Check device availability
     (;device) = strategy
-    KA.functional(device) || error("Device $(typeof(device)) is not functional. Please check your device setup and drivers.")
+    KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
 
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     b                 = create_system_vector(operator_strategy, dh)
