@@ -75,6 +75,36 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 end
 
 """
+    init_transfer_sparsity_pattern(dh_row::DofHandler, dh_col::DofHandler)
+
+Build a [`SparsityPattern`](@ref) of size `(ndofs(dh_row) × ndofs(dh_col))` covering all
+DoF pairs `(rdof, cdof)` that share a cell.  Both DofHandlers must live on the same grid
+and have the same number of subdomains.
+"""
+function init_transfer_sparsity_pattern(dh_row::DofHandler, dh_col::DofHandler)
+    nrdofs = ndofs(dh_row)
+    ncdofs = ndofs(dh_col)
+    nnz_per_row = ndofs_per_cell(dh_col.subdofhandlers[1])
+    sp = SparsityPattern(nrdofs, ncdofs; nnz_per_row)
+    rdofs_buf = Int[]
+    cdofs_buf = Int[]
+    for (sdh_row, sdh_col) in zip(dh_row.subdofhandlers, dh_col.subdofhandlers)
+        resize!(rdofs_buf, ndofs_per_cell(sdh_row))
+        resize!(cdofs_buf, ndofs_per_cell(sdh_col))
+        for cellid in sdh_row.cellset
+            celldofs!(rdofs_buf, dh_row, cellid)
+            celldofs!(cdofs_buf, dh_col, cellid)
+            for rdof in rdofs_buf
+                for cdof in cdofs_buf
+                    Ferrite.add_entry!(sp, rdof, cdof)
+                end
+            end
+        end
+    end
+    return sp
+end
+
+"""
     setup_transfer_operator(strategy, integrator, dh_row, dh_col)
 
 Set up a [`TransferFerriteOperator`](@ref) for assembling a rectangular sparse matrix of
@@ -96,10 +126,10 @@ function setup_transfer_operator(
     @assert get_grid(dh_row) === get_grid(dh_col) "Both DofHandlers must share the same grid"
     @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) "Mismatch in number of subdomains"
 
-    # Build rectangular sparse matrix
-    nrdofs = ndofs(dh_row)
-    ncdofs = ndofs(dh_col)
-    P = spzeros(value_type(strategy.device), nrdofs, ncdofs)
+    # Build rectangular sparse matrix with the correct sparsity pattern
+    Tv = value_type(strategy.device)
+    sp = init_transfer_sparsity_pattern(dh_row, dh_col)
+    P  = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
 
     # Build per-subdomain caches (one per SubDofHandler pair)
     subdomain_caches = TransferSubdomainCache[]

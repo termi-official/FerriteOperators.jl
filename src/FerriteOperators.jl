@@ -6,18 +6,21 @@ using TimerOutputs
 using Adapt
 using Unrolled
 using SparseArrays, StaticArrays
+import SparseArrays: AbstractSparseMatrixCSC
 
 using ConcreteStructs
 
 import LinearAlgebra: mul!, ldiv!, qr, cholesky!, Symmetric
 
-import Base: *, +, -, @kwdef
+import Base: *, +, -, @kwdef, @propagate_inbounds
 
 using Polyester # TODO extension
 
 import Atomix
 
 import Ferrite: AbstractDofHandler, AbstractGrid, AbstractRefShape, AbstractCell, get_grid, get_coordinate_eltype
+import Ferrite: SparsityPattern, allocate_matrix
+import Ferrite: AbstractCSCAssembler, AbstractCSRAssembler, matrix_handle, fillzero!
 import Ferrite: vertices, edges, faces, sortedge, sortface
 import Ferrite: get_coordinate_type, getspatialdim
 import Ferrite: reference_shape_value
@@ -87,6 +90,6 @@ export AbstractTransferIntegrator, AbstractTransferElementCache
 export AbstractVolumetricElementCache
 export MassProlongatorIntegrator
 export setup_element_cache, assemble_element!
-export TransferFerriteOperator, setup_transfer_operator
+export TransferFerriteOperator, setup_transfer_operator, init_transfer_sparsity_pattern
 
 end

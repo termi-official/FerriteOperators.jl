@@ -103,7 +103,7 @@ end
 ####################################
 
 function execute_transfer_on_device!(
-        P::SparseMatrixCSC,
+        assembler::CSCAssembler2,
         device::SequentialCPUDevice,
         subdomain_cache::TransferSubdomainCache,
         p,
@@ -113,20 +113,20 @@ function execute_transfer_on_device!(
         reinit!(tc, cellid)
         fill!(Pe, 0.0)
         @timeit_debug "assemble transfer element" assemble_transfer_element!(Pe, tc, element, p)
-        _accumulate_transfer_element!(P, Pe, getrowdofs(tc), getcolumndofs(tc))
+        assemble!(assembler, getrowdofs(tc), getcolumndofs(tc), Pe)
     end
     return nothing
 end
 
 function execute_transfer_on_device!(
-        P::SparseMatrixCSC,
+        assembler::CSCAssembler2,
         device::PolyesterDevice,
         subdomain_cache::TransferSubdomainCache,
         p,
     )
     # For now fall back to sequential; parallel coloring for transfer operators
     # can be added later once the coloring algorithm is extended to rectangular operators.
-    execute_transfer_on_device!(P, SequentialCPUDevice(), subdomain_cache, p)
+    execute_transfer_on_device!(assembler, SequentialCPUDevice(), subdomain_cache, p)
     return nothing
 end
 
@@ -162,12 +162,13 @@ Reassemble the rectangular transfer matrix `op.P` from scratch.
 function update_operator!(op::TransferFerriteOperator, p)
     (; P, strategy, subdomain_caches) = op
 
-    # Zero out existing entries (preserves sparsity pattern after first assembly)
-    fill!(nonzeros(P), zero(eltype(P)))
+    n_row = maximum(sc -> ndofs_per_cell(sc.sdh_row), subdomain_caches; init = 0)
+    n_col = maximum(sc -> ndofs_per_cell(sc.sdh_col), subdomain_caches; init = 0)
+    assembler = start_assemble2(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
 
     for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
         @timeit_debug "assemble transfer subdomain $subdomain_id" begin
-            execute_transfer_on_device!(P, strategy.device, subdomain_cache, p)
+            execute_transfer_on_device!(assembler, strategy.device, subdomain_cache, p)
         end
     end
 
