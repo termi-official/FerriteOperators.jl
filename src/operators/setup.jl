@@ -73,3 +73,40 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
         subdomain_caches
     )
 end
+
+"""
+    setup_transfer_operator(strategy, integrator, dh_row, dh_col)
+
+Set up a [`TransferFerriteOperator`](@ref) for assembling a rectangular sparse matrix of
+size `(ndofs(dh_row) × ndofs(dh_col))`.
+
+`dh_row` and `dh_col` must live on the **same** grid and their subdomain lists must
+correspond 1-to-1 (same length, same cellsets at each index).
+
+`integrator` must be an [`AbstractTransferIntegrator`](@ref); its
+`setup_transfer_element_cache(integrator, sdh_row, sdh_col)` method is called once per
+subdomain pair.
+"""
+function setup_transfer_operator(
+        strategy::AbstractAssemblyStrategy,
+        integrator::AbstractTransferIntegrator,
+        dh_row::DofHandler,
+        dh_col::DofHandler,
+    )
+    @assert get_grid(dh_row) === get_grid(dh_col) "Both DofHandlers must share the same grid"
+    @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) "Mismatch in number of subdomains"
+
+    # Build rectangular sparse matrix
+    nrdofs = ndofs(dh_row)
+    ncdofs = ndofs(dh_col)
+    P = spzeros(value_type(strategy.device), nrdofs, ncdofs)
+
+    # Build per-subdomain caches (one per SubDofHandler pair)
+    subdomain_caches = TransferSubdomainCache[]
+    for (sdh_row, sdh_col) in zip(dh_row.subdofhandlers, dh_col.subdofhandlers)
+        element = setup_transfer_element_cache(integrator, sdh_row, sdh_col)
+        push!(subdomain_caches, TransferSubdomainCache(sdh_row, sdh_col, element))
+    end
+
+    return TransferFerriteOperator(P, strategy, subdomain_caches)
+end

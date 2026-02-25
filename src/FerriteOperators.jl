@@ -21,10 +21,13 @@ import Ferrite: AbstractDofHandler, AbstractGrid, AbstractRefShape, AbstractCell
 import Ferrite: vertices, edges, faces, sortedge, sortface
 import Ferrite: get_coordinate_type, getspatialdim
 import Ferrite: reference_shape_value
+import Ferrite: IntegerCollection
+import Ferrite: nnodes_per_cell, cellnodes!, getcoordinates!
 
 include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or GPUs)
 include("core/strategy.jl")  # Utilities to control the assembly strategy
 include("core/tasks.jl")     # Contains the basic task system
+include("core/iterators.jl") # Transfer cell iterators for two-DofHandler assembly
 
 include("core/element_interface.jl") # This is the basic element interface used for the operators
 include("core/utils.jl")             # Internal helpers
@@ -59,9 +62,12 @@ include("operators/matrix_free.jl")     # Everything related to the fundamental 
 include("operators/nonlinear.jl")       # Here are all the tasks to handle the assembly and action of operators
 include("operators/bilinear.jl")
 include("operators/linear.jl")
+include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
 
 export QuadratureRuleCollection, QuadratureInterpolation, InternalVariableHandler
+export getquadraturerule
+export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
 
 export setup_operator, update_operator!, update_linearization!
 
@@ -71,5 +77,15 @@ export NullOperator, DiagonalOperator
 
 export SequentialCPUDevice, PolyesterDevice, CudaDevice
 export SequentialAssemblyStrategy, ElementAssemblyStrategy, PerColorAssemblyStrategy
+
+# Transfer operator infrastructure
+export SameGridTransferCellCache, SameGridTransferCellIterator
+export NestedGridTransferCellCache, NestedGridTransferCellIterator
+export getrowdofs, getcolumndofs
+export get_fine_coordinates, get_coarse_coordinates, get_child_ref_coords
+export AbstractTransferIntegrator, AbstractTransferElementCache
+export AbstractVolumetricElementCache
+export setup_element_cache, assemble_element!
+export TransferFerriteOperator, setup_transfer_operator
 
 end
