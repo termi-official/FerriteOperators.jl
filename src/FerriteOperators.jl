@@ -9,7 +9,7 @@ using SparseArrays, StaticArrays
 
 using ConcreteStructs
 
-import LinearAlgebra: mul!, ldiv!, qr
+import LinearAlgebra: mul!, ldiv!, qr, cholesky!, Symmetric
 
 import Base: *, +, -, @kwdef
 

@@ -75,42 +75,42 @@ function duplicate_for_device(device, cache::MassProlongatorElementCache)
     return MassProlongatorElementCache(
         duplicate_for_device(device, cache.cv1),
         duplicate_for_device(device, cache.cv2),
+        similar(cache.Mₑbuf),
+        similar(cache.Pₑbuf),
     )
 end
 
 function assemble_transfer_element!(Pₑ::AbstractMatrix, cell, element_cache::MassProlongatorElementCache, p)
     (; cv1, cv2, Mₑbuf, Pₑbuf) = element_cache
-    n_basefuncs_1 = getnbasefunctions(cv1)
-    n_basefuncs_2 = getnbasefunctions(cv2)
+    n1 = getnbasefunctions(cv1)
+    n2 = getnbasefunctions(cv2)
 
     reinit!(cv1, cell)
     reinit!(cv2, cell)
 
     fill!(Mₑbuf, zero(eltype(Mₑbuf)))
-    for qp in 1:getnquadpoints(cv1)
-        dΩ = getdetJdV(cv1, qp)
-        for i in 1:n_basefuncs_1
-            Nᵢ = shape_value(cv1, qp, i)
-            for j in 1:n_basefuncs_1
-                Nⱼ = shape_value(cv1, qp, j)
-                Mₑbuf[i, j] += Nⱼ ⋅ Nᵢ * dΩ
-            end
-        end
-    end
-
     fill!(Pₑbuf, zero(eltype(Pₑbuf)))
-    for qp in 1:getnquadpoints(cv1)
+
+    # Single quadrature pass: accumulate Mₑ (upper triangle, M is SPD) and Pₑbuf together.
+    # Merging the two loops halves the number of shape_value(cv1,...) evaluations.
+    @inbounds for qp in 1:getnquadpoints(cv1)
         dΩ = getdetJdV(cv1, qp)
-        for i in 1:n_basefuncs_1
+        for i in 1:n1
             Nᵢ = shape_value(cv1, qp, i)
-            for j in 1:n_basefuncs_2
-                Nⱼ = shape_value(cv2, qp, j)
-                Pₑbuf[i, j] += Nⱼ ⋅ Nᵢ * dΩ
+            for j in i:n1  # upper triangle only
+                Mₑbuf[i, j] += shape_value(cv1, qp, j) ⋅ Nᵢ * dΩ
+            end
+            for j in 1:n2
+                Pₑbuf[i, j] += shape_value(cv2, qp, j) ⋅ Nᵢ * dΩ
             end
         end
     end
 
-    ldiv!(Pₑ, qr(Mₑbuf), Pₑbuf)
+    # In-place Cholesky on the SPD mass matrix.  cholesky! overwrites the upper triangle of
+    # Mₑbuf with the Cholesky factor and returns a lightweight wrapper (no large allocation),
+    # unlike qr() which copies the matrix and allocates O(n²) for the reflectors.
+    C = cholesky!(Symmetric(Mₑbuf))
+    ldiv!(Pₑ, C, Pₑbuf)
 end
 
 function setup_transfer_element_cache(element_model::MassProlongatorIntegrator, sdh_row::SubDofHandler, sdh_col::SubDofHandler)
