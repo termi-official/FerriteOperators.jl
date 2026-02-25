@@ -330,4 +330,29 @@ using SparseArrays
         @test norm(u[ndofs(dh)+1:end]) ≈ 0.062203435313135984
         @test norm(uprev) ≈ 0.0
     end
+
+    @testset "Transfer with different Dof Handlers" begin
+        grid = generate_grid(Hexahedron, (1,1,1))
+        Ferrite.transform_coordinates!(grid, x->Vec{3}(sign.(x.-0.5) .* (x.-0.5).^2))
+
+        dh2 = DofHandler(grid)
+        add!(dh2, :u, Lagrange{RefHexahedron,2}())
+        close!(dh2)
+
+        dh1 = DofHandler(grid)
+        add!(dh1, :u, Lagrange{RefHexahedron,1}())
+        close!(dh1)
+
+        integrator = FerriteOperators.MassProlongatorIntegrator(QuadratureRuleCollection(4), :u)
+        strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+        op         = setup_transfer_operator(strategy, integrator, dh2, dh1)
+        update_operator!(op, nothing)
+
+        u1 = zeros(ndofs(dh1))
+        u2 = zeros(ndofs(dh2))
+        apply_analytical!(u1, dh1, :u, x->1.0)
+        apply_analytical!(u2, dh2, :u, x->1.0)
+
+        @test u2 ≈ op.P * u1
+    end
 end

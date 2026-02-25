@@ -9,7 +9,7 @@ using SparseArrays, StaticArrays
 
 using ConcreteStructs
 
-import LinearAlgebra: mul!
+import LinearAlgebra: mul!, ldiv!, qr
 
 import Base: *, +, -, @kwdef
 
@@ -52,11 +52,6 @@ abstract type AbstractLinearIntegrator end
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
 include("elements/generic_first_order_time_element.jl")
 
-include("elements/simple_diffusion.jl")       # Example element for diffusion
-include("elements/simple_mass.jl")            # Example element for mass matrices
-include("elements/simple_hyperelasticity.jl") # Example element for hyperelasticity
-include("elements/simple_linear_viscoelasticity.jl")
-
 include("operators/general.jl")         # Some general operators which might be handy
 include("operators/matrix_free.jl")     # Everything related to the fundamental decomposition
 include("operators/nonlinear.jl")       # Here are all the tasks to handle the assembly and action of operators
@@ -64,6 +59,11 @@ include("operators/bilinear.jl")
 include("operators/linear.jl")
 include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
+
+include("elements/simple_diffusion.jl")       # Example element for diffusion
+include("elements/simple_mass.jl")            # Example element for mass matrices
+include("elements/simple_hyperelasticity.jl") # Example element for hyperelasticity
+include("elements/simple_linear_viscoelasticity.jl")
 
 export QuadratureRuleCollection, QuadratureInterpolation, InternalVariableHandler
 export getquadraturerule
@@ -85,6 +85,7 @@ export getrowdofs, getcolumndofs
 export get_fine_coordinates, get_coarse_coordinates, get_child_ref_coords
 export AbstractTransferIntegrator, AbstractTransferElementCache
 export AbstractVolumetricElementCache
+export MassProlongatorIntegrator
 export setup_element_cache, assemble_element!
 export TransferFerriteOperator, setup_transfer_operator
 
