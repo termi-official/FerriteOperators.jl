@@ -9,25 +9,35 @@ end
     u # <: AbstractVector
     p # global parameters
     element # <: Abstract*ElementCache
-    # Moving parts
-    Ke # <: AbstractMatrix
-    ue # <: AbstractVector
-    re # <: AbstractVector
+    local_cache # BilinearLocalCache | NonlinearLocalCache | LinearLocalCache
     # pe
     geometry_cache # <: CellCache
     ivh # <: InternalVariableHandler
 end
 Ferrite.reinit!(buffer::GenericTaskBuffer, taskid) = reinit!(buffer.geometry_cache, taskid)
 
+## Local cache accessors ##
+get_Ke(lc::BilinearLocalCache)  = lc.Ke
+get_Ke(lc::NonlinearLocalCache) = lc.Ke
+get_Ke(::LinearLocalCache)      = error("LinearLocalCache does not have an element matrix (Ke). Check your buffer_requirement.")
+
+get_ue(::BilinearLocalCache)    = error("BilinearLocalCache does not have an element unknown vector (ue). Check your buffer_requirement.")
+get_ue(lc::NonlinearLocalCache) = lc.ue
+get_ue(::LinearLocalCache)      = error("LinearLocalCache does not have an element unknown vector (ue). Check your buffer_requirement.")
+
+get_re(::BilinearLocalCache)    = error("BilinearLocalCache does not have an element residual vector (re). Check your buffer_requirement.")
+get_re(lc::NonlinearLocalCache) = lc.re
+get_re(lc::LinearLocalCache)    = lc.re
+
 function get_task_buffer_for_device(task, u, p, device_cache::SimpleAssemblyCache, chunkid)
-    (; element, Ke, ue, re, cell, ivh) = device_cache
-    GenericTaskBuffer(u, p, element, Ke, ue, re, cell, ivh)
+    (; local_cache, cell, ivh, element) = device_cache
+    GenericTaskBuffer(u, p, element, local_cache, cell, ivh)
 end
 
 function get_task_buffer_for_device(task, u, p, device_cache::ThreadedAssemblyCache, chunkid)
-    (; task_local_caches)  = device_cache
-    (; cell, element, Ke, re, ue, ivh) = task_local_caches[chunkid]
-    GenericTaskBuffer(u, p, element, Ke, ue, re, cell, ivh)
+    cache = device_cache.task_local_caches[chunkid]
+    (; local_cache, cell, ivh, element) = cache
+    GenericTaskBuffer(u, p, element, local_cache, cell, ivh)
 end
 
 function load_element_unknowns!(uₑ, buffer::GenericTaskBuffer)
@@ -37,9 +47,9 @@ function store_condensed_element_unknowns!(uₑ, buffer::GenericTaskBuffer)
     store_condensed_element_unknowns!(uₑ, buffer.u, buffer.geometry_cache, buffer.ivh, buffer.element)
 end
 
-query_element_matrix(b::GenericTaskBuffer) = b.Ke
-query_element_residual_buffer(b::GenericTaskBuffer) = b.re
-query_element_unknown_buffer(b::GenericTaskBuffer) = query_element_unknown_buffer(b.element, b.ue)
+query_element_matrix(b::GenericTaskBuffer) = get_Ke(b.local_cache)
+query_element_residual_buffer(b::GenericTaskBuffer) = get_re(b.local_cache)
+query_element_unknown_buffer(b::GenericTaskBuffer) = query_element_unknown_buffer(b.element, get_ue(b.local_cache))
 query_element_unknown_buffer(element, ue) = ue
 query_element_parameters(b::GenericTaskBuffer) = query_element_parameters(b.element, b.geometry_cache, b.ivh, b.p)
 query_element_parameters(element, geometry_cache, ivh, p) = p

@@ -48,6 +48,11 @@ abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrato
 abstract type AbstractSimpleCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
 abstract type AbstractLinearIntegrator end
 
+# Integrator → BufferRequirement mapping (known at setup time)
+buffer_requirement(::AbstractBilinearIntegrator)  = BilinearBufferRequirement()
+buffer_requirement(::AbstractNonlinearIntegrator) = NonlinearBufferRequirement()
+buffer_requirement(::AbstractLinearIntegrator)    = LinearBufferRequirement()
+
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
 include("elements/generic_first_order_time_element.jl")
 

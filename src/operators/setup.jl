@@ -22,14 +22,15 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
     return InternalVariableHandler(nothing, 0)
 end
 
-function setup_element_strategy_caches(strategy, element_caches, ivh, dh)
-    return [setup_element_strategy_cache(strategy, element_cache, ivh, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
+function setup_element_strategy_caches(strategy, req, element_caches, ivh, dh)
+    return [setup_element_strategy_cache(strategy, req, element_cache, ivh, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
 end
 
 function setup_subdomain_caches(strategy, integrator, dh)
+    req             = buffer_requirement(integrator)
     element_caches  = setup_elements(integrator, dh)
     ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
-    strategy_caches = setup_element_strategy_caches(strategy, element_caches, ivh, dh)
+    strategy_caches = setup_element_strategy_caches(strategy, req, element_caches, ivh, dh)
     return [SubdomainCache(
             sdh,
             ivh,

@@ -113,7 +113,7 @@ end
 
 # GPU kernel: grid-stride loop, each thread processes one or more elements
 KA.@kernel function _execute_task_kernel!(task, buffer_pool, @Const(items), num_items::Ti, nblocks::Ti, nthreads::Ti) where {Ti <: Integer}
-    thread_id = KA.@index(Global)
+    thread_id = KA.@index(Global, Linear)
     stride = nblocks * nthreads
 
     # Per-thread buffer (same concept as task_local_caches[tasksetid] on CPU)
@@ -159,3 +159,8 @@ KA.functional(::AbstractCPUDevice) = KA.functional(KA.CPU())
 KA.functional(device::AbstractGPUDevice) = default_backend(device) |> KA.functional
 #TODO: remove when AMDGPU.jl creates new release that includes (https://github.com/JuliaGPU/AMDGPU.jl/pull/884)
 KA.functional(device::RocDevice) = true
+
+
+## APIs for local buffer management ##
+max_sharedmem_per_block(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
+max_registers_per_block(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")

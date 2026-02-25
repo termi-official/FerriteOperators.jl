@@ -7,10 +7,11 @@ end
 struct AssembleLinearTerm{A}
     inner_assembler::A
 end
+buffer_requirement(::AssembleLinearTerm) = LinearBufferRequirement()
 duplicate_for_device(device, task::AssembleLinearTerm{<:AbstractVector}) = task
 duplicate_for_device(device, task::AssembleLinearTerm) = AssembleLinearTerm(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearTerm, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.re)
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_residual_buffer(task_buffer))
 end
 function execute_task_on_single_cell!(task::AssembleLinearTerm, task_buffer)
     pₑ = query_element_parameters(task_buffer)

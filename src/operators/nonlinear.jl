@@ -1,9 +1,10 @@
 struct AssembleLinearizationJR{A}
     inner_assembler::A
 end
+buffer_requirement(::AssembleLinearizationJR) = NonlinearBufferRequirement()
 duplicate_for_device(device, task::AssembleLinearizationJR) = AssembleLinearizationJR(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearizationJR, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.Ke, task_buffer.re)
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_matrix(task_buffer), query_element_residual_buffer(task_buffer))
 end
 function execute_task_on_single_cell!(task::AssembleLinearizationJR, task_buffer)
     Jₑ = query_element_matrix(task_buffer)
@@ -27,9 +28,10 @@ end
 struct AssembleLinearizationJ{A}
     inner_assembler::A
 end
+buffer_requirement(::AssembleLinearizationJ) = BilinearBufferRequirement()
 duplicate_for_device(device, task::AssembleLinearizationJ) = AssembleLinearizationJ(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearizationJ, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.Ke)
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_matrix(task_buffer))
 end
 function execute_task_on_single_cell!(task::AssembleLinearizationJ, task_buffer)
     Jₑ = query_element_matrix(task_buffer)
@@ -51,10 +53,11 @@ end
 struct AssembleLinearizationR{A}
     inner_assembler::A
 end
+buffer_requirement(::AssembleLinearizationR) = LinearBufferRequirement()
 duplicate_for_device(device, task::AssembleLinearizationR{<:AbstractVector}) = task
 duplicate_for_device(device, task::AssembleLinearizationR) = AssembleLinearizationR(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearizationR, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.re)
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_residual_buffer(task_buffer))
 end
 function execute_task_on_single_cell!(task::AssembleLinearizationR, task_buffer)
     rₑ = query_element_residual_buffer(task_buffer)

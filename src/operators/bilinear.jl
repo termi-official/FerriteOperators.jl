@@ -7,9 +7,10 @@ end
 struct AssembleBilinearTerm{A}
     inner_assembler::A
 end
+buffer_requirement(::AssembleBilinearTerm) = BilinearBufferRequirement()
 duplicate_for_device(device, task::AssembleBilinearTerm) = AssembleBilinearTerm(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleBilinearTerm, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.Ke)
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_matrix(task_buffer))
 end
 function execute_task_on_single_cell!(task::AssembleBilinearTerm, task_buffer)
     pₑ = query_element_parameters(task_buffer)
