@@ -112,12 +112,12 @@ end
 end
 
 # GPU kernel: grid-stride loop, each thread processes one or more elements
-KA.@kernel function _execute_task_kernel!(task, buffer_pool, @Const(items), num_items::Ti, nblocks::Ti, nthreads::Ti) where {Ti <: Integer}
+KA.@kernel function _execute_task_kernel!(task, cache, @Const(items), num_items::Ti, nblocks::Ti, nthreads::Ti) where {Ti <: Integer}
     thread_id = KA.@index(Global, Linear)
     stride = nblocks * nthreads
 
     # Per-thread buffer (same concept as task_local_caches[tasksetid] on CPU)
-    local_task_buffer = get_task_buffer(task, buffer_pool, thread_id)
+    local_task_buffer = get_task_buffer(task, cache, thread_id)
 
     for idx in DeviceStridedIterator(thread_id, stride, num_items)
         taskid = items[idx]
@@ -153,6 +153,7 @@ function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
 end
 
 # KA compat
+default_backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
 KA.backend(::AbstractCPUDevice) = KA.CPU()
 KA.backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
 KA.functional(::AbstractCPUDevice) = KA.functional(KA.CPU())
@@ -164,3 +165,17 @@ KA.functional(device::RocDevice) = true
 ## APIs for local buffer management ##
 max_sharedmem_per_block(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
 max_registers_per_block(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
+
+# Compute threads per block — must match kernel launch in execute_task_on_device!
+function _compute_groupsize(device::AbstractGPUDevice, ncells::Integer)
+    Ti = index_type(device)
+    return convert(Ti, min(ncells, something(device.threads, convert(Ti, 256))))
+end
+
+# Compute total number of GPU threads — must match kernel launch in execute_task_on_device!
+function compute_total_nthreads(device::AbstractGPUDevice, ncells::Integer)
+    Ti = index_type(device)
+    threads_per_block = _compute_groupsize(device, ncells)
+    nblocks           = convert(Ti, something(device.blocks, cld(ncells, threads_per_block)))
+    return convert(Ti, nblocks * threads_per_block)
+end

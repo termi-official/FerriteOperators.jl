@@ -98,6 +98,8 @@ println("="^70)
 ## Test on ROC if available ##
 roc_available = try
     using AMDGPU
+    # Load extension manually (Project.toml doesn't have [extensions] yet)
+    include(joinpath(@__DIR__, "..", "ext", "FerriteOperatorsAMDGPUExt.jl"))
     AMDGPU.functional()
 catch
     false
@@ -156,3 +158,55 @@ else
 end
 
 println("="^70)
+
+## Test: setup_element_strategy_cache for GPU device ##
+println("="^70)
+println("Test: setup_element_strategy_cache for GPU device")
+println("="^70)
+
+using FerriteOperators
+import FerriteOperators: ElementAssemblyStrategy, ElementAssemblyOperatorStrategy,
+    setup_element_strategy_cache, compute_total_nthreads,
+    BilinearBufferRequirement, InternalVariableHandler,
+    setup_element_cache, EAVector
+
+if roc_available
+    @testset "setup_element_strategy_cache - RocDevice" begin
+        grid = generate_grid(Quadrilateral, (4, 4))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        close!(dh)
+
+        device = RocDevice()
+        integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u)
+
+        # Build ElementAssemblyOperatorStrategy manually (skip Adapt for now)
+        eadata = EAVector(dh)
+        operator_strategy = ElementAssemblyOperatorStrategy(device, eadata)
+
+        # setup_element_cache → element cache (CellValues etc.)
+        sdh = dh.subdofhandlers[1]
+        element_cache = setup_element_cache(integrator, sdh)
+
+        # setup_element_strategy_cache → this is what we're debugging
+        req = BilinearBufferRequirement()
+        ivh = InternalVariableHandler(nothing, 0)
+        strategy_cache = setup_element_strategy_cache(operator_strategy, req, element_cache, ivh, sdh)
+        @test strategy_cache isa FerriteOperators.ElementAssemblyStrategyCache
+        @test strategy_cache.device === device
+
+        # Verify materialized caches
+        local_caches = strategy_cache.device_cache
+        ncells = getncells(Ferrite.get_grid(dh))
+        total_nthreads = compute_total_nthreads(device, ncells)
+        @test length(local_caches) == total_nthreads
+        @test local_caches[1] isa FerriteOperators.BilinearLocalCache
+        @test local_caches[2] isa FerriteOperators.BilinearLocalCache
+        # Each cache's Ke should be a view into the same GPU pool
+        @test parent(local_caches[1].Ke) === parent(local_caches[2].Ke)
+        @test !(parent(local_caches[1].Ke) isa Array)  # Should be GPU array, not CPU
+        println("  RocDevice: setup OK, $(total_nthreads) thread caches for $(ncells) cells, pool type = $(typeof(parent(local_caches[1].Ke)))")
+    end
+else
+    @info "AMDGPU not available, skipping GPU setup_element_strategy_cache test"
+end
