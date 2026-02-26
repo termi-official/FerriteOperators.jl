@@ -54,6 +54,8 @@ end
 
 @doc raw"""
     MassProlongatorIntegrator
+
+P_ij = M^{-1}_{e} ∫ ϕ_i(x) ⋅ ϕc_j(x) dx (ϕc is the coarse basis function)
 """
 struct MassProlongatorIntegrator <: AbstractTransferIntegrator
     # Every integrator needs these
