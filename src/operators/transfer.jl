@@ -183,3 +183,88 @@ mul!(out::AbstractVector, op::TransferFerriteOperator, x::AbstractVector, α, β
 Base.eltype(op::TransferFerriteOperator) = eltype(op.P)
 Base.size(op::TransferFerriteOperator, axis) = size(op.P, axis)
 Base.size(op::TransferFerriteOperator) = size(op.P)
+
+
+####################################
+## Nested-grid transfer operator   ##
+####################################
+
+"""
+    NestedTransferSubdomainCache
+
+Holds pre-allocated data for assembling one subdomain's contribution to a
+[`NestedTransferFerriteOperator`](@ref).  The fine and coarse DofHandlers live on
+**different** grids connected by `fine2coarse` and `child_ref_coords`.
+"""
+struct NestedTransferSubdomainCache{SDH_fine, SDH_coarse, EL}
+    sdh_fine::SDH_fine
+    sdh_coarse::SDH_coarse
+    element::EL
+    Pe::Matrix{Float64}
+    tc::NestedGridTransferCellCache
+end
+
+function execute_transfer_on_device!(
+        assembler::CSCAssembler2,
+        device::SequentialCPUDevice,
+        sc::NestedTransferSubdomainCache,
+        p,
+    )
+    (; sdh_fine, element, Pe, tc) = sc
+    for cellid in sdh_fine.cellset
+        reinit!(tc, cellid)
+        fill!(Pe, 0.0)
+        @timeit_debug "assemble nested transfer element" assemble_transfer_element!(Pe, tc, element, p)
+        assemble!(assembler, getrowdofs(tc), getcolumndofs(tc), Pe)
+    end
+    return nothing
+end
+
+function execute_transfer_on_device!(
+        assembler::CSCAssembler2,
+        device::PolyesterDevice,
+        sc::NestedTransferSubdomainCache,
+        p,
+    )
+    execute_transfer_on_device!(assembler, SequentialCPUDevice(), sc, p)
+    return nothing
+end
+
+"""
+    NestedTransferFerriteOperator
+
+Transfer operator for hierarchically nested grids (geometric multigrid).  The fine and
+coarse DofHandlers live on different grids connected via `fine2coarse` mappings.
+
+Construct via [`setup_nested_transfer_operator`](@ref); update via [`update_operator!`](@ref).
+"""
+struct NestedTransferFerriteOperator{MatrixType}
+    P::MatrixType
+    strategy
+    subdomain_caches::Vector{NestedTransferSubdomainCache}
+end
+
+function update_operator!(op::NestedTransferFerriteOperator, p)
+    (; P, strategy, subdomain_caches) = op
+
+    n_row = maximum(sc -> ndofs_per_cell(sc.sdh_fine),   subdomain_caches; init = 0)
+    n_col = maximum(sc -> ndofs_per_cell(sc.sdh_coarse), subdomain_caches; init = 0)
+    assembler = start_assemble2(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
+
+    for (subdomain_id, sc) in enumerate(subdomain_caches)
+        @timeit_debug "assemble nested transfer subdomain $subdomain_id" begin
+            execute_transfer_on_device!(assembler, strategy.device, sc, p)
+        end
+    end
+
+    return op
+end
+
+mul!(out::AbstractVector, op::NestedTransferFerriteOperator, x::AbstractVector) =
+    mul!(out, op.P, x)
+mul!(out::AbstractVector, op::NestedTransferFerriteOperator, x::AbstractVector, α, β) =
+    mul!(out, op.P, x, α, β)
+
+Base.eltype(op::NestedTransferFerriteOperator) = eltype(op.P)
+Base.size(op::NestedTransferFerriteOperator, axis) = size(op.P, axis)
+Base.size(op::NestedTransferFerriteOperator) = size(op.P)

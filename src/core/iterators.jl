@@ -269,6 +269,12 @@ shape functions at fine-grid quadrature points.
 """
 get_child_ref_coords(tc::NestedGridTransferCellCache) = tc.child_ref_coords[tc.fine_cellid]
 
+# Allow reinit!(cv, tc) for CellValues so the loop pattern `reinit!(cv, tc)` works with nested grids.
+function Ferrite.reinit!(cv::Ferrite.AbstractCellValues, tc::NestedGridTransferCellCache)
+    cell = Ferrite.reinit_needs_cell(cv) ? getcells(tc.fine_grid, tc.fine_cellid) : nothing
+    return Ferrite.reinit!(cv, cell, tc.fine_coords)
+end
+
 
 ##########################################
 ## NestedGridTransferCellIterator       ##

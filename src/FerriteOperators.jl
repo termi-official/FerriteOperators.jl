@@ -89,7 +89,9 @@ export get_fine_coordinates, get_coarse_coordinates, get_child_ref_coords
 export AbstractTransferIntegrator, AbstractTransferElementCache
 export AbstractVolumetricElementCache
 export MassProlongatorIntegrator
+export NestedMassProlongatorIntegrator
 export setup_element_cache, assemble_element!
 export TransferFerriteOperator, setup_transfer_operator, init_transfer_sparsity_pattern
+export NestedTransferFerriteOperator, setup_nested_transfer_operator, init_nested_transfer_sparsity_pattern
 
 end

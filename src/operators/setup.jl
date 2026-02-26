@@ -140,3 +140,67 @@ function setup_transfer_operator(
 
     return TransferFerriteOperator(P, strategy, subdomain_caches)
 end
+
+"""
+    init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)
+
+Build a [`SparsityPattern`](@ref) of size `(ndofs(dh_fine) × ndofs(dh_coarse))` for a
+nested-grid transfer operator.  The sparsity is determined by the `fine2coarse` mapping:
+a (rdof, cdof) entry is added whenever `rdof` belongs to fine cell `i` and `cdof` belongs
+to its parent coarse cell `fine2coarse[i]`.
+"""
+function init_nested_transfer_sparsity_pattern(
+        dh_fine::DofHandler,
+        dh_coarse::DofHandler,
+        fine2coarse::AbstractVector{Int},
+    )
+    nrdofs   = ndofs(dh_fine)
+    ncdofs   = ndofs(dh_coarse)
+    nnz_hint = maximum(sdh -> ndofs_per_cell(sdh), dh_coarse.subdofhandlers; init = 1)
+    sp       = SparsityPattern(nrdofs, ncdofs; nnz_per_row = nnz_hint)
+    rdofs_buf = Int[]
+    cdofs_buf = Int[]
+    for fine_id in 1:getncells(get_grid(dh_fine))
+        coarse_id = fine2coarse[fine_id]
+        resize!(rdofs_buf, ndofs_per_cell(dh_fine,   fine_id))
+        resize!(cdofs_buf, ndofs_per_cell(dh_coarse, coarse_id))
+        celldofs!(rdofs_buf, dh_fine,   fine_id)
+        celldofs!(cdofs_buf, dh_coarse, coarse_id)
+        for rdof in rdofs_buf, cdof in cdofs_buf
+            Ferrite.add_entry!(sp, rdof, cdof)
+        end
+    end
+    return sp
+end
+
+"""
+    setup_nested_transfer_operator(strategy, integrator, dh_fine, dh_coarse, fine2coarse, child_ref_coords)
+
+Set up a [`NestedTransferFerriteOperator`](@ref) for assembling a rectangular sparse
+matrix of size `(ndofs(dh_fine) × ndofs(dh_coarse))`.
+
+`dh_fine` and `dh_coarse` must live on **different** grids where every fine cell is a
+child of exactly one coarse cell, as encoded by `fine2coarse` and `child_ref_coords`.
+"""
+function setup_nested_transfer_operator(
+        strategy::AbstractAssemblyStrategy,
+        integrator::AbstractTransferIntegrator,
+        dh_fine::DofHandler,
+        dh_coarse::DofHandler,
+        fine2coarse::AbstractVector{Int},
+        child_ref_coords::AbstractVector,
+    )
+    Tv  = value_type(strategy.device)
+    sp  = init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)
+    P   = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
+
+    subdomain_caches = NestedTransferSubdomainCache[]
+    for (sdh_fine, sdh_coarse) in zip(dh_fine.subdofhandlers, dh_coarse.subdofhandlers)
+        element = setup_transfer_element_cache(integrator, sdh_fine, sdh_coarse)
+        tc      = NestedGridTransferCellCache(dh_fine, dh_coarse, fine2coarse, child_ref_coords)
+        Pe      = zeros(ndofs_per_cell(sdh_fine), ndofs_per_cell(sdh_coarse))
+        push!(subdomain_caches, NestedTransferSubdomainCache(sdh_fine, sdh_coarse, element, Pe, tc))
+    end
+
+    return NestedTransferFerriteOperator(P, strategy, subdomain_caches)
+end
