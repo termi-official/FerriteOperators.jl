@@ -71,36 +71,60 @@ function select_memory_type(device::AbstractGPUDevice, req::AbstractTaskBufferRe
     return GPUGlobalMemoryType()
 end
 
-## 4. GPU buffer placeholders (Register / Shared) ##
-# Stored in BilinearLocalCache.Ke / NonlinearLocalCache.ue etc. at setup time.
-# The kernel calls `materialize` to create actual buffers.
-# - Register: MMatrix/MVector on stack (per-thread registers)
-# - Shared:   view into @localmem allocation (per-block, indexed by local_tid)
-struct GPULocalMatrix{MemType <: AbstractGPUMemoryType, N, T}
-    local_tid::Int32
-    groupsize::Int32
+## Local Cache Factory ##
+# GPU allocation occurs in two steps: (1) factory creation on the CPU and (2) kernel-side materialization.# All factories support `materialize(factory, tid, local_tid, groupsize)` → local cache.
+abstract type AbstractGPULocalCacheFactory end
+
+# Register: stack-allocated MArrays (per-thread, in registers)
+struct RegisterLocalCacheFactory{Req <: AbstractTaskBufferRequirement, N, T} <: AbstractGPULocalCacheFactory end
+
+@inline materialize(::RegisterLocalCacheFactory{BilinearBufferRequirement, N, T}, tid, local_tid, groupsize) where {N, T} =
+    BilinearLocalCache(MMatrix{N, N, T}(undef))
+@inline materialize(::RegisterLocalCacheFactory{NonlinearBufferRequirement, N, T}, tid, local_tid, groupsize) where {N, T} =
+    NonlinearLocalCache(MMatrix{N, N, T}(undef), MVector{N, T}(undef), MVector{N, T}(undef))
+@inline materialize(::RegisterLocalCacheFactory{LinearBufferRequirement, N, T}, tid, local_tid, groupsize) where {N, T} =
+    LinearLocalCache(MVector{N, T}(undef))
+
+# Shared: @localmem allocates once per block, each thread indexes with local_tid
+struct SharedLocalCacheFactory{Req <: AbstractTaskBufferRequirement, N, T} <: AbstractGPULocalCacheFactory end
+
+@inline function materialize(::SharedLocalCacheFactory{BilinearBufferRequirement, N, T}, tid, local_tid, groupsize) where {N, T}
+    shared = KA.@localmem T (N, N, groupsize)
+    BilinearLocalCache(view(shared, :, :, local_tid))
 end
-struct GPULocalVector{MemType <: AbstractGPUMemoryType, N, T}
-    local_tid::Int32
-    groupsize::Int32
+@inline function materialize(::SharedLocalCacheFactory{NonlinearBufferRequirement, N, T}, tid, local_tid, groupsize) where {N, T}
+    Ke_shared = KA.@localmem T (N, N, groupsize)
+    ue_shared = KA.@localmem T (N, groupsize)
+    re_shared = KA.@localmem T (N, groupsize)
+    NonlinearLocalCache(view(Ke_shared, :, :, local_tid), view(ue_shared, :, local_tid), view(re_shared, :, local_tid))
+end
+@inline function materialize(::SharedLocalCacheFactory{LinearBufferRequirement, N, T}, tid, local_tid, groupsize) where {N, T}
+    shared = KA.@localmem T (N, groupsize)
+    LinearLocalCache(view(shared, :, local_tid))
 end
 
-# Kernel-side: materialize placeholders
-# Register: stack-allocated MArrays (one per thread, in registers)
-@inline materialize(::GPULocalMatrix{GPURegisterMemoryType, N, T}) where {N, T} = MMatrix{N, N, T}(undef)
-@inline materialize(::GPULocalVector{GPURegisterMemoryType, N, T}) where {N, T} = MVector{N, T}(undef)
-# Shared: @localmem allocates once per block, all threads in the block get the same ref.
-# Each thread indexes with local_tid into a block-wide pool.
-@inline function materialize(p::GPULocalMatrix{GPUSharedMemoryType, N, T}) where {N, T}
-    shared = KA.@localmem T (N, N, p.groupsize)
-    return view(shared, :, :, p.local_tid)
+# Global: pre-allocated GPU array pools, views created per-thread in kernel
+abstract type AbstractGlobalLocalCacheFactory <: AbstractGPULocalCacheFactory end
+
+@concrete struct BilinearGlobalLocalCacheFactory <: AbstractGlobalLocalCacheFactory
+    Ke_pool  # GPU array (N, N, total_nthreads)
 end
-@inline function materialize(p::GPULocalVector{GPUSharedMemoryType, N, T}) where {N, T}
-    shared = KA.@localmem T (N, p.groupsize)
-    return view(shared, :, p.local_tid)
+@inline materialize(f::BilinearGlobalLocalCacheFactory, tid, local_tid, groupsize) =
+    BilinearLocalCache(view(f.Ke_pool, :, :, tid))
+
+@concrete struct NonlinearGlobalLocalCacheFactory <: AbstractGlobalLocalCacheFactory
+    Ke_pool  # GPU array (N, N, total_nthreads)
+    ue_pool  # GPU array (N, total_nthreads)
+    re_pool  # GPU array (N, total_nthreads)
 end
-# Global path: views are already usable
-@inline materialize(x) = x
+@inline materialize(f::NonlinearGlobalLocalCacheFactory, tid, local_tid, groupsize) =
+    NonlinearLocalCache(view(f.Ke_pool, :, :, tid), view(f.ue_pool, :, tid), view(f.re_pool, :, tid))
+
+@concrete struct LinearGlobalLocalCacheFactory <: AbstractGlobalLocalCacheFactory
+    re_pool  # GPU array (N, total_nthreads)
+end
+@inline materialize(f::LinearGlobalLocalCacheFactory, tid, local_tid, groupsize) =
+    LinearLocalCache(view(f.re_pool, :, tid))
 
 ## Local caches: typed per buffer requirement ##
 @concrete struct BilinearLocalCache
@@ -135,57 +159,33 @@ function allocate_local_cache(::LinearBufferRequirement, ::CPUMemoryType, elemen
     LinearLocalCache(allocate_element_residual_vector(element_cache, sdh))
 end
 
-## GPU: allocate local cache based on memory type ##
-# Register / Shared: factory returns local cache with placeholder buffers (isbitstype configs).
-# Kernel calls `materialize(cache.Ke)` etc. to create actual MArrays.
-function allocate_local_cache(::BilinearBufferRequirement, mem::Union{GPURegisterMemoryType, GPUSharedMemoryType}, device::AbstractGPUDevice, sdh; total_nthreads)
-    N = ndofs_per_cell(sdh)
-    T = value_type(device)
-    M = typeof(mem)
-    groupsize = _compute_groupsize(device, total_nthreads)
-    return tid -> begin
-        local_tid = Int32((tid - 1) % groupsize + 1)
-        BilinearLocalCache(GPULocalMatrix{M, N, T}(local_tid, groupsize))
-    end
-end
-function allocate_local_cache(::NonlinearBufferRequirement, mem::Union{GPURegisterMemoryType, GPUSharedMemoryType}, device::AbstractGPUDevice, sdh; total_nthreads)
-    N = ndofs_per_cell(sdh)
-    T = value_type(device)
-    M = typeof(mem)
-    groupsize = _compute_groupsize(device, total_nthreads)
-    return tid -> begin
-        local_tid = Int32((tid - 1) % groupsize + 1)
-        NonlinearLocalCache(
-            GPULocalMatrix{M, N, T}(local_tid, groupsize),
-            GPULocalVector{M, N, T}(local_tid, groupsize),
-            GPULocalVector{M, N, T}(local_tid, groupsize),
-        )
-    end
-end
-function allocate_local_cache(::LinearBufferRequirement, mem::Union{GPURegisterMemoryType, GPUSharedMemoryType}, device::AbstractGPUDevice, sdh; total_nthreads)
-    N = ndofs_per_cell(sdh)
-    T = value_type(device)
-    M = typeof(mem)
-    groupsize = _compute_groupsize(device, total_nthreads)
-    return tid -> begin
-        local_tid = Int32((tid - 1) % groupsize + 1)
-        LinearLocalCache(GPULocalVector{M, N, T}(local_tid, groupsize))
-    end
-end
+## GPU: allocate local cache → returns an AbstractGPULocalCacheFactory ##
+# Kernel calls `materialize(factory, tid, local_tid, groupsize)` to create the actual local cache.
 
-## GPU Global memory: factory pattern ##
-# allocate_local_cache returns a factory (closure) that, given a thread_id,
-# produces a BilinearLocalCache / NonlinearLocalCache / LinearLocalCache
-# with views into GPU-allocated pools. The pools are captured by the closure.
 function _gpu_zeros(device::AbstractGPUDevice, T, dims...)
     Adapt.adapt(default_backend(device), zeros(T, dims...))
 end
 
+# Register
+function allocate_local_cache(req::AbstractTaskBufferRequirement, ::GPURegisterMemoryType, device::AbstractGPUDevice, sdh; total_nthreads)
+    N = ndofs_per_cell(sdh)
+    T = value_type(device)
+    return RegisterLocalCacheFactory{typeof(req), N, T}()
+end
+
+# Shared
+function allocate_local_cache(req::AbstractTaskBufferRequirement, ::GPUSharedMemoryType, device::AbstractGPUDevice, sdh; total_nthreads)
+    N = ndofs_per_cell(sdh)
+    T = value_type(device)
+    return SharedLocalCacheFactory{typeof(req), N, T}()
+end
+
+# Global
 function allocate_local_cache(::BilinearBufferRequirement, ::GPUGlobalMemoryType, device::AbstractGPUDevice, sdh; total_nthreads)
     N = ndofs_per_cell(sdh)
     T = value_type(device)
     Ke_pool = _gpu_zeros(device, T, N, N, total_nthreads)
-    return tid -> BilinearLocalCache(view(Ke_pool, :, :, tid))
+    return BilinearGlobalLocalCacheFactory(Ke_pool)
 end
 function allocate_local_cache(::NonlinearBufferRequirement, ::GPUGlobalMemoryType, device::AbstractGPUDevice, sdh; total_nthreads)
     N = ndofs_per_cell(sdh)
@@ -193,13 +193,13 @@ function allocate_local_cache(::NonlinearBufferRequirement, ::GPUGlobalMemoryTyp
     Ke_pool = _gpu_zeros(device, T, N, N, total_nthreads)
     ue_pool = _gpu_zeros(device, T, N, total_nthreads)
     re_pool = _gpu_zeros(device, T, N, total_nthreads)
-    return tid -> NonlinearLocalCache(view(Ke_pool, :, :, tid), view(ue_pool, :, tid), view(re_pool, :, tid))
+    return NonlinearGlobalLocalCacheFactory(Ke_pool, ue_pool, re_pool)
 end
 function allocate_local_cache(::LinearBufferRequirement, ::GPUGlobalMemoryType, device::AbstractGPUDevice, sdh; total_nthreads)
     N = ndofs_per_cell(sdh)
     T = value_type(device)
     re_pool = _gpu_zeros(device, T, N, total_nthreads)
-    return tid -> LinearLocalCache(view(re_pool, :, tid))
+    return LinearGlobalLocalCacheFactory(re_pool)
 end
 
 @concrete struct SimpleAssemblyCache
@@ -340,9 +340,11 @@ function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{
     mem_type   = select_memory_type(device, req, N)
     # Compute total threads consistently with kernel launch (see execute_task_on_device!)
     total_nthreads = compute_total_nthreads(device, ncells)
-    local_cache_factory = allocate_local_cache(req, mem_type, device, sdh; total_nthreads)
-    # Materialize: one local cache per thread (threads stride over cells)
-    local_caches = [local_cache_factory(tid) for tid in 1:total_nthreads]
+    # allocate_local_cache returns an AbstractGPULocalCacheFactory:
+    # - RegisterLocalCacheFactory / SharedLocalCacheFactory (zero-size isbitstype)
+    # - BilinearGlobalLocalCacheFactory / NonlinearGlobalLocalCacheFactory / LinearGlobalLocalCacheFactory (GPU array pools)
+    # All support `materialize(factory, tid, local_tid, groupsize)` in the kernel.
+    device_cache = allocate_local_cache(req, mem_type, device, sdh; total_nthreads)
     # TODO: adapt cell, ivh, element for GPU
-    return ElementAssemblyStrategyCache(device, local_caches)
+    return ElementAssemblyStrategyCache(device, device_cache)
 end

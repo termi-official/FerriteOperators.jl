@@ -4,7 +4,7 @@ import KernelAbstractions as KA
 
 # ---- Test: MArray (registers) inside a KA kernel ----
 # Tests whether a struct with MMatrix/MVector fields works on GPU
-
+#TODO: to remove this file
 ## Test buffer: mimics SimpleAssemblyCache with static arrays ##
 struct TestBuffer{T}
     Ke::MMatrix{4, 4, T, 16}

@@ -40,6 +40,14 @@ function get_task_buffer_for_device(task, u, p, device_cache::ThreadedAssemblyCa
     GenericTaskBuffer(u, p, element, local_cache, cell, ivh)
 end
 
+# GPU: device_cache is a GPULocalCacheConfig (Register/Shared) or pool struct (Global).
+# materialize(device_cache, tid, local_tid, groupsize) is called in the kernel
+# to create the actual local cache.
+function get_task_buffer_for_gpu(u, p, local_cache)
+    # TODO: cell, ivh, element need GPU-compatible types
+    GenericTaskBuffer(u, p, nothing, local_cache, nothing, nothing)
+end
+
 function load_element_unknowns!(uₑ, buffer::GenericTaskBuffer)
     load_element_unknowns!(uₑ, buffer.u, buffer.geometry_cache, buffer.ivh, buffer.element)
 end

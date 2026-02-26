@@ -25,6 +25,7 @@ import Ferrite: reference_shape_value
 
 include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or GPUs)
 include("core/strategy.jl")  # Utilities to control the assembly strategy
+include("core/adapt.jl")     # Adapt.adapt_structure for GPU local cache factories
 include("core/tasks.jl")     # Contains the basic task system
 
 include("core/element_interface.jl") # This is the basic element interface used for the operators

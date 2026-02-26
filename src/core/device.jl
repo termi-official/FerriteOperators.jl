@@ -114,15 +114,23 @@ end
 # GPU kernel: grid-stride loop, each thread processes one or more elements
 KA.@kernel function _execute_task_kernel!(task, cache, @Const(items), num_items::Ti, nblocks::Ti, nthreads::Ti) where {Ti <: Integer}
     thread_id = KA.@index(Global, Linear)
+    local_tid = KA.@index(Local, Linear)
+    groupsize = KA.@groupsize()[1]
     stride = nblocks * nthreads
 
-    # Per-thread buffer (same concept as task_local_caches[tasksetid] on CPU)
-    local_task_buffer = get_task_buffer(task, cache, thread_id)
+    # Destructure the subdomain cache
+    (; u, p, subdomain) = cache
+    (; strategy_cache) = subdomain
+    (; device_cache) = strategy_cache
+
+    # Materialize local cache: Register → MArrays, Shared → @localmem views, Global → pool views
+    local_cache = materialize(device_cache, thread_id, local_tid, groupsize)
+    task_buffer = get_task_buffer_for_gpu(u, p, local_cache)
 
     for idx in DeviceStridedIterator(thread_id, stride, num_items)
         taskid = items[idx]
-        reinit!(local_task_buffer, taskid)
-        execute_task_on_single_cell!(task, local_task_buffer)
+        reinit!(task_buffer, taskid)
+        execute_task_on_single_cell!(task, task_buffer)
     end
 end
 
