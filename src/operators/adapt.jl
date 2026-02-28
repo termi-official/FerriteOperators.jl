@@ -1,32 +1,58 @@
 #FIXME: this needs to be revisted
 
-## GenericIndexedData ##
-Adapt.adapt_structure(::AbstractCPUDevice, gid::GenericIndexedData) = gid
-function Adapt.adapt_structure(to::AbstractGPUDevice, gid::GenericIndexedData)
-    backend = default_backend(to)
-    GenericIndexedData(
-        Adapt.adapt(backend, gid.data),
-        Adapt.adapt(backend, gid.index_structure),
+## EAOperatorAssembler (@concrete) ##
+# Passed as `task.inner_assembler` into the GPU kernel.
+Adapt.adapt_structure(to, a::EAOperatorAssembler) =
+    EAOperatorAssembler(
+        Adapt.adapt(to, a.K_element),
+        Adapt.adapt(to, a.f_element),
+        Adapt.adapt(to, a.f),
     )
-end
+
+## Task structs (plain parametric — Adapt.@adapt_structure works) ##
+Adapt.@adapt_structure AssembleBilinearTerm
+Adapt.@adapt_structure AssembleLinearizationJR
+Adapt.@adapt_structure AssembleLinearizationJ
+Adapt.@adapt_structure AssembleLinearizationR
+Adapt.@adapt_structure AssembleLinearTerm
+
+## SubdomainCache (@concrete struct) ##
+# Manual adapt: sdh (SubDofHandler) and element (CPU CellValues) are only
+# used on the CPU side. The kernel accesses element_cache_factory from
+# GPUAssemblyCache inside strategy_cache instead. Drop both to avoid
+# adapting non-isbitstype fields.
+Adapt.adapt_structure(to, sc::SubdomainCache) =
+    SubdomainCache(
+        nothing,
+        Adapt.adapt(to, sc.ivh),
+        nothing,
+        Adapt.adapt(to, sc.strategy_cache),
+    )
+
+## GenericIndexedData ##
+# Generic `to` so it works both with our device types (setup-time) and
+# KA's KernelAdaptor (kernel-launch-time).
+Adapt.adapt_structure(to, gid::GenericIndexedData) =
+    GenericIndexedData(
+        Adapt.adapt(to, gid.data),
+        Adapt.adapt(to, gid.index_structure),
+    )
 
 ## EAVector ##
-Adapt.adapt_structure(::AbstractCPUDevice, eavec::EAVector) = eavec
-function Adapt.adapt_structure(to::AbstractGPUDevice, eavec::EAVector)
+Adapt.adapt_structure(to, eavec::EAVector) =
     EAVector(
         Adapt.adapt(to, eavec.data),
         Adapt.adapt(to, eavec.dof_to_element_map),
     )
-end
 
 ## EAOperator ##
-Adapt.adapt_structure(::AbstractCPUDevice, op::EAOperator) = op
-function Adapt.adapt_structure(to::AbstractGPUDevice, op::EAOperator)
+# `device` and `device_cache` are CPU-only (not accessed in the kernel).
+# Drop them to avoid adapting non-isbitstype fields (e.g. RocDevice with Union fields).
+Adapt.adapt_structure(to, op::EAOperator) =
     EAOperator(
-        op.device,
-        op.device_cache,
+        nothing,
+        nothing,
         Adapt.adapt(to, op.element_matrices),
         Adapt.adapt(to, op.vector_element_map),
         Adapt.adapt(to, op.element_vector_map),
     )
-end

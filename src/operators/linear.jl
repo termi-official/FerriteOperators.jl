@@ -1,7 +1,7 @@
 struct LinearFerriteOperator{VectorType} <: AbstractLinearOperator
     b::VectorType
     strategy
-    subdomain_caches::Vector{SubdomainCache}
+    subdomain_caches::Vector{<:SubdomainCache}
 end
 
 struct AssembleLinearTerm{A}
@@ -22,7 +22,9 @@ function execute_task_on_single_cell!(task::AssembleLinearTerm, task_buffer)
     cell    = query_geometry_cache(task_buffer)
     element = query_element(task_buffer)
 
-    @timeit_debug "assemble element" assemble_element!(bₑ, cell, element, pₑ)
+    # TODO: re-enable when TimerOutputs is GPU-compatible
+    # @timeit_debug "assemble element" assemble_element!(bₑ, cell, element, pₑ)
+    assemble_element!(bₑ, cell, element, pₑ)
 
     assemble!(task, task_buffer)
 end
@@ -36,8 +38,10 @@ function update_operator!(op::LinearFerriteOperator, p)
     for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
         # Function barrier
         task_cache = SubdomainAssemblyTaskBuffer(nothing, p, subdomain_cache)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
+        # TODO: re-enable when TimerOutputs is GPU-compatible
+        # @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
+        execute_task_on_device!(task, strategy.device, task_cache)
     end
 
-    finalize_assembly!(assembler)
+    finalize_assembly!(assembler, strategy.device)
 end

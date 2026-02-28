@@ -2,7 +2,7 @@
 # TODO energy based operator?
 # TODO maybe a trait system for operators?
 
-struct SubdomainCache
+@concrete struct SubdomainCache
     sdh
     ivh
     element # TODO remove this and query from device cache.

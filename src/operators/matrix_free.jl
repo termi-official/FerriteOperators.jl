@@ -185,7 +185,6 @@ end
 
 
 @concrete struct EAOperatorAssembler <: Ferrite.AbstractAssembler
-    device
     K_element
     f_element
     f
@@ -195,20 +194,20 @@ duplicate_for_device(device, assembler::EAOperatorAssembler) = assembler
 function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, f::Vector{T}; fillzero::Bool=true) where T
     fillzero && fill!(f, 0.0)
     fillzero && fill!(strategy.eadata, 0.0)
-    return EAOperatorAssembler(strategy.device, nothing, strategy.eadata, f)
+    return EAOperatorAssembler(nothing, strategy.eadata, f)
 end
 function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, element_matrix::EAOperator; fillzero::Bool=true)
     fillzero && fill!(element_matrix.element_matrices.data, 0.0)
-    return EAOperatorAssembler(strategy.device, element_matrix, nothing, nothing)
+    return EAOperatorAssembler(element_matrix, nothing, nothing)
 end
 function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, element_matrix::EAOperator, f::AbstractVector; fillzero::Bool=true)
     fillzero && fill!(element_matrix.element_matrices.data, 0.0)
     fillzero && fill!(f, 0.0)
     fillzero && fill!(strategy.eadata, 0.0)
-    return EAOperatorAssembler(strategy.device, element_matrix, strategy.eadata, f)
+    return EAOperatorAssembler(element_matrix, strategy.eadata, f)
 end
 
-function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, Kₑ::AbstractMatrix)
+@inline function _ea_assemble_matrix!(assembler::EAOperatorAssembler, cell, Kₑ::AbstractMatrix)
     (; element_matrices) = assembler.K_element
     i = cellid(cell)
     (; offset, nrows, ncols) = element_matrices.index_structure[i]
@@ -217,7 +216,7 @@ function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, Kₑ
     Aₑ .+= Kₑ
     return nothing
 end
-function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, rₑ::AbstractVector)
+@inline function _ea_assemble_vector!(assembler::EAOperatorAssembler, cell, rₑ::AbstractVector)
     i = cellid(cell)
     (; data) = assembler.f_element # f_element is an EAVector
     (; offset, length) = data.index_structure[i]
@@ -225,9 +224,21 @@ function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, rₑ
     fₑ .+= rₑ
     return nothing
 end
-function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, Kₑ::AbstractMatrix, rₑ::AbstractVector)
-    assemble!(assembler, cell, Kₑ)
-    assemble!(assembler, cell, rₑ)
+
+# CPU: CellCache dispatch
+Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, Kₑ::AbstractMatrix) = _ea_assemble_matrix!(a, c, Kₑ)
+Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, rₑ::AbstractVector) = _ea_assemble_vector!(a, c, rₑ)
+function Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, Kₑ::AbstractMatrix, rₑ::AbstractVector)
+    _ea_assemble_matrix!(a, c, Kₑ)
+    _ea_assemble_vector!(a, c, rₑ)
+end
+
+# GPU: DeviceCellCache dispatch
+Ferrite.assemble!(a::EAOperatorAssembler, c::DeviceCellCache, Kₑ::AbstractMatrix) = _ea_assemble_matrix!(a, c, Kₑ)
+Ferrite.assemble!(a::EAOperatorAssembler, c::DeviceCellCache, rₑ::AbstractVector) = _ea_assemble_vector!(a, c, rₑ)
+function Ferrite.assemble!(a::EAOperatorAssembler, c::DeviceCellCache, Kₑ::AbstractMatrix, rₑ::AbstractVector)
+    _ea_assemble_matrix!(a, c, Kₑ)
+    _ea_assemble_vector!(a, c, rₑ)
 end
 
 function ea_collapse!(b::Vector, bes::EAVector, device::AbstractCPUDevice)
@@ -249,10 +260,10 @@ end
     end
 end
 
-function finalize_assembly!(assembler::EAOperatorAssembler)
+function finalize_assembly!(assembler::EAOperatorAssembler, device)
     assembler.f === nothing && return
 
-    ea_collapse!(assembler.f, assembler.f_element, assembler.device)
+    ea_collapse!(assembler.f, assembler.f_element, device)
 end
 
 # TODO support for DG
@@ -267,13 +278,13 @@ function create_system_matrix(strategy::ElementAssemblyOperatorStrategy, dh)
     matrix_index_structure = zeros(GenericEAMatrixIndex{IndexType}, getncells(grid))
     vector_index_structure = zeros(GenericEAVectorIndex{IndexType}, getncells(grid))
 
-    element_offset = 1
-    vector_offset  = 1
+    element_offset = one(IndexType)
+    vector_offset  = one(IndexType)
     for sdh in dh.subdofhandlers
-        ndofs = ndofs_per_cell(sdh)
+        ndofs = IndexType(ndofs_per_cell(sdh))
         for cc in CellIterator(sdh)
             dofs = celldofs(cc)
-            nrows = ncols = length(dofs)
+            nrows = ncols = IndexType(length(dofs))
             matrix_index_structure[cellid(cc)] = GenericEAMatrixIndex(element_offset, nrows, ncols)
             vector_index_structure[cellid(cc)] = GenericEAVectorIndex(vector_offset, nrows)
             element_offset += nrows*ncols
@@ -285,5 +296,8 @@ function create_system_matrix(strategy::ElementAssemblyOperatorStrategy, dh)
     element_matrices = GenericIndexedData(zeros(ValueType, element_offset-1), matrix_index_structure)
     # FIXME pass EA info down via device cache instead of hardcoded EAViewCache
     op = EAOperator(device, EAViewCache(), element_matrices, element_vector_info, element_vector_info)
-    return Adapt.adapt(device, op)
+    # Use the GPU backend adaptor (ROCBackend/CUDABackend) so AMDGPU/CUDA's
+    # Adapt.adapt_storage converts Array → ROCArray/CuArray.
+    # For CPU devices, just return as-is.
+    return _adapt_for_device(device, op)
 end

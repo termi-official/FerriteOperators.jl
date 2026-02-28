@@ -75,11 +75,11 @@ end
 Please add CUDA.jl to your Project to make this device work.
 """
 struct CudaDevice{ValueType, IndexType} <: AbstractGPUDevice{ValueType, IndexType}
-    threads::Union{IndexType, Nothing}
-    blocks::Union{IndexType, Nothing}
+    threads::IndexType
+    blocks::IndexType
 end
 
-CudaDevice() = CudaDevice{Float32, Int32}(nothing, nothing)
+CudaDevice() = CudaDevice{Float32, Int32}(Int32(256), Int32(20))
 CudaDevice(threads::IndexType, blocks::IndexType) where IndexType = CudaDevice{Float32, IndexType}(threads, blocks)
 
 """
@@ -88,11 +88,11 @@ CudaDevice(threads::IndexType, blocks::IndexType) where IndexType = CudaDevice{F
 Please add AMDGPU.jl to your Project to make this device work.
 """
 struct RocDevice{ValueType, IndexType} <: AbstractGPUDevice{ValueType, IndexType}
-    threads::Union{IndexType, Nothing}
-    blocks::Union{IndexType, Nothing}
+    threads::IndexType
+    blocks::IndexType
 end
 
-RocDevice() = RocDevice{Float64, Int32}(nothing, nothing)
+RocDevice() = RocDevice{Float64, Int32}(Int32(256), Int32(20))
 RocDevice(threads::IndexType, blocks::IndexType) where IndexType = RocDevice{Float64, IndexType}(threads, blocks)
 
 # Logic-agnostic grid-stride iterator
@@ -113,9 +113,10 @@ end
 
 # GPU kernel: grid-stride loop, each thread processes one or more elements
 KA.@kernel function _execute_task_kernel!(task, cache, @Const(items), num_items::Ti, nblocks::Ti, nthreads::Ti) where {Ti <: Integer}
-    thread_id = KA.@index(Global, Linear)
-    local_tid = KA.@index(Local, Linear)
-    groupsize = KA.@groupsize()[1]
+    # KA.@index returns Int — convert to Ti for type-uniform DeviceStridedIterator
+    thread_id = Ti(KA.@index(Global, Linear))
+    local_tid = Ti(KA.@index(Local, Linear))
+    groupsize = Ti(KA.@groupsize()[1])
     stride = nblocks * nthreads
 
     # Destructure the subdomain cache
@@ -141,24 +142,31 @@ function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
 
     Ti = index_type(device)
     for items in itemsets
-        num_items         = convert(Ti, length(items))
-        threads_per_block = convert(Ti, min(num_items, something(device.threads, convert(Ti, 256))))
-        # TODO: should we cap the number of blocks to avoid oversubscription?
-        nblocks           = convert(Ti, something(device.blocks, cld(num_items, threads_per_block)))
+        # Convert items to a plain GPU array (OrderedSet / Set not GPU-compatible)
+        items_gpu = Adapt.adapt(backend, Ti.(collect(items)))
 
-        kernel = _execute_task_kernel!(backend, threads_per_block)
+        num_items         = convert(Ti, length(items))
+        threads_per_block = convert(Ti, min(num_items, device.threads))
+        nblocks           = convert(Ti, cld(num_items, threads_per_block))
+
+        # KA requires Int for groupsize/ndrange (not Int32)
+        kernel = _execute_task_kernel!(backend, Int(threads_per_block))
         kernel(
             task,
             cache,
-            items,
+            items_gpu,
             num_items,
             nblocks,
             threads_per_block;
-            ndrange = nblocks * threads_per_block
+            ndrange = Int(nblocks * threads_per_block)
         )
         KA.synchronize(backend)
     end
 end
+
+# Adapt helper: CPU → identity, GPU → use backend adaptor (Array → ROCArray/CuArray)
+_adapt_for_device(::AbstractCPUDevice, x) = x
+_adapt_for_device(device::AbstractGPUDevice, x) = Adapt.adapt(default_backend(device), x)
 
 # KA compat
 default_backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
@@ -177,29 +185,27 @@ max_registers_per_block(device::AbstractGPUDevice) = error("Load the GPU package
 # Compute threads per block — must match kernel launch in execute_task_on_device!
 function _compute_groupsize(device::AbstractGPUDevice, ncells::Integer)
     Ti = index_type(device)
-    return convert(Ti, min(ncells, something(device.threads, convert(Ti, 256))))
+    return convert(Ti, min(ncells, device.threads))
 end
 
 # Compute total number of GPU threads — must match kernel launch in execute_task_on_device!
 function compute_total_nthreads(device::AbstractGPUDevice, ncells::Integer)
     Ti = index_type(device)
     threads_per_block = _compute_groupsize(device, ncells)
-    nblocks           = convert(Ti, something(device.blocks, cld(ncells, threads_per_block)))
+    nblocks           = convert(Ti, cld(ncells, threads_per_block))
     return convert(Ti, nblocks * threads_per_block)
 end
 
-## Resolved device: concrete threads/blocks (no `nothing`), used during GPU setup.
-## After resolving, `total_nthreads(device)` returns the total thread count.
 total_nthreads(device::AbstractGPUDevice) = device.threads * device.blocks
 
 function resolve_launch_config(device::CudaDevice{V,I}, ncells::Integer) where {V,I}
     tpb     = _compute_groupsize(device, ncells)
-    nblocks = convert(I, something(device.blocks, cld(ncells, tpb)))
+    nblocks = convert(I, cld(ncells, tpb))
     return CudaDevice{V,I}(tpb, nblocks)
 end
 
 function resolve_launch_config(device::RocDevice{V,I}, ncells::Integer) where {V,I}
     tpb     = _compute_groupsize(device, ncells)
-    nblocks = convert(I, something(device.blocks, cld(ncells, tpb)))
+    nblocks = convert(I, cld(ncells, tpb))
     return RocDevice{V,I}(tpb, nblocks)
 end

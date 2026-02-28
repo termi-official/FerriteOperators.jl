@@ -55,7 +55,7 @@ buffer_memory_per_element(::LinearBufferRequirement, ndofs, ::Type{T}) where T  
 function select_memory_type(device::AbstractGPUDevice, req::AbstractTaskBufferRequirement, ndofs::Int)
     T = value_type(device)
     mem = buffer_memory_per_element(req, ndofs, T)
-    groupsize = Int(something(device.threads, 256))
+    groupsize = Int(device.threads)
 
     # Register: 4 bytes per register. Use at most 50% of per-thread register file
     # to leave room for compiler-generated register usage (loop counters, intermediates).
@@ -303,13 +303,13 @@ end
 
 function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy{<:AbstractCPUDevice}, integrator, dh)
     (;device) = strategy
-    eadata = Adapt.adapt(device, EAVector(dh)) # will only adapt if device <: AbstractGPUDevice
+    eadata = _adapt_for_device(device, EAVector(dh))
     return ElementAssemblyOperatorStrategy(device, eadata)
 end
 
 function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy{<:AbstractGPUDevice}, integrator, dh)
     (;device) = strategy
-    eadata = Adapt.adapt(device, EAVector(dh))
+    eadata = _adapt_for_device(device, EAVector(dh))
     return ElementAssemblyOperatorStrategy(device, eadata)
 end
 

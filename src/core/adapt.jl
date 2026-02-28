@@ -18,3 +18,20 @@ Adapt.adapt_structure(to, dc::GPUAssemblyCache) =
         Adapt.adapt(to, dc.ivh),
         Adapt.adapt(to, dc.element_cache_factory),
     )
+
+## SubdomainAssemblyTaskBuffer (@concrete) — passed as `cache` to GPU kernel ##
+Adapt.adapt_structure(to, b::SubdomainAssemblyTaskBuffer) =
+    SubdomainAssemblyTaskBuffer(
+        Adapt.adapt(to, b.u),
+        Adapt.adapt(to, b.p),
+        Adapt.adapt(to, b.subdomain),
+    )
+
+## ElementAssemblyStrategyCache (@concrete) — nested inside SubdomainCache ##
+# `device` is CPU-only (launch config); the kernel only reads `device_cache`.
+# Drop it to avoid adapting non-isbitstype RocDevice/CudaDevice.
+Adapt.adapt_structure(to, sc::ElementAssemblyStrategyCache) =
+    ElementAssemblyStrategyCache(
+        nothing,
+        Adapt.adapt(to, sc.device_cache),
+    )

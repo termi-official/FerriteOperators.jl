@@ -24,6 +24,13 @@ function Adapt.adapt_structure(::AbstractGPUDevice, cv::CellValues)
     error("adapt_structure(::AbstractGPUDevice, ::CellValues) is not implemented yet — use DeviceCellValues instead")
 end
 
+## InternalVariableHandler (@concrete) ##
+Adapt.adapt_structure(to, ivh::InternalVariableHandler) =
+    InternalVariableHandler(
+        Adapt.adapt(to, ivh.internal_variable_offsets),
+        ivh.ndofs,
+    )
+
 ## Device types (GPU) ##
 # Plain structs with GPU arrays: Adapt.@adapt_structure auto-generates
 # adapt_structure that recurses into all fields.

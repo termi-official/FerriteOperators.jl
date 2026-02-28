@@ -32,8 +32,6 @@ end
     return SimpleBilinearDiffusionElementCache(cache.D, cv)
 end
 
-Adapt.@adapt_structure SimpleBilinearDiffusionElementCache
-
 function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBilinearDiffusionElementCache, time)
     (; cellvalues, D) = element_cache
     n_basefuncs = getnbasefunctions(cellvalues)
