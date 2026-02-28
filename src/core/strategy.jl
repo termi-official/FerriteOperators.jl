@@ -53,21 +53,24 @@ buffer_memory_per_element(::NonlinearBufferRequirement, ndofs, ::Type{T}) where 
 buffer_memory_per_element(::LinearBufferRequirement, ndofs, ::Type{T}) where T    = ndofs * sizeof(T)
 
 function select_memory_type(device::AbstractGPUDevice, req::AbstractTaskBufferRequirement, ndofs::Int)
-    # T   = value_type(device)
-    # mem = buffer_memory_per_element(req, ndofs, T)
+    T = value_type(device)
+    mem = buffer_memory_per_element(req, ndofs, T)
+    groupsize = Int(something(device.threads, 256))
 
-    # # Heuristic: register budget ≈ max_registers * 4 bytes, use at most 25%
-    # register_budget = max_registers_per_block(device) * 4 ÷ 4
-    # if mem <= register_budget
-    #     return GPURegisterMemoryType()
-    # end
+    # Register: 4 bytes per register. Use at most 50% of per-thread register file
+    # to leave room for compiler-generated register usage (loop counters, intermediates).
+    regs_per_thread = max_registers_per_block(device) ÷ groupsize
+    register_budget = regs_per_thread * 2  # 50% of (regs × 4 bytes)
+    if mem <= register_budget
+        return GPURegisterMemoryType()
+    end
 
-    # # Shared memory: budget per thread ≈ total shared / 256 threads (conservative)
-    # shared_budget = max_sharedmem_per_block(device) ÷ 256
-    # if mem <= shared_budget
-    #     return GPUSharedMemoryType()
-    # end
-    # TODO: implement this efficiently.
+    # Shared: per-thread share of block-level shared memory.
+    shared_budget = max_sharedmem_per_block(device) ÷ groupsize
+    if mem <= shared_budget
+        return GPUSharedMemoryType()
+    end
+
     return GPUGlobalMemoryType()
 end
 
@@ -203,11 +206,29 @@ function allocate_local_cache(::LinearBufferRequirement, ::GPUGlobalMemoryType, 
 end
 
 @concrete struct SimpleAssemblyCache
-    # NOTE: idea here is instead of allocating useless memory (also not expressive development-wise), we allocate only the needed local cache. 
+    # NOTE: idea here is instead of allocating useless memory (also not expressive development-wise), we allocate only the needed local cache.
     local_cache # (either BilinearLocalCache, NonlinearLocalCache, or LinearLocalCache)
     cell
     ivh
     element
+end
+
+# GPU analog of SimpleAssemblyCache — holds factories instead of concrete caches.
+# Each factory's `materialize(factory, tid)` creates the per-thread cache inside the kernel.
+@concrete struct GPUAssemblyCache
+    local_cache_factory   # AbstractGPULocalCacheFactory (Ke/ue/re pools)
+    cell_cache_factory    # DeviceCellCacheFactory
+    ivh                   # InternalVariableHandler (GPU-adapted, read-only shared)
+    element_cache_factory # e.g. SimpleBilinearDiffusionElementCache{<:DeviceCellValuesFactory}
+end
+
+# Materialize all GPU factories into a SimpleAssemblyCache (same shape as CPU).
+# Called inside the kernel — each thread gets its own materialized caches.
+@inline function materialize(dc::GPUAssemblyCache, tid, local_tid, groupsize)
+    local_cache = materialize(dc.local_cache_factory, tid, local_tid, groupsize)
+    cell        = materialize(dc.cell_cache_factory, tid)
+    element     = materialize(dc.element_cache_factory, tid)
+    return SimpleAssemblyCache(local_cache, cell, dc.ivh, element)
 end
 
 function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh)
@@ -333,18 +354,26 @@ matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMat
 ## GPU ##
 
 function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh)
-    (; device) = strategy
     (; dh)     = sdh
     ncells     = getncells(get_grid(dh))
+    # Resolve device launch config: threads/blocks become concrete (no `nothing`).
+    # After this, total_nthreads(device) returns the total thread count.
+    device     = resolve_launch_config(strategy.device, ncells)
     N          = ndofs_per_cell(sdh)
     mem_type   = select_memory_type(device, req, N)
-    # Compute total threads consistently with kernel launch (see execute_task_on_device!)
-    total_nthreads = compute_total_nthreads(device, ncells)
+    nt         = total_nthreads(device)
     # allocate_local_cache returns an AbstractGPULocalCacheFactory:
     # - RegisterLocalCacheFactory / SharedLocalCacheFactory (zero-size isbitstype)
     # - BilinearGlobalLocalCacheFactory / NonlinearGlobalLocalCacheFactory / LinearGlobalLocalCacheFactory (GPU array pools)
     # All support `materialize(factory, tid, local_tid, groupsize)` in the kernel.
-    device_cache = allocate_local_cache(req, mem_type, device, sdh; total_nthreads)
-    # TODO: adapt cell, ivh, element for GPU
+    local_cache_factory   = allocate_local_cache(req, mem_type, device, sdh; total_nthreads=nt)
+    cell_cache_factory    = DeviceCellCacheFactory(sdh, device; total_nthreads=nt)
+    gpu_ivh               = duplicate_for_device(device, ivh)
+    # duplicate_for_device dispatches on device type:
+    # CPU → deep copy CellValues (parallel_duplication_api.jl)
+    # GPU → DeviceCellValuesFactory (device_cellvalues.jl), using total_nthreads(device)
+    element_cache_factory = duplicate_for_device(device, element_cache)
+
+    device_cache = GPUAssemblyCache(local_cache_factory, cell_cache_factory, gpu_ivh, element_cache_factory)
     return ElementAssemblyStrategyCache(device, device_cache)
 end

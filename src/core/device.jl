@@ -187,3 +187,19 @@ function compute_total_nthreads(device::AbstractGPUDevice, ncells::Integer)
     nblocks           = convert(Ti, something(device.blocks, cld(ncells, threads_per_block)))
     return convert(Ti, nblocks * threads_per_block)
 end
+
+## Resolved device: concrete threads/blocks (no `nothing`), used during GPU setup.
+## After resolving, `total_nthreads(device)` returns the total thread count.
+total_nthreads(device::AbstractGPUDevice) = device.threads * device.blocks
+
+function resolve_launch_config(device::CudaDevice{V,I}, ncells::Integer) where {V,I}
+    tpb     = _compute_groupsize(device, ncells)
+    nblocks = convert(I, something(device.blocks, cld(ncells, tpb)))
+    return CudaDevice{V,I}(tpb, nblocks)
+end
+
+function resolve_launch_config(device::RocDevice{V,I}, ncells::Integer) where {V,I}
+    tpb     = _compute_groupsize(device, ncells)
+    nblocks = convert(I, something(device.blocks, cld(ncells, tpb)))
+    return RocDevice{V,I}(tpb, nblocks)
+end

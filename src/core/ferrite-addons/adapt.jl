@@ -23,3 +23,12 @@ Adapt.adapt_structure(::AbstractCPUDevice, cv::CellValues) = cv
 function Adapt.adapt_structure(::AbstractGPUDevice, cv::CellValues)
     error("adapt_structure(::AbstractGPUDevice, ::CellValues) is not implemented yet — use DeviceCellValues instead")
 end
+
+## Device types (GPU) ##
+# Plain structs with GPU arrays: Adapt.@adapt_structure auto-generates
+# adapt_structure that recurses into all fields.
+Adapt.@adapt_structure DeviceGrid
+Adapt.@adapt_structure DeviceDofHandlerData
+Adapt.@adapt_structure DeviceSubDofHandler
+Adapt.@adapt_structure DeviceCellCacheFactory
+Adapt.@adapt_structure DeviceCellValuesFactory

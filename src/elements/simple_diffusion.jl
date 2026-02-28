@@ -14,17 +14,25 @@ end
 """
 The cache associated with [`BilinearDiffusionIntegrator`](@ref) to assemble element diffusion matrices.
 """
-struct SimpleBilinearDiffusionElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+struct SimpleBilinearDiffusionElementCache{CV} <: AbstractVolumetricElementCache
     D::Float64
     cellvalues::CV
 end
-
+# NOTE: for `CPU` will do depp copy, for `GPU` will create a pool 
 function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache)
     return SimpleBilinearDiffusionElementCache(
         cache.D,
         duplicate_for_device(device, cache.cellvalues),
     )
 end
+
+## GPU: materialize replaces DeviceCellValuesFactory with DeviceCellValues (per-thread views).
+@inline function materialize(cache::SimpleBilinearDiffusionElementCache{<:DeviceCellValuesFactory}, tid)
+    cv = materialize(cache.cellvalues, tid)
+    return SimpleBilinearDiffusionElementCache(cache.D, cv)
+end
+
+Adapt.@adapt_structure SimpleBilinearDiffusionElementCache
 
 function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBilinearDiffusionElementCache, time)
     (; cellvalues, D) = element_cache

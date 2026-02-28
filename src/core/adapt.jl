@@ -10,3 +10,11 @@ Adapt.adapt_structure(to, f::NonlinearGlobalLocalCacheFactory) =
 
 Adapt.adapt_structure(to, f::LinearGlobalLocalCacheFactory) =
     LinearGlobalLocalCacheFactory(Adapt.adapt(to, f.re_pool))
+
+Adapt.adapt_structure(to, dc::GPUAssemblyCache) =
+    GPUAssemblyCache(
+        Adapt.adapt(to, dc.local_cache_factory),
+        Adapt.adapt(to, dc.cell_cache_factory),
+        Adapt.adapt(to, dc.ivh),
+        Adapt.adapt(to, dc.element_cache_factory),
+    )
