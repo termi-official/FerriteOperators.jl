@@ -26,10 +26,8 @@ end
 
 Ferrite.get_coordinate_type(::DeviceGrid{sdim, <:Any, T}) where {sdim, T} = Vec{sdim, T}
 
-@inline Ferrite.getcells(grid::DeviceGrid, v::Ti) where {Ti <: Integer} = grid.cells[v]
-@inline Ferrite.getcells(grid::DeviceGrid, v::Int) = grid.cells[v]
+@inline Ferrite.getcells(grid::DeviceGrid, v::Integer) = grid.cells[v]
 @inline Ferrite.getnodes(grid::DeviceGrid, v::Integer) = grid.nodes[v]
-@inline Ferrite.getnodes(grid::DeviceGrid, v::Int) = grid.nodes[v]
 
 function _getcoordinates(grid::DeviceGrid, e::Ti) where {Ti <: Integer}
     CT = Ferrite.get_coordinate_type(grid)
@@ -44,4 +42,3 @@ function _getcoordinates(grid::DeviceGrid, e::Ti) where {Ti <: Integer}
 end
 
 Ferrite.getcoordinates(grid::DeviceGrid, e::Integer) = _getcoordinates(grid, e)
-Ferrite.getcoordinates(grid::DeviceGrid, e::Int) = _getcoordinates(grid, e)
