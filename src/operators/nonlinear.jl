@@ -107,11 +107,10 @@ function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector,
         # Function barrier
         task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
         # TODO: re-enable when TimerOutputs is GPU-compatible
-        # @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
-        execute_task_on_device!(task, strategy.device, task_cache)
+        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
     end
 
-    finalize_assembly!(assembler, strategy.device)
+    finalize_assembly!(assembler)
 end
 function update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
     (; J, strategy, subdomain_caches) = op
@@ -123,11 +122,10 @@ function update_linearization!(op::LinearizedFerriteOperator, residual::Abstract
         # Function barrier
         task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
         # TODO: re-enable when TimerOutputs is GPU-compatible
-        # @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
-        execute_task_on_device!(task, strategy.device, task_cache)
+        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
     end
 
-    finalize_assembly!(assembler, strategy.device)
+    finalize_assembly!(assembler)
 end
 function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
     (; strategy, subdomain_caches) = op
@@ -143,7 +141,7 @@ function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::A
         execute_task_on_device!(task, strategy.device, task_cache)
     end
 
-    finalize_assembly!(assembler, strategy.device)
+    finalize_assembly!(assembler)
 end
 
 """

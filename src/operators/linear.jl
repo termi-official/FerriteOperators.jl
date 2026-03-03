@@ -43,5 +43,5 @@ function update_operator!(op::LinearFerriteOperator, p)
         execute_task_on_device!(task, strategy.device, task_cache)
     end
 
-    finalize_assembly!(assembler, strategy.device)
+    finalize_assembly!(assembler)
 end

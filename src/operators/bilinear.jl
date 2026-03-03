@@ -42,7 +42,7 @@ function update_operator!(op::BilinearFerriteOperator, p)
         execute_task_on_device!(task, strategy.device, task_cache)
     end
 
-    finalize_assembly!(assembler, strategy.device)
+    finalize_assembly!(assembler)
 end
 
 mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector) = mul!(out, op.A, in)

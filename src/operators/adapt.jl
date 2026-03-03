@@ -4,6 +4,7 @@
 # Passed as `task.inner_assembler` into the GPU kernel.
 Adapt.adapt_structure(to, a::EAOperatorAssembler) =
     EAOperatorAssembler(
+        a.device,
         Adapt.adapt(to, a.K_element),
         Adapt.adapt(to, a.f_element),
         Adapt.adapt(to, a.f),

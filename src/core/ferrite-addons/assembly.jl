@@ -14,8 +14,5 @@ function Ferrite.assemble!(f::AbstractVector, cell::CellCache, fe::AbstractVecto
 end
 finalize_assembly!(assembler::Ferrite.AbstractAssembler) = nothing
 finalize_assembly!(assembler::AbstractVector) = nothing
-# Device-accepting overloads (device only needed by EAOperatorAssembler)
-finalize_assembly!(assembler::Ferrite.AbstractAssembler, device) = nothing
-finalize_assembly!(assembler::AbstractVector, device) = nothing
 
 allocate_vector(::Vector{T}, dh) where T = zeros(T, ndofs(dh))

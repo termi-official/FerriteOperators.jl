@@ -185,6 +185,7 @@ end
 
 
 @concrete struct EAOperatorAssembler <: Ferrite.AbstractAssembler
+    device
     K_element
     f_element
     f
@@ -194,17 +195,17 @@ duplicate_for_device(device, assembler::EAOperatorAssembler) = assembler
 function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, f::Vector{T}; fillzero::Bool=true) where T
     fillzero && fill!(f, 0.0)
     fillzero && fill!(strategy.eadata, 0.0)
-    return EAOperatorAssembler(nothing, strategy.eadata, f)
+    return EAOperatorAssembler(strategy.device, nothing, strategy.eadata, f)
 end
 function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, element_matrix::EAOperator; fillzero::Bool=true)
     fillzero && fill!(element_matrix.element_matrices.data, 0.0)
-    return EAOperatorAssembler(element_matrix, nothing, nothing)
+    return EAOperatorAssembler(strategy.device, element_matrix, nothing, nothing)
 end
 function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, element_matrix::EAOperator, f::AbstractVector; fillzero::Bool=true)
     fillzero && fill!(element_matrix.element_matrices.data, 0.0)
     fillzero && fill!(f, 0.0)
     fillzero && fill!(strategy.eadata, 0.0)
-    return EAOperatorAssembler(element_matrix, strategy.eadata, f)
+    return EAOperatorAssembler(strategy.device, element_matrix, strategy.eadata, f)
 end
 
 @inline function _ea_assemble_matrix!(assembler::EAOperatorAssembler, cell, Kₑ::AbstractMatrix)
@@ -260,10 +261,10 @@ end
     end
 end
 
-function finalize_assembly!(assembler::EAOperatorAssembler, device)
+function finalize_assembly!(assembler::EAOperatorAssembler)
     assembler.f === nothing && return
 
-    ea_collapse!(assembler.f, assembler.f_element, device)
+    ea_collapse!(assembler.f, assembler.f_element, assembler.device)
 end
 
 # TODO support for DG
