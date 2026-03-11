@@ -45,7 +45,7 @@ end
 # and filled coords — equivalent to reinit! but works on immutable structs.
 function get_task_buffer_for_device(task, u, p, device_cache::GPUAssemblyCache, tid, taskid)
     local_cache = device_cache.local_cache_container[tid]
-    cell        = device_cache.cell_cache_container[tid](taskid)
+    cell        = device_cache.cell_cache_container[tid](Int(taskid)) # functor accepts only cellid::Int
     element     = device_cache.element_cache_container[tid]
     GenericTaskBuffer(u, p, element, local_cache, cell, device_cache.ivh)
 end
