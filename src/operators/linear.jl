@@ -38,7 +38,7 @@ function update_operator!(op::LinearFerriteOperator, p)
     for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
         # Function barrier
         task_cache = SubdomainAssemblyTaskBuffer(nothing, p, subdomain_cache)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
+        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, subdomain_cache.strategy_cache.device, task_cache)
     end
 
     finalize_assembly!(assembler)
