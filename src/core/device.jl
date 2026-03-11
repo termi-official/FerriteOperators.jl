@@ -103,11 +103,12 @@ RocDevice(threads::IndexType, blocks::IndexType) where IndexType = RocDevice{Flo
 KA.@kernel function _execute_task_kernel!(task, u, p, device_cache, @Const(items), num_items::Ti) where {Ti <: Integer}
     thread_id = convert(Ti, KA.@index(Global, Linear))
 
-    task_buffer = get_task_buffer_for_device(task, u, p, device_cache, thread_id)
-
     for idx in thread_id:convert(Ti, KA.@ndrange()[1]):num_items
         taskid = items[idx]
-        reinit!(task_buffer, taskid)
+        # Use the ImmutableCellCache functor: creates a new cache with correct cellid + fills coords.
+        # This is the GPU-compatible equivalent of reinit!(cell, taskid) — it also updates cellid,
+        # which reinit! cannot do since ImmutableCellCache is immutable.
+        task_buffer = get_task_buffer_for_device(task, u, p, device_cache, thread_id, taskid)
         execute_task_on_single_cell!(task, task_buffer)
     end
 end

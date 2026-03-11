@@ -40,10 +40,12 @@ function get_task_buffer_for_device(task, u, p, device_cache::ThreadedAssemblyCa
     GenericTaskBuffer(u, p, element, local_cache, cell, ivh)
 end
 
-# GPU: index into each container by thread id, then wrap into GenericTaskBuffer.
-function get_task_buffer_for_device(task, u, p, device_cache::GPUAssemblyCache, tid)
+# GPU: index into each container by thread id + cell id, then wrap into GenericTaskBuffer.
+# Uses the ImmutableCellCache functor cc[tid](taskid) to get a cache with the correct cellid
+# and filled coords — equivalent to reinit! but works on immutable structs.
+function get_task_buffer_for_device(task, u, p, device_cache::GPUAssemblyCache, tid, taskid)
     local_cache = device_cache.local_cache_container[tid]
-    cell        = device_cache.cell_cache_container[tid]
+    cell        = device_cache.cell_cache_container[tid](taskid)
     element     = device_cache.element_cache_container[tid]
     GenericTaskBuffer(u, p, element, local_cache, cell, device_cache.ivh)
 end
