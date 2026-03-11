@@ -226,7 +226,6 @@ end
     return nothing
 end
 
-# CPU: CellCache dispatch
 Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, Kₑ::AbstractMatrix) = _ea_assemble_matrix!(a, c, Kₑ)
 Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, rₑ::AbstractVector) = _ea_assemble_vector!(a, c, rₑ)
 function Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, Kₑ::AbstractMatrix, rₑ::AbstractVector)
@@ -234,10 +233,10 @@ function Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, Kₑ::AbstractM
     _ea_assemble_vector!(a, c, rₑ)
 end
 
-# GPU: DeviceCellCache dispatch
-Ferrite.assemble!(a::EAOperatorAssembler, c::DeviceCellCache, Kₑ::AbstractMatrix) = _ea_assemble_matrix!(a, c, Kₑ)
-Ferrite.assemble!(a::EAOperatorAssembler, c::DeviceCellCache, rₑ::AbstractVector) = _ea_assemble_vector!(a, c, rₑ)
-function Ferrite.assemble!(a::EAOperatorAssembler, c::DeviceCellCache, Kₑ::AbstractMatrix, rₑ::AbstractVector)
+# TODO: is it better if we created AbstractCellCache in Ferrite.jl ? 
+Ferrite.assemble!(a::EAOperatorAssembler, c::ImmutableCellCache, Kₑ::AbstractMatrix) = _ea_assemble_matrix!(a, c, Kₑ)
+Ferrite.assemble!(a::EAOperatorAssembler, c::ImmutableCellCache, rₑ::AbstractVector) = _ea_assemble_vector!(a, c, rₑ)
+function Ferrite.assemble!(a::EAOperatorAssembler, c::ImmutableCellCache, Kₑ::AbstractMatrix, rₑ::AbstractVector)
     _ea_assemble_matrix!(a, c, Kₑ)
     _ea_assemble_vector!(a, c, rₑ)
 end
@@ -297,8 +296,6 @@ function create_system_matrix(strategy::ElementAssemblyOperatorStrategy, dh)
     element_matrices = GenericIndexedData(zeros(ValueType, element_offset-1), matrix_index_structure)
     # FIXME pass EA info down via device cache instead of hardcoded EAViewCache
     op = EAOperator(device, EAViewCache(), element_matrices, element_vector_info, element_vector_info)
-    # Use the GPU backend adaptor (ROCBackend/CUDABackend) so AMDGPU/CUDA's
-    # Adapt.adapt_storage converts Array → ROCArray/CuArray.
-    # For CPU devices, just return as-is.
+    # CPU -> as is, GPU → adapt for GPU
     return _adapt_for_device(device, op)
 end

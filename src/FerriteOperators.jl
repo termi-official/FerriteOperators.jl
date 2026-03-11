@@ -24,6 +24,9 @@ import Ferrite: get_coordinate_type, getspatialdim
 import Ferrite: reference_shape_value
 
 include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or GPUs)
+# Bridge methods for Ferrite's ImmutableCellCache (GPU cell cache from FerriteKAExt)
+include("core/ferrite-addons/device_dofhandler.jl")
+
 include("core/strategy.jl")  # Utilities to control the assembly strategy
 include("core/tasks.jl")     # Contains the basic task system
 include("core/adapt.jl")     # Adapt.adapt_structure for GPU local cache factories + core types
@@ -39,11 +42,6 @@ include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
 include("core/ferrite-addons/internal_variable_handler.jl")
-include("core/ferrite-addons/device_grid.jl")
-include("core/ferrite-addons/device_dofhandler.jl")
-include("core/ferrite-addons/device_iterator.jl")
-include("core/ferrite-addons/device_cellvalues.jl")
-include("core/ferrite-addons/adapt.jl")
 
 # Some generic integrator types
 abstract type AbstractBilinearIntegrator end

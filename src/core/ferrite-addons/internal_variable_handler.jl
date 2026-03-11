@@ -20,6 +20,11 @@ function duplicate_for_device(device, ivh::InternalVariableHandler)
     )
 end
 
+Adapt.adapt_structure(to, ivh::InternalVariableHandler) =
+    InternalVariableHandler(
+        Adapt.adapt(to, ivh.internal_variable_offsets),
+        ivh.ndofs,
+    )
 # # Utils to distribute and visualize local variables
 # struct QuadratureInterpolation{RefShape, QR <: QuadratureRule{RefShape}} <:
 #        Ferrite.ScalarInterpolation{RefShape, -1}

@@ -1,7 +1,3 @@
-## Adapt.adapt_structure for GPU types ##
-# @concrete structs need explicit adapt_structure so KA can convert
-# ROCArray/CuArray → ROCDeviceArray/CuDeviceArray at kernel launch.
-
 Adapt.adapt_structure(to, c::BilinearLocalCacheContainer) =
     BilinearLocalCacheContainer(Adapt.adapt(to, c.Ke_pool))
 

@@ -79,7 +79,7 @@ struct CudaDevice{ValueType, IndexType} <: AbstractGPUDevice{ValueType, IndexTyp
     blocks::IndexType
 end
 
-CudaDevice() = CudaDevice{Float32, Int32}(Int32(256), Int32(20))
+CudaDevice() = CudaDevice{Float32, Int32}(Int32(0), Int32(0))
 CudaDevice(threads::IndexType, blocks::IndexType) where IndexType = CudaDevice{Float32, IndexType}(threads, blocks)
 
 """
@@ -92,43 +92,20 @@ struct RocDevice{ValueType, IndexType} <: AbstractGPUDevice{ValueType, IndexType
     blocks::IndexType
 end
 
-RocDevice() = RocDevice{Float64, Int32}(Int32(256), Int32(20))
+RocDevice() = RocDevice{Float64, Int32}(Int32(0), Int32(0))
 RocDevice(threads::IndexType, blocks::IndexType) where IndexType = RocDevice{Float64, IndexType}(threads, blocks)
 
 # Logic-agnostic grid-stride iterator
-struct DeviceStridedIterator{Ti <: Integer}
-    start::Ti
-    stride::Ti
-    stop::Ti
-end
 
-@inline function Base.iterate(iter::DeviceStridedIterator)
-    iter.start > iter.stop ? nothing : (iter.start, iter.start)
-end
 
-@inline function Base.iterate(iter::DeviceStridedIterator, state)
-    next = state + iter.stride
-    next > iter.stop ? nothing : (next, next)
-end
+# GPU kernel: grid-stride loop, each thread processes one or more elements.
+# Receives already-unpacked u, p, device_cache — no SubdomainCache nesting on GPU.
+KA.@kernel function _execute_task_kernel!(task, u, p, device_cache, @Const(items), num_items::Ti) where {Ti <: Integer}
+    thread_id = convert(Ti, KA.@index(Global, Linear))
 
-# GPU kernel: grid-stride loop, each thread processes one or more elements
-KA.@kernel function _execute_task_kernel!(task, cache, @Const(items), num_items::Ti, nblocks::Ti, nthreads::Ti) where {Ti <: Integer}
-    # KA.@index returns Int — convert to Ti for type-uniform DeviceStridedIterator
-    thread_id = Ti(KA.@index(Global, Linear))
-    local_tid = Ti(KA.@index(Local, Linear))
-    groupsize = Ti(KA.@groupsize()[1])
-    stride = nblocks * nthreads
+    task_buffer = get_task_buffer_for_device(task, u, p, device_cache, thread_id)
 
-    # Destructure the subdomain cache
-    (; u, p, subdomain) = cache
-    (; strategy_cache) = subdomain
-    (; device_cache) = strategy_cache
-
-    # Materialize local cache: Register → MArrays, Shared → @localmem views, Global → pool views
-    local_cache = materialize(device_cache, thread_id, local_tid, groupsize)
-    task_buffer = get_task_buffer_for_gpu(u, p, local_cache)
-
-    for idx in DeviceStridedIterator(thread_id, stride, num_items)
+    for idx in thread_id:convert(Ti, KA.@ndrange()[1]):num_items
         taskid = items[idx]
         reinit!(task_buffer, taskid)
         execute_task_on_single_cell!(task, task_buffer)
@@ -136,29 +113,28 @@ KA.@kernel function _execute_task_kernel!(task, cache, @Const(items), num_items:
 end
 
 function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
-    #Note: cache here encapsulates three things: 1) subdomain cache, 2) global params, 3) previous solution (case nonlinear)
     backend = default_backend(device)
-    itemsets = get_items(task, cache) # aka what cells to iterate over
+    itemsets = get_items(task, cache)
+
+    #NOTE: we don't pass SubdomainCache to GPU, so we unpack it here and pass the relevant pieces (local_cache) directly to the kernel.
+    ##TODO: Revisit, because this might be suboptimal design-wise. 
+    (; u, p, subdomain) = cache
+    (; strategy_cache) = subdomain
+    (; device_cache) = strategy_cache
 
     Ti = index_type(device)
     for items in itemsets
-        # Convert items to a plain GPU array (OrderedSet / Set not GPU-compatible)
-        items_gpu = Adapt.adapt(backend, Ti.(collect(items)))
+        items_gpu = Adapt.adapt(backend, convert(Vector{Ti}, collect(items)))
 
-        num_items         = convert(Ti, length(items))
-        threads_per_block = convert(Ti, min(num_items, device.threads))
-        nblocks           = convert(Ti, cld(num_items, threads_per_block))
+        num_items = convert(Ti, length(items))
 
-        # KA requires Int for groupsize/ndrange (not Int32)
-        kernel = _execute_task_kernel!(backend, Int(threads_per_block))
+        kernel = _execute_task_kernel!(backend, Int(device.threads))
         kernel(
             task,
-            cache,
+            u, p, device_cache,
             items_gpu,
-            num_items,
-            nblocks,
-            threads_per_block;
-            ndrange = Int(nblocks * threads_per_block)
+            num_items;
+            ndrange = Int(device.blocks * device.threads)
         )
         KA.synchronize(backend)
     end
@@ -183,9 +159,11 @@ max_sharedmem_per_block(device::AbstractGPUDevice) = error("Load the GPU package
 max_registers_per_block(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
 
 # Compute threads per block — must match kernel launch in execute_task_on_device!
+const DEFAULT_GPU_THREADS_PER_BLOCK = 256
 function _compute_groupsize(device::AbstractGPUDevice, ncells::Integer)
     Ti = index_type(device)
-    return convert(Ti, min(ncells, device.threads))
+    max_tpb = iszero(device.threads) ? Ti(DEFAULT_GPU_THREADS_PER_BLOCK) : device.threads
+    return convert(Ti, min(ncells, max_tpb))
 end
 
 # Compute total number of GPU threads — must match kernel launch in execute_task_on_device!

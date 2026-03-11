@@ -21,13 +21,20 @@ function duplicate_for_device(device, fv::FacetValues)
     )
 end
 
-function duplicate_for_device(device, cv::CellValues)
+function duplicate_for_device(device::AbstractCPUDevice, cv::CellValues)
     return CellValues(
         duplicate_for_device(device, cv.fun_values),
         duplicate_for_device(device, cv.geo_mapping),
         duplicate_for_device(device, cv.qr),
         duplicate_for_device(device, cv.detJdV),
     )
+end
+
+## GPU duplicate_for_device: CellValues → CellValuesContainer ##
+function duplicate_for_device(device::AbstractGPUDevice, cv::CellValues)
+    backend = default_backend(device)
+    nt = total_nthreads(device)
+    return Ferrite.CellValuesContainer(backend, nt, cv)
 end
 
 function duplicate_for_device(device, v::Ferrite.FunctionValues)

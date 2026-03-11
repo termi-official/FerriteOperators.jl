@@ -1,3 +1,5 @@
+#FIXME: this needs to be revisted
+
 ## EAOperatorAssembler (@concrete) ##
 # Passed as `task.inner_assembler` into the GPU kernel.
 Adapt.adapt_structure(to, a::EAOperatorAssembler) =
@@ -16,6 +18,8 @@ Adapt.@adapt_structure AssembleLinearizationR
 Adapt.@adapt_structure AssembleLinearTerm
 
 ## GenericIndexedData ##
+# Generic `to` so it works both with our device types (setup-time) and
+# KA's KernelAdaptor (kernel-launch-time).
 Adapt.adapt_structure(to, gid::GenericIndexedData) =
     GenericIndexedData(
         Adapt.adapt(to, gid.data),
@@ -30,6 +34,8 @@ Adapt.adapt_structure(to, eavec::EAVector) =
     )
 
 ## EAOperator ##
+# `device` and `device_cache` are CPU-only (not accessed in the kernel).
+# Drop them to avoid adapting non-isbitstype fields (e.g. RocDevice with Union fields).
 Adapt.adapt_structure(to, op::EAOperator) =
     EAOperator(
         nothing,

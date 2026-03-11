@@ -40,10 +40,12 @@ function get_task_buffer_for_device(task, u, p, device_cache::ThreadedAssemblyCa
     GenericTaskBuffer(u, p, element, local_cache, cell, ivh)
 end
 
-# GPU: GPUAssemblyCache materializes into SimpleAssemblyCache (same as CPU shape).
-function get_task_buffer_for_gpu(u, p, cache::SimpleAssemblyCache)
-    (; local_cache, cell, ivh, element) = cache
-    GenericTaskBuffer(u, p, element, local_cache, cell, ivh)
+# GPU: index into each container by thread id, then wrap into GenericTaskBuffer.
+function get_task_buffer_for_device(task, u, p, device_cache::GPUAssemblyCache, tid)
+    local_cache = device_cache.local_cache_container[tid]
+    cell        = device_cache.cell_cache_container[tid]
+    element     = device_cache.element_cache_container[tid]
+    GenericTaskBuffer(u, p, element, local_cache, cell, device_cache.ivh)
 end
 
 function load_element_unknowns!(uₑ, buffer::GenericTaskBuffer)

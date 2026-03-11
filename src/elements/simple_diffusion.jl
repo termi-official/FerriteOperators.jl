@@ -26,9 +26,9 @@ function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache
     )
 end
 
-## GPU: materialize replaces DeviceCellValuesFactory with DeviceCellValues (per-thread views).
-@inline function materialize(cache::SimpleBilinearDiffusionElementCache{<:DeviceCellValuesFactory}, tid)
-    cv = materialize(cache.cellvalues, tid)
+## GPU: index per-thread CellValues from CellValuesContainer (views into GPU pools).
+@inline function Base.getindex(cache::SimpleBilinearDiffusionElementCache{<:Ferrite.CellValuesContainer}, tid)
+    cv = cache.cellvalues[tid]
     return SimpleBilinearDiffusionElementCache(cache.D, cv)
 end
 
