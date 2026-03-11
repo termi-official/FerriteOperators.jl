@@ -212,9 +212,11 @@ end
     (; element_matrices) = assembler.K_element
     i = cellid(cell)
     (; offset, nrows, ncols) = element_matrices.index_structure[i]
-    Aₑ_flattened = @view element_matrices.data[offset:(offset+nrows*ncols-1)]
-    Aₑ = reshape(Aₑ_flattened, (nrows, ncols))
-    Aₑ .+= Kₑ
+    for col in 1:ncols
+        for row in 1:nrows
+            element_matrices.data[offset + (col-1)*nrows + row - 1] += Kₑ[row, col]
+        end
+    end
     return nothing
 end
 @inline function _ea_assemble_vector!(assembler::EAOperatorAssembler, cell, rₑ::AbstractVector)
