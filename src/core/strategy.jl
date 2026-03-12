@@ -211,11 +211,11 @@ end
 end
 
 function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:SequentialCPUDevice}, integrator, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, req, element_cache, ivh, sdh, getncells(get_grid(sdh.dh)))
+    return _setup_element_strategy_cache_cpu(strategy, integrator, element_cache, ivh, sdh, getncells(get_grid(sdh.dh)))
 end
 
 function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:PolyesterDevice}, integrator, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, req, element_cache, ivh, sdh, strategy.device.chunksize)
+    return _setup_element_strategy_cache_cpu(strategy, integrator, element_cache, ivh, sdh, strategy.device.chunksize)
 end
 
 function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStrategy, integrator, element_cache, ivh, sdh, chunksize)
