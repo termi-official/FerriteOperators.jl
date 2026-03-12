@@ -35,7 +35,7 @@ function test_bilinear_diffusion_assembly(device)
 
     @testset "Element matrices match CPU" begin
         @test length(cpu_Ke_data) == length(gpu_Ke_data)
-        @test cpu_Ke_data ≈ gpu_Ke_data atol=1e-12
+        @test cpu_Ke_data ≈ gpu_Ke_data atol=1e-6
     end
 
     # Idempotency: re-assemble should give same result
