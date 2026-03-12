@@ -30,7 +30,7 @@ SparseArrays = "1.10.0"
 StaticArrays = "1.9.13"
 TimerOutputs = "0.5.28"
 Unrolled = "0.1.5"
-julia = "1.11"
+julia = "1.10"
 
 [sources]
 Ferrite = {url = "https://github.com/Ferrite-FEM/Ferrite.jl.git", rev = "do/gpu-mwe"}
