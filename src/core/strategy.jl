@@ -157,11 +157,11 @@ end
 end
 
 function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, integrator, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, req, element_cache, ivh, sdh, 1)
+    return _setup_element_strategy_cache_cpu(strategy, integrator, element_cache, ivh, sdh, 1)
 end
 
 function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, integrator, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, req, element_cache, ivh, sdh, strategy.device.chunksize)
+    return _setup_element_strategy_cache_cpu(strategy, integrator, element_cache, ivh, sdh, strategy.device.chunksize)
 end
 
 function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, integrator, element_cache, ivh, sdh, chunksize)
