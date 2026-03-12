@@ -37,10 +37,9 @@ function setup_element_strategy_caches(strategy::ElementAssemblyOperatorStrategy
 end
 
 function setup_subdomain_caches(strategy, integrator, dh)
-    req             = buffer_requirement(integrator)
     element_caches  = setup_elements(integrator, dh)
     ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
-    strategy_caches = setup_element_strategy_caches(strategy, req, element_caches, ivh, dh)
+    strategy_caches = setup_element_strategy_caches(strategy, integrator, element_caches, ivh, dh)
     return [SubdomainCache(
             sdh,
             ivh,
@@ -60,8 +59,8 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 
     return BilinearFerriteOperator(
         A,
-        operator_strategy,
-        subdomain_caches,
+        operator_strategy, #FIXME: doesn't have resolved device
+        subdomain_caches, #FIXME: has resolved device
     )
 end
 

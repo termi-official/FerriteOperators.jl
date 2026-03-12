@@ -7,7 +7,6 @@ end
 struct AssembleLinearTerm{A}
     inner_assembler::A
 end
-buffer_requirement(::AssembleLinearTerm) = LinearBufferRequirement()
 duplicate_for_device(device, task::AssembleLinearTerm{<:AbstractVector}) = task
 duplicate_for_device(device, task::AssembleLinearTerm) = AssembleLinearTerm(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearTerm, task_buffer::GenericTaskBuffer)

@@ -19,13 +19,13 @@ Ferrite.reinit!(buffer::GenericTaskBuffer, taskid) = reinit!(buffer.geometry_cac
 ## Local cache accessors ##
 get_Ke(lc::BilinearLocalCache)  = lc.Ke
 get_Ke(lc::NonlinearLocalCache) = lc.Ke
-get_Ke(::LinearLocalCache)      = error("LinearLocalCache does not have an element matrix (Ke). Check your buffer_requirement.")
+get_Ke(::LinearLocalCache)      = error("LinearLocalCache does not have an element matrix (Ke).")
 
-get_ue(::BilinearLocalCache)    = error("BilinearLocalCache does not have an element unknown vector (ue). Check your buffer_requirement.")
+get_ue(::BilinearLocalCache)    = error("BilinearLocalCache does not have an element unknown vector (ue).")
 get_ue(lc::NonlinearLocalCache) = lc.ue
-get_ue(::LinearLocalCache)      = error("LinearLocalCache does not have an element unknown vector (ue). Check your buffer_requirement.")
+get_ue(::LinearLocalCache)      = error("LinearLocalCache does not have an element unknown vector (ue).")
 
-get_re(::BilinearLocalCache)    = error("BilinearLocalCache does not have an element residual vector (re). Check your buffer_requirement.")
+get_re(::BilinearLocalCache)    = error("BilinearLocalCache does not have an element residual vector (re).")
 get_re(lc::NonlinearLocalCache) = lc.re
 get_re(lc::LinearLocalCache)    = lc.re
 

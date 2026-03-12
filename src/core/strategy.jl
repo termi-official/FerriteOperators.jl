@@ -24,16 +24,6 @@ end
 
 setup_operator_strategy_cache(strategy, integrator, dh) = strategy
 
-## 1. Trait: what does this task need? ##
-abstract type AbstractTaskBufferRequirement end
-struct BilinearBufferRequirement  <: AbstractTaskBufferRequirement end  # Ke + cell + element
-struct NonlinearBufferRequirement <: AbstractTaskBufferRequirement end  # Ke + ue + re + cell + element
-struct LinearBufferRequirement    <: AbstractTaskBufferRequirement end  # re + cell + element
-
-# Integrator → BufferRequirement mapping defined after integrator types (see FerriteOperators.jl)
-# Each task also declares its requirement (overrides in operators/*.jl)
-buffer_requirement(task) = error("buffer_requirement not implemented for $(typeof(task))")
-
 ## Local Cache Container ##
 # GPU allocation occurs in two steps: (1) container creation on the CPU and (2) kernel-side indexing.
 # All containers support `container[tid]` → local cache for that thread (consistent with Ferrite's CellValuesContainer).
@@ -75,12 +65,13 @@ end
 end
 
 
-## Allocate local cache based on requirement ##
-function allocate_local_cache(::BilinearBufferRequirement, element_cache, sdh)
+#TODO: Unify `allocate_local_cache` signature across devices.
+## CPU local cache ##
+function allocate_local_cache(::AbstractBilinearIntegrator, element_cache, sdh)
     BilinearLocalCache(allocate_element_matrix(element_cache, sdh))
 end
 
-function allocate_local_cache(::NonlinearBufferRequirement, element_cache, sdh)
+function allocate_local_cache(::AbstractNonlinearIntegrator, element_cache, sdh)
     NonlinearLocalCache(
         allocate_element_matrix(element_cache, sdh),
         allocate_element_unknown_vector(element_cache, sdh),
@@ -88,11 +79,12 @@ function allocate_local_cache(::NonlinearBufferRequirement, element_cache, sdh)
     )
 end
 
-function allocate_local_cache(::LinearBufferRequirement, element_cache, sdh)
+function allocate_local_cache(::AbstractLinearIntegrator, element_cache, sdh)
     LinearLocalCache(allocate_element_residual_vector(element_cache, sdh))
 end
 
-function allocate_local_cache(::BilinearBufferRequirement, device::AbstractGPUDevice, sdh)
+## GPU local cache ##
+function allocate_local_cache(::AbstractBilinearIntegrator, device::AbstractGPUDevice, sdh)
     backend = default_backend(device)
     N = ndofs_per_cell(sdh)
     T = value_type(device)
@@ -100,7 +92,7 @@ function allocate_local_cache(::BilinearBufferRequirement, device::AbstractGPUDe
     Ke_pool = KA.zeros(backend, T, N, N, nt)
     return BilinearLocalCacheContainer(Ke_pool)
 end
-function allocate_local_cache(::NonlinearBufferRequirement, device::AbstractGPUDevice, sdh)
+function allocate_local_cache(::AbstractNonlinearIntegrator, device::AbstractGPUDevice, sdh)
     backend = default_backend(device)
     N = ndofs_per_cell(sdh)
     T = value_type(device)
@@ -110,7 +102,7 @@ function allocate_local_cache(::NonlinearBufferRequirement, device::AbstractGPUD
     re_pool = KA.zeros(backend, T, N, nt)
     return NonlinearLocalCacheContainer(Ke_pool, ue_pool, re_pool)
 end
-function allocate_local_cache(::LinearBufferRequirement, device::AbstractGPUDevice, sdh)
+function allocate_local_cache(::AbstractLinearIntegrator, device::AbstractGPUDevice, sdh)
     backend = default_backend(device)
     N = ndofs_per_cell(sdh)
     T = value_type(device)
@@ -137,8 +129,8 @@ end
 end
 
 
-function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh)
-    local_cache = allocate_local_cache(req, element_cache, sdh)
+function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, integrator, element_cache, ivh, sdh)
+    local_cache = allocate_local_cache(integrator, element_cache, sdh)
     return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(local_cache, CellCache(sdh), ivh, element_cache))
 end
 
@@ -164,15 +156,15 @@ end
     task_local_caches
 end
 
-function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh)
+function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, integrator, element_cache, ivh, sdh)
     return _setup_element_strategy_cache_cpu(strategy, req, element_cache, ivh, sdh, 1)
 end
 
-function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh)
+function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, integrator, element_cache, ivh, sdh)
     return _setup_element_strategy_cache_cpu(strategy, req, element_cache, ivh, sdh, strategy.device.chunksize)
 end
 
-function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh, chunksize)
+function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, integrator, element_cache, ivh, sdh, chunksize)
     (; device) = strategy
     (; dh)     = sdh
     grid       = get_grid(dh)
@@ -184,7 +176,7 @@ function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, r
 
     task_local_caches = [
         SimpleAssemblyCache(
-            allocate_local_cache(req, element_cache, sdh),
+            allocate_local_cache(integrator, element_cache, sdh),
             CellCache(sdh),
             duplicate_for_device(device, ivh),
             duplicate_for_device(device, element_cache),
@@ -218,15 +210,15 @@ end
     device_cache
 end
 
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:SequentialCPUDevice}, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh)
+function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:SequentialCPUDevice}, integrator, element_cache, ivh, sdh)
     return _setup_element_strategy_cache_cpu(strategy, req, element_cache, ivh, sdh, getncells(get_grid(sdh.dh)))
 end
 
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:PolyesterDevice}, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh)
+function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:PolyesterDevice}, integrator, element_cache, ivh, sdh)
     return _setup_element_strategy_cache_cpu(strategy, req, element_cache, ivh, sdh, strategy.device.chunksize)
 end
 
-function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStrategy, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh, chunksize)
+function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStrategy, integrator, element_cache, ivh, sdh, chunksize)
     (; device) = strategy
     (; dh)     = sdh
     grid       = get_grid(dh)
@@ -236,7 +228,7 @@ function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStra
 
     task_local_caches = [
         SimpleAssemblyCache(
-            allocate_local_cache(req, element_cache, sdh),
+            allocate_local_cache(integrator, element_cache, sdh),
             CellCache(sdh),
             duplicate_for_device(device, ivh),
             duplicate_for_device(device, element_cache),
@@ -252,14 +244,14 @@ matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMat
 ## GPU ##
 
 # GPU setup: takes an adapted GPU SubDofHandler — grid/cell_dofs shared across subdomains.
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, req::AbstractTaskBufferRequirement, element_cache, ivh, sdh, device_sdh, ncells::Integer)
+function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh, device_sdh, ncells::Integer)
     # Resolve device launch config: threads/blocks become concrete.
     # After this, total_nthreads(device) returns the total thread count.
     device     = resolve_launch_config(strategy.device, ncells)
     backend    = default_backend(device)
     nt         = total_nthreads(device)
 
-    local_cache_container    = allocate_local_cache(req, device, sdh)
+    local_cache_container    = allocate_local_cache(integrator, device, sdh)
     cell_cache_container     = Ferrite.CellCacheContainer(backend, nt, device_sdh)
     gpu_ivh                  = duplicate_for_device(device, ivh)
     element_cache_container  = duplicate_for_device(device, element_cache)

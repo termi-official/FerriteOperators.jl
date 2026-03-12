@@ -23,6 +23,14 @@ import Ferrite: vertices, edges, faces, sortedge, sortface
 import Ferrite: get_coordinate_type, getspatialdim
 import Ferrite: reference_shape_value
 
+# Some generic integrator types
+abstract type AbstractBilinearIntegrator end
+abstract type AbstractNonlinearIntegrator end
+abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
+# Simple means that it has a constant number of dofs per quadrature point
+abstract type AbstractSimpleCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
+abstract type AbstractLinearIntegrator end
+
 include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or GPUs)
 # Bridge methods for Ferrite's ImmutableCellCache (GPU cell cache from FerriteKAExt)
 include("core/ferrite-addons/device_dofhandler.jl")
@@ -42,19 +50,6 @@ include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
 include("core/ferrite-addons/internal_variable_handler.jl")
-
-# Some generic integrator types
-abstract type AbstractBilinearIntegrator end
-abstract type AbstractNonlinearIntegrator end
-abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
-# Simple means that it has a constant number of dofs per quadrature point
-abstract type AbstractSimpleCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
-abstract type AbstractLinearIntegrator end
-
-# Integrator → BufferRequirement mapping (known at setup time)
-buffer_requirement(::AbstractBilinearIntegrator)  = BilinearBufferRequirement()
-buffer_requirement(::AbstractNonlinearIntegrator) = NonlinearBufferRequirement()
-buffer_requirement(::AbstractLinearIntegrator)    = LinearBufferRequirement()
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
 include("elements/generic_first_order_time_element.jl")

@@ -1,7 +1,6 @@
 struct AssembleLinearizationJR{A}
     inner_assembler::A
 end
-buffer_requirement(::AssembleLinearizationJR) = NonlinearBufferRequirement()
 duplicate_for_device(device, task::AssembleLinearizationJR) = AssembleLinearizationJR(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearizationJR, task_buffer::GenericTaskBuffer)
     assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_matrix(task_buffer), query_element_residual_buffer(task_buffer))
@@ -19,8 +18,7 @@ function execute_task_on_single_cell!(task::AssembleLinearizationJR, task_buffer
     element    = query_element(task_buffer)
 
     load_element_unknowns!(uₑ, task_buffer)
-    # TODO: re-enable when TimerOutputs is GPU-compatible
-    # @timeit_debug "assemble element" assemble_element!(Jₑ, rₑ, uₑ, cell_cache, element, pₑ)
+
     assemble_element!(Jₑ, rₑ, uₑ, cell_cache, element, pₑ)
     store_condensed_element_unknowns!(uₑ, task_buffer)
 
@@ -30,7 +28,6 @@ end
 struct AssembleLinearizationJ{A}
     inner_assembler::A
 end
-buffer_requirement(::AssembleLinearizationJ) = BilinearBufferRequirement()
 duplicate_for_device(device, task::AssembleLinearizationJ) = AssembleLinearizationJ(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearizationJ, task_buffer::GenericTaskBuffer)
     assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_matrix(task_buffer))
@@ -57,7 +54,6 @@ end
 struct AssembleLinearizationR{A}
     inner_assembler::A
 end
-buffer_requirement(::AssembleLinearizationR) = LinearBufferRequirement()
 duplicate_for_device(device, task::AssembleLinearizationR{<:AbstractVector}) = task
 duplicate_for_device(device, task::AssembleLinearizationR) = AssembleLinearizationR(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearizationR, task_buffer::GenericTaskBuffer)
@@ -106,7 +102,6 @@ function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector,
     for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
         # Function barrier
         task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
-        # TODO: re-enable when TimerOutputs is GPU-compatible
         @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, subdomain_cache.strategy_cache.device, task_cache)
     end
 
