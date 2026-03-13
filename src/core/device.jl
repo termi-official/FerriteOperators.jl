@@ -149,10 +149,6 @@ KA.functional(device::AbstractGPUDevice) = KA.functional(KA.backend(device))
 KA.functional(device::RocDevice) = true
 
 
-## APIs for local buffer management ##
-max_sharedmem_per_block(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
-max_registers_per_block(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
-
 # Compute threads per block — must match kernel launch in execute_task_on_device!
 const DEFAULT_GPU_THREADS_PER_BLOCK = 256
 function _compute_groupsize(device::AbstractGPUDevice, ncells::Integer)
@@ -172,7 +168,8 @@ end
 total_nthreads(device::AbstractGPUDevice) = device.threads * device.blocks
 
 function resolve_device_config(device::D, dh::AbstractDofHandler) where {V, I, D <: AbstractGPUDevice{V,I}}
-    ncells = getncells(get_grid(dh))
+    iszero(device.threads) || iszero(device.blocks) || return device
+    ncells  = getncells(get_grid(dh))
     tpb     = _compute_groupsize(device, ncells)
     nblocks = convert(I, cld(ncells, tpb))
     return D(tpb, nblocks)
