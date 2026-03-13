@@ -27,24 +27,24 @@ function setup_element_strategy_caches(strategy, integrator, element_caches, ivh
 end
 
 function setup_element_strategy_caches(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_caches, ivh, dh)
-    backend = default_backend(strategy.device)
-    dh_gpu  = Adapt.adapt(backend, dh) # HostDofHandler
     return [
-        setup_element_strategy_cache(strategy, integrator, element_cache, ivh, device_sdh)
-        for (element_cache, device_sdh) in zip(element_caches, dh_gpu.subdofhandlers)
+        setup_element_strategy_cache(strategy, integrator, element_cache, ivh, sdh)
+        for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)
     ]
 end
 
 function setup_subdomain_caches(strategy, integrator, dh)
+    backend = KA.backend(strategy.device)
+    dh_device  = Adapt.adapt(backend, dh) # HostDofHandler
     element_caches  = setup_elements(integrator, dh)
     ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
-    strategy_caches = setup_element_strategy_caches(strategy, integrator, element_caches, ivh, dh)
+    strategy_caches = setup_element_strategy_caches(strategy, integrator, element_caches, ivh, dh_device)
     return [SubdomainCache(
             sdh,
             ivh,
             element_cache,
             strategy_cache,
-        ) for (sdh, element_cache, strategy_cache) in zip(dh.subdofhandlers, element_caches, strategy_caches)]
+        ) for (sdh, element_cache, strategy_cache) in zip(dh_device.subdofhandlers, element_caches, strategy_caches)]
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)

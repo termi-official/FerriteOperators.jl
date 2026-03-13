@@ -90,7 +90,7 @@ end
 
 ## GPU local cache ##
 function allocate_local_cache(::AbstractBilinearIntegrator, device::AbstractGPUDevice, sdh)
-    backend = default_backend(device)
+    backend = KA.backend(device)
     N = sdh.ndofs_per_cell
     T = value_type(device)
     nt = total_nthreads(device)
@@ -98,7 +98,7 @@ function allocate_local_cache(::AbstractBilinearIntegrator, device::AbstractGPUD
     return BilinearLocalCacheContainer(Ke_pool)
 end
 function allocate_local_cache(::AbstractNonlinearIntegrator, device::AbstractGPUDevice, sdh)
-    backend = default_backend(device)
+    backend = KA.backend(device)
     N = sdh.ndofs_per_cell
     T = value_type(device)
     nt = total_nthreads(device)
@@ -108,7 +108,7 @@ function allocate_local_cache(::AbstractNonlinearIntegrator, device::AbstractGPU
     return NonlinearLocalCacheContainer(Ke_pool, ue_pool, re_pool)
 end
 function allocate_local_cache(::AbstractLinearIntegrator, device::AbstractGPUDevice, sdh)
-    backend = default_backend(device)
+    backend = KA.backend(device)
     N = sdh.ndofs_per_cell
     T = value_type(device)
     nt = total_nthreads(device)
@@ -253,7 +253,7 @@ matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMat
 function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh)
 
     (; device) = strategy
-    backend    = default_backend(device)
+    backend    = KA.backend(device)
     nt         = total_nthreads(device)
 
     local_cache_container    = allocate_local_cache(integrator, device, sdh)

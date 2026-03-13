@@ -112,7 +112,7 @@ KA.@kernel function _execute_task_kernel!(task, u, p, device_cache, @Const(items
 end
 
 function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
-    backend = default_backend(device)
+    backend = KA.backend(device)
     itemsets = get_items(task, cache)
 
     #NOTE: we don't pass SubdomainCache to GPU, so we unpack it here and pass the relevant pieces (local_cache) directly to the kernel.
@@ -120,18 +120,15 @@ function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
     (; u, p, subdomain) = cache
     (; strategy_cache) = subdomain
     (; device_cache) = strategy_cache
-
     Ti = index_type(device)
     for items in itemsets
-        items_gpu = Adapt.adapt(backend, convert(Vector{Ti}, collect(items)))
-
         num_items = convert(Ti, length(items))
 
         kernel = _execute_task_kernel!(backend, Int(device.threads))
         kernel(
             task,
             u, p, device_cache,
-            items_gpu,
+            items,
             num_items;
             ndrange = Int(device.blocks * device.threads)
         )
@@ -141,14 +138,13 @@ end
 
 # Adapt helper: CPU → identity, GPU → use backend adaptor (Array → ROCArray/CuArray)
 _adapt_for_device(::AbstractCPUDevice, x) = x
-_adapt_for_device(device::AbstractGPUDevice, x) = Adapt.adapt(default_backend(device), x)
+_adapt_for_device(device::AbstractGPUDevice, x) = Adapt.adapt(KA.backend(device), x)
 
 # KA compat
-default_backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
 KA.backend(::AbstractCPUDevice) = KA.CPU()
 KA.backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
 KA.functional(::AbstractCPUDevice) = KA.functional(KA.CPU())
-KA.functional(device::AbstractGPUDevice) = KA.functional(default_backend(device))
+KA.functional(device::AbstractGPUDevice) = KA.functional(KA.backend(device))
 #TODO: remove when AMDGPU.jl creates new release that includes (https://github.com/JuliaGPU/AMDGPU.jl/pull/884)
 KA.functional(device::RocDevice) = true
 

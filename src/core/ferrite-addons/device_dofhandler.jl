@@ -5,3 +5,6 @@ const ImmutableCellCache = Base.get_extension(Ferrite, :FerriteKAExt).ImmutableC
 @inline Ferrite.reinit!(cv::Ferrite.AbstractCellValues, cc::ImmutableCellCache) = reinit!(cv, cc.coords)
 @inline Ferrite.getcoordinates(cc::ImmutableCellCache) = cc.coords
 @inline Ferrite.cellid(cc::ImmutableCellCache) = cc.cellid
+
+# CPU no-op: don't wrap DofHandler into HostDofHandler on CPU
+Adapt.adapt_structure(::KA.CPU, dh::Ferrite.DofHandler) = dh

@@ -32,7 +32,7 @@ end
 
 ## GPU duplicate_for_device: CellValues → CellValuesContainer ##
 function duplicate_for_device(device::AbstractGPUDevice, cv::CellValues)
-    backend = default_backend(device)
+    backend = KA.backend(device)
     nt = total_nthreads(device)
     return Ferrite.CellValuesContainer(backend, nt, cv)
 end
