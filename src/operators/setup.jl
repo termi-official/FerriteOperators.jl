@@ -22,17 +22,16 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
     return InternalVariableHandler(nothing, 0)
 end
 
-function setup_element_strategy_caches(strategy, req, element_caches, ivh, dh)
-    return [setup_element_strategy_cache(strategy, req, element_cache, ivh, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
+function setup_element_strategy_caches(strategy, integrator, element_caches, ivh, dh)
+    return [setup_element_strategy_cache(strategy, integrator, element_cache, ivh, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
 end
 
-function setup_element_strategy_caches(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, req, element_caches, ivh, dh)
+function setup_element_strategy_caches(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_caches, ivh, dh)
     backend = default_backend(strategy.device)
     dh_gpu  = Adapt.adapt(backend, dh) # HostDofHandler
-    ncells  = getncells(get_grid(dh))
     return [
-        setup_element_strategy_cache(strategy, req, element_cache, ivh, sdh, dh_gpu.subdofhandlers[i], ncells)
-        for (i, (element_cache, sdh)) in enumerate(zip(element_caches, dh.subdofhandlers))
+        setup_element_strategy_cache(strategy, integrator, element_cache, ivh, device_sdh)
+        for (element_cache, device_sdh) in zip(element_caches, dh_gpu.subdofhandlers)
     ]
 end
 
@@ -62,8 +61,8 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 
     return BilinearFerriteOperator(
         A,
-        operator_strategy, #FIXME: doesn't have resolved device
-        subdomain_caches, #FIXME: has resolved device
+        operator_strategy, 
+        subdomain_caches, 
     )
 end
 

@@ -103,7 +103,8 @@ RocDevice(threads::IndexType, blocks::IndexType) where IndexType = RocDevice{Flo
 KA.@kernel function _execute_task_kernel!(task, u, p, device_cache, @Const(items), num_items::Ti) where {Ti <: Integer}
     thread_id = convert(Ti, KA.@index(Global, Linear))
 
-    for idx in thread_id:convert(Ti, KA.@ndrange()[1]):num_items
+    stride = prod(KA.@ndrange)
+    for idx in thread_id:stride:num_items
         taskid = items[idx]
         task_buffer = get_task_buffer_for_device(task, u, p, device_cache, thread_id, taskid)
         execute_task_on_single_cell!(task, task_buffer)

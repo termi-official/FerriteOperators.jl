@@ -91,7 +91,7 @@ end
 ## GPU local cache ##
 function allocate_local_cache(::AbstractBilinearIntegrator, device::AbstractGPUDevice, sdh)
     backend = default_backend(device)
-    N = ndofs_per_cell(sdh)
+    N = sdh.ndofs_per_cell
     T = value_type(device)
     nt = total_nthreads(device)
     Ke_pool = KA.zeros(backend, T, N, N, nt)
@@ -99,7 +99,7 @@ function allocate_local_cache(::AbstractBilinearIntegrator, device::AbstractGPUD
 end
 function allocate_local_cache(::AbstractNonlinearIntegrator, device::AbstractGPUDevice, sdh)
     backend = default_backend(device)
-    N = ndofs_per_cell(sdh)
+    N = sdh.ndofs_per_cell
     T = value_type(device)
     nt = total_nthreads(device)
     Ke_pool = KA.zeros(backend, T, N, N, nt)
@@ -109,7 +109,7 @@ function allocate_local_cache(::AbstractNonlinearIntegrator, device::AbstractGPU
 end
 function allocate_local_cache(::AbstractLinearIntegrator, device::AbstractGPUDevice, sdh)
     backend = default_backend(device)
-    N = ndofs_per_cell(sdh)
+    N = sdh.ndofs_per_cell
     T = value_type(device)
     nt = total_nthreads(device)
     re_pool = KA.zeros(backend, T, N, nt)
@@ -250,15 +250,14 @@ matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMat
 
 ## GPU ##
 
-# GPU setup: takes an adapted GPU SubDofHandler — grid/cell_dofs shared across subdomains.
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh, device_sdh, ncells::Integer)
-    
+function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh)
+
     (; device) = strategy
     backend    = default_backend(device)
     nt         = total_nthreads(device)
 
     local_cache_container    = allocate_local_cache(integrator, device, sdh)
-    cell_cache_container     = Ferrite.CellCacheContainer(backend, nt, device_sdh)
+    cell_cache_container     = Ferrite.CellCacheContainer(backend, nt, sdh)
     gpu_ivh                  = duplicate_for_device(device, ivh)
     element_cache_container  = duplicate_for_device(device, element_cache)
 
