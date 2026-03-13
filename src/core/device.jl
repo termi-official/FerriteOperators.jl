@@ -147,7 +147,7 @@ default_backend(device::AbstractGPUDevice) = error("Load the GPU package associa
 KA.backend(::AbstractCPUDevice) = KA.CPU()
 KA.backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
 KA.functional(::AbstractCPUDevice) = KA.functional(KA.CPU())
-KA.functional(device::AbstractGPUDevice) = default_backend(device) |> KA.functional
+KA.functional(device::AbstractGPUDevice) = KA.functional(default_backend(device))
 #TODO: remove when AMDGPU.jl creates new release that includes (https://github.com/JuliaGPU/AMDGPU.jl/pull/884)
 KA.functional(device::RocDevice) = true
 
@@ -174,14 +174,9 @@ end
 
 total_nthreads(device::AbstractGPUDevice) = device.threads * device.blocks
 
-function resolve_launch_config(device::CudaDevice{V,I}, ncells::Integer) where {V,I}
+function resolve_device_config(device::D, dh::AbstractDofHandler) where {V, I, D <: AbstractGPUDevice{V,I}}
+    ncells = getncells(get_grid(dh))
     tpb     = _compute_groupsize(device, ncells)
     nblocks = convert(I, cld(ncells, tpb))
-    return CudaDevice{V,I}(tpb, nblocks)
-end
-
-function resolve_launch_config(device::RocDevice{V,I}, ncells::Integer) where {V,I}
-    tpb     = _compute_groupsize(device, ncells)
-    nblocks = convert(I, cld(ncells, tpb))
-    return RocDevice{V,I}(tpb, nblocks)
+    return D(tpb, nblocks)
 end

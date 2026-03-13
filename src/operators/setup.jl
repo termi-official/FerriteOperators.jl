@@ -52,8 +52,11 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
     # Check device availability
     (;device) = strategy
     KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
+    
+    # this has the resolved device launch config.
+    resolved_staregy = resolve_device_config(strategy, dh)
 
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)
     A                 = create_system_matrix(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 
@@ -68,8 +71,11 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
     # Check device availability
     (;device) = strategy
     KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
+    
+    # this has the resolved device launch config.
+    resolved_staregy = resolve_device_config(strategy, dh)
 
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)
     J                 = create_system_matrix(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 
@@ -85,7 +91,10 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
     (;device) = strategy
     KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
 
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    # this has the resolved device launch config.
+    resolved_staregy = resolve_device_config(strategy, dh)
+    
+    operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)
     b                 = create_system_vector(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 

@@ -7,6 +7,10 @@ abstract type AbstractFullAssemblyStrategy <: AbstractAssemblyStrategy end
 # This one is the super type for strategies giving us an object which we ONLY can multiply a vector with
 abstract type AbstractMatrixFreeStrategy <: AbstractAssemblyStrategy end
 
+# NOTE: problem here on GPU in particular is that `nblocks` and `nthreads` might be zeros or way more that ncells.
+# Updates the strategy with the resolved device config (e.g. launch config for GPU).
+resolve_device_config(strategy::AbstractAssemblyStrategy,dh::AbstractDofHandler) = strategy
+
 """
     SequentialAssemblyStrategy()
 """
@@ -15,6 +19,7 @@ struct SequentialAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
     operator_specification
 end
 SequentialAssemblyStrategy(device) = SequentialAssemblyStrategy(device, StandardOperatorSpecification())
+resolve_device_config(strategy::SequentialAssemblyStrategy{<:AbstractGPUDevice}, dh::AbstractDofHandler) = SequentialAssemblyStrategy(resolve_device_config(strategy.device, dh), strategy.operator_specification)
 
 struct SequentialAssemblyStrategyCache{DeviceType, DeviceCacheType}
     device::DeviceType
@@ -143,6 +148,7 @@ struct PerColorAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
     operator_specification
 end
 PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = PerColorAssemblyStrategy(device, alg, StandardOperatorSpecification())
+resolve_device_config(strategy::PerColorAssemblyStrategy{<:AbstractGPUDevice}, dh::AbstractDofHandler) = PerColorAssemblyStrategy(resolve_device_config(strategy.device, dh), strategy.coloralg, strategy.operator_specification)
 
 @concrete struct PerColorAssemblyStrategyCache
     device
@@ -191,6 +197,7 @@ end
 struct ElementAssemblyStrategy{DeviceType} <: AbstractMatrixFreeStrategy
     device::DeviceType
 end
+resolve_device_config(strategy::ElementAssemblyStrategy{<:AbstractGPUDevice}, dh::AbstractDofHandler) = ElementAssemblyStrategy(resolve_device_config(strategy.device, dh))
 
 @concrete struct ElementAssemblyOperatorStrategy
     device
@@ -245,9 +252,8 @@ matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMat
 
 # GPU setup: takes an adapted GPU SubDofHandler — grid/cell_dofs shared across subdomains.
 function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh, device_sdh, ncells::Integer)
-    # Resolve device launch config: threads/blocks become concrete.
-    # After this, total_nthreads(device) returns the total thread count.
-    device     = resolve_launch_config(strategy.device, ncells)
+    
+    (; device) = strategy
     backend    = default_backend(device)
     nt         = total_nthreads(device)
 

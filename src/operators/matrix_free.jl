@@ -208,6 +208,16 @@ function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, eleme
     return EAOperatorAssembler(strategy.device, element_matrix, strategy.eadata, f)
 end
 
+# Doesn't work on GPU
+# @inline function _ea_assemble_matrix!(assembler::EAOperatorAssembler, cell, Kₑ::AbstractMatrix)
+#     (; element_matrices) = assembler.K_element
+#     i = cellid(cell)
+#     (; offset, nrows, ncols) = element_matrices.index_structure[i]
+#     Aₑ = reshape(view(element_matrices.data, offset:offset+nrows*ncols-1), (nrows, ncols))
+#     Aₑ .+= Kₑ
+#     return nothing
+# end
+
 @inline function _ea_assemble_matrix!(assembler::EAOperatorAssembler, cell, Kₑ::AbstractMatrix)
     (; element_matrices) = assembler.K_element
     i = cellid(cell)
@@ -219,6 +229,7 @@ end
     end
     return nothing
 end
+
 @inline function _ea_assemble_vector!(assembler::EAOperatorAssembler, cell, rₑ::AbstractVector)
     i = cellid(cell)
     (; data) = assembler.f_element # f_element is an EAVector
@@ -228,17 +239,9 @@ end
     return nothing
 end
 
-Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, Kₑ::AbstractMatrix) = _ea_assemble_matrix!(a, c, Kₑ)
-Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, rₑ::AbstractVector) = _ea_assemble_vector!(a, c, rₑ)
-function Ferrite.assemble!(a::EAOperatorAssembler, c::CellCache, Kₑ::AbstractMatrix, rₑ::AbstractVector)
-    _ea_assemble_matrix!(a, c, Kₑ)
-    _ea_assemble_vector!(a, c, rₑ)
-end
-
-# TODO: is it better if we created AbstractCellCache in Ferrite.jl ? 
-Ferrite.assemble!(a::EAOperatorAssembler, c::ImmutableCellCache, Kₑ::AbstractMatrix) = _ea_assemble_matrix!(a, c, Kₑ)
-Ferrite.assemble!(a::EAOperatorAssembler, c::ImmutableCellCache, rₑ::AbstractVector) = _ea_assemble_vector!(a, c, rₑ)
-function Ferrite.assemble!(a::EAOperatorAssembler, c::ImmutableCellCache, Kₑ::AbstractMatrix, rₑ::AbstractVector)
+Ferrite.assemble!(a::EAOperatorAssembler, c::CellCacheType, Kₑ::AbstractMatrix) = _ea_assemble_matrix!(a, c, Kₑ)
+Ferrite.assemble!(a::EAOperatorAssembler, c::CellCacheType, rₑ::AbstractVector) = _ea_assemble_vector!(a, c, rₑ)
+function Ferrite.assemble!(a::EAOperatorAssembler, c::CellCacheType, Kₑ::AbstractMatrix, rₑ::AbstractVector)
     _ea_assemble_matrix!(a, c, Kₑ)
     _ea_assemble_vector!(a, c, rₑ)
 end
