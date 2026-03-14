@@ -1,17 +1,17 @@
-## Transfer cell iterators for assembly of rectangular (transfer/prolongation) operators.
+## Cell iterators for assembly of rectangular (transfer/prolongation) operators.
 ##
 ## Two cases are covered:
-##   1. SameGridTransferCellIterator  – two DofHandlers on the *same* grid (p-multigrid).
-##   2. NestedGridTransferCellIterator – a fine grid nested inside a coarse grid (geometric multigrid).
+##   1. SameGridCellIterator  – two DofHandlers on the *same* grid (p-multigrid).
+##   2. NestedGridCellIterator – a fine grid nested inside a coarse grid (geometric multigrid).
 
 ####################################
-## SameGridTransferCellCache      ##
+## SameGridCellCache      ##
 ####################################
 
 """
-    SameGridTransferCellCache
+    SameGridCellCache
 
-Cache for iterating over cells of a shared grid when assembling a transfer (prolongation /
+Cache for iterating over cells of a shared grid when assembling e.g. a transfer (prolongation /
 restriction) operator between two DofHandlers that are defined on the **same** grid and the
 **same** set of cells (e.g. polynomial p-multigrid).
 
@@ -24,7 +24,7 @@ The geometry (nodes, coordinates) is shared; each DofHandler provides its own do
 - `getrowdofs(tc)` – global row dofs (from `dh_row`, typically the fine/test space)
 - `getcolumndofs(tc)` – global column dofs (from `dh_col`, typically the coarse/trial space)
 """
-mutable struct SameGridTransferCellCache{X, G <: AbstractGrid,
+mutable struct SameGridCellCache{X, G <: AbstractGrid,
                                           DH_row <: AbstractDofHandler,
                                           DH_col <: AbstractDofHandler}
     const grid::G
@@ -37,14 +37,14 @@ mutable struct SameGridTransferCellCache{X, G <: AbstractGrid,
     const cdofs::Vector{Int}
 end
 
-function SameGridTransferCellCache(dh_row::DofHandler, dh_col::DofHandler)
+function SameGridCellCache(dh_row::DofHandler, dh_col::DofHandler)
     grid = get_grid(dh_row)
     @assert get_grid(dh_col) === grid "Both DofHandlers must share the same grid"
     sdim = getspatialdim(grid)
     T    = get_coordinate_eltype(grid)
     X    = Vec{sdim, T}
     N    = nnodes_per_cell(grid, 1)
-    return SameGridTransferCellCache(
+    return SameGridCellCache(
         grid, dh_row, dh_col, -1,
         zeros(Int, N), zeros(X, N),
         zeros(Int, ndofs_per_cell(dh_row.subdofhandlers[1])),
@@ -52,14 +52,14 @@ function SameGridTransferCellCache(dh_row::DofHandler, dh_col::DofHandler)
     )
 end
 
-function SameGridTransferCellCache(sdh_row::SubDofHandler, sdh_col::SubDofHandler)
+function SameGridCellCache(sdh_row::SubDofHandler, sdh_col::SubDofHandler)
     @assert sdh_row.dh.grid === sdh_col.dh.grid "Both SubDofHandlers must share the same grid"
     @assert sdh_row.cellset == sdh_col.cellset "Both SubDofHandlers must have the same cellset"
     grid = get_grid(sdh_row.dh)
     sdim = getspatialdim(grid)
     T    = get_coordinate_eltype(grid)
     X    = Vec{sdim, T}
-    return SameGridTransferCellCache(
+    return SameGridCellCache(
         grid, sdh_row, sdh_col, -1,
         Int[], zeros(X, 0),
         zeros(Int, ndofs_per_cell(sdh_row)),
@@ -67,7 +67,7 @@ function SameGridTransferCellCache(sdh_row::SubDofHandler, sdh_col::SubDofHandle
     )
 end
 
-function Ferrite.reinit!(tc::SameGridTransferCellCache, i::Int)
+function Ferrite.reinit!(tc::SameGridCellCache, i::Int)
     tc.cellid = i
     resize!(tc.nodes,  nnodes_per_cell(tc.grid, i))
     resize!(tc.coords, nnodes_per_cell(tc.grid, i))
@@ -80,64 +80,64 @@ function Ferrite.reinit!(tc::SameGridTransferCellCache, i::Int)
     return tc
 end
 
-Ferrite.cellid(tc::SameGridTransferCellCache)      = tc.cellid
-Ferrite.getnodes(tc::SameGridTransferCellCache)    = tc.nodes
-Ferrite.getcoordinates(tc::SameGridTransferCellCache) = tc.coords
-getrowdofs(tc::SameGridTransferCellCache)  = tc.rdofs
-getcolumndofs(tc::SameGridTransferCellCache) = tc.cdofs
+Ferrite.cellid(tc::SameGridCellCache)      = tc.cellid
+Ferrite.getnodes(tc::SameGridCellCache)    = tc.nodes
+Ferrite.getcoordinates(tc::SameGridCellCache) = tc.coords
+getrowdofs(tc::SameGridCellCache)  = tc.rdofs
+getcolumndofs(tc::SameGridCellCache) = tc.cdofs
 
 # Allow reinit!(cv, tc) for CellValues so the loop pattern `reinit!(cv, tc)` works.
-function Ferrite.reinit!(cv::Ferrite.AbstractCellValues, tc::SameGridTransferCellCache)
+function Ferrite.reinit!(cv::Ferrite.AbstractCellValues, tc::SameGridCellCache)
     cell = Ferrite.reinit_needs_cell(cv) ? getcells(tc.grid, tc.cellid) : nothing
     return Ferrite.reinit!(cv, cell, tc.coords)
 end
 
 
 ####################################
-## SameGridTransferCellIterator   ##
+## SameGridCellIterator   ##
 ####################################
 
 """
-    SameGridTransferCellIterator(dh_row, dh_col [, cellset])
-    SameGridTransferCellIterator(sdh_row::SubDofHandler, sdh_col::SubDofHandler)
+    SameGridCellIterator(dh_row, dh_col [, cellset])
+    SameGridCellIterator(sdh_row::SubDofHandler, sdh_col::SubDofHandler)
 
-Iterator over cells of a shared grid for assembling a transfer operator between `dh_row`
+Iterator over cells of a shared grid for assembling e.g. a transfer operator between `dh_row`
 (row / test / fine space) and `dh_col` (column / trial / coarse space).
 
 Both DofHandlers must live on the **same** grid object.  When constructed from a pair of
 `SubDofHandler`s the iterator is restricted to their common `cellset`.
 
-Each iteration step reinitialises a [`SameGridTransferCellCache`](@ref) and returns it.
+Each iteration step reinitialises a [`SameGridCellCache`](@ref) and returns it.
 
 !!! warning
     Stateful – do not collect or broadcast over this iterator.
 """
-struct SameGridTransferCellIterator{CC <: SameGridTransferCellCache, IC}
+struct SameGridCellIterator{CC <: SameGridCellCache, IC}
     cc::CC
     set::IC
 end
 
-function SameGridTransferCellIterator(
+function SameGridCellIterator(
         dh_row::DofHandler, dh_col::DofHandler,
         set::Union{IntegerCollection, Nothing} = nothing,
     )
     if set === nothing
         set = 1:getncells(get_grid(dh_row))
     end
-    return SameGridTransferCellIterator(SameGridTransferCellCache(dh_row, dh_col), set)
+    return SameGridCellIterator(SameGridCellCache(dh_row, dh_col), set)
 end
 
-function SameGridTransferCellIterator(sdh_row::SubDofHandler, sdh_col::SubDofHandler)
+function SameGridCellIterator(sdh_row::SubDofHandler, sdh_col::SubDofHandler)
     @assert sdh_row.cellset == sdh_col.cellset "SubDofHandlers must share the same cellset"
-    return SameGridTransferCellIterator(
-        SameGridTransferCellCache(sdh_row, sdh_col), sdh_row.cellset,
+    return SameGridCellIterator(
+        SameGridCellCache(sdh_row, sdh_col), sdh_row.cellset,
     )
 end
 
-@inline _getset(it::SameGridTransferCellIterator)   = it.set
-@inline _getcache(it::SameGridTransferCellIterator) = it.cc
+@inline _getset(it::SameGridCellIterator)   = it.set
+@inline _getcache(it::SameGridCellIterator) = it.cc
 
-function Base.iterate(it::SameGridTransferCellIterator, state...)
+function Base.iterate(it::SameGridCellIterator, state...)
     res = iterate(_getset(it), state...)
     res === nothing && return nothing
     item, next_state = res
@@ -145,21 +145,21 @@ function Base.iterate(it::SameGridTransferCellIterator, state...)
     return (_getcache(it), next_state)
 end
 
-Base.IteratorSize(::Type{<:SameGridTransferCellIterator{CC, IC}}) where {CC, IC} =
+Base.IteratorSize(::Type{<:SameGridCellIterator{CC, IC}}) where {CC, IC} =
     Base.IteratorSize(IC)
-Base.IteratorEltype(::Type{<:SameGridTransferCellIterator}) = Base.HasEltype()
-Base.eltype(::Type{<:SameGridTransferCellIterator{CC}}) where {CC} = CC
-Base.length(it::SameGridTransferCellIterator) = length(_getset(it))
+Base.IteratorEltype(::Type{<:SameGridCellIterator}) = Base.HasEltype()
+Base.eltype(::Type{<:SameGridCellIterator{CC}}) where {CC} = CC
+Base.length(it::SameGridCellIterator) = length(_getset(it))
 
 
 ########################################
-## NestedGridTransferCellCache        ##
+## NestedGridCellCache        ##
 ########################################
 
 """
-    NestedGridTransferCellCache
+    NestedGridCellCache
 
-Cache for iterating over fine cells when assembling a transfer operator between a **fine**
+Cache for iterating over fine cells when assembling e.g. a transfer operator between a **fine**
 and a **coarse** grid where every fine cell is a child of exactly one coarse cell.
 
 The user must supply:
@@ -174,11 +174,11 @@ are typically known at construction time.
 - `cellid(tc)` / `coarse_cellid(tc)` – current fine / coarse cell id
 - `get_fine_nodes(tc)` / `get_coarse_nodes(tc)`
 - `get_fine_coordinates(tc)` / `get_coarse_coordinates(tc)`
-- `getrowdofs(tc)` – dofs from the fine DofHandler (rows of the transfer matrix)
-- `getcolumndofs(tc)` – dofs from the coarse DofHandler (columns of the transfer matrix)
+- `getrowdofs(tc)` – dofs from the fine DofHandler (rows of the resulting matrix)
+- `getcolumndofs(tc)` – dofs from the coarse DofHandler (columns of the resulting matrix)
 - `get_child_ref_coords(tc)` – reference coordinates of the fine cell's nodes in the coarse element
 """
-mutable struct NestedGridTransferCellCache{
+mutable struct NestedGridCellCache{
         X_f, X_c,
         G_f <: AbstractGrid, G_c <: AbstractGrid,
         DH_f <: AbstractDofHandler, DH_c <: AbstractDofHandler,
@@ -204,7 +204,7 @@ mutable struct NestedGridTransferCellCache{
     const child_ref_coords::Vector{Vector{X_c}}
 end
 
-function NestedGridTransferCellCache(
+function NestedGridCellCache(
         dh_fine::DofHandler, dh_coarse::DofHandler,
         fine2coarse::Vector{Int},
         child_ref_coords::Vector{<:AbstractVector},
@@ -218,7 +218,7 @@ function NestedGridTransferCellCache(
     T_c = get_coordinate_eltype(coarse_grid)
     X_f = Vec{sdim_f, T_f}
     X_c = Vec{sdim_c, T_c}
-    return NestedGridTransferCellCache(
+    return NestedGridCellCache(
         fine_grid,   dh_fine,   -1, Int[], X_f[], zeros(Int, ndofs_per_cell(dh_fine.subdofhandlers[1])),
         coarse_grid, dh_coarse, -1, Int[], X_c[], zeros(Int, ndofs_per_cell(dh_coarse.subdofhandlers[1])),
         fine2coarse,
@@ -226,7 +226,7 @@ function NestedGridTransferCellCache(
     )
 end
 
-function Ferrite.reinit!(tc::NestedGridTransferCellCache, fine_id::Int)
+function Ferrite.reinit!(tc::NestedGridCellCache, fine_id::Int)
     tc.fine_cellid   = fine_id
     tc.coarse_cellid = tc.fine2coarse[fine_id]
 
@@ -251,37 +251,37 @@ function Ferrite.reinit!(tc::NestedGridTransferCellCache, fine_id::Int)
     return tc
 end
 
-Ferrite.cellid(tc::NestedGridTransferCellCache)              = tc.fine_cellid
-coarse_cellid(tc::NestedGridTransferCellCache)       = tc.coarse_cellid
-get_fine_nodes(tc::NestedGridTransferCellCache)      = tc.fine_nodes
-get_coarse_nodes(tc::NestedGridTransferCellCache)    = tc.coarse_nodes
-get_fine_coordinates(tc::NestedGridTransferCellCache)   = tc.fine_coords
-get_coarse_coordinates(tc::NestedGridTransferCellCache) = tc.coarse_coords
-getrowdofs(tc::NestedGridTransferCellCache)          = tc.fine_dofs
-getcolumndofs(tc::NestedGridTransferCellCache)       = tc.coarse_dofs
+Ferrite.cellid(tc::NestedGridCellCache)              = tc.fine_cellid
+coarse_cellid(tc::NestedGridCellCache)       = tc.coarse_cellid
+get_fine_nodes(tc::NestedGridCellCache)      = tc.fine_nodes
+get_coarse_nodes(tc::NestedGridCellCache)    = tc.coarse_nodes
+get_fine_coordinates(tc::NestedGridCellCache)   = tc.fine_coords
+get_coarse_coordinates(tc::NestedGridCellCache) = tc.coarse_coords
+getrowdofs(tc::NestedGridCellCache)          = tc.fine_dofs
+getcolumndofs(tc::NestedGridCellCache)       = tc.coarse_dofs
 
 """
-    get_child_ref_coords(tc::NestedGridTransferCellCache)
+    get_child_ref_coords(tc::NestedGridCellCache)
 
 Return the reference coordinates of the current fine cell's nodes expressed in the
 reference frame of its parent coarse cell.  These can be used to evaluate coarse-grid
 shape functions at fine-grid quadrature points.
 """
-get_child_ref_coords(tc::NestedGridTransferCellCache) = tc.child_ref_coords[tc.fine_cellid]
+get_child_ref_coords(tc::NestedGridCellCache) = tc.child_ref_coords[tc.fine_cellid]
 
 # Allow reinit!(cv, tc) for CellValues so the loop pattern `reinit!(cv, tc)` works with nested grids.
-function Ferrite.reinit!(cv::Ferrite.AbstractCellValues, tc::NestedGridTransferCellCache)
+function Ferrite.reinit!(cv::Ferrite.AbstractCellValues, tc::NestedGridCellCache)
     cell = Ferrite.reinit_needs_cell(cv) ? getcells(tc.fine_grid, tc.fine_cellid) : nothing
     return Ferrite.reinit!(cv, cell, tc.fine_coords)
 end
 
 
 ##########################################
-## NestedGridTransferCellIterator       ##
+## NestedGridCellIterator               ##
 ##########################################
 
 """
-    NestedGridTransferCellIterator(dh_fine, dh_coarse, fine2coarse, child_ref_coords [, cellset])
+    NestedGridCellIterator(dh_fine, dh_coarse, fine2coarse, child_ref_coords [, cellset])
 
 Iterator over **fine** cells for assembling a transfer operator between a fine and a coarse
 grid that are hierarchically nested.
@@ -296,12 +296,12 @@ Arguments:
 !!! warning
     Stateful – do not collect or broadcast over this iterator.
 """
-struct NestedGridTransferCellIterator{CC <: NestedGridTransferCellCache, IC}
+struct NestedGridCellIterator{CC <: NestedGridCellCache, IC}
     cc::CC
     set::IC
 end
 
-function NestedGridTransferCellIterator(
+function NestedGridCellIterator(
         dh_fine::DofHandler, dh_coarse::DofHandler,
         fine2coarse::Vector{Int},
         child_ref_coords::Vector{<:AbstractVector},
@@ -310,14 +310,14 @@ function NestedGridTransferCellIterator(
     if set === nothing
         set = 1:getncells(get_grid(dh_fine))
     end
-    cache = NestedGridTransferCellCache(dh_fine, dh_coarse, fine2coarse, child_ref_coords)
-    return NestedGridTransferCellIterator(cache, set)
+    cache = NestedGridCellCache(dh_fine, dh_coarse, fine2coarse, child_ref_coords)
+    return NestedGridCellIterator(cache, set)
 end
 
-@inline _getset(it::NestedGridTransferCellIterator)   = it.set
-@inline _getcache(it::NestedGridTransferCellIterator) = it.cc
+@inline _getset(it::NestedGridCellIterator)   = it.set
+@inline _getcache(it::NestedGridCellIterator) = it.cc
 
-function Base.iterate(it::NestedGridTransferCellIterator, state...)
+function Base.iterate(it::NestedGridCellIterator, state...)
     res = iterate(_getset(it), state...)
     res === nothing && return nothing
     item, next_state = res
@@ -325,8 +325,8 @@ function Base.iterate(it::NestedGridTransferCellIterator, state...)
     return (_getcache(it), next_state)
 end
 
-Base.IteratorSize(::Type{<:NestedGridTransferCellIterator{CC, IC}}) where {CC, IC} =
+Base.IteratorSize(::Type{<:NestedGridCellIterator{CC, IC}}) where {CC, IC} =
     Base.IteratorSize(IC)
-Base.IteratorEltype(::Type{<:NestedGridTransferCellIterator}) = Base.HasEltype()
-Base.eltype(::Type{<:NestedGridTransferCellIterator{CC}}) where {CC} = CC
-Base.length(it::NestedGridTransferCellIterator) = length(_getset(it))
+Base.IteratorEltype(::Type{<:NestedGridCellIterator}) = Base.HasEltype()
+Base.eltype(::Type{<:NestedGridCellIterator{CC}}) where {CC} = CC
+Base.length(it::NestedGridCellIterator) = length(_getset(it))

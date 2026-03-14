@@ -17,7 +17,7 @@
 ##   P = op.P
 
 ####################################
-## Element interface               ##
+## Element interface              ##
 ####################################
 
 """
@@ -42,8 +42,8 @@ Required method:
 
     assemble_transfer_element!(Pe, tc, element_cache, p)
 
-where `tc` is a [`SameGridTransferCellCache`](@ref) or a
-[`NestedGridTransferCellCache`](@ref) and `Pe` is the pre-allocated rectangular element
+where `tc` is a [`SameGridCellCache`](@ref) or a
+[`NestedGridCellCache`](@ref) and `Pe` is the pre-allocated rectangular element
 matrix of size `(nrdofs_per_cell × ncdofs_per_cell)`.
 """
 abstract type AbstractTransferElementCache end
@@ -71,12 +71,12 @@ struct TransferSubdomainCache{SDH_row, SDH_col, EL, TC}
     sdh_col::SDH_col            # SubDofHandler for col space (coarse / trial)
     element::EL                 # AbstractTransferElementCache
     Pe::Matrix{Float64}         # pre-allocated element-local rectangular matrix
-    tc::TC                      # SameGridTransferCellCache (reused across iterations)
+    tc::TC                      # SameGridCellCache (reused across iterations)
 end
 
 function TransferSubdomainCache(sdh_row::SubDofHandler, sdh_col::SubDofHandler, element::AbstractTransferElementCache)
     Pe = allocate_transfer_element_matrix(element, sdh_row, sdh_col)
-    tc = SameGridTransferCellCache(sdh_row, sdh_col)
+    tc = SameGridCellCache(sdh_row, sdh_col)
     return TransferSubdomainCache(sdh_row, sdh_col, element, Pe, tc)
 end
 
@@ -201,7 +201,7 @@ struct NestedTransferSubdomainCache{SDH_fine, SDH_coarse, EL}
     sdh_coarse::SDH_coarse
     element::EL
     Pe::Matrix{Float64}
-    tc::NestedGridTransferCellCache
+    tc::NestedGridCellCache
 end
 
 function execute_transfer_on_device!(

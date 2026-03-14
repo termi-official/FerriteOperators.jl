@@ -82,8 +82,8 @@ export SequentialCPUDevice, PolyesterDevice, CudaDevice
 export SequentialAssemblyStrategy, ElementAssemblyStrategy, PerColorAssemblyStrategy
 
 # Transfer operator infrastructure
-export SameGridTransferCellCache, SameGridTransferCellIterator
-export NestedGridTransferCellCache, NestedGridTransferCellIterator
+export SameGridCellCache, SameGridCellIterator
+export NestedGridCellCache, NestedGridCellIterator
 export getrowdofs, getcolumndofs
 export get_fine_coordinates, get_coarse_coordinates, get_child_ref_coords
 export AbstractTransferIntegrator, AbstractTransferElementCache

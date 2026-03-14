@@ -134,7 +134,7 @@ are **hierarchically nested** (geometric multigrid).
 
 Unlike [`MassProlongatorIntegrator`](@ref) (same grid, two DofHandlers), this variant
 evaluates the coarse basis functions at fine quadrature points by mapping through the
-reference-space affine map stored in [`NestedGridTransferCellCache`](@ref):
+reference-space affine map stored in [`NestedGridCellCache`](@ref):
 
 ```math
 \xi_\text{coarse} = \sum_i N_i^{\text{geo,fine}}(\xi_\text{fine})\; \hat{x}_i
@@ -189,7 +189,7 @@ end
 
 function assemble_transfer_element!(
         Pₑ::AbstractMatrix,
-        tc::NestedGridTransferCellCache,
+        tc::NestedGridCellCache,
         cache::NestedMassProlongatorElementCache,
         p,
     )
@@ -197,7 +197,7 @@ function assemble_transfer_element!(
     n_fine   = getnbasefunctions(cv_fine)
     n_coarse = getnbasefunctions(ip_coarse)
 
-    reinit!(cv_fine, tc)   # delegates to Ferrite.reinit!(cv, tc::NestedGridTransferCellCache)
+    reinit!(cv_fine, tc)   # delegates to Ferrite.reinit!(cv, tc::NestedGridCellCache)
     child_nodes = get_child_ref_coords(tc)  # fine cell node positions in coarse ref element
 
     fill!(Mₑbuf, zero(eltype(Mₑbuf)))
