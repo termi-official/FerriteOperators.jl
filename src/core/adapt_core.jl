@@ -1,11 +1,11 @@
-Adapt.adapt_structure(to, c::BilinearLocalCacheContainer) =
-    BilinearLocalCacheContainer(Adapt.adapt(to, c.Ke_pool))
+Adapt.adapt_structure(to, c::BilinearAssemblyCacheContainer) =
+    BilinearAssemblyCacheContainer(Adapt.adapt(to, c.Ke_pool))
 
-Adapt.adapt_structure(to, c::NonlinearLocalCacheContainer) =
-    NonlinearLocalCacheContainer(Adapt.adapt(to, c.Ke_pool), Adapt.adapt(to, c.ue_pool), Adapt.adapt(to, c.re_pool))
+Adapt.adapt_structure(to, c::NonlinearAssemblyCacheContainer) =
+    NonlinearAssemblyCacheContainer(Adapt.adapt(to, c.Ke_pool), Adapt.adapt(to, c.ue_pool), Adapt.adapt(to, c.re_pool))
 
-Adapt.adapt_structure(to, c::LinearLocalCacheContainer) =
-    LinearLocalCacheContainer(Adapt.adapt(to, c.re_pool))
+Adapt.adapt_structure(to, c::LinearAssemblyCacheContainer) =
+    LinearAssemblyCacheContainer(Adapt.adapt(to, c.re_pool))
 
 Adapt.adapt_structure(to, dc::GPUAssemblyCache) =
     GPUAssemblyCache(

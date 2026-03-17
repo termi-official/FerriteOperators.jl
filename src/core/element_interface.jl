@@ -11,10 +11,23 @@ Specialized Interface for Condensed Problems:
 
 """
 abstract type AbstractVolumetricElementCache end
+#FIXME: still some element uses old api.
+allocate_element_matrix(::AbstractCPUDevice, element_cache::AbstractVolumetricElementCache, sdh)          = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
+allocate_element_unknown_vector(::AbstractCPUDevice, element_cache::AbstractVolumetricElementCache, sdh)  = zeros(ndofs_per_cell(sdh))
+allocate_element_residual_vector(::AbstractCPUDevice, element_cache::AbstractVolumetricElementCache, sdh) = zeros(ndofs_per_cell(sdh))
 
-allocate_element_matrix(element_cache::AbstractVolumetricElementCache, sdh)          = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
-allocate_element_unknown_vector(element_cache::AbstractVolumetricElementCache, sdh)  = zeros(ndofs_per_cell(sdh))
-allocate_element_residual_vector(element_cache::AbstractVolumetricElementCache, sdh) = zeros(ndofs_per_cell(sdh))
+function allocate_element_matrix(device::AbstractGPUDevice, element_cache, sdh)
+    N = sdh.ndofs_per_cell
+    return KA.zeros(KA.backend(device), value_type(device), N, N, total_nthreads(device))
+end
+function allocate_element_unknown_vector(device::AbstractGPUDevice, element_cache, sdh)
+    N = sdh.ndofs_per_cell
+    return KA.zeros(KA.backend(device), value_type(device), N, total_nthreads(device))
+end
+function allocate_element_residual_vector(device::AbstractGPUDevice, element_cache, sdh)
+    N = sdh.ndofs_per_cell
+    return KA.zeros(KA.backend(device), value_type(device), N, total_nthreads(device))
+end
 load_element_unknowns!(uₑ, u, cell, ivh, element_cache::AbstractVolumetricElementCache)   = uₑ .= @view u[celldofs(cell)]
 store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache::AbstractVolumetricElementCache) = nothing
 

@@ -70,6 +70,15 @@ end
 
 duplicate_for_device(device, ip::Ferrite.Interpolation) = ip
 
+
+function duplicate_for_device(device, ivh::InternalVariableHandler)
+    ivh.internal_variable_offsets === nothing && return ivh
+    return InternalVariableHandler(
+        Adapt.adapt(KA.backend(device), ivh.internal_variable_offsets),
+        ivh.ndofs,
+    )
+end
+
 function duplicate_for_device(device, x::T)::T where {T <: Tuple}
     if isbitstype(T)
         return x

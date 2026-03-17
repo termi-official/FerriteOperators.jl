@@ -1,7 +1,5 @@
-using Test
 using Adapt
 import KernelAbstractions as KA
-using FerriteOperators
 import LinearAlgebra: mul!, norm
 
 ## End-to-end test: setup_operator → update_operator! → verify assembly ##

@@ -7,24 +7,7 @@ end
 Ferrite.ndofs(lvh::InternalVariableHandler) = lvh.ndofs
 internal_variable_offset(lvh::InternalVariableHandler, cellid::Int) = lvh.internal_variable_offsets[cellid]
 
-# Read-only lookup table, shared across threads.
-# CPU: deep-copy offsets so threads don't alias.
-# GPU: adapt offsets to GPU array; nothing offsets stay nothing.
-function duplicate_for_device(device, ivh::InternalVariableHandler)
-    if ivh.internal_variable_offsets === nothing
-        return ivh
-    end
-    return InternalVariableHandler(
-        duplicate_for_device(device, ivh.internal_variable_offsets),
-        ivh.ndofs,
-    )
-end
-
-Adapt.adapt_structure(to, ivh::InternalVariableHandler) =
-    InternalVariableHandler(
-        Adapt.adapt(to, ivh.internal_variable_offsets),
-        ivh.ndofs,
-    )
+Adapt.@adapt_structure InternalVariableHandler
 # # Utils to distribute and visualize local variables
 # struct QuadratureInterpolation{RefShape, QR <: QuadratureRule{RefShape}} <:
 #        Ferrite.ScalarInterpolation{RefShape, -1}

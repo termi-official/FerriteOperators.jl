@@ -9,7 +9,7 @@ end
     u # <: AbstractVector
     p # global parameters
     element # <: Abstract*ElementCache
-    local_cache # BilinearLocalCache | NonlinearLocalCache | LinearLocalCache
+    local_cache # BilinearAssemblyCache | NonlinearAssemblyCache | LinearAssemblyCache
     # pe
     geometry_cache # <: CellCache
     ivh # <: InternalVariableHandler
@@ -17,17 +17,17 @@ end
 Ferrite.reinit!(buffer::GenericTaskBuffer, taskid) = reinit!(buffer.geometry_cache, taskid)
 
 ## Local cache accessors ##
-get_Ke(lc::BilinearLocalCache)  = lc.Ke
-get_Ke(lc::NonlinearLocalCache) = lc.Ke
-get_Ke(::LinearLocalCache)      = error("LinearLocalCache does not have an element matrix (Ke).")
+get_Ke(lc::BilinearAssemblyCache)  = lc.Ke
+get_Ke(lc::NonlinearAssemblyCache) = lc.Ke
+get_Ke(::LinearAssemblyCache)      = error("LinearAssemblyCache does not have an element matrix (Ke).")
 
-get_ue(::BilinearLocalCache)    = error("BilinearLocalCache does not have an element unknown vector (ue).")
-get_ue(lc::NonlinearLocalCache) = lc.ue
-get_ue(::LinearLocalCache)      = error("LinearLocalCache does not have an element unknown vector (ue).")
+get_ue(::BilinearAssemblyCache)    = error("BilinearAssemblyCache does not have an element unknown vector (ue).")
+get_ue(lc::NonlinearAssemblyCache) = lc.ue
+get_ue(::LinearAssemblyCache)      = error("LinearAssemblyCache does not have an element unknown vector (ue).")
 
-get_re(::BilinearLocalCache)    = error("BilinearLocalCache does not have an element residual vector (re).")
-get_re(lc::NonlinearLocalCache) = lc.re
-get_re(lc::LinearLocalCache)    = lc.re
+get_re(::BilinearAssemblyCache)    = error("BilinearAssemblyCache does not have an element residual vector (re).")
+get_re(lc::NonlinearAssemblyCache) = lc.re
+get_re(lc::LinearAssemblyCache)    = lc.re
 
 function get_task_buffer_for_device(task, u, p, device_cache::SimpleAssemblyCache, chunkid)
     (; local_cache, cell, ivh, element) = device_cache
