@@ -1,6 +1,3 @@
-## Adapt.jl integration for element caches ##
-# Element caches holding CellValues need Adapt so KA can convert
-# CuArray/ROCArray → CuDeviceArray/ROCDeviceArray at kernel launch.
 
 Adapt.@adapt_structure SimpleBilinearDiffusionElementCache
 Adapt.@adapt_structure SimpleBilinearMassElementCache

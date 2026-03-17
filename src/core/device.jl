@@ -136,9 +136,6 @@ function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
     end
 end
 
-# Adapt helper: CPU → identity, GPU → use backend adaptor (Array → ROCArray/CuArray)
-_adapt_for_device(::AbstractCPUDevice, x) = x
-_adapt_for_device(device::AbstractGPUDevice, x) = Adapt.adapt(KA.backend(device), x)
 
 # KA compat
 KA.backend(::AbstractCPUDevice) = KA.CPU()

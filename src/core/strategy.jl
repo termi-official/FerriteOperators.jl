@@ -186,7 +186,7 @@ end
 function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy, integrator, dh)
     (;device) = strategy
     # CPU -> as is, GPU → adapt for GPU
-    eadata = _adapt_for_device(device, EAVector(dh)) 
+    eadata = Adapt.adapt(KA.backend(device), EAVector(dh))
     return ElementAssemblyOperatorStrategy(device, eadata)
 end
 

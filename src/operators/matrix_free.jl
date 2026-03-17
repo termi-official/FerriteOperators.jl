@@ -302,5 +302,5 @@ function create_system_matrix(strategy::ElementAssemblyOperatorStrategy, dh)
     # FIXME pass EA info down via device cache instead of hardcoded EAViewCache
     op = EAOperator(device, EAViewCache(), element_matrices, element_vector_info, element_vector_info)
     # CPU -> as is, GPU → adapt for GPU
-    return _adapt_for_device(device, op)
+    return Adapt.adapt(KA.backend(device), op)
 end
