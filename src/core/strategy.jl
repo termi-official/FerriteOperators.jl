@@ -96,20 +96,13 @@ function allocate_local_cache(::AbstractLinearIntegrator, element_cache, device:
 end
 
 @concrete struct SimpleAssemblyCache
-    # NOTE: idea here is instead of allocating useless memory (also not expressive development-wise), we allocate only the needed local cache.
-    local_cache # (either BilinearAssemblyCache, NonlinearAssemblyCache, or LinearAssemblyCache)
+    # NOTE: On CPU, assembly_cache holds a concrete BilinearAssemblyCache/NonlinearAssemblyCache/LinearAssemblyCache.
+    # On GPU, it holds the corresponding *Container (e.g. BilinearAssemblyCacheContainer) — a pool indexed by thread id.
+    # Same for cell (CellCache on CPU, CellCacheContainer on GPU) and element (concrete vs container).
+    assembly_cache
     cell
     ivh
     element
-end
-
-# GPU analog of SimpleAssemblyCache — holds containers instead of concrete caches.
-# Each container's extract/indexing creates per-thread cache in the kernel.
-@concrete struct GPUAssemblyCache
-    local_cache_container    # Bilinear/Nonlinear/LinearAssemblyCacheContainer (Ke/ue/re pools)
-    cell_cache_container     # Ferrite.CellCacheContainer (batched ImmutableCellCache)
-    ivh                      # InternalVariableHandler (GPU-adapted, read-only shared)
-    element_cache_container  # e.g. SimpleBilinearDiffusionElementCache{<:CellValuesContainer}
 end
 
 
@@ -235,11 +228,11 @@ function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{
     backend    = KA.backend(device)
     nt         = total_nthreads(device)
 
-    local_cache_container    = allocate_local_cache(integrator, element_cache, device, sdh)
+    assembly_cache_container = allocate_local_cache(integrator, element_cache, device, sdh)
     cell_cache_container     = Ferrite.CellCacheContainer(backend, nt, sdh)
     gpu_ivh                  = duplicate_for_device(device, ivh)
     element_cache_container  = duplicate_for_device(device, element_cache)
 
-    device_cache = GPUAssemblyCache(local_cache_container, cell_cache_container, gpu_ivh, element_cache_container)
+    device_cache = SimpleAssemblyCache(assembly_cache_container, cell_cache_container, gpu_ivh, element_cache_container)
     return ElementAssemblyStrategyCache(device, device_cache)
 end

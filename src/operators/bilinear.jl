@@ -20,8 +20,6 @@ function execute_task_on_single_cell!(task::AssembleBilinearTerm, task_buffer)
     cell    = query_geometry_cache(task_buffer)
     element = query_element(task_buffer)
 
-    # TODO: re-enable when TimerOutputs is GPU-compatible
-    # @timeit_debug "assemble element" assemble_element!(Aₑ, cell, element, pₑ)
     assemble_element!(Aₑ, cell, element, pₑ)
 
     assemble!(task, task_buffer)

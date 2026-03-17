@@ -18,7 +18,7 @@ struct SimpleBilinearDiffusionElementCache{CV} <: AbstractVolumetricElementCache
     D::Float64
     cellvalues::CV
 end
-# NOTE: for `CPU` will do depp copy, for `GPU` will create a pool 
+ 
 function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache)
     return SimpleBilinearDiffusionElementCache(
         cache.D,

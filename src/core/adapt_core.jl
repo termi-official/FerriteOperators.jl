@@ -1,4 +1,4 @@
 Adapt.@adapt_structure BilinearAssemblyCacheContainer
 Adapt.@adapt_structure NonlinearAssemblyCacheContainer
 Adapt.@adapt_structure LinearAssemblyCacheContainer
-Adapt.@adapt_structure GPUAssemblyCache
+Adapt.@adapt_structure SimpleAssemblyCache
