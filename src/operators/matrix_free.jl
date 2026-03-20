@@ -104,19 +104,22 @@ struct EAViewCache
 end
 
 # Work functor for GPU matrix-free product.
-@concrete struct DeviceMatrixFreeWork
+@concrete struct DeviceMatrixFreeWork <: AbstractDeviceWork
+    device
     out
     operator
     in_vec
 end
+
+getdevice(w::DeviceMatrixFreeWork) = w.device
+getnitems(w::DeviceMatrixFreeWork) = getnelements(w.operator)
 
 @inline function (w::DeviceMatrixFreeWork)(ei, _tid)
     product_kernel!(w.out, w.operator, w.in_vec, ei, w.operator.vector_element_map, w.operator.element_vector_map, nothing, nothing)
 end
 
 function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::AbstractGPUDevice)
-    work = DeviceMatrixFreeWork(out, A, in)
-    device_strided_launch!(work, device, getnelements(A))
+    DeviceMatrixFreeWork(device, out, A, in) |> launch!
 end
 
 # TODO make this per subdomain
@@ -270,18 +273,21 @@ end
     end
 end
 
-@concrete struct DeviceEACollapseWork
+@concrete struct DeviceEACollapseWork <: AbstractDeviceWork
+    device
     b
     bes
 end
+
+getdevice(w::DeviceEACollapseWork) = w.device
+getnitems(w::DeviceEACollapseWork) = size(w.b, 1)
 
 @inline function (w::DeviceEACollapseWork)(dof, _tid)
     _ea_collapse_kernel!(w.b, dof, w.bes)
 end
 
 function ea_collapse!(b::AbstractVector, bes::EAVector, device::AbstractGPUDevice)
-    work = DeviceEACollapseWork(b, bes)
-    device_strided_launch!(work, device, size(b, 1))
+    DeviceEACollapseWork(device, b, bes) |> launch!
 end
 
 function finalize_assembly!(assembler::EAOperatorAssembler)

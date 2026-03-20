@@ -144,18 +144,23 @@ KA.@kernel function _device_strided_kernel!(work, num_items::Ti) where {Ti <: In
     end
 end
 
-function device_strided_launch!(work, device::AbstractGPUDevice, num_items)
+# AbstractDeviceWork interface — every work type must implement:
+abstract type AbstractDeviceWork end
+getdevice(::T) where {T <: AbstractDeviceWork} = error("getdevice not implemented for $T")
+getnitems(::T) where {T <: AbstractDeviceWork} = error("getnitems not implemented for $T")
+
+function launch!(work::AbstractDeviceWork)
+    device = getdevice(work)
     backend = KA.backend(device)
     Ti = index_type(device)
-    n = convert(Ti, num_items)
+    n = convert(Ti, getnitems(work))
     kernel = _device_strided_kernel!(backend, Int(device.threads))
     kernel(work, n; ndrange = Int(device.blocks * device.threads))
     KA.synchronize(backend)
 end
 
-# Interface for what should be done inside the kernel wo the boilerplate of setup and launch.
-#FIXME: better naming or better formalization of the interface.
-@concrete struct DeviceTaskWork
+@concrete struct DeviceTaskWork <: AbstractDeviceWork
+    device
     task
     u
     p
@@ -163,6 +168,10 @@ end
     items
 end
 
+getdevice(w::DeviceTaskWork) = w.device
+getnitems(w::DeviceTaskWork) = length(w.items)
+
+# work being executed on GPU.
 @inline function (w::DeviceTaskWork)(idx, tid)
     taskid = w.items[idx]
     task_buffer = get_task_buffer_for_device(w.task, w.u, w.p, w.device_cache, tid, taskid)
@@ -176,8 +185,7 @@ function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
     (; strategy_cache) = subdomain
     (; device_cache) = strategy_cache
     for items in get_items(task, cache)
-        work = DeviceTaskWork(task, u, p, device_cache, items)
-        device_strided_launch!(work, device, length(items))
+        DeviceTaskWork(device, task, u, p, device_cache, items) |> launch!
     end
 end
 
