@@ -224,16 +224,6 @@ function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, eleme
     return EAOperatorAssembler(strategy.device, element_matrix, strategy.eadata, f)
 end
 
-# Doesn't work on GPU
-# @inline function _ea_assemble_matrix!(assembler::EAOperatorAssembler, cell, Kₑ::AbstractMatrix)
-#     (; element_matrices) = assembler.K_element
-#     i = cellid(cell)
-#     (; offset, nrows, ncols) = element_matrices.index_structure[i]
-#     Aₑ = reshape(view(element_matrices.data, offset:offset+nrows*ncols-1), (nrows, ncols))
-#     Aₑ .+= Kₑ
-#     return nothing
-# end
-
 @inline function _ea_assemble_matrix!(assembler::EAOperatorAssembler, cell, Kₑ::AbstractMatrix)
     (; element_matrices) = assembler.K_element
     i = cellid(cell)
@@ -278,6 +268,20 @@ end
         local_data = get_indices(bes.data, edp.element_index)
         b[dof]  += local_data[edp.local_dof_index]
     end
+end
+
+@concrete struct DeviceEACollapseWork
+    b
+    bes
+end
+
+@inline function (w::DeviceEACollapseWork)(dof, _tid)
+    _ea_collapse_kernel!(w.b, dof, w.bes)
+end
+
+function ea_collapse!(b::AbstractVector, bes::EAVector, device::AbstractGPUDevice)
+    work = DeviceEACollapseWork(b, bes)
+    device_strided_launch!(work, device, size(b, 1))
 end
 
 function finalize_assembly!(assembler::EAOperatorAssembler)

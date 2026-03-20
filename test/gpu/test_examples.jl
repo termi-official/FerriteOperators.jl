@@ -73,6 +73,32 @@ cuda_available = try
     CUDA.functional()
 catch; false end
 
+## Test ea_collapse! on GPU ##
+function test_ea_collapse(device; rtol=1e-10)
+    grid = generate_grid(Quadrilateral, (4, 4))
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+
+    # Create EAVector and fill with known per-element data
+    eavec = FerriteOperators.EAVector(dh)
+    fill!(eavec, 0.0)
+    # Write 1.0 into every per-element slot
+    eavec.data.data .= 1.0
+
+    # CPU reference collapse
+    b_cpu = zeros(Ferrite.ndofs(dh))
+    FerriteOperators.ea_collapse!(b_cpu, eavec, SequentialCPUDevice())
+
+    # GPU collapse
+    backend = KA.backend(device)
+    gpu_eavec = Adapt.adapt(backend, eavec)
+    b_gpu = KA.zeros(backend, Float64, Ferrite.ndofs(dh))
+    FerriteOperators.ea_collapse!(b_gpu, gpu_eavec, device)
+
+    @test isapprox(Array(b_gpu), b_cpu; rtol=rtol)
+end
+
 @testset "Bilinear Diffusion Assembly (GPU)" begin
     if roc_available
         @testset "ROC" begin
@@ -91,5 +117,15 @@ catch; false end
         end
     else
         @info "CUDA not available, skipping CUDA"
+    end
+end
+
+@testset "EA Collapse (GPU)" begin
+    if cuda_available
+        @testset "CUDA" begin
+            test_ea_collapse(CudaDevice{Float64, Int32}(Int32(64), Int32(4)))
+        end
+    else
+        @info "CUDA not available, skipping"
     end
 end
