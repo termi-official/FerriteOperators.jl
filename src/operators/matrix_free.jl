@@ -103,6 +103,22 @@ end
 struct EAViewCache
 end
 
+# Work functor for GPU matrix-free product.
+@concrete struct DeviceMatrixFreeWork
+    out
+    operator
+    in_vec
+end
+
+@inline function (w::DeviceMatrixFreeWork)(ei, _tid)
+    product_kernel!(w.out, w.operator, w.in_vec, ei, w.operator.vector_element_map, w.operator.element_vector_map, nothing, nothing)
+end
+
+function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::AbstractGPUDevice)
+    work = DeviceMatrixFreeWork(out, A, in)
+    device_strided_launch!(work, device, getnelements(A))
+end
+
 # TODO make this per subdomain
 struct EAThreadedKernelCache{T}
     inₑ::Vector{Vector{T}}
@@ -135,9 +151,9 @@ end
 
 function read_data(indexed_data::GenericIndexedData{<:GenericEAMatrixIndex}, i::Integer, device_cache::EAViewCache)
     (; offset, nrows, ncols) = indexed_data.index_structure[i]
-    Aₑ_flattened = @view indexed_data.data[offset:(offset+nrows*ncols-1)]
-    Aₑ = reshape(Aₑ_flattened, (nrows, ncols))
-    return Aₑ
+    # CPU -> reshape view, GPU -> custom view
+    # reshape(@view indexed_data.data[offset:(offset+nrows*ncols-1)], (nrows, ncols)) 
+    return device_reshape_view(indexed_data.data, offset, nrows, ncols) 
 end
 function read_data(indexed_data::GenericIndexedData{<:GenericEAVectorIndex}, data::AbstractVector, i::Integer, device_cache::EAViewCache)
     (; offset, length) = indexed_data.index_structure[i]
@@ -222,11 +238,10 @@ end
     (; element_matrices) = assembler.K_element
     i = cellid(cell)
     (; offset, nrows, ncols) = element_matrices.index_structure[i]
-    for col in 1:ncols
-        for row in 1:nrows
-            element_matrices.data[offset + (col-1)*nrows + row - 1] += Kₑ[row, col]
-        end
-    end
+    # CPU -> reshape view, GPU -> custom view
+    # equivalent to Aₑ = reshape(view(element_matrices.data, offset:offset+nrows*ncols-1), (nrows, ncols)) but GPU compatible
+    Aₑ = device_reshape_view(element_matrices.data, offset, nrows, ncols)
+    Aₑ .+= Kₑ
     return nothing
 end
 

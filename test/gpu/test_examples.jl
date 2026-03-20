@@ -3,7 +3,7 @@ import KernelAbstractions as KA
 import LinearAlgebra: mul!, norm
 
 ## End-to-end test: setup_operator → update_operator! → verify assembly ##
-function test_bilinear_diffusion_assembly(device)
+function test_bilinear_diffusion_assembly(device; atol=nothing, rtol=nothing)
     # Setup: 4x4 quad mesh, scalar Lagrange, diffusion D=2.5
     grid = generate_grid(Quadrilateral, (4, 4))
     dh = DofHandler(grid)
@@ -31,9 +31,9 @@ function test_bilinear_diffusion_assembly(device)
     cpu_Ke_data = cpu_op.A.element_matrices.data
     gpu_Ke_data = Array(gpu_op.A.element_matrices.data)
 
-    @testset "Element matrices match CPU" begin
+    @testset "Element matrices" begin
         @test length(cpu_Ke_data) == length(gpu_Ke_data)
-        @test cpu_Ke_data ≈ gpu_Ke_data atol=1e-6
+        @test isapprox(cpu_Ke_data, gpu_Ke_data; atol=something(atol, 0), rtol=something(rtol, 0))
     end
 
     # Idempotency: re-assemble should give same result
@@ -42,6 +42,21 @@ function test_bilinear_diffusion_assembly(device)
 
     @testset "Idempotency" begin
         @test gpu_Ke_data ≈ gpu_Ke_data2 atol=1e-14
+    end
+
+    # Matrix-free product: mul!(y, op, x) must match CPU
+    @testset "Matrix-free product" begin
+        ndofs = Ferrite.ndofs(dh)
+        x = KA.zeros(KA.backend(device), Float64, ndofs)
+        copyto!(x, collect(1.0:ndofs).^2)
+        y_gpu = KA.zeros(KA.backend(device), Float64, ndofs)
+        mul!(y_gpu, gpu_op.A, x)
+
+        x_cpu = collect(1.0:ndofs).^2
+        y_cpu = zeros(ndofs)
+        mul!(y_cpu, cpu_op.A, x_cpu)
+
+        @test isapprox(Array(y_gpu), y_cpu; atol=something(atol, 0), rtol=something(rtol, 0))
     end
 end
 
@@ -68,8 +83,11 @@ catch; false end
     end
 
     if cuda_available
-        @testset "CUDA" begin
-            test_bilinear_diffusion_assembly(CudaDevice())
+        @testset "CUDA (Float32)" begin
+            test_bilinear_diffusion_assembly(CudaDevice(), rtol=1e-5)
+        end
+        @testset "CUDA (Float64)" begin
+            test_bilinear_diffusion_assembly(CudaDevice{Float64, Int32}(Int32(0), Int32(0)), atol=1e-10, rtol=0.0)
         end
     else
         @info "CUDA not available, skipping CUDA"

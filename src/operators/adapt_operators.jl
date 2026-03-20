@@ -7,3 +7,4 @@ Adapt.@adapt_structure AssembleLinearTerm
 Adapt.@adapt_structure GenericIndexedData
 Adapt.@adapt_structure EAVector
 Adapt.@adapt_structure EAOperator
+Adapt.@adapt_structure DeviceMatrixFreeWork

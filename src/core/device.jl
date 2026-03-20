@@ -95,44 +95,89 @@ end
 RocDevice() = RocDevice{Float64, Int32}(Int32(0), Int32(0))
 RocDevice(threads::IndexType, blocks::IndexType) where IndexType = RocDevice{Float64, IndexType}(threads, blocks)
 
-# Logic-agnostic grid-stride iterator
+# GPU-safe 2D view into a flat vector — replaces @view + reshape which fails on GPU
+struct DeviceReshapedView{T, Ti <: Integer, D <: AbstractVector{T}} <: AbstractMatrix{T}
+    data::D
+    offset::Ti
+    nrows::Ti
+    ncols::Ti
+end
 
+@inline Base.size(v::DeviceReshapedView) = (Int(v.nrows), Int(v.ncols))
+@inline Base.size(v::DeviceReshapedView, d::Int) = d == 1 ? Int(v.nrows) : Int(v.ncols)
+@inline function Base.getindex(v::DeviceReshapedView, i::Integer, j::Integer)
+    @inbounds v.data[v.offset + (j - 1) * v.nrows + i - 1]
+end
+@inline function Base.setindex!(v::DeviceReshapedView, val, i::Integer, j::Integer)
+    @inbounds v.data[v.offset + (j - 1) * v.nrows + i - 1] = val
+end
 
-# GPU kernel: grid-stride loop, each thread processes one or more elements.
-# Receives already-unpacked u, p, device_cache — no SubdomainCache nesting on GPU.
-KA.@kernel function _execute_task_kernel!(task, u, p, device_cache, @Const(items), num_items::Ti) where {Ti <: Integer}
-    thread_id = convert(Ti, KA.@index(Global, Linear))
+#CPU -> use normal calls
+@inline function device_reshape_view(data::Vector, offset, nrows, ncols)
+    flat = @view data[offset:(offset + nrows * ncols - 1)]
+    return reshape(flat, (Int(nrows), Int(ncols)))
+end
+@inline function device_reshape_view(data::AbstractVector, offset, nrows, ncols)
+    return DeviceReshapedView(data, offset, nrows, ncols)
+end
 
-    stride = prod(KA.@ndrange)
-    for idx in thread_id:stride:num_items
-        taskid = items[idx]
-        task_buffer = get_task_buffer_for_device(task, u, p, device_cache, thread_id, taskid)
-        execute_task_on_single_cell!(task, task_buffer)
+struct DeviceStridedIterator{Ti <: Integer}
+    tid::Ti # thread id
+    range::StepRange{Ti, Ti} #  this in the loop give idx, which is the index of the item to process and starts from tid and get incremented by stride.
+end
+
+function DeviceStridedIterator(num_items::Ti, tid::Ti, stride::Ti) where {Ti <: Integer}
+    DeviceStridedIterator(tid, tid:stride:num_items)
+end
+
+Base.iterate(l::DeviceStridedIterator) = iterate(l.range)
+Base.iterate(l::DeviceStridedIterator, state) = iterate(l.range, state)
+
+# Logic-agnostic grid-stride kernel — calls work(idx, tid) for each item.
+KA.@kernel function _device_strided_kernel!(work, num_items::Ti) where {Ti <: Integer}
+    tid = convert(Ti, KA.@index(Global, Linear))
+    if tid <= num_items
+        iter = DeviceStridedIterator(num_items, tid, convert(Ti, prod(KA.@ndrange)))
+        for idx in iter
+            work(idx, iter.tid)
+        end
     end
 end
 
-function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
+function device_strided_launch!(work, device::AbstractGPUDevice, num_items)
     backend = KA.backend(device)
-    itemsets = get_items(task, cache)
+    Ti = index_type(device)
+    n = convert(Ti, num_items)
+    kernel = _device_strided_kernel!(backend, Int(device.threads))
+    kernel(work, n; ndrange = Int(device.blocks * device.threads))
+    KA.synchronize(backend)
+end
 
-    #NOTE: we don't pass SubdomainCache to GPU, so we unpack it here and pass the relevant pieces (local_cache) directly to the kernel.
-    ##TODO: Revisit, because this might be suboptimal design-wise. 
+# Interface for what should be done inside the kernel wo the boilerplate of setup and launch.
+#FIXME: better naming or better formalization of the interface.
+@concrete struct DeviceTaskWork
+    task
+    u
+    p
+    device_cache
+    items
+end
+
+@inline function (w::DeviceTaskWork)(idx, tid)
+    taskid = w.items[idx]
+    task_buffer = get_task_buffer_for_device(w.task, w.u, w.p, w.device_cache, tid, taskid)
+    execute_task_on_single_cell!(w.task, task_buffer)
+end
+
+function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
+    #NOTE: we don't pass SubdomainCache to GPU, so we unpack it here and pass the relevant pieces directly to the kernel.
+    ##TODO: Revisit, because this might be suboptimal design-wise.
     (; u, p, subdomain) = cache
     (; strategy_cache) = subdomain
     (; device_cache) = strategy_cache
-    Ti = index_type(device)
-    for items in itemsets
-        num_items = convert(Ti, length(items))
-
-        kernel = _execute_task_kernel!(backend, Int(device.threads))
-        kernel(
-            task,
-            u, p, device_cache,
-            items,
-            num_items;
-            ndrange = Int(device.blocks * device.threads)
-        )
-        KA.synchronize(backend)
+    for items in get_items(task, cache)
+        work = DeviceTaskWork(task, u, p, device_cache, items)
+        device_strided_launch!(work, device, length(items))
     end
 end
 
@@ -142,11 +187,8 @@ KA.backend(::AbstractCPUDevice) = KA.CPU()
 KA.backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
 KA.functional(::AbstractCPUDevice) = KA.functional(KA.CPU())
 KA.functional(device::AbstractGPUDevice) = KA.functional(KA.backend(device))
-#TODO: remove when AMDGPU.jl creates new release that includes (https://github.com/JuliaGPU/AMDGPU.jl/pull/884)
-KA.functional(device::RocDevice) = true
 
-
-# Compute threads per block — must match kernel launch in execute_task_on_device!
+#TODO: revisit this section, needs further refinment.
 const DEFAULT_GPU_THREADS_PER_BLOCK = 256
 function _compute_groupsize(device::AbstractGPUDevice, ncells::Integer)
     Ti = index_type(device)
@@ -154,7 +196,6 @@ function _compute_groupsize(device::AbstractGPUDevice, ncells::Integer)
     return convert(Ti, min(ncells, max_tpb))
 end
 
-# Compute total number of GPU threads — must match kernel launch in execute_task_on_device!
 function compute_total_nthreads(device::AbstractGPUDevice, ncells::Integer)
     Ti = index_type(device)
     threads_per_block = _compute_groupsize(device, ncells)
