@@ -17,7 +17,16 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 Unrolled = "9602ed7d-8fef-5bc8-8597-8f21381861e8"
 
+[weakdeps]
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+
+[extensions]
+FerriteOperatorsAMDGPUExt = "AMDGPU"
+FerriteOperatorsCUDAExt = "CUDA"
+
 [compat]
+AMDGPU = "≥ 2.3.0"
 Adapt = "4.3.0"
 Atomix = "1.1.2"
 ConcreteStructs = "0.2.3"

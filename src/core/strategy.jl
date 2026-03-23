@@ -163,6 +163,11 @@ function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, i
     return PerColorAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(task_local_caches), colors)
 end
 
+function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh, gpu_colors)
+    device_cache = _setup_gpu_assembly_cache(strategy.device, integrator, element_cache, ivh, sdh)
+    return PerColorAssemblyStrategyCache(strategy.device, device_cache, gpu_colors)
+end
+
 """
     ElementAssemblyStrategy
 """
@@ -217,22 +222,23 @@ function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStra
 end
 
 matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)
-matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
+matrix_type(device::AbstractCPUDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
 
+vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
+vector_type(device::AbstractCPUDevice) = Vector{value_type(device)}
 
-## GPU ##
+function _setup_gpu_assembly_cache(device, integrator, element_cache, ivh, sdh)
+    backend = KA.backend(device)
+    nt      = total_nthreads(device)
+    return SimpleAssemblyCache(
+        allocate_local_cache(integrator, element_cache, device, sdh),
+        Ferrite.CellCacheContainer(backend, nt, sdh),
+        duplicate_for_device(device, ivh),
+        duplicate_for_device(device, element_cache),
+    )
+end
 
 function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh)
-
-    (; device) = strategy
-    backend    = KA.backend(device)
-    nt         = total_nthreads(device)
-
-    assembly_cache_container = allocate_local_cache(integrator, element_cache, device, sdh)
-    cell_cache_container     = Ferrite.CellCacheContainer(backend, nt, sdh)
-    gpu_ivh                  = duplicate_for_device(device, ivh)
-    element_cache_container  = duplicate_for_device(device, element_cache)
-
-    device_cache = SimpleAssemblyCache(assembly_cache_container, cell_cache_container, gpu_ivh, element_cache_container)
-    return ElementAssemblyStrategyCache(device, device_cache)
+    device_cache = _setup_gpu_assembly_cache(strategy.device, integrator, element_cache, ivh, sdh)
+    return ElementAssemblyStrategyCache(strategy.device, device_cache)
 end

@@ -26,16 +26,23 @@ function setup_element_strategy_caches(strategy, integrator, element_caches, ivh
     return [setup_element_strategy_cache(strategy, integrator, element_cache, ivh, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
 end
 
-function setup_element_strategy_caches(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_caches, ivh, dh)
+#FIXME: better way, maybe? 
+function setup_element_strategy_caches(strategy::PerColorAssemblyStrategy{<:AbstractGPUDevice}, integrator, element_caches, ivh, dh_device)
+    cpu_dh  = dh_device.original_dh
+    backend = KA.backend(strategy.device)
     return [
-        setup_element_strategy_cache(strategy, integrator, element_cache, ivh, sdh)
-        for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)
+        begin
+            colors     = Ferrite.create_coloring(get_grid(cpu_dh), cpu_sdh.cellset; alg=strategy.coloralg)
+            gpu_colors = [Adapt.adapt(backend, color) for color in colors]
+            setup_element_strategy_cache(strategy, integrator, element_cache, ivh, sdh, gpu_colors)
+        end
+        for (element_cache, sdh, cpu_sdh) in zip(element_caches, dh_device.subdofhandlers, cpu_dh.subdofhandlers)
     ]
 end
 
 function setup_subdomain_caches(strategy, integrator, dh)
     backend = KA.backend(strategy.device)
-    dh_device  = Adapt.adapt(backend, dh) # HostDofHandler
+    dh_device  = Adapt.adapt(backend, dh) #GPU ->  HostDofHandler, CPU -> DofHandler (no-op)
     element_caches  = setup_elements(integrator, dh)
     ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
     strategy_caches = setup_element_strategy_caches(strategy, integrator, element_caches, ivh, dh_device)

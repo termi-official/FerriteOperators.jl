@@ -179,7 +179,6 @@ getnitems(w::DeviceTaskWork) = length(w.items)
 end
 
 function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
-    #NOTE: we don't pass SubdomainCache to GPU, so we unpack it here and pass the relevant pieces directly to the kernel.
     ##TODO: Revisit, because this might be suboptimal design-wise.
     (; u, p, subdomain) = cache
     (; strategy_cache) = subdomain
