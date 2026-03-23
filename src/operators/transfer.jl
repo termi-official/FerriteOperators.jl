@@ -66,11 +66,11 @@ function setup_transfer_element_cache end
 Holds all pre-allocated data needed to assemble one subdomain's contribution to a transfer
 operator.  Analogous to `SubdomainCache` in the square-operator case.
 """
-struct TransferSubdomainCache{SDH_row, SDH_col, EL, TC}
+struct TransferSubdomainCache{SDH_row, SDH_col, EL, PET, TC}
     sdh_row::SDH_row            # SubDofHandler for row space (fine / test)
     sdh_col::SDH_col            # SubDofHandler for col space (coarse / trial)
     element::EL                 # AbstractTransferElementCache
-    Pe::Matrix{Float64}         # pre-allocated element-local rectangular matrix
+    Pe::PET         # pre-allocated element-local rectangular matrix
     tc::TC                      # SameGridCellCache (reused across iterations)
 end
 
@@ -79,24 +79,6 @@ function TransferSubdomainCache(sdh_row::SubDofHandler, sdh_col::SubDofHandler, 
     tc = SameGridCellCache(sdh_row, sdh_col)
     return TransferSubdomainCache(sdh_row, sdh_col, element, Pe, tc)
 end
-
-
-####################################
-## Sparse accumulation helper      ##
-####################################
-
-## Accumulate a local rectangular matrix Pe into a global sparse matrix P.
-## Uses direct sparse indexing which is safe even before the sparsity pattern is fixed.
-@inline function _accumulate_transfer_element!(P::SparseMatrixCSC, Pe::AbstractMatrix,
-        rdofs::AbstractVector{Int}, cdofs::AbstractVector{Int})
-    @inbounds for (j, Kcol) in enumerate(cdofs)
-        for (i, Krow) in enumerate(rdofs)
-            P[Krow, Kcol] += Pe[i, j]
-        end
-    end
-    return nothing
-end
-
 
 ####################################
 ## Device dispatch                 ##

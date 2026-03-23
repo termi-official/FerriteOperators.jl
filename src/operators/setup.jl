@@ -197,7 +197,7 @@ function setup_nested_transfer_operator(
     subdomain_caches = NestedTransferSubdomainCache[]
     for (sdh_fine, sdh_coarse) in zip(dh_fine.subdofhandlers, dh_coarse.subdofhandlers)
         element = setup_transfer_element_cache(integrator, sdh_fine, sdh_coarse)
-        tc      = NestedGridCellCache(dh_fine, dh_coarse, fine2coarse, child_ref_coords)
+        tc      = NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords)
         Pe      = zeros(ndofs_per_cell(sdh_fine), ndofs_per_cell(sdh_coarse))
         push!(subdomain_caches, NestedTransferSubdomainCache(sdh_fine, sdh_coarse, element, Pe, tc))
     end

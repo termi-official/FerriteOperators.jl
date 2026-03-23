@@ -38,30 +38,24 @@ mutable struct SameGridCellCache{X, G <: AbstractGrid,
 end
 
 function SameGridCellCache(dh_row::DofHandler, dh_col::DofHandler)
-    grid = get_grid(dh_row)
-    @assert get_grid(dh_col) === grid "Both DofHandlers must share the same grid"
-    sdim = getspatialdim(grid)
-    T    = get_coordinate_eltype(grid)
-    X    = Vec{sdim, T}
-    N    = nnodes_per_cell(grid, 1)
+    @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) == 1 "Only a single subdofhandler is allowed for iterations."
     return SameGridCellCache(
-        grid, dh_row, dh_col, -1,
-        zeros(Int, N), zeros(X, N),
-        zeros(Int, ndofs_per_cell(dh_row.subdofhandlers[1])),
-        zeros(Int, ndofs_per_cell(dh_col.subdofhandlers[1])),
+        dh_row.subdofhandlers[1],
+        dh_col.subdofhandlers[1],
     )
 end
 
 function SameGridCellCache(sdh_row::SubDofHandler, sdh_col::SubDofHandler)
-    @assert sdh_row.dh.grid === sdh_col.dh.grid "Both SubDofHandlers must share the same grid"
+    @assert get_grid(sdh_row.dh) === get_grid(sdh_col.dh) "Both SubDofHandlers must share the same grid"
     @assert sdh_row.cellset == sdh_col.cellset "Both SubDofHandlers must have the same cellset"
     grid = get_grid(sdh_row.dh)
     sdim = getspatialdim(grid)
     T    = get_coordinate_eltype(grid)
     X    = Vec{sdim, T}
+    nN   = Ferrite.nnodes_per_cell(grid, first(sdh_row.cellset))
     return SameGridCellCache(
         grid, sdh_row, sdh_col, -1,
-        Int[], zeros(X, 0),
+        zeros(Int, nN), zeros(X, nN),
         zeros(Int, ndofs_per_cell(sdh_row)),
         zeros(Int, ndofs_per_cell(sdh_col)),
     )
@@ -69,12 +63,8 @@ end
 
 function Ferrite.reinit!(tc::SameGridCellCache, i::Int)
     tc.cellid = i
-    resize!(tc.nodes,  nnodes_per_cell(tc.grid, i))
-    resize!(tc.coords, nnodes_per_cell(tc.grid, i))
     cellnodes!(tc.nodes, tc.grid, i)
     getcoordinates!(tc.coords, tc.grid, i)
-    resize!(tc.rdofs, ndofs_per_cell(tc.dh_row, i))
-    resize!(tc.cdofs, ndofs_per_cell(tc.dh_col, i))
     celldofs!(tc.rdofs, tc.dh_row, i)
     celldofs!(tc.cdofs, tc.dh_col, i)
     return tc
@@ -209,8 +199,22 @@ function NestedGridCellCache(
         fine2coarse::Vector{Int},
         child_ref_coords::Vector{<:AbstractVector},
     )
-    fine_grid   = get_grid(dh_fine)
-    coarse_grid = get_grid(dh_coarse)
+    @assert length(dh_fine.subdofhandlers) == length(dh_coarse.subdofhandlers) == 1 "Only a single subdofhandler is allowed for iterations."
+    return NestedGridCellCache(
+        dh_fine.subdofhandlers[1],
+        dh_coarse.subdofhandlers[1],
+        fine2coarse,
+        child_ref_coords,
+    )
+end
+
+function NestedGridCellCache(
+        sdh_fine::SubDofHandler, sdh_coarse::SubDofHandler,
+        fine2coarse::Vector{Int},
+        child_ref_coords::Vector{<:AbstractVector},
+    )
+    fine_grid   = get_grid(sdh_fine.dh)
+    coarse_grid = get_grid(sdh_coarse.dh)
     sdim_f = getspatialdim(fine_grid)
     sdim_c = getspatialdim(coarse_grid)
     @assert sdim_f == sdim_c "Fine and coarse grids must have the same spatial dimension"
@@ -218,9 +222,10 @@ function NestedGridCellCache(
     T_c = get_coordinate_eltype(coarse_grid)
     X_f = Vec{sdim_f, T_f}
     X_c = Vec{sdim_c, T_c}
+    nN   = Ferrite.nnodes_per_cell(fine_grid, first(sdh_fine.cellset))
     return NestedGridCellCache(
-        fine_grid,   dh_fine,   -1, Int[], X_f[], zeros(Int, ndofs_per_cell(dh_fine.subdofhandlers[1])),
-        coarse_grid, dh_coarse, -1, Int[], X_c[], zeros(Int, ndofs_per_cell(dh_coarse.subdofhandlers[1])),
+        fine_grid,   sdh_fine,   -1, zeros(Int, nN), zeros(X_f, nN), zeros(Int, ndofs_per_cell(sdh_fine)),
+        coarse_grid, sdh_coarse, -1, zeros(Int, nN), zeros(X_c, nN), zeros(Int, ndofs_per_cell(sdh_coarse)),
         fine2coarse,
         [convert(Vector{X_c}, v) for v in child_ref_coords],
     )
@@ -231,21 +236,15 @@ function Ferrite.reinit!(tc::NestedGridCellCache, fine_id::Int)
     tc.coarse_cellid = tc.fine2coarse[fine_id]
 
     # Fine geometry
-    resize!(tc.fine_nodes,  nnodes_per_cell(tc.fine_grid,   fine_id))
-    resize!(tc.fine_coords, nnodes_per_cell(tc.fine_grid,   fine_id))
     cellnodes!(tc.fine_nodes,   tc.fine_grid,   fine_id)
     getcoordinates!(tc.fine_coords, tc.fine_grid, fine_id)
 
     # Coarse geometry
     coarse_id = tc.coarse_cellid
-    resize!(tc.coarse_nodes,  nnodes_per_cell(tc.coarse_grid, coarse_id))
-    resize!(tc.coarse_coords, nnodes_per_cell(tc.coarse_grid, coarse_id))
     cellnodes!(tc.coarse_nodes,   tc.coarse_grid,   coarse_id)
     getcoordinates!(tc.coarse_coords, tc.coarse_grid, coarse_id)
 
     # Dofs
-    resize!(tc.fine_dofs,   ndofs_per_cell(tc.dh_fine,   fine_id))
-    resize!(tc.coarse_dofs, ndofs_per_cell(tc.dh_coarse, coarse_id))
     celldofs!(tc.fine_dofs,   tc.dh_fine,   fine_id)
     celldofs!(tc.coarse_dofs, tc.dh_coarse, coarse_id)
     return tc
