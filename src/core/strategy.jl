@@ -29,7 +29,7 @@ end
 
 setup_operator_strategy_cache(strategy, integrator, dh) = strategy
 
-## Local caches ##
+## Assembly caches ##
 @concrete struct BilinearAssemblyCache
     Ke
 end
@@ -66,32 +66,32 @@ end
     LinearAssemblyCache(view(c.re_pool, :, tid))
 
 ## Local cache allocation ##
-function allocate_local_cache(::AbstractBilinearIntegrator, element_cache, device::AbstractCPUDevice, sdh)
+function allocate_assembly_cache(::AbstractBilinearIntegrator, element_cache, device::AbstractCPUDevice, sdh)
     BilinearAssemblyCache(allocate_element_matrix(device, element_cache, sdh))
 end
-function allocate_local_cache(::AbstractNonlinearIntegrator, element_cache, device::AbstractCPUDevice, sdh)
+function allocate_assembly_cache(::AbstractNonlinearIntegrator, element_cache, device::AbstractCPUDevice, sdh)
     NonlinearAssemblyCache(
         allocate_element_matrix(device, element_cache, sdh),
         allocate_element_unknown_vector(device, element_cache, sdh),
         allocate_element_residual_vector(device, element_cache, sdh),
     )
 end
-function allocate_local_cache(::AbstractLinearIntegrator, element_cache, device::AbstractCPUDevice, sdh)
+function allocate_assembly_cache(::AbstractLinearIntegrator, element_cache, device::AbstractCPUDevice, sdh)
     LinearAssemblyCache(allocate_element_residual_vector(device, element_cache, sdh))
 end
 
 #TODO: should we use same inner functions like `allocate_element_matrix` for GPU, eventhough it dosn't actually allocate element matrix but a pool?
-function allocate_local_cache(::AbstractBilinearIntegrator, element_cache, device::AbstractGPUDevice, sdh)
+function allocate_assembly_cache(::AbstractBilinearIntegrator, element_cache, device::AbstractGPUDevice, sdh)
     BilinearAssemblyCacheContainer(allocate_element_matrix(device, element_cache, sdh))
 end
-function allocate_local_cache(::AbstractNonlinearIntegrator, element_cache, device::AbstractGPUDevice, sdh)
+function allocate_assembly_cache(::AbstractNonlinearIntegrator, element_cache, device::AbstractGPUDevice, sdh)
     NonlinearAssemblyCacheContainer(
         allocate_element_matrix(device, element_cache, sdh),
         allocate_element_unknown_vector(device, element_cache, sdh),
         allocate_element_residual_vector(device, element_cache, sdh),
     )
 end
-function allocate_local_cache(::AbstractLinearIntegrator, element_cache, device::AbstractGPUDevice, sdh)
+function allocate_assembly_cache(::AbstractLinearIntegrator, element_cache, device::AbstractGPUDevice, sdh)
     LinearAssemblyCacheContainer(allocate_element_residual_vector(device, element_cache, sdh))
 end
 
@@ -107,7 +107,7 @@ end
 
 
 function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, integrator, element_cache, ivh, sdh)
-    local_cache = allocate_local_cache(integrator, element_cache, strategy.device, sdh)
+    local_cache = allocate_assembly_cache(integrator, element_cache, strategy.device, sdh)
     return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(local_cache, CellCache(sdh), ivh, element_cache))
 end
 
@@ -154,7 +154,7 @@ function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, i
 
     task_local_caches = [
         SimpleAssemblyCache(
-            allocate_local_cache(integrator, element_cache, device, sdh),
+            allocate_assembly_cache(integrator, element_cache, device, sdh),
             CellCache(sdh),
             duplicate_for_device(device, ivh),
             duplicate_for_device(device, element_cache),
@@ -212,7 +212,7 @@ function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStra
 
     task_local_caches = [
         SimpleAssemblyCache(
-            allocate_local_cache(integrator, element_cache, device, sdh),
+            allocate_assembly_cache(integrator, element_cache, device, sdh),
             CellCache(sdh),
             duplicate_for_device(device, ivh),
             duplicate_for_device(device, element_cache),
@@ -231,7 +231,7 @@ function _setup_gpu_assembly_cache(device, integrator, element_cache, ivh, sdh)
     backend = KA.backend(device)
     nt      = total_nthreads(device)
     return SimpleAssemblyCache(
-        allocate_local_cache(integrator, element_cache, device, sdh),
+        allocate_assembly_cache(integrator, element_cache, device, sdh),
         Ferrite.CellCacheContainer(backend, nt, sdh),
         duplicate_for_device(device, ivh),
         duplicate_for_device(device, element_cache),

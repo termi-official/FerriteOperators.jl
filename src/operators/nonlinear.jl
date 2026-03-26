@@ -43,8 +43,7 @@ function execute_task_on_single_cell!(task::AssembleLinearizationJ, task_buffer)
     element    = query_element(task_buffer)
 
     load_element_unknowns!(uₑ, task_buffer)
-    # TODO: re-enable when TimerOutputs is GPU-compatible
-    # @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, cell_cache, element, pₑ)
+   
     assemble_element!(Jₑ, uₑ, cell_cache, element, pₑ)
     store_condensed_element_unknowns!(uₑ, task_buffer)
 
@@ -70,8 +69,7 @@ function execute_task_on_single_cell!(task::AssembleLinearizationR, task_buffer)
     element    = query_element(task_buffer)
 
     load_element_unknowns!(uₑ, task_buffer)
-    # TODO: re-enable when TimerOutputs is GPU-compatible
-    # @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, cell_cache, element, pₑ)
+    
     assemble_element!(rₑ, uₑ, cell_cache, element, pₑ)
     store_condensed_element_unknowns!(uₑ, task_buffer)
 
@@ -116,7 +114,6 @@ function update_linearization!(op::LinearizedFerriteOperator, residual::Abstract
     for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
         # Function barrier
         task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
-        # TODO: re-enable when TimerOutputs is GPU-compatible
         @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, subdomain_cache.strategy_cache.device, task_cache)
     end
 

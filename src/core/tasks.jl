@@ -7,7 +7,7 @@ end
 @concrete struct GenericTaskBuffer
     # Static parts
     u # <: AbstractVector
-    p # global parameters
+    p # global parameter
     element # <: Abstract*ElementCache
     assembly_cache # BilinearAssemblyCache | NonlinearAssemblyCache | LinearAssemblyCache
     # pe
