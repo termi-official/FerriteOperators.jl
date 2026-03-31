@@ -6,36 +6,31 @@ end
 
 struct AssembleLinearTerm{A}
     inner_assembler::A
+    p
 end
 duplicate_for_device(device, task::AssembleLinearTerm{<:AbstractVector}) = task
-duplicate_for_device(device, task::AssembleLinearTerm) = AssembleLinearTerm(duplicate_for_device(device, task.inner_assembler))
-function Ferrite.assemble!(task::AssembleLinearTerm, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.re)
-end
-function execute_task_on_single_cell!(task::AssembleLinearTerm, task_buffer)
-    pₑ = query_element_parameters(task_buffer)
-    rₑ = query_element_residual_buffer(task_buffer)
+duplicate_for_device(device, task::AssembleLinearTerm) = AssembleLinearTerm(duplicate_for_device(device, task.inner_assembler), task.p)
+
+function execute_on_cell!(task::AssembleLinearTerm, ws::AssemblyWorkspace)
+    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
+    rₑ = ws.re
 
     fill!(rₑ, 0.0)
 
-    cell    = query_geometry_cache(task_buffer)
-    element = query_element(task_buffer)
+    @timeit_debug "assemble element" assemble_element!(rₑ, ws.cell, ws.element, pₑ)
 
-    @timeit_debug "assemble element" assemble_element!(bₑ, cell, element, pₑ)
-
-    assemble!(task, task_buffer)
+    assemble!(task.inner_assembler, ws.cell, rₑ)
 end
 
 function update_operator!(op::LinearFerriteOperator, p)
     (; b, strategy, subdomain_caches) = op
 
     assembler = start_assemble(strategy, b)
-    task = AssembleLinearTerm(assembler)
+    task = AssembleLinearTerm(assembler, p)
 
-    for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
-        # Function barrier
-        task_cache = SubdomainAssemblyTaskBuffer(nothing, p, subdomain_cache)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
+    for (subdomain_id, sc) in enumerate(subdomain_caches)
+        (; strategy_cache) = sc
+        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy_cache.device, strategy_cache.device_cache, get_items(sc))
     end
 
     finalize_assembly!(assembler)

@@ -57,6 +57,44 @@ function setup_transfer_element_cache end
 
 
 ####################################
+## Transfer workspace              ##
+####################################
+
+"""
+    TransferWorkspace
+
+Per-worker workspace for transfer operator assembly. Holds the element cache,
+pre-allocated rectangular element matrix, and the transfer cell cache.
+"""
+@concrete struct TransferWorkspace
+    element
+    Pe
+    tc
+end
+
+Ferrite.reinit!(ws::TransferWorkspace, cellid) = reinit!(ws.tc, cellid)
+
+
+####################################
+## Transfer task                   ##
+####################################
+
+struct AssembleTransferTerm{A}
+    inner_assembler::A
+    p
+end
+duplicate_for_device(device, task::AssembleTransferTerm) = AssembleTransferTerm(duplicate_for_device(device, task.inner_assembler), task.p)
+
+function execute_on_cell!(task::AssembleTransferTerm, ws::TransferWorkspace)
+    pₑ = query_element_parameters(ws.element, ws.tc, nothing, task.p)
+
+    fill!(ws.Pe, 0.0)
+    @timeit_debug "assemble transfer element" assemble_transfer_element!(ws.Pe, ws.tc, ws.element, pₑ)
+    assemble!(task.inner_assembler, getrowdofs(ws.tc), getcolumndofs(ws.tc), ws.Pe)
+end
+
+
+####################################
 ## Subdomain-level cache           ##
 ####################################
 
@@ -66,52 +104,18 @@ function setup_transfer_element_cache end
 Holds all pre-allocated data needed to assemble one subdomain's contribution to a transfer
 operator.  Analogous to `SubdomainCache` in the square-operator case.
 """
-struct TransferSubdomainCache{SDH_row, SDH_col, EL, PET, TC}
+struct TransferSubdomainCache{SDH_row, SDH_col, WS}
     sdh_row::SDH_row            # SubDofHandler for row space (fine / test)
     sdh_col::SDH_col            # SubDofHandler for col space (coarse / trial)
-    element::EL                 # AbstractTransferElementCache
-    Pe::PET         # pre-allocated element-local rectangular matrix
-    tc::TC                      # SameGridCellCache (reused across iterations)
+    workspace::WS               # TransferWorkspace
 end
 
 function TransferSubdomainCache(sdh_row::SubDofHandler, sdh_col::SubDofHandler, element::AbstractTransferElementCache)
     Pe = allocate_transfer_element_matrix(element, sdh_row, sdh_col)
     tc = SameGridCellCache(sdh_row, sdh_col)
-    return TransferSubdomainCache(sdh_row, sdh_col, element, Pe, tc)
+    workspace = TransferWorkspace(element, Pe, tc)
+    return TransferSubdomainCache(sdh_row, sdh_col, workspace)
 end
-
-####################################
-## Device dispatch                 ##
-####################################
-
-function execute_transfer_on_device!(
-        assembler::CSCAssembler2,
-        device::SequentialCPUDevice,
-        subdomain_cache::TransferSubdomainCache,
-        p,
-    )
-    (; sdh_row, element, Pe, tc) = subdomain_cache
-    for cellid in sdh_row.cellset
-        reinit!(tc, cellid)
-        fill!(Pe, 0.0)
-        @timeit_debug "assemble transfer element" assemble_transfer_element!(Pe, tc, element, p)
-        assemble!(assembler, getrowdofs(tc), getcolumndofs(tc), Pe)
-    end
-    return nothing
-end
-
-function execute_transfer_on_device!(
-        assembler::CSCAssembler2,
-        device::PolyesterDevice,
-        subdomain_cache::TransferSubdomainCache,
-        p,
-    )
-    # For now fall back to sequential; parallel coloring for transfer operators
-    # can be added later once the coloring algorithm is extended to rectangular operators.
-    execute_transfer_on_device!(assembler, SequentialCPUDevice(), subdomain_cache, p)
-    return nothing
-end
-
 
 ####################################
 ## Operator struct                 ##
@@ -148,9 +152,11 @@ function update_operator!(op::TransferFerriteOperator, p)
     n_col = maximum(sc -> ndofs_per_cell(sc.sdh_col), subdomain_caches; init = 0)
     assembler = start_assemble2(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
 
-    for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
+    task = AssembleTransferTerm(assembler, p)
+
+    for (subdomain_id, sc) in enumerate(subdomain_caches)
         @timeit_debug "assemble transfer subdomain $subdomain_id" begin
-            execute_transfer_on_device!(assembler, strategy.device, subdomain_cache, p)
+            execute_on_device!(task, strategy.device, sc.workspace, (sc.sdh_row.cellset,))
         end
     end
 
@@ -178,38 +184,10 @@ Holds pre-allocated data for assembling one subdomain's contribution to a
 [`NestedTransferFerriteOperator`](@ref).  The fine and coarse DofHandlers live on
 **different** grids connected by `fine2coarse` and `child_ref_coords`.
 """
-struct NestedTransferSubdomainCache{SDH_fine, SDH_coarse, EL}
+struct NestedTransferSubdomainCache{SDH_fine, SDH_coarse, WS}
     sdh_fine::SDH_fine
     sdh_coarse::SDH_coarse
-    element::EL
-    Pe::Matrix{Float64}
-    tc::NestedGridCellCache
-end
-
-function execute_transfer_on_device!(
-        assembler::CSCAssembler2,
-        device::SequentialCPUDevice,
-        sc::NestedTransferSubdomainCache,
-        p,
-    )
-    (; sdh_fine, element, Pe, tc) = sc
-    for cellid in sdh_fine.cellset
-        reinit!(tc, cellid)
-        fill!(Pe, 0.0)
-        @timeit_debug "assemble nested transfer element" assemble_transfer_element!(Pe, tc, element, p)
-        assemble!(assembler, getrowdofs(tc), getcolumndofs(tc), Pe)
-    end
-    return nothing
-end
-
-function execute_transfer_on_device!(
-        assembler::CSCAssembler2,
-        device::PolyesterDevice,
-        sc::NestedTransferSubdomainCache,
-        p,
-    )
-    execute_transfer_on_device!(assembler, SequentialCPUDevice(), sc, p)
-    return nothing
+    workspace::WS               # TransferWorkspace with NestedGridCellCache
 end
 
 """
@@ -233,9 +211,11 @@ function update_operator!(op::NestedTransferFerriteOperator, p)
     n_col = maximum(sc -> ndofs_per_cell(sc.sdh_coarse), subdomain_caches; init = 0)
     assembler = start_assemble2(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
 
+    task = AssembleTransferTerm(assembler, p)
+
     for (subdomain_id, sc) in enumerate(subdomain_caches)
         @timeit_debug "assemble nested transfer subdomain $subdomain_id" begin
-            execute_transfer_on_device!(assembler, strategy.device, sc, p)
+            execute_on_device!(task, strategy.device, sc.workspace, (sc.sdh_fine.cellset,))
         end
     end
 

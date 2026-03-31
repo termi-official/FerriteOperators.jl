@@ -24,7 +24,21 @@ end
 
 setup_operator_strategy_cache(strategy, integrator, dh) = strategy
 
-@concrete struct SimpleAssemblyCache
+"""
+    AssemblyWorkspace
+
+Per-worker workspace for square operator assembly (bilinear, nonlinear, linear).
+Holds pre-allocated element-local buffers and caches that are reused across cells.
+
+Fields:
+- `Ke`: element stiffness matrix
+- `ue`: element unknown vector
+- `re`: element residual vector
+- `cell`: geometry cache ([`CellCache`](@ref))
+- `ivh`: internal variable handler
+- `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
+"""
+@concrete struct AssemblyWorkspace
     Ke
     ue
     re
@@ -36,7 +50,7 @@ function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, elem
     Ke = allocate_element_matrix(element_cache, sdh)
     ue = allocate_element_unknown_vector(element_cache, sdh)
     re = allocate_element_residual_vector(element_cache, sdh)
-    return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(Ke, ue, re, CellCache(sdh), ivh, element_cache))
+    return SequentialAssemblyStrategyCache(strategy.device, AssemblyWorkspace(Ke, ue, re, CellCache(sdh), ivh, element_cache))
 end
 
 """
@@ -80,7 +94,7 @@ function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, e
     nchunksmax = ceil(Int, ncellsmax / chunksize)
 
     task_local_caches = [
-        SimpleAssemblyCache(
+        AssemblyWorkspace(
             allocate_element_matrix(element_cache, sdh),
             allocate_element_unknown_vector(element_cache, sdh),
             allocate_element_residual_vector(element_cache, sdh),
@@ -135,7 +149,7 @@ function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStra
     nchunksmax = ceil(Int, ncellsmax / chunksize)
 
     task_local_caches = [
-        SimpleAssemblyCache(
+        AssemblyWorkspace(
             allocate_element_matrix(element_cache, sdh),
             allocate_element_unknown_vector(element_cache, sdh),
             allocate_element_residual_vector(element_cache, sdh),
@@ -149,3 +163,10 @@ end
 
 matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)
 matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
+
+# Workspace protocol
+Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
+
+# Extract the first usable workspace from a device cache
+_first_workspace(ws) = ws
+_first_workspace(ws::ThreadedAssemblyCache) = first(ws.task_local_caches)

@@ -6,35 +6,30 @@ end
 
 struct AssembleBilinearTerm{A}
     inner_assembler::A
+    p
 end
-duplicate_for_device(device, task::AssembleBilinearTerm) = AssembleBilinearTerm(duplicate_for_device(device, task.inner_assembler))
-function Ferrite.assemble!(task::AssembleBilinearTerm, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.Ke)
-end
-function execute_task_on_single_cell!(task::AssembleBilinearTerm, task_buffer)
-    pₑ = query_element_parameters(task_buffer)
-    Aₑ = query_element_matrix(task_buffer)
+duplicate_for_device(device, task::AssembleBilinearTerm) = AssembleBilinearTerm(duplicate_for_device(device, task.inner_assembler), task.p)
 
-    fill!(Aₑ, 0.0)
+function execute_on_cell!(task::AssembleBilinearTerm, ws::AssemblyWorkspace)
+    Kₑ = ws.Ke
+    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
 
-    cell    = query_geometry_cache(task_buffer)
-    element = query_element(task_buffer)
+    fill!(Kₑ, 0.0)
 
-    @timeit_debug "assemble element" assemble_element!(Aₑ, cell, element, pₑ)
+    @timeit_debug "assemble element" assemble_element!(Kₑ, ws.cell, ws.element, pₑ)
 
-    assemble!(task, task_buffer)
+    assemble!(task.inner_assembler, ws.cell, Kₑ)
 end
 
 function update_operator!(op::BilinearFerriteOperator, p)
     (; A, strategy, subdomain_caches) = op
 
     assembler = start_assemble(strategy, A)
-    task = AssembleBilinearTerm(assembler)
+    task = AssembleBilinearTerm(assembler, p)
 
-    for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
-        # Function barrier
-        task_cache = SubdomainAssemblyTaskBuffer(nothing, p, subdomain_cache)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
+    for (subdomain_id, sc) in enumerate(subdomain_caches)
+        (; strategy_cache) = sc
+        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy_cache.device, strategy_cache.device_cache, get_items(sc))
     end
 
     finalize_assembly!(assembler)
@@ -43,4 +38,4 @@ end
 mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector) = mul!(out, op.A, in)
 mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.A, in, α, β)
 Base.eltype(op::BilinearFerriteOperator) = eltype(op.A)
-Base.size(op::BilinearFerriteOperator, axis) = sisze(op.A, axis)
+Base.size(op::BilinearFerriteOperator, axis) = size(op.A, axis)

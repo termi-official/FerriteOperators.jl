@@ -22,6 +22,43 @@ CurrentModule = FerriteOperators
     in the current design. This can be done via julialang.slack.com,
     julialang.zulipchat.com or via mail.
 
+## Architecture Overview
+
+FerriteOperators sits between Ferrite modeling code and solver code.  Its job is
+to assemble sparse matrices, residual vectors, and matrix-free actions from
+user-defined element formulations — either sequentially or in parallel — on
+different devices (CPU threads, or eventually GPUs).
+
+The assembly pipeline is built around four layers:
+
+1. **Strategies** decide *how* to partition work (sequential, per-color, element-assembly / matrix-free).
+2. **Devices** decide *where* to execute (sequential CPU, threaded via Polyester, or GPU).
+3. **Tasks** carry the per-call state needed for one assembly pass (assembler handle, global unknowns, parameters).
+4. **Workspaces** hold the pre-allocated per-worker scratch data (element cache, cell cache, local matrices/vectors).
+
+These layers compose into a single generic device loop shared by all operator types:
+
+```
+for chunk in items
+    for cellid in chunk
+        reinit!(workspace, cellid)
+        execute_on_cell!(task, workspace)
+    end
+end
+```
+
+Square operators (bilinear, nonlinear, linear) use an [`AssemblyWorkspace`](@ref)
+that holds the local element matrix `Ke`, unknown vector `ue`, residual vector
+`re`, geometry cache, internal variable handler, and element cache.
+
+Transfer operators (prolongation/restriction) use a [`TransferWorkspace`](@ref)
+with the rectangular element matrix `Pe`, a transfer cell cache, and the
+transfer element cache.
+
+Adding a new operator family only requires defining a new task type and
+implementing `execute_on_cell!` for the appropriate workspace — the device loop,
+strategy infrastructure, and parallel duplication remain unchanged.
+
 ## The Element Interface
 
 For users the most important piece is the element interface.
@@ -52,6 +89,18 @@ FerriteOperators.AbstractNonlinearIntegrator
 FerriteOperators.AbstractLinearIntegrator
 ```
 
+## Transfer Operators
+
+Transfer operators assemble rectangular sparse matrices for prolongation and
+restriction between two `DofHandler`s.
+
+```@docs
+setup_transfer_operator
+setup_nested_transfer_operator
+FerriteOperators.AbstractTransferIntegrator
+FerriteOperators.AbstractTransferElementCache
+```
+
 ## The Setup Interface
 
 The main entry point for users is the function
@@ -63,10 +112,14 @@ setup_operator
 which takes a strategy, the integrator and a matching dof handler.
 Here the strategy controls the type of parallelism, the used device (e.g. threaded CPU or GPU) and the integrator is the hub controlling what exactly will be assembled.
 
+## Devices
+
 ```@docs
 SequentialCPUDevice
 PolyesterDevice
 ```
+
+## Strategies
 
 ```@docs
 SequentialAssemblyStrategy

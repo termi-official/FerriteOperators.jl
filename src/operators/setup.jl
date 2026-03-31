@@ -123,6 +123,8 @@ function setup_transfer_operator(
         dh_row::DofHandler,
         dh_col::DofHandler,
     )
+    @assert strategy isa SequentialAssemblyStrategy "Transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"
+    @assert strategy.device isa SequentialCPUDevice "Transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"
     @assert get_grid(dh_row) === get_grid(dh_col) "Both DofHandlers must share the same grid"
     @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) "Mismatch in number of subdomains"
 
@@ -190,6 +192,8 @@ function setup_nested_transfer_operator(
         fine2coarse::AbstractVector{Int},
         child_ref_coords::AbstractVector,
     )
+    @assert strategy isa SequentialAssemblyStrategy "Nested transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"
+    @assert strategy.device isa SequentialCPUDevice "Nested transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"
     Tv  = value_type(strategy.device)
     sp  = init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)
     P   = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
@@ -199,7 +203,8 @@ function setup_nested_transfer_operator(
         element = setup_transfer_element_cache(integrator, sdh_fine, sdh_coarse)
         tc      = NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords)
         Pe      = zeros(ndofs_per_cell(sdh_fine), ndofs_per_cell(sdh_coarse))
-        push!(subdomain_caches, NestedTransferSubdomainCache(sdh_fine, sdh_coarse, element, Pe, tc))
+        workspace = TransferWorkspace(element, Pe, tc)
+        push!(subdomain_caches, NestedTransferSubdomainCache(sdh_fine, sdh_coarse, workspace))
     end
 
     return NestedTransferFerriteOperator(P, strategy, subdomain_caches)
