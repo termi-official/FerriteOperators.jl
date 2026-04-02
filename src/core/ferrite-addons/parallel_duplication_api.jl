@@ -87,12 +87,20 @@ function duplicate_for_device(device, x::T)::T where {T <: Tuple}
     end
 end
 
-function duplicate_for_device(device, x::T)::T where {T}
-    if !isbitstype(T)
-        error("MethodError: duplicate_for_device(device, ::$T) is not implemented")
-    end
-    return x
+function duplicate_for_device(device, x::T) where {T}
+    isbitstype(T) && return x
+    # Recurse on fields
+    # IDEA: we don't need to explicitly write ``duplicate_for_device`` for every struct type. Only once for each field type.
+    fields = ntuple(i -> duplicate_for_device(device, getfield(x, i)), fieldcount(T))
+    return T.name.wrapper(fields...)
 end
+
+# function duplicate_for_device(device, x::T)::T where {T}
+#     if !isbitstype(T)
+#         error("MethodError: duplicate_for_device(device, ::$T) is not implemented")
+#     end
+#     return x
+# end
 
 function duplicate_for_device(device, x::T)::T where {S, T <: DenseArray{S}}
     @assert !isbitstype(T)

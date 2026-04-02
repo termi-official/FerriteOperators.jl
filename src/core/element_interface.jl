@@ -152,3 +152,90 @@ assemble_interface!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache,
 assemble_interface!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptyInterfaceCache, time) = nothing
 # Update residual in nonlinear operators
 assemble_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptyInterfaceCache, time) = nothing
+
+## GPU element infrastructure ##
+
+# per_thread: extract per-thread instance from a container struct.
+# Default: identity (scalars, isbits, non-container fields pass through).
+per_thread(x, tid) = x
+per_thread(x::Ferrite.CellValuesContainer, tid) = x[tid]
+
+macro per_thread_structure(T)
+    quote
+        @inline function Base.getindex(x::$(esc(T)), tid)
+            fields = ntuple(i -> per_thread(getfield(x, i), tid), fieldcount(typeof(x)))
+            typeof(x)(fields...)
+        end
+    end
+end
+
+"""
+    @device_element struct MyElementCache <: AbstractVolumetricElementCache
+        D::Float64
+        cellvalues::CellValues
+    end
+
+    # Generates:
+    # struct MyElementCache{_T1, _T2} <: AbstractVolumetricElementCache
+    #     D::_T1
+    #     cellvalues::_T2
+    # end
+    # Adapt.@adapt_structure MyElementCache
+    # @per_thread_structure MyElementCache
+"""
+macro device_element(expr)
+    expr.head == :struct || error("@device_element expects a struct definition")
+    expr.args[1] && error("@device_element does not support mutable structs")
+
+    struct_header = expr.args[2]
+    struct_body = expr.args[3]
+
+    if struct_header isa Expr && struct_header.head == :(<:)
+        struct_name = struct_header.args[1]
+        supertype = struct_header.args[2]
+    else
+        struct_name = struct_header
+        supertype = nothing
+    end
+
+    # Parametrize all typed fields
+    type_params = Symbol[]
+    new_fields = Expr[]
+    param_counter = 0
+
+    for line in struct_body.args
+        if line isa Expr && line.head == :(::)
+            field_name = line.args[1]
+            param_counter += 1
+            param = Symbol("_T", param_counter)
+            push!(type_params, param)
+            push!(new_fields, :($field_name::$param))
+        elseif line isa LineNumberNode
+            continue
+        else
+            push!(new_fields, line)
+        end
+    end
+
+    if isempty(type_params)
+        param_name = struct_name
+    else
+        param_name = :($struct_name{$(type_params...)})
+    end
+
+    full_header = supertype !== nothing ? :($param_name <: $supertype) : param_name
+
+    esc(quote
+        Base.@__doc__ struct $full_header
+            $(new_fields...)
+        end
+        @inline function Adapt.adapt_structure(to, x::$struct_name)
+            fields = ntuple(i -> Adapt.adapt(to, getfield(x, i)), fieldcount(typeof(x)))
+            typeof(x).name.wrapper(fields...)
+        end
+        @inline function Base.getindex(x::$struct_name, tid)
+            fields = ntuple(i -> per_thread(getfield(x, i), tid), fieldcount(typeof(x)))
+            typeof(x).name.wrapper(fields...)
+        end
+    end)
+end
