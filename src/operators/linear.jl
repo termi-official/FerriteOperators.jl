@@ -11,7 +11,7 @@ end
 duplicate_for_device(device, task::AssembleLinearTerm{<:AbstractVector}) = task
 duplicate_for_device(device, task::AssembleLinearTerm) = AssembleLinearTerm(duplicate_for_device(device, task.inner_assembler), task.p)
 
-function execute_on_cell!(task::AssembleLinearTerm, ws::AssemblyWorkspace)
+function execute_single_task!(task::AssembleLinearTerm, ws::AssemblyWorkspace)
     pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
     rₑ = ws.re
 

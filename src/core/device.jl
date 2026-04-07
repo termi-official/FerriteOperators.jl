@@ -20,7 +20,7 @@ function execute_on_device!(task, device::SequentialCPUDevice, device_cache, ite
     for chunk in items
         for cellid in chunk
             reinit!(ws, cellid)
-            execute_on_cell!(task, ws)
+            execute_single_task!(task, ws)
         end
     end
 end
@@ -62,7 +62,7 @@ function execute_on_device!(task, device::PolyesterDevice, device_cache, items)
             for itemid in first_itemid:last_itemid
                 cellid = chunk[itemid]
                 reinit!(local_ws, cellid)
-                execute_on_cell!(local_task, local_ws)
+                execute_single_task!(local_task, local_ws)
             end
         end
     end

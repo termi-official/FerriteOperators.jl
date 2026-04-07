@@ -5,7 +5,7 @@ struct AssembleLinearizationJR{A}
 end
 duplicate_for_device(device, task::AssembleLinearizationJR) = AssembleLinearizationJR(duplicate_for_device(device, task.inner_assembler), task.u, task.p)
 
-function execute_on_cell!(task::AssembleLinearizationJR, ws::AssemblyWorkspace)
+function execute_single_task!(task::AssembleLinearizationJR, ws::AssemblyWorkspace)
     Jₑ = ws.Ke
     rₑ = ws.re
     uₑ = query_element_unknown_buffer(ws.element, ws.ue)
@@ -28,7 +28,7 @@ struct AssembleLinearizationJ{A}
 end
 duplicate_for_device(device, task::AssembleLinearizationJ) = AssembleLinearizationJ(duplicate_for_device(device, task.inner_assembler), task.u, task.p)
 
-function execute_on_cell!(task::AssembleLinearizationJ, ws::AssemblyWorkspace)
+function execute_single_task!(task::AssembleLinearizationJ, ws::AssemblyWorkspace)
     Jₑ = ws.Ke
     uₑ = query_element_unknown_buffer(ws.element, ws.ue)
     pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
@@ -50,7 +50,7 @@ end
 duplicate_for_device(device, task::AssembleLinearizationR{<:AbstractVector}) = task
 duplicate_for_device(device, task::AssembleLinearizationR) = AssembleLinearizationR(duplicate_for_device(device, task.inner_assembler), task.u, task.p)
 
-function execute_on_cell!(task::AssembleLinearizationR, ws::AssemblyWorkspace)
+function execute_single_task!(task::AssembleLinearizationR, ws::AssemblyWorkspace)
     rₑ = ws.re
     uₑ = query_element_unknown_buffer(ws.element, ws.ue)
     pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
