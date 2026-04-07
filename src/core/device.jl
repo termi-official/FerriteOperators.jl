@@ -7,7 +7,7 @@ index_type(::AbstractDevice{<:Any, IndexType}) where IndexType = IndexType
 
 
 """
-    SequentialCPUDevice
+    SequentialCPUDevice()
 
 Sequential algorithms on CPU.
 """
@@ -27,7 +27,7 @@ end
 
 
 """
-    PolyesterDevice
+    PolyesterDevice(chunksize)
 
 Threaded algorithms via Polyester.jl .
 """
@@ -70,7 +70,7 @@ end
 
 
 """
-    CudaDevice
+    CudaDevice(threads, blocks)
 
 Please add CUDA.jl to your Project to make this device work.
 """
