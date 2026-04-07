@@ -24,28 +24,32 @@ CurrentModule = FerriteOperators
 
 ## Architecture Overview
 
-FerriteOperators sits between Ferrite modeling code and solver code.  Its job is
-to assemble sparse matrices, residual vectors, and matrix-free actions from
-user-defined element formulations — either sequentially or in parallel — on
-different devices (CPU threads, or eventually GPUs).
+FerriteOperators sits between Ferrite modeling code and solver code. It provides
+a flexible job system to define generic finite element operators. These typically
+assemble sparse matrices, residual vectors, or apply matrix-free actions with
+user-defined element formulations. The task system allows to execute these
+actions either sequentially or in parallel and on
+different devices (CPU threads, GPUs, ...).
 
 The assembly pipeline is built around four layers:
 
 1. **Strategies** decide *how* to partition work (sequential, per-color, element-assembly / matrix-free).
-2. **Devices** decide *where* to execute (sequential CPU, threaded via Polyester, or GPU).
-3. **Tasks** carry the per-call state needed for one assembly pass (assembler handle, global unknowns, parameters).
-4. **Workspaces** hold the pre-allocated per-worker scratch data (element cache, cell cache, local matrices/vectors).
+2. **Devices** decide *where* to execute (e.g. sequential on the CPU, threaded via Polyester, or GPU via KernelAbstractions).
+3. **Tasks** encode *what* to execute on a device.
+4. **Workspaces** hold the pre-allocated per-worker scratch data (e.g. element cache, cell cache, local matrices/vectors, ...) allowing them to execute their assigned tasks independently.
 
 These layers compose into a single generic device loop shared by all operator types:
 
 ```
 for chunk in items
-    for cellid in chunk
-        reinit!(workspace, cellid)
-        execute_on_cell!(task, workspace)
+    for taskid in chunk
+        reinit!(workspace, taskid)
+        execute_single_task!(task, workspace)
     end
 end
 ```
+
+where the items encode ids for the tasks to setup the local buffers from the device cache.
 
 Square operators (bilinear, nonlinear, linear) use an [`AssemblyWorkspace`](@ref)
 that holds the local element matrix `Ke`, unknown vector `ue`, residual vector
@@ -55,8 +59,8 @@ Transfer operators (prolongation/restriction) use a [`TransferWorkspace`](@ref)
 with the rectangular element matrix `Pe`, a transfer cell cache, and the
 transfer element cache.
 
-Adding a new operator family only requires defining a new task type and
-implementing `execute_on_cell!` for the appropriate workspace — the device loop,
+Adding a new operator type typically only requires defining a new task type and
+implementing `execute_single_task!` for the appropriate workspace - the device loop,
 strategy infrastructure, and parallel duplication remain unchanged.
 
 ## The Element Interface
