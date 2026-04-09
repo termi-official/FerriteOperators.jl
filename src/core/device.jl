@@ -133,58 +133,31 @@ end
 Base.iterate(l::DeviceStridedIterator) = iterate(l.range)
 Base.iterate(l::DeviceStridedIterator, state) = iterate(l.range, state)
 
-# Logic-agnostic grid-stride kernel — calls work(idx, tid) for each item.
-KA.@kernel function _device_strided_kernel!(work, num_items::Ti) where {Ti <: Integer}
+# GPU kernel: grid-stride loop for cell-based task execution.
+KA.@kernel function _execute_task_kernel!(task, u, p, device_cache, @Const(items), num_items::Ti) where {Ti <: Integer}
     tid = convert(Ti, KA.@index(Global, Linear))
     if tid <= num_items
         iter = DeviceStridedIterator(num_items, tid, convert(Ti, prod(KA.@ndrange)))
         for idx in iter
-            work(idx, iter.tid)
+            taskid = items[idx]
+            task_buffer = get_task_buffer_for_device(task, u, p, device_cache, iter.tid, taskid)
+            execute_task_on_single_cell!(task, task_buffer)
         end
     end
 end
 
-# AbstractDeviceWork interface — every work type must implement:
-abstract type AbstractDeviceWork end
-getdevice(::T) where {T <: AbstractDeviceWork} = error("getdevice not implemented for $T")
-getnitems(::T) where {T <: AbstractDeviceWork} = error("getnitems not implemented for $T")
-
-function launch!(work::AbstractDeviceWork)
-    device = getdevice(work)
-    backend = KA.backend(device)
-    Ti = index_type(device)
-    n = convert(Ti, getnitems(work))
-    kernel = _device_strided_kernel!(backend, Int(device.threads))
-    kernel(work, n; ndrange = Int(device.blocks * device.threads))
-    KA.synchronize(backend)
-end
-
-@concrete struct DeviceTaskWork <: AbstractDeviceWork
-    device
-    task
-    u
-    p
-    device_cache
-    items
-end
-
-getdevice(w::DeviceTaskWork) = w.device
-getnitems(w::DeviceTaskWork) = length(w.items)
-
-# work being executed on GPU.
-@inline function (w::DeviceTaskWork)(idx, tid)
-    taskid = w.items[idx]
-    task_buffer = get_task_buffer_for_device(w.task, w.u, w.p, w.device_cache, tid, taskid)
-    execute_task_on_single_cell!(w.task, task_buffer)
-end
-
 function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
-    ##TODO: Revisit, because this might be suboptimal design-wise.
+    #FIXME: this might be suboptimal design wise? better way to unfold this? 
     (; u, p, subdomain) = cache
     (; strategy_cache) = subdomain
     (; device_cache) = strategy_cache
+    backend = KA.backend(device)
+    Ti = index_type(device)
     for items in get_items(task, cache)
-        DeviceTaskWork(device, task, u, p, device_cache, items) |> launch!
+        num_items = convert(Ti, length(items))
+        kernel = _execute_task_kernel!(backend, Int(device.threads))
+        kernel(task, u, p, device_cache, items, num_items; ndrange = Int(device.blocks * device.threads))
+        KA.synchronize(backend)
     end
 end
 

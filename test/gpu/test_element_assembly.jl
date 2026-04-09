@@ -1,8 +1,7 @@
 ## ElementAssemblyStrategy GPU tests ##
 
-function test_bilinear_diffusion_ea(device; atol=nothing, rtol=nothing)
-    dh, integrator = setup_diffusion_problem()
-
+# --- Bilinear: test element matrices + matrix-free product ---
+function test_bilinear_ea(device, dh, integrator; atol=nothing, rtol=nothing)
     # CPU reference
     cpu_strategy = ElementAssemblyStrategy(SequentialCPUDevice())
     cpu_op = setup_operator(cpu_strategy, integrator, dh)
@@ -28,20 +27,73 @@ function test_bilinear_diffusion_ea(device; atol=nothing, rtol=nothing)
     end
 
     @testset "Matrix-free product" begin
-        ndofs = Ferrite.ndofs(dh)
-        x = KA.zeros(KA.backend(device), Float64, ndofs)
-        copyto!(x, collect(1.0:ndofs).^2)
-        y_gpu = KA.zeros(KA.backend(device), Float64, ndofs)
+        n = Ferrite.ndofs(dh)
+        x = KA.zeros(KA.backend(device), Float64, n)
+        copyto!(x, collect(1.0:n) .^ 2)
+        y_gpu = KA.zeros(KA.backend(device), Float64, n)
         mul!(y_gpu, gpu_op.A, x)
 
-        x_cpu = collect(1.0:ndofs).^2
-        y_cpu = zeros(ndofs)
+        x_cpu = collect(1.0:n) .^ 2
+        y_cpu = zeros(n)
         mul!(y_cpu, cpu_op.A, x_cpu)
 
         @test isapprox(Array(y_gpu), y_cpu; atol=something(atol, 0), rtol=something(rtol, 0))
     end
 end
 
+# --- Nonlinear: test J, J+R, R via ElementAssemblyStrategy ---
+function test_nonlinear_ea(device, dh, integrator, u_gpu; atol=nothing, rtol=nothing)
+    backend = KA.backend(device)
+    n = ndofs(dh)
+    u_cpu = Array(u_gpu)
+
+    # CPU reference
+    cpu_strategy = ElementAssemblyStrategy(SequentialCPUDevice())
+    cpu_op = setup_operator(cpu_strategy, integrator, dh)
+
+    update_linearization!(cpu_op, u_cpu, 0.0)
+    yref = zero(u_cpu)
+    mul!(yref, cpu_op.J, u_cpu)
+
+    residual_cpu = zeros(n)
+    update_linearization!(cpu_op, residual_cpu, u_cpu, 0.0)
+    residual_baseline = copy(residual_cpu)
+
+    # GPU — u, residual, mul! vectors are all GPU
+    gpu_strategy = ElementAssemblyStrategy(device)
+    gpu_op = setup_operator(gpu_strategy, integrator, dh)
+
+    @testset "J + mul!" begin
+        update_linearization!(gpu_op, u_gpu, 0.0)
+        y_gpu = KA.zeros(backend, Float64, n)
+        mul!(y_gpu, gpu_op.J, u_gpu)
+        @test isapprox(yref, Array(y_gpu); atol=something(atol, 0), rtol=something(rtol, 0))
+    end
+
+    @testset "J+R" begin
+        residual_gpu = KA.zeros(backend, Float64, n)
+        update_linearization!(gpu_op, residual_gpu, u_gpu, 0.0)
+        y_gpu = KA.zeros(backend, Float64, n)
+        mul!(y_gpu, gpu_op.J, u_gpu)
+        @test isapprox(yref, Array(y_gpu); atol=something(atol, 0), rtol=something(rtol, 0))
+        @test isapprox(residual_baseline, Array(residual_gpu); atol=something(atol, 0), rtol=something(rtol, 0))
+    end
+
+    @testset "R only" begin
+        residual_gpu = KA.zeros(backend, Float64, n)
+        gpu_op(residual_gpu, u_gpu, 0.0)
+        @test isapprox(residual_baseline, Array(residual_gpu); atol=something(atol, 0), rtol=something(rtol, 0))
+    end
+
+    @testset "Idempotency" begin
+        update_linearization!(gpu_op, u_gpu, 0.0)
+        y_gpu = KA.zeros(backend, Float64, n)
+        mul!(y_gpu, gpu_op.J, u_gpu)
+        @test isapprox(yref, Array(y_gpu); atol=something(atol, 0), rtol=something(rtol, 0))
+    end
+end
+
+# --- EA Collapse ---
 function test_ea_collapse(device; rtol=1e-10)
     dh, _ = setup_diffusion_problem()
 
@@ -61,25 +113,24 @@ function test_ea_collapse(device; rtol=1e-10)
 end
 
 @testset "ElementAssemblyStrategy (GPU)" begin
-    if cuda_available
-        @testset "CUDA (Float32)" begin
-            test_bilinear_diffusion_ea(CudaDevice(), rtol=1e-5)
+    run_on_backends(cuda_f32=false) do device
+        @testset "Bilinear Diffusion" begin
+            dh, integrator = setup_diffusion_problem()
+            test_bilinear_ea(device, dh, integrator, atol=1e-10)
         end
-        @testset "CUDA (Float64)" begin
-            test_bilinear_diffusion_ea(CudaDevice{Float64, Int32}(Int32(0), Int32(0)), atol=1e-10, rtol=0.0)
-        end
-        @testset "EA Collapse" begin
-            test_ea_collapse(CudaDevice{Float64, Int32}(Int32(64), Int32(4)))
-        end
-    else
-        @info "CUDA not available, skipping"
-    end
 
-    if roc_available
-        @testset "ROC" begin
-            test_bilinear_diffusion_ea(RocDevice())
+        @testset "Bilinear Mass" begin
+            dh, integrator = setup_mass_problem()
+            test_bilinear_ea(device, dh, integrator, atol=1e-10)
         end
-    else
-        @info "AMDGPU not available, skipping ROC"
+
+        @testset "Nonlinear Hyperelasticity" begin
+            dh, integrator, u = setup_hyperelasticity_problem(device)
+            test_nonlinear_ea(device, dh, integrator, u, atol=1e-10)
+        end
+
+        @testset "EA Collapse" begin
+            test_ea_collapse(device)
+        end
     end
 end

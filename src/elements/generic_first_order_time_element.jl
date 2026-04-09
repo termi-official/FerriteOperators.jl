@@ -1,3 +1,6 @@
+#TODO: This file is not GPU supported yet, due to convolution in parameteres. 
+
+
 @concrete struct GenericFirstOrderTimeParameters
     p
     t
@@ -64,6 +67,7 @@ function query_element_parameters(element::AbstractGenericFirstOrderTimeSurfaceE
     (; cv) = element
     (; uprev, Δt, t) = p
     # FIXME: uses old api
+    # FIXME: this will fail on GPU
     uₑprev = allocate_element_unknown_vector(element, cell)
     load_element_unknowns!(uₑprev, uprev, cell, ivh, element)
     pₑ = query_element_parameters(element, cell, ivh, p.p)

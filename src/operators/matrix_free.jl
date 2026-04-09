@@ -103,23 +103,23 @@ end
 struct EAViewCache
 end
 
-# Work functor for GPU matrix-free product.
-@concrete struct DeviceMatrixFreeWork <: AbstractDeviceWork
-    device
-    out
-    operator
-    in_vec
-end
-
-getdevice(w::DeviceMatrixFreeWork) = w.device
-getnitems(w::DeviceMatrixFreeWork) = getnelements(w.operator)
-
-@inline function (w::DeviceMatrixFreeWork)(ei, _tid)
-    product_kernel!(w.out, w.operator, w.in_vec, ei, w.operator.vector_element_map, w.operator.element_vector_map, nothing, nothing)
+KA.@kernel function _matrix_free_product_kernel!(out, A, in_vec, num_elements::Ti) where {Ti <: Integer}
+    tid = convert(Ti, KA.@index(Global, Linear))
+    if tid <= num_elements
+        iter = DeviceStridedIterator(num_elements, tid, convert(Ti, prod(KA.@ndrange)))
+        for ei in iter
+            product_kernel!(out, A, in_vec, ei, A.vector_element_map, A.element_vector_map, nothing, nothing)
+        end
+    end
 end
 
 function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::AbstractGPUDevice)
-    DeviceMatrixFreeWork(device, out, A, in) |> launch!
+    backend = KA.backend(device)
+    Ti = index_type(device)
+    n = convert(Ti, getnelements(A))
+    kernel = _matrix_free_product_kernel!(backend, Int(device.threads))
+    kernel(out, A, in, n; ndrange = Int(device.blocks * device.threads))
+    KA.synchronize(backend)
 end
 
 # TODO make this per subdomain
@@ -211,7 +211,7 @@ end
 end
 duplicate_for_device(device, assembler::EAOperatorAssembler) = assembler
 
-function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, f::Vector{T}; fillzero::Bool=true) where T
+function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, f::AbstractVector{T}; fillzero::Bool=true) where T
     fillzero && fill!(f, 0.0)
     fillzero && fill!(strategy.eadata, 0.0)
     return EAOperatorAssembler(strategy.device, nothing, strategy.eadata, f)
@@ -273,21 +273,23 @@ end
     end
 end
 
-@concrete struct DeviceEACollapseWork <: AbstractDeviceWork
-    device
-    b
-    bes
-end
-
-getdevice(w::DeviceEACollapseWork) = w.device
-getnitems(w::DeviceEACollapseWork) = size(w.b, 1)
-
-@inline function (w::DeviceEACollapseWork)(dof, _tid)
-    _ea_collapse_kernel!(w.b, dof, w.bes)
+KA.@kernel function _ea_collapse_gpu_kernel!(b, bes, num_dofs::Ti) where {Ti <: Integer}
+    tid = convert(Ti, KA.@index(Global, Linear))
+    if tid <= num_dofs
+        iter = DeviceStridedIterator(num_dofs, tid, convert(Ti, prod(KA.@ndrange)))
+        for dof in iter
+            _ea_collapse_kernel!(b, dof, bes)
+        end
+    end
 end
 
 function ea_collapse!(b::AbstractVector, bes::EAVector, device::AbstractGPUDevice)
-    DeviceEACollapseWork(device, b, bes) |> launch!
+    backend = KA.backend(device)
+    Ti = index_type(device)
+    n = convert(Ti, size(b, 1))
+    kernel = _ea_collapse_gpu_kernel!(backend, Int(device.threads))
+    kernel(b, bes, n; ndrange = Int(device.blocks * device.threads))
+    KA.synchronize(backend)
 end
 
 function finalize_assembly!(assembler::EAOperatorAssembler)

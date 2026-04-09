@@ -159,12 +159,14 @@ assemble_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, loc
 # Default: identity (scalars, isbits, non-container fields pass through).
 per_thread(x, tid) = x
 per_thread(x::Ferrite.CellValuesContainer, tid) = x[tid]
+per_thread(x::Tuple, tid) = map(f -> per_thread(f, tid), x)
+per_thread(x::AbstractVolumetricElementCache, tid) = x[tid]
 
 macro per_thread_structure(T)
     quote
         @inline function Base.getindex(x::$(esc(T)), tid)
             fields = ntuple(i -> per_thread(getfield(x, i), tid), fieldcount(typeof(x)))
-            typeof(x)(fields...)
+            typeof(x).name.wrapper(fields...)
         end
     end
 end
@@ -180,8 +182,34 @@ end
     #     D::_T1
     #     cellvalues::_T2
     # end
-    # Adapt.@adapt_structure MyElementCache
-    # @per_thread_structure MyElementCache
+    # + Adapt.adapt_structure (for kernel launch: CuArray → CuDeviceArray)
+    # + Base.getindex (for per-thread extraction from GPU pools)
+
+User-specified type parameters are preserved (bounds stripped for GPU compatibility):
+
+    @device_element struct MyElementCache{EnergyType} <: AbstractVolumetricElementCache
+        ψ::EnergyType
+        cv::CellValues
+    end
+
+    # Generates:
+    # struct MyElementCache{EnergyType, _T1} <: AbstractVolumetricElementCache
+    #     ψ::EnergyType
+    #     cv::_T1
+    # end
+
+Untyped fields are also parametrized:
+
+    @device_element struct MyElementCache <: AbstractVolumetricElementCache
+        data
+        cv::CellValues
+    end
+
+    # Generates:
+    # struct MyElementCache{_T1, _T2} <: AbstractVolumetricElementCache
+    #     data::_T1
+    #     cv::_T2
+    # end
 """
 macro device_element(expr)
     expr.head == :struct || error("@device_element expects a struct definition")
@@ -190,37 +218,69 @@ macro device_element(expr)
     struct_header = expr.args[2]
     struct_body = expr.args[3]
 
+    # Parse struct name, supertype, and existing type params
     if struct_header isa Expr && struct_header.head == :(<:)
-        struct_name = struct_header.args[1]
+        name_part = struct_header.args[1]
         supertype = struct_header.args[2]
     else
-        struct_name = struct_header
+        name_part = struct_header
         supertype = nothing
     end
 
-    # Parametrize all typed fields
-    type_params = Symbol[]
+    # Extract existing user-specified type params
+    user_params = Symbol[]
+    if name_part isa Expr && name_part.head == :curly
+        struct_name = name_part.args[1]
+        for p in name_part.args[2:end]
+            if p isa Symbol
+                push!(user_params, p)
+            elseif p isa Expr && p.head == :(<:)
+                push!(user_params, p.args[1])
+            end
+        end
+    else
+        struct_name = name_part
+    end
+
+    # Process fields: keep user-parametrized, auto-parametrize the rest
+    auto_params = Symbol[]
     new_fields = Expr[]
     param_counter = 0
 
     for line in struct_body.args
         if line isa Expr && line.head == :(::)
             field_name = line.args[1]
+            field_type = line.args[2]
+            if field_type in user_params
+                # Field references a user-specified type param — keep as-is
+                push!(new_fields, line)
+            else
+                # Auto-parametrize
+                param_counter += 1
+                param = Symbol("_T", param_counter)
+                push!(auto_params, param)
+                push!(new_fields, :($field_name::$param))
+            end
+        elseif line isa Symbol
+            # Untyped field — auto-parametrize
             param_counter += 1
             param = Symbol("_T", param_counter)
-            push!(type_params, param)
-            push!(new_fields, :($field_name::$param))
+            push!(auto_params, param)
+            push!(new_fields, :($line::$param))
         elseif line isa LineNumberNode
             continue
         else
-            push!(new_fields, line)
+            continue
         end
     end
 
-    if isempty(type_params)
+    # Combine: user params (bounds stripped for GPU compatibility) + auto params
+    all_params = vcat(user_params, auto_params)
+
+    if isempty(all_params)
         param_name = struct_name
     else
-        param_name = :($struct_name{$(type_params...)})
+        param_name = :($struct_name{$(all_params...)})
     end
 
     full_header = supertype !== nothing ? :($param_name <: $supertype) : param_name

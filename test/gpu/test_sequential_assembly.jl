@@ -1,14 +1,14 @@
-## PerColorAssemblyStrategy GPU tests ##
+## SequentialAssemblyStrategy GPU tests (1 thread, 1 block) ##
 
 # --- Bilinear: sparse matrix assembly ---
-function test_bilinear_percolor(device, dh, integrator; atol=nothing, rtol=nothing)
+function test_bilinear_sequential(device, dh, integrator; atol=nothing, rtol=nothing)
     # CPU reference
-    cpu_strategy = PerColorAssemblyStrategy(SequentialCPUDevice())
+    cpu_strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     cpu_op = setup_operator(cpu_strategy, integrator, dh)
     update_operator!(cpu_op, 0.0)
 
-    # GPU
-    gpu_strategy = PerColorAssemblyStrategy(device)
+    # GPU (1 thread, 1 block — sequential)
+    gpu_strategy = SequentialAssemblyStrategy(device)
     gpu_op = setup_operator(gpu_strategy, integrator, dh)
     update_operator!(gpu_op, 0.0)
 
@@ -27,13 +27,13 @@ function test_bilinear_percolor(device, dh, integrator; atol=nothing, rtol=nothi
 end
 
 # --- Nonlinear: Full Assembly (J, J+R, R) ---
-function test_nonlinear_percolor(device, dh, integrator, u_gpu; atol=nothing, rtol=nothing)
+function test_nonlinear_sequential(device, dh, integrator, u_gpu; atol=nothing, rtol=nothing)
     backend = KA.backend(device)
     n = ndofs(dh)
     u_cpu = Array(u_gpu)
 
     # CPU reference
-    cpu_strategy = PerColorAssemblyStrategy(SequentialCPUDevice())
+    cpu_strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     cpu_op = setup_operator(cpu_strategy, integrator, dh)
 
     cpu_op.J .= NaN
@@ -46,7 +46,7 @@ function test_nonlinear_percolor(device, dh, integrator, u_gpu; atol=nothing, rt
     residual_baseline = copy(residual_cpu)
 
     # GPU — u, residual are all GPU
-    gpu_strategy = PerColorAssemblyStrategy(device)
+    gpu_strategy = SequentialAssemblyStrategy(device)
     gpu_op = setup_operator(gpu_strategy, integrator, dh)
 
     @testset "J only" begin
@@ -76,21 +76,21 @@ function test_nonlinear_percolor(device, dh, integrator, u_gpu; atol=nothing, rt
     end
 end
 
-@testset "PerColorAssemblyStrategy (GPU)" begin
+@testset "SequentialAssemblyStrategy (GPU)" begin
     run_on_backends(cuda_f32=false) do device
         @testset "Bilinear Diffusion" begin
             dh, integrator = setup_diffusion_problem()
-            test_bilinear_percolor(device, dh, integrator, atol=1e-10)
+            test_bilinear_sequential(device, dh, integrator, atol=1e-10)
         end
 
         @testset "Bilinear Mass" begin
             dh, integrator = setup_mass_problem()
-            test_bilinear_percolor(device, dh, integrator, atol=1e-10)
+            test_bilinear_sequential(device, dh, integrator, atol=1e-10)
         end
 
         @testset "Nonlinear Hyperelasticity" begin
             dh, integrator, u = setup_hyperelasticity_problem(device)
-            test_nonlinear_percolor(device, dh, integrator, u, atol=1e-10)
+            test_nonlinear_sequential(device, dh, integrator, u, atol=1e-10)
         end
     end
 end

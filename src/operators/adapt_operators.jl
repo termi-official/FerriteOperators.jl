@@ -1,3 +1,5 @@
+#TODO: do we need this file?!
+
 Adapt.@adapt_structure EAOperatorAssembler
 Adapt.@adapt_structure AssembleBilinearTerm
 Adapt.@adapt_structure AssembleLinearizationJR
@@ -7,5 +9,3 @@ Adapt.@adapt_structure AssembleLinearTerm
 Adapt.@adapt_structure GenericIndexedData
 Adapt.@adapt_structure EAVector
 Adapt.@adapt_structure EAOperator
-Adapt.@adapt_structure DeviceMatrixFreeWork
-Adapt.@adapt_structure DeviceEACollapseWork

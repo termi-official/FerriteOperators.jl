@@ -79,11 +79,11 @@ function duplicate_for_device(device, ivh::InternalVariableHandler)
     )
 end
 
-function duplicate_for_device(device, x::T)::T where {T <: Tuple}
+function duplicate_for_device(device, x::T) where {T <: Tuple}
     if isbitstype(T)
         return x
     else
-        return map(y->duplicate_for_device(device, y), x)::T
+        return map(y->duplicate_for_device(device, y), x)
     end
 end
 

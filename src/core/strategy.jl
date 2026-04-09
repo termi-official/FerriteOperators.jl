@@ -19,7 +19,11 @@ struct SequentialAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
     operator_specification
 end
 SequentialAssemblyStrategy(device) = SequentialAssemblyStrategy(device, StandardOperatorSpecification())
-resolve_device_config(strategy::SequentialAssemblyStrategy{<:AbstractGPUDevice}, dh::AbstractDofHandler) = SequentialAssemblyStrategy(resolve_device_config(strategy.device, dh), strategy.operator_specification)
+# Sequential on GPU: force 1 thread, 1 block — no race conditions, no coloring needed.
+function resolve_device_config(strategy::SequentialAssemblyStrategy{D}, dh::AbstractDofHandler) where {V, I, D <: AbstractGPUDevice{V,I}}
+    device = D(one(I), one(I))
+    return SequentialAssemblyStrategy(device, strategy.operator_specification)
+end
 
 struct SequentialAssemblyStrategyCache{DeviceType, DeviceCacheType}
     device::DeviceType
@@ -106,9 +110,14 @@ end
 end
 
 
-function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, integrator, element_cache, ivh, sdh)
+function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy{<:AbstractCPUDevice}, integrator, element_cache, ivh, sdh)
     local_cache = allocate_assembly_cache(integrator, element_cache, strategy.device, sdh)
     return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(local_cache, CellCache(sdh), ivh, element_cache))
+end
+
+function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh)
+    device_cache = _setup_gpu_assembly_cache(strategy.device, integrator, element_cache, ivh, sdh)
+    return SequentialAssemblyStrategyCache(strategy.device, device_cache)
 end
 
 """
