@@ -95,7 +95,7 @@ end
 RocDevice() = RocDevice{Float64, Int32}(Int32(0), Int32(0))
 RocDevice(threads::IndexType, blocks::IndexType) where IndexType = RocDevice{Float64, IndexType}(threads, blocks)
 
-# GPU-safe 2D view into a flat vector — replaces @view + reshape which fails on GPU
+# TODO: remove once [https://github.com/JuliaGPU/CUDA.jl/pull/3095] is merged and released.
 struct DeviceReshapedView{T, Ti <: Integer, D <: AbstractVector{T}} <: AbstractMatrix{T}
     data::D
     offset::Ti
@@ -115,7 +115,7 @@ end
 #CPU -> use normal calls
 @inline function device_reshape_view(data::Vector, offset, nrows, ncols)
     flat = @view data[offset:(offset + nrows * ncols - 1)]
-    return reshape(flat, (Int(nrows), Int(ncols)))
+    return reshape(flat, (nrows, ncols))
 end
 @inline function device_reshape_view(data::AbstractVector, offset, nrows, ncols)
     return DeviceReshapedView(data, offset, nrows, ncols)
@@ -165,7 +165,6 @@ end
 # KA compat
 KA.backend(::AbstractCPUDevice) = KA.CPU()
 KA.backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
-KA.functional(::AbstractCPUDevice) = KA.functional(KA.CPU())
 KA.functional(device::AbstractGPUDevice) = KA.functional(KA.backend(device))
 
 #TODO: revisit this section, needs further refinment.
