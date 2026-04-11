@@ -184,10 +184,14 @@ end
 
 total_nthreads(device::AbstractGPUDevice) = device.threads * device.blocks
 
+# TODO: do we need `make_device`? 
+make_device(::Type{D}, threads, blocks) where {D <: AbstractGPUDevice} = D(threads, blocks)
+make_sequential_device(::Type{D}) where {V, I, D <: AbstractGPUDevice{V,I}} = make_device(D, one(I), one(I))
+
 function resolve_device_config(device::D, dh::AbstractDofHandler) where {V, I, D <: AbstractGPUDevice{V,I}}
     iszero(device.threads) || iszero(device.blocks) || return device
     ncells  = getncells(get_grid(dh))
     tpb     = _compute_groupsize(device, ncells)
     nblocks = convert(I, cld(ncells, tpb))
-    return D(tpb, nblocks)
+    return make_device(D, tpb, nblocks)
 end

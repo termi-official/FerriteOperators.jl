@@ -7,7 +7,7 @@ end
 @concrete struct GenericTaskBuffer
     # Static parts
     u # <: AbstractVector
-    p # global parameter
+    p # global parameters
     element # <: Abstract*ElementCache
     assembly_cache # BilinearAssemblyCache | NonlinearAssemblyCache | LinearAssemblyCache
     # pe
@@ -40,7 +40,7 @@ function get_task_buffer_for_device(task, u, p, device_cache::ThreadedAssemblyCa
     GenericTaskBuffer(u, p, element, assembly_cache, cell, ivh)
 end
 
-# GPU: index into each container by thread id + cell id, then wrap into GenericTaskBuffer.
+# GPU: index into each container by global thread index `tid` + cell id `taskid`, then wrap into GenericTaskBuffer.
 # Uses the ImmutableCellCache functor cc[tid](taskid) to get a cache with the correct cellid
 # and filled coords — equivalent to reinit! but works on immutable structs.
 function get_task_buffer_for_device(task, u, p, device_cache::SimpleAssemblyCache, tid, taskid)
