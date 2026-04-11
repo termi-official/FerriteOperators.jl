@@ -4,6 +4,8 @@ using Test
 import LinearAlgebra: mul!
 using SparseArrays
 
+include("test_macros.jl")
+
 @testset "FerriteOperators.jl" begin
     @testset "Element Assembly Matrix" begin
         Aₑ = [1.0 -1.0; -1.0 1.0]

@@ -138,3 +138,13 @@ assemble_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, interface
         assemble_interface!(residualₑ, uₑ, interface, inner_cache, time)
     end
 end
+
+# GPU/threads adaptation helpers for composite caches
+Adapt.@adapt_structure CompositeVolumetricElementCache
+@per_thread_structure CompositeVolumetricElementCache
+
+Adapt.@adapt_structure CompositeSurfaceElementCache
+@per_thread_structure CompositeSurfaceElementCache
+
+Adapt.@adapt_structure CompositeInterfaceElementCache
+@per_thread_structure CompositeInterfaceElementCache

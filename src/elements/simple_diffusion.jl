@@ -14,16 +14,9 @@ end
 """
 The cache associated with [`BilinearDiffusionIntegrator`](@ref) to assemble element diffusion matrices.
 """
-struct SimpleBilinearDiffusionElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+@device_element struct SimpleBilinearDiffusionElementCache <: AbstractVolumetricElementCache
     D::Float64
-    cellvalues::CV
-end
-
-function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache)
-    return SimpleBilinearDiffusionElementCache(
-        cache.D,
-        duplicate_for_device(device, cache.cellvalues),
-    )
+    cellvalues::CellValues
 end
 
 function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBilinearDiffusionElementCache, time)

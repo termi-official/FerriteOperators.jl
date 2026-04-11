@@ -1,4 +1,5 @@
 [deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 ConcreteStructs = "2569d6c7-a4a2-43d3-a901-331e8e4be471"
 FerriteOperators = "27d9367a-5072-424e-9c5f-fe582399bac3"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"

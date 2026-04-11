@@ -22,36 +22,66 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
     return InternalVariableHandler(nothing, 0)
 end
 
-function setup_element_strategy_caches(strategy, element_caches, ivh, dh)
-    return [setup_element_strategy_cache(strategy, element_cache, ivh, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
+function setup_element_strategy_caches(strategy, integrator, element_caches, ivh, dh)
+    return [setup_element_strategy_cache(strategy, integrator, element_cache, ivh, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
+end
+
+#FIXME: better way, maybe? 
+function setup_element_strategy_caches(strategy::PerColorAssemblyStrategy{<:AbstractGPUDevice}, integrator, element_caches, ivh, dh_device)
+    cpu_dh  = dh_device.original_dh
+    backend = KA.backend(strategy.device)
+    return [
+        begin
+            colors     = Ferrite.create_coloring(get_grid(cpu_dh), cpu_sdh.cellset; alg=strategy.coloralg)
+            gpu_colors = [Adapt.adapt(backend, color) for color in colors]
+            setup_element_strategy_cache(strategy, integrator, element_cache, ivh, sdh, gpu_colors)
+        end
+        for (element_cache, sdh, cpu_sdh) in zip(element_caches, dh_device.subdofhandlers, cpu_dh.subdofhandlers)
+    ]
 end
 
 function setup_subdomain_caches(strategy, integrator, dh)
+    backend = KA.backend(strategy.device)
+    dh_device  = Adapt.adapt(backend, dh) #GPU ->  HostDofHandler, CPU -> DofHandler (no-op)
     element_caches  = setup_elements(integrator, dh)
     ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
-    strategy_caches = setup_element_strategy_caches(strategy, element_caches, ivh, dh)
+    strategy_caches = setup_element_strategy_caches(strategy, integrator, element_caches, ivh, dh_device)
     return [SubdomainCache(
             sdh,
             ivh,
             element_cache,
             strategy_cache,
-        ) for (sdh, element_cache, strategy_cache) in zip(dh.subdofhandlers, element_caches, strategy_caches)]
+        ) for (sdh, element_cache, strategy_cache) in zip(dh_device.subdofhandlers, element_caches, strategy_caches)]
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    # Check device availability
+    (;device) = strategy
+    KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
+    
+    # this has the resolved device launch config.
+    resolved_staregy = resolve_device_config(strategy, dh)
+
+    operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)
     A                 = create_system_matrix(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 
     return BilinearFerriteOperator(
         A,
-        operator_strategy,
-        subdomain_caches,
+        operator_strategy, 
+        subdomain_caches, 
     )
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    # Check device availability
+    (;device) = strategy
+    KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
+    
+    # this has the resolved device launch config.
+    resolved_staregy = resolve_device_config(strategy, dh)
+
+    operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)
     J                 = create_system_matrix(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 
@@ -63,7 +93,14 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    # Check device availability
+    (;device) = strategy
+    KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
+
+    # this has the resolved device launch config.
+    resolved_staregy = resolve_device_config(strategy, dh)
+    
+    operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)
     b                 = create_system_vector(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 

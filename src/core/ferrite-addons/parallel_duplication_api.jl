@@ -21,13 +21,20 @@ function duplicate_for_device(device, fv::FacetValues)
     )
 end
 
-function duplicate_for_device(device, cv::CellValues)
+function duplicate_for_device(device::AbstractCPUDevice, cv::CellValues)
     return CellValues(
         duplicate_for_device(device, cv.fun_values),
         duplicate_for_device(device, cv.geo_mapping),
         duplicate_for_device(device, cv.qr),
         duplicate_for_device(device, cv.detJdV),
     )
+end
+
+## GPU duplicate_for_device: CellValues → CellValuesContainer ##
+function duplicate_for_device(device::AbstractGPUDevice, cv::CellValues)
+    backend = KA.backend(device)
+    nt = total_nthreads(device)
+    return Ferrite.CellValuesContainer(backend, nt, cv)
 end
 
 function duplicate_for_device(device, v::Ferrite.FunctionValues)
@@ -63,20 +70,37 @@ end
 
 duplicate_for_device(device, ip::Ferrite.Interpolation) = ip
 
-function duplicate_for_device(device, x::T)::T where {T <: Tuple}
+
+function duplicate_for_device(device, ivh::InternalVariableHandler)
+    ivh.internal_variable_offsets === nothing && return ivh
+    return InternalVariableHandler(
+        Adapt.adapt(KA.backend(device), ivh.internal_variable_offsets),
+        ivh.ndofs,
+    )
+end
+
+function duplicate_for_device(device, x::T) where {T <: Tuple}
     if isbitstype(T)
         return x
     else
-        return map(y->duplicate_for_device(device, y), x)::T
+        return map(y->duplicate_for_device(device, y), x)
     end
 end
 
-function duplicate_for_device(device, x::T)::T where {T}
-    if !isbitstype(T)
-        error("MethodError: duplicate_for_device(device, ::$T) is not implemented")
-    end
-    return x
+function duplicate_for_device(device, x::T) where {T}
+    isbitstype(T) && return x
+    # Recurse on fields
+    # IDEA: we don't need to explicitly write ``duplicate_for_device`` for every struct type. Only once for each field type.
+    fields = ntuple(i -> duplicate_for_device(device, getfield(x, i)), fieldcount(T))
+    return T.name.wrapper(fields...)
 end
+
+# function duplicate_for_device(device, x::T)::T where {T}
+#     if !isbitstype(T)
+#         error("MethodError: duplicate_for_device(device, ::$T) is not implemented")
+#     end
+#     return x
+# end
 
 function duplicate_for_device(device, x::T)::T where {S, T <: DenseArray{S}}
     @assert !isbitstype(T)

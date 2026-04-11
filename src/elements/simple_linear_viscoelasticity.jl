@@ -17,20 +17,11 @@ struct SimpleCondensedLinearViscoelasticity <: AbstractCondensedNonlinearIntegra
     viscosity_name::Symbol
 end
 
-struct SimpleCondensedLinearViscoelasticityCache{CV <: CellValues} <: AbstractGenericFirstOrderTimeVolumetricElementCache
+@device_element struct SimpleCondensedLinearViscoelasticityCache <: AbstractGenericFirstOrderTimeVolumetricElementCache
     material_parameters::MaxwellParameters
     displacement_range::UnitRange{Int}
     viscosity_range::UnitRange{Int}
-    cv::CV
-end
-
-function duplicate_for_device(device, cache::SimpleCondensedLinearViscoelasticityCache)
-    return SimpleCondensedLinearViscoelasticityCache(
-        cache.material_parameters,
-        cache.displacement_range,
-        cache.viscosity_range,
-        duplicate_for_device(device, cache.cv),
-    )
+    cv::CellValues
 end
 
 function get_number_of_internal_dofs_per_element(element_model, cache::SimpleCondensedLinearViscoelasticityCache, sdh)
@@ -290,4 +281,11 @@ function store_condensed_element_unknowns!(uₑ, u, cell, ivh, element::SimpleCo
     return nothing
 end
 
+
+#TODO: remove this
 allocate_element_unknown_vector(element::SimpleCondensedLinearViscoelasticityCache, cell) = zeros(getnbasefunctions(element.cv)+6getnquadpoints(element.cv))
+allocate_element_unknown_vector(::AbstractCPUDevice, element::SimpleCondensedLinearViscoelasticityCache, sdh) = zeros(getnbasefunctions(element.cv)+6getnquadpoints(element.cv))
+function allocate_element_unknown_vector(device::AbstractGPUDevice, element::SimpleCondensedLinearViscoelasticityCache, sdh)
+    N = getnbasefunctions(element.cv) + 6getnquadpoints(element.cv)
+    return KA.zeros(KA.backend(device), value_type(device), N, total_nthreads(device))
+end

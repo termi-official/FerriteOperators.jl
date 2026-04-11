@@ -14,16 +14,9 @@ end
 """
 The cache associated with [`BilinearMassIntegrator`](@ref) to assemble element Mass matrices.
 """
-struct SimpleBilinearMassElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+@device_element struct SimpleBilinearMassElementCache <: AbstractVolumetricElementCache
     ρ::Float64
-    cellvalues::CV
-end
-
-function duplicate_for_device(device, cache::SimpleBilinearMassElementCache)
-    return SimpleBilinearMassElementCache(
-        cache.ρ,
-        duplicate_for_device(device, cache.cellvalues),
-    )
+    cellvalues::CellValues
 end
 
 function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBilinearMassElementCache, time)

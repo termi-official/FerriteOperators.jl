@@ -7,6 +7,7 @@ end
 Ferrite.ndofs(lvh::InternalVariableHandler) = lvh.ndofs
 internal_variable_offset(lvh::InternalVariableHandler, cellid::Int) = lvh.internal_variable_offsets[cellid]
 
+Adapt.@adapt_structure InternalVariableHandler
 # # Utils to distribute and visualize local variables
 # struct QuadratureInterpolation{RefShape, QR <: QuadratureRule{RefShape}} <:
 #        Ferrite.ScalarInterpolation{RefShape, -1}

@@ -103,6 +103,25 @@ end
 struct EAViewCache
 end
 
+KA.@kernel function _matrix_free_product_kernel!(out, A, in_vec, num_elements::Ti) where {Ti <: Integer}
+    tid = convert(Ti, KA.@index(Global, Linear))
+    if tid <= num_elements
+        iter = DeviceStridedIterator(num_elements, tid, convert(Ti, prod(KA.@ndrange)))
+        for ei in iter
+            product_kernel!(out, A, in_vec, ei, A.vector_element_map, A.element_vector_map, nothing, nothing)
+        end
+    end
+end
+
+function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::AbstractGPUDevice)
+    backend = KA.backend(device)
+    Ti = index_type(device)
+    n = convert(Ti, getnelements(A))
+    kernel = _matrix_free_product_kernel!(backend, Int(device.threads))
+    kernel(out, A, in, n; ndrange = Int(device.blocks * device.threads))
+    KA.synchronize(backend)
+end
+
 # TODO make this per subdomain
 struct EAThreadedKernelCache{T}
     inₑ::Vector{Vector{T}}
@@ -135,9 +154,9 @@ end
 
 function read_data(indexed_data::GenericIndexedData{<:GenericEAMatrixIndex}, i::Integer, device_cache::EAViewCache)
     (; offset, nrows, ncols) = indexed_data.index_structure[i]
-    Aₑ_flattened = @view indexed_data.data[offset:(offset+nrows*ncols-1)]
-    Aₑ = reshape(Aₑ_flattened, (nrows, ncols))
-    return Aₑ
+    # CPU -> reshape view, GPU -> custom view
+    # reshape(@view indexed_data.data[offset:(offset+nrows*ncols-1)], (nrows, ncols)) 
+    return device_reshape_view(indexed_data.data, offset, nrows, ncols) 
 end
 function read_data(indexed_data::GenericIndexedData{<:GenericEAVectorIndex}, data::AbstractVector, i::Integer, device_cache::EAViewCache)
     (; offset, length) = indexed_data.index_structure[i]
@@ -192,7 +211,7 @@ end
 end
 duplicate_for_device(device, assembler::EAOperatorAssembler) = assembler
 
-function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, f::Vector{T}; fillzero::Bool=true) where T
+function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, f::AbstractVector{T}; fillzero::Bool=true) where T
     fillzero && fill!(f, 0.0)
     fillzero && fill!(strategy.eadata, 0.0)
     return EAOperatorAssembler(strategy.device, nothing, strategy.eadata, f)
@@ -208,16 +227,18 @@ function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, eleme
     return EAOperatorAssembler(strategy.device, element_matrix, strategy.eadata, f)
 end
 
-function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, Kₑ::AbstractMatrix)
+@inline function _ea_assemble_matrix!(assembler::EAOperatorAssembler, cell, Kₑ::AbstractMatrix)
     (; element_matrices) = assembler.K_element
     i = cellid(cell)
     (; offset, nrows, ncols) = element_matrices.index_structure[i]
-    Aₑ_flattened = @view element_matrices.data[offset:(offset+nrows*ncols-1)]
-    Aₑ = reshape(Aₑ_flattened, (nrows, ncols))
+    # CPU -> reshape view, GPU -> custom view
+    # equivalent to Aₑ = reshape(view(element_matrices.data, offset:offset+nrows*ncols-1), (nrows, ncols)) but GPU compatible
+    Aₑ = device_reshape_view(element_matrices.data, offset, nrows, ncols)
     Aₑ .+= Kₑ
     return nothing
 end
-function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, rₑ::AbstractVector)
+
+@inline function _ea_assemble_vector!(assembler::EAOperatorAssembler, cell, rₑ::AbstractVector)
     i = cellid(cell)
     (; data) = assembler.f_element # f_element is an EAVector
     (; offset, length) = data.index_structure[i]
@@ -225,9 +246,12 @@ function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, rₑ
     fₑ .+= rₑ
     return nothing
 end
-function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, Kₑ::AbstractMatrix, rₑ::AbstractVector)
-    assemble!(assembler, cell, Kₑ)
-    assemble!(assembler, cell, rₑ)
+
+Ferrite.assemble!(a::EAOperatorAssembler, c::CellCacheType, Kₑ::AbstractMatrix) = _ea_assemble_matrix!(a, c, Kₑ)
+Ferrite.assemble!(a::EAOperatorAssembler, c::CellCacheType, rₑ::AbstractVector) = _ea_assemble_vector!(a, c, rₑ)
+function Ferrite.assemble!(a::EAOperatorAssembler, c::CellCacheType, Kₑ::AbstractMatrix, rₑ::AbstractVector)
+    _ea_assemble_matrix!(a, c, Kₑ)
+    _ea_assemble_vector!(a, c, rₑ)
 end
 
 function ea_collapse!(b::Vector, bes::EAVector, device::AbstractCPUDevice)
@@ -249,6 +273,25 @@ end
     end
 end
 
+KA.@kernel function _ea_collapse_gpu_kernel!(b, bes, num_dofs::Ti) where {Ti <: Integer}
+    tid = convert(Ti, KA.@index(Global, Linear))
+    if tid <= num_dofs
+        iter = DeviceStridedIterator(num_dofs, tid, convert(Ti, prod(KA.@ndrange)))
+        for dof in iter
+            _ea_collapse_kernel!(b, dof, bes)
+        end
+    end
+end
+
+function ea_collapse!(b::AbstractVector, bes::EAVector, device::AbstractGPUDevice)
+    backend = KA.backend(device)
+    Ti = index_type(device)
+    n = convert(Ti, size(b, 1))
+    kernel = _ea_collapse_gpu_kernel!(backend, Int(device.threads))
+    kernel(b, bes, n; ndrange = Int(device.blocks * device.threads))
+    KA.synchronize(backend)
+end
+
 function finalize_assembly!(assembler::EAOperatorAssembler)
     assembler.f === nothing && return
 
@@ -267,13 +310,13 @@ function create_system_matrix(strategy::ElementAssemblyOperatorStrategy, dh)
     matrix_index_structure = zeros(GenericEAMatrixIndex{IndexType}, getncells(grid))
     vector_index_structure = zeros(GenericEAVectorIndex{IndexType}, getncells(grid))
 
-    element_offset = 1
-    vector_offset  = 1
+    element_offset = one(IndexType)
+    vector_offset  = one(IndexType)
     for sdh in dh.subdofhandlers
-        ndofs = ndofs_per_cell(sdh)
+        ndofs = IndexType(ndofs_per_cell(sdh))
         for cc in CellIterator(sdh)
             dofs = celldofs(cc)
-            nrows = ncols = length(dofs)
+            nrows = ncols = IndexType(length(dofs))
             matrix_index_structure[cellid(cc)] = GenericEAMatrixIndex(element_offset, nrows, ncols)
             vector_index_structure[cellid(cc)] = GenericEAVectorIndex(vector_offset, nrows)
             element_offset += nrows*ncols
@@ -284,5 +327,7 @@ function create_system_matrix(strategy::ElementAssemblyOperatorStrategy, dh)
     element_vector_info = GenericIndexedData(dh.cell_dofs, vector_index_structure)
     element_matrices = GenericIndexedData(zeros(ValueType, element_offset-1), matrix_index_structure)
     # FIXME pass EA info down via device cache instead of hardcoded EAViewCache
-    return EAOperator(device, EAViewCache(), element_matrices, element_vector_info, element_vector_info)
+    op = EAOperator(device, EAViewCache(), element_matrices, element_vector_info, element_vector_info)
+    # CPU -> as is, GPU → adapt for GPU
+    return Adapt.adapt(KA.backend(device), op)
 end
