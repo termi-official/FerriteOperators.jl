@@ -15,7 +15,7 @@ end
 SequentialCPUDevice() = SequentialCPUDevice{Float64, Int}()
 
 function execute_on_device!(task, device::SequentialCPUDevice, device_cache, items)
-    ws = _first_workspace(device_cache)
+    ws = device_cache[1]
     for chunk in items
         for cellid in chunk
             reinit!(ws, cellid)

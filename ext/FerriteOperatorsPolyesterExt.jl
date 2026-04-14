@@ -4,7 +4,7 @@ using FerriteOperators, Polyester
 
 function FerriteOperators.execute_on_device!(task, device::FerriteOperators.PolyesterDevice, device_cache, items)
     (; chunksize) = device
-    workspaces = device_cache.task_local_caches
+    workspaces = device_cache
     num_items_max = maximum(length.(items))
     num_tasks_max = ceil(Int, num_items_max / chunksize)
 

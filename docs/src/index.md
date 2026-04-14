@@ -52,7 +52,9 @@ end
 where the partition is computed at setup time by `compute_partition(strategy, sdh)` and
 encodes the work distribution (single batch for sequential, color groups for per-color,
 etc.). The device cache contains the workspace(s) for each parallel worker, constructed
-by `setup_device_cache(device, ws_builder, n_workers)`.
+by `setup_device_cache(device, obj, n_workers)`, which creates independent copies of
+`obj` via `duplicate_for_device(device, obj)` for parallel execution. The function
+works on any duplicable object, not only workspaces.
 
 Square operators (bilinear, nonlinear, linear) use an [`AssemblyWorkspace`](@ref)
 that holds the local element matrix `Ke`, unknown vector `ue`, residual vector

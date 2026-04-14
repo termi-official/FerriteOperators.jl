@@ -56,7 +56,7 @@ Abstract supertype for all per-worker workspace types used by the task/device sy
 
 Every concrete workspace must implement:
 - `Ferrite.reinit!(ws, cellid)` — reinitialise geometry and element caches for the given cell
-- `execute_single_task!(task, ws)` — execute one task unit using the workspace state
+- `duplicate_for_device(device::AbstractCPUDevice, ws)` — create an independent copy for a parallel worker
 
 New device backends must allocate and manage workspaces of a concrete subtype.
 """
@@ -116,36 +116,30 @@ end
 ## Device cache                   ##
 ####################################
 
-@concrete struct ThreadedAssemblyCache
-    task_local_caches
-end
-
 """
-    setup_device_cache(device, ws::AbstractWorkspace, n_workers)
+    setup_device_cache(device, obj, n_workers)
 
-Create a device cache from a prototype workspace `ws` for `n_workers` parallel workers.
-For [`SequentialCPUDevice`](@ref), returns the prototype workspace directly (zero extra allocation).
-For threaded devices, returns a [`ThreadedAssemblyCache`](@ref) wrapping `n_workers` independent
-copies produced by [`duplicate_for_device`](@ref).
+Create a device cache by duplicating `obj` for `n_workers` parallel workers.
+For [`SequentialCPUDevice`](@ref), returns a 1-element tuple `(obj,)`.
+For threaded CPU devices, returns a `Vector` of `n_workers` independent copies
+produced by [`duplicate_for_device`](@ref).
+
+Works on any type that implements `duplicate_for_device`, not only workspaces.
 """
-function setup_device_cache(::SequentialCPUDevice, ws::AbstractWorkspace, n_workers)
-    return ws
+function setup_device_cache(::SequentialCPUDevice, obj, n_workers)
+    return (obj,)
 end
 
-function setup_device_cache(device::AbstractCPUDevice, ws::AbstractWorkspace, n_workers)
-    return ThreadedAssemblyCache([duplicate_for_device(device, ws) for _ in 1:n_workers])
+function setup_device_cache(device::AbstractCPUDevice, obj, n_workers)
+    return [duplicate_for_device(device, obj) for _ in 1:n_workers]
 end
 
-function setup_device_cache(device::AbstractGPUDevice, ws::AbstractWorkspace, n_workers)
+function setup_device_cache(device::AbstractGPUDevice, obj, n_workers)
     throw(ArgumentError(
         "GPU assembly is not yet implemented for $(typeof(device)). " *
         "Implement setup_device_cache for this device type."
     ))
 end
-
-# Extract the first usable workspace from a device cache
-_first_workspace(ws) = ws
-_first_workspace(ws::ThreadedAssemblyCache) = first(ws.task_local_caches)
 
 
 ####################################

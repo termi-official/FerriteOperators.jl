@@ -385,6 +385,24 @@ using Polyester
         @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, CudaDevice(), nothing, [])
     end
 
+    @testset "Generic setup_device_cache" begin
+        # setup_device_cache should work on any duplicable object, not just AbstractWorkspace
+        struct _TestDuplicable
+            x::Int
+        end
+        FerriteOperators.duplicate_for_device(::FerriteOperators.AbstractCPUDevice, d::_TestDuplicable) = _TestDuplicable(d.x)
+
+        seq = SequentialCPUDevice()
+        dc_seq = FerriteOperators.setup_device_cache(seq, _TestDuplicable(7), 1)
+        @test length(dc_seq) == 1
+        @test dc_seq[1].x == 7
+
+        poly = PolyesterDevice()
+        dc_poly = FerriteOperators.setup_device_cache(poly, _TestDuplicable(7), 3)
+        @test length(dc_poly) == 3
+        @test all(d -> d.x == 7, dc_poly)
+    end
+
     @testset "Transfer setup validation" begin
         grid = generate_grid(Hexahedron, (1,1,1))
         dh2 = DofHandler(grid)
