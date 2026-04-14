@@ -95,23 +95,6 @@ end
 
 
 ####################################
-## Subdomain-level cache           ##
-####################################
-
-"""
-    TransferSubdomainCache
-
-Holds all pre-allocated data needed to assemble one subdomain's contribution to a transfer
-operator.  Analogous to `SubdomainCache` in the square-operator case.
-"""
-struct TransferSubdomainCache{SDH_row, SDH_col, DC, P}
-    sdh_row::SDH_row            # SubDofHandler for row space (fine / test)
-    sdh_col::SDH_col            # SubDofHandler for col space (coarse / trial)
-    device_cache::DC            # TransferWorkspace or ThreadedAssemblyCache
-    partition::P                # iterable of iterables (cell ID groups)
-end
-
-####################################
 ## Operator struct                 ##
 ####################################
 
@@ -128,10 +111,10 @@ Construct via [`setup_transfer_operator`](@ref) and update via [`update_operator
 
 apply the operator (matrix-vector product).
 """
-struct TransferFerriteOperator{MatrixType}
-    P::MatrixType
+@concrete struct TransferFerriteOperator
+    P
     strategy
-    subdomain_caches::Vector{TransferSubdomainCache}
+    subdomain_caches
 end
 
 """
@@ -142,17 +125,13 @@ Reassemble the rectangular transfer matrix `op.P` from scratch.
 function update_operator!(op::TransferFerriteOperator, p)
     (; P, strategy, subdomain_caches) = op
 
-    n_row = maximum(sc -> ndofs_per_cell(sc.sdh_row), subdomain_caches; init = 0)
-    n_col = maximum(sc -> ndofs_per_cell(sc.sdh_col), subdomain_caches; init = 0)
+    n_row = maximum(sc -> ndofs_per_cell(sc.domain.sdh_row), subdomain_caches; init = 0)
+    n_col = maximum(sc -> ndofs_per_cell(sc.domain.sdh_col), subdomain_caches; init = 0)
     assembler = start_assemble2(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
 
     task = AssembleTransferTerm(assembler, p)
 
-    for (subdomain_id, sc) in enumerate(subdomain_caches)
-        @timeit_debug "assemble transfer subdomain $subdomain_id" begin
-            execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
-        end
-    end
+    execute_on_subdomains!(task, strategy, subdomain_caches)
 
     return op
 end
@@ -172,20 +151,6 @@ Base.size(op::TransferFerriteOperator) = size(op.P)
 ####################################
 
 """
-    NestedTransferSubdomainCache
-
-Holds pre-allocated data for assembling one subdomain's contribution to a
-[`NestedTransferFerriteOperator`](@ref).  The fine and coarse DofHandlers live on
-**different** grids connected by `fine2coarse` and `child_ref_coords`.
-"""
-struct NestedTransferSubdomainCache{SDH_fine, SDH_coarse, DC, P}
-    sdh_fine::SDH_fine
-    sdh_coarse::SDH_coarse
-    device_cache::DC            # TransferWorkspace or ThreadedAssemblyCache
-    partition::P                # iterable of iterables (cell ID groups)
-end
-
-"""
     NestedTransferFerriteOperator
 
 Transfer operator for hierarchically nested grids (geometric multigrid).  The fine and
@@ -193,26 +158,22 @@ coarse DofHandlers live on different grids connected via `fine2coarse` mappings.
 
 Construct via [`setup_nested_transfer_operator`](@ref); update via [`update_operator!`](@ref).
 """
-struct NestedTransferFerriteOperator{MatrixType}
-    P::MatrixType
+@concrete struct NestedTransferFerriteOperator
+    P
     strategy
-    subdomain_caches::Vector{NestedTransferSubdomainCache}
+    subdomain_caches
 end
 
 function update_operator!(op::NestedTransferFerriteOperator, p)
     (; P, strategy, subdomain_caches) = op
 
-    n_row = maximum(sc -> ndofs_per_cell(sc.sdh_fine),   subdomain_caches; init = 0)
-    n_col = maximum(sc -> ndofs_per_cell(sc.sdh_coarse), subdomain_caches; init = 0)
+    n_row = maximum(sc -> ndofs_per_cell(sc.domain.sdh_row), subdomain_caches; init = 0)
+    n_col = maximum(sc -> ndofs_per_cell(sc.domain.sdh_col), subdomain_caches; init = 0)
     assembler = start_assemble2(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
 
     task = AssembleTransferTerm(assembler, p)
 
-    for (subdomain_id, sc) in enumerate(subdomain_caches)
-        @timeit_debug "assemble nested transfer subdomain $subdomain_id" begin
-            execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
-        end
-    end
+    execute_on_subdomains!(task, strategy, subdomain_caches)
 
     return op
 end

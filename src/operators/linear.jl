@@ -1,7 +1,7 @@
-struct LinearFerriteOperator{VectorType} <: AbstractLinearOperator
-    b::VectorType
+@concrete struct LinearFerriteOperator <: AbstractLinearOperator
+    b
     strategy
-    subdomain_caches::Vector{SubdomainCache}
+    subdomain_caches
 end
 
 struct AssembleLinearTerm{A}
@@ -28,9 +28,7 @@ function update_operator!(op::LinearFerriteOperator, p)
     assembler = start_assemble(strategy, b)
     task = AssembleLinearTerm(assembler, p)
 
-    for (subdomain_id, sc) in enumerate(subdomain_caches)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
-    end
+    execute_on_subdomains!(task, strategy, subdomain_caches)
 
     finalize_assembly!(assembler)
 end

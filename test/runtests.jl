@@ -355,4 +355,38 @@ using SparseArrays
 
         @test u2 ≈ op.P * u1
     end
+
+    @testset "Operator sizes" begin
+        grid = generate_grid(Quadrilateral, (3,3))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral,1}())
+        close!(dh)
+        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        n = ndofs(dh)
+
+        bilin_op = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
+        @test size(bilin_op) == (n, n)
+        @test size(bilin_op, 1) == n
+        @test size(bilin_op, 2) == n
+
+        nl_op = setup_operator(strategy, FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.3), QuadratureRuleCollection(2), :u), dh)
+        @test size(nl_op) == (n, n)
+        @test size(nl_op, 1) == n
+        @test size(nl_op, 2) == n
+
+        lin_op = FerriteOperators.LinearFerriteOperator(zeros(n), strategy, FerriteOperators.SubdomainCache[])
+        @test size(lin_op) == (n,)
+    end
+
+    @testset "Transfer setup validation" begin
+        grid = generate_grid(Hexahedron, (1,1,1))
+        dh2 = DofHandler(grid)
+        add!(dh2, :u, Lagrange{RefHexahedron,2}())
+        close!(dh2)
+        dh1 = DofHandler(grid)
+        add!(dh1, :u, Lagrange{RefHexahedron,1}())
+        close!(dh1)
+        integrator = FerriteOperators.MassProlongatorIntegrator(QuadratureRuleCollection(4), :u)
+        @test_throws ArgumentError setup_transfer_operator(PerColorAssemblyStrategy(SequentialCPUDevice()), integrator, dh2, dh1)
+    end
 end

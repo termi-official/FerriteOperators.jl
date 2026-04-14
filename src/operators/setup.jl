@@ -31,7 +31,7 @@ function setup_subdomain_caches(strategy, integrator, dh)
         n = n_workers(strategy, device, partition)
         ws_builder = _assembly_ws_builder(device, element_cache, sdh, ivh, n)
         dc = setup_device_cache(device, ws_builder, n)
-        SubdomainCache(sdh, ivh, element_cache, dc, partition)
+        SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
     end for (sdh, element_cache) in zip(dh.subdofhandlers, element_caches)]
 end
 
@@ -148,8 +148,8 @@ function setup_transfer_operator(
         dh_row::DofHandler,
         dh_col::DofHandler,
     )
-    @assert strategy isa SequentialAssemblyStrategy "Transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"
-    @assert strategy.device isa SequentialCPUDevice "Transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"
+    strategy isa SequentialAssemblyStrategy || throw(ArgumentError("Transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"))
+    strategy.device isa SequentialCPUDevice || throw(ArgumentError("Transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"))
     @assert get_grid(dh_row) === get_grid(dh_col) "Both DofHandlers must share the same grid"
     @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) "Mismatch in number of subdomains"
 
@@ -160,7 +160,7 @@ function setup_transfer_operator(
 
     # Build per-subdomain caches (one per SubDofHandler pair)
     device = strategy.device
-    subdomain_caches = TransferSubdomainCache[]
+    subdomain_caches = SubdomainCache[]
     for (sdh_row, sdh_col) in zip(dh_row.subdofhandlers, dh_col.subdofhandlers)
         element = setup_transfer_element_cache(integrator, sdh_row, sdh_col)
         partition = compute_partition(strategy, sdh_row)
@@ -168,7 +168,7 @@ function setup_transfer_operator(
         tc_builder = () -> SameGridCellCache(sdh_row, sdh_col)
         ws_builder = _transfer_ws_builder(device, element, sdh_row, sdh_col, tc_builder, n)
         dc = setup_device_cache(device, ws_builder, n)
-        push!(subdomain_caches, TransferSubdomainCache(sdh_row, sdh_col, dc, partition))
+        push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_row, sdh_col), dc, partition))
     end
 
     return TransferFerriteOperator(P, strategy, subdomain_caches)
@@ -223,14 +223,14 @@ function setup_nested_transfer_operator(
         fine2coarse::AbstractVector{Int},
         child_ref_coords::AbstractVector,
     )
-    @assert strategy isa SequentialAssemblyStrategy "Nested transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"
-    @assert strategy.device isa SequentialCPUDevice "Nested transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"
+    strategy isa SequentialAssemblyStrategy || throw(ArgumentError("Nested transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"))
+    strategy.device isa SequentialCPUDevice || throw(ArgumentError("Nested transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"))
     Tv  = value_type(strategy.device)
     sp  = init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)
     P   = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
 
     device = strategy.device
-    subdomain_caches = NestedTransferSubdomainCache[]
+    subdomain_caches = SubdomainCache[]
     for (sdh_fine, sdh_coarse) in zip(dh_fine.subdofhandlers, dh_coarse.subdofhandlers)
         element = setup_transfer_element_cache(integrator, sdh_fine, sdh_coarse)
         partition = compute_partition(strategy, sdh_fine)
@@ -238,7 +238,7 @@ function setup_nested_transfer_operator(
         tc_builder = () -> NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords)
         ws_builder = _transfer_ws_builder(device, element, sdh_fine, sdh_coarse, tc_builder, n)
         dc = setup_device_cache(device, ws_builder, n)
-        push!(subdomain_caches, NestedTransferSubdomainCache(sdh_fine, sdh_coarse, dc, partition))
+        push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_fine, sdh_coarse), dc, partition))
     end
 
     return NestedTransferFerriteOperator(P, strategy, subdomain_caches)

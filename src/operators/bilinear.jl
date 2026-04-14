@@ -1,7 +1,7 @@
-struct BilinearFerriteOperator{MatrixType} <: AbstractBilinearOperator
-    A::MatrixType
+@concrete struct BilinearFerriteOperator <: AbstractBilinearOperator
+    A
     strategy
-    subdomain_caches::Vector{SubdomainCache}
+    subdomain_caches
 end
 
 struct AssembleBilinearTerm{A}
@@ -27,9 +27,7 @@ function update_operator!(op::BilinearFerriteOperator, p)
     assembler = start_assemble(strategy, A)
     task = AssembleBilinearTerm(assembler, p)
 
-    for (subdomain_id, sc) in enumerate(subdomain_caches)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
-    end
+    execute_on_subdomains!(task, strategy, subdomain_caches)
 
     finalize_assembly!(assembler)
 end
@@ -37,4 +35,5 @@ end
 mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector) = mul!(out, op.A, in)
 mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.A, in, α, β)
 Base.eltype(op::BilinearFerriteOperator) = eltype(op.A)
+Base.size(op::BilinearFerriteOperator) = size(op.A)
 Base.size(op::BilinearFerriteOperator, axis) = size(op.A, axis)

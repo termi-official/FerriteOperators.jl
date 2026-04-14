@@ -72,10 +72,10 @@ A model for a function with its fully assembled linearization.
 Comes with one entry point for each cache type to handle the most common cases:
     assemble_element! -> update jacobian/residual contribution with internal state variables
 """
-struct LinearizedFerriteOperator{MatrixType} <: AbstractNonlinearOperator
-    J::MatrixType
+@concrete struct LinearizedFerriteOperator <: AbstractNonlinearOperator
+    J
     strategy
-    subdomain_caches::Vector{SubdomainCache}
+    subdomain_caches
 end
 
 # Interface
@@ -85,9 +85,7 @@ function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector,
     assembler = start_assemble(strategy, J)
     task = AssembleLinearizationJ(assembler, u, p)
 
-    for (subdomain_id, sc) in enumerate(subdomain_caches)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
-    end
+    execute_on_subdomains!(task, strategy, subdomain_caches)
 
     finalize_assembly!(assembler)
 end
@@ -97,9 +95,7 @@ function update_linearization!(op::LinearizedFerriteOperator, residual::Abstract
     assembler = start_assemble(strategy, J, residual)
     task = AssembleLinearizationJR(assembler, u, p)
 
-    for (subdomain_id, sc) in enumerate(subdomain_caches)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
-    end
+    execute_on_subdomains!(task, strategy, subdomain_caches)
 
     finalize_assembly!(assembler)
 end
@@ -109,9 +105,7 @@ function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::A
     assembler = start_assemble(strategy, residual)
     task = AssembleLinearizationR(assembler, u, p)
 
-    for (subdomain_id, sc) in enumerate(subdomain_caches)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
-    end
+    execute_on_subdomains!(task, strategy, subdomain_caches)
 
     finalize_assembly!(assembler)
 end
@@ -126,7 +120,8 @@ mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector) = m
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.J, in, α, β)
 (op::LinearizedFerriteOperator)(residual, u, p) = residual!(op, residual, u, p)
 Base.eltype(op::LinearizedFerriteOperator) = eltype(op.J)
+Base.size(op::LinearizedFerriteOperator) = size(op.J)
 Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)
 
-residual_size(op::LinearizedFerriteOperator) = ndofs(op.subdomain_caches[1].sdh.dh)
-unknown_size(op::LinearizedFerriteOperator)  = ndofs(op.subdomain_caches[1].sdh.dh) + ndofs(op.subdomain_caches[1].ivh)
+residual_size(op::LinearizedFerriteOperator) = ndofs(op.subdomain_caches[1].domain.sdh.dh)
+unknown_size(op::LinearizedFerriteOperator)  = ndofs(op.subdomain_caches[1].domain.sdh.dh) + ndofs(op.subdomain_caches[1].domain.ivh)
