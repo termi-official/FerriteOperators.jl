@@ -87,6 +87,14 @@ end
 
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
 
+function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
+    return create_assembly_workspace(
+        duplicate_for_device(device, ws.element),
+        ws.cell.dh,
+        duplicate_for_device(device, ws.ivh),
+    )
+end
+
 """
     create_assembly_workspace(element, sdh, ivh)
 
@@ -113,22 +121,22 @@ end
 end
 
 """
-    setup_device_cache(device, ws_builder, n_workers)
+    setup_device_cache(device, ws::AbstractWorkspace, n_workers)
 
-Create a device cache containing workspace(s) for `n_workers` parallel workers.
-`ws_builder()` is called once per workspace to create each instance.
-For [`SequentialCPUDevice`](@ref), returns the single workspace directly.
-For threaded devices, returns a [`ThreadedAssemblyCache`](@ref) wrapping `n_workers` workspaces.
+Create a device cache from a prototype workspace `ws` for `n_workers` parallel workers.
+For [`SequentialCPUDevice`](@ref), returns the prototype workspace directly (zero extra allocation).
+For threaded devices, returns a [`ThreadedAssemblyCache`](@ref) wrapping `n_workers` independent
+copies produced by [`duplicate_for_device`](@ref).
 """
-function setup_device_cache(::SequentialCPUDevice, ws_builder, n_workers)
-    return ws_builder()
+function setup_device_cache(::SequentialCPUDevice, ws::AbstractWorkspace, n_workers)
+    return ws
 end
 
-function setup_device_cache(::AbstractCPUDevice, ws_builder, n_workers)
-    return ThreadedAssemblyCache([ws_builder() for _ in 1:n_workers])
+function setup_device_cache(device::AbstractCPUDevice, ws::AbstractWorkspace, n_workers)
+    return ThreadedAssemblyCache([duplicate_for_device(device, ws) for _ in 1:n_workers])
 end
 
-function setup_device_cache(device::AbstractGPUDevice, ws_builder, n_workers)
+function setup_device_cache(device::AbstractGPUDevice, ws::AbstractWorkspace, n_workers)
     throw(ArgumentError(
         "GPU assembly is not yet implemented for $(typeof(device)). " *
         "Implement setup_device_cache for this device type."

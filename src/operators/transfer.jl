@@ -74,6 +74,14 @@ end
 
 Ferrite.reinit!(ws::TransferWorkspace, cellid) = reinit!(ws.tc, cellid)
 
+function duplicate_for_device(device::AbstractCPUDevice, ws::TransferWorkspace)
+    return TransferWorkspace(
+        duplicate_for_device(device, ws.element),
+        copy(ws.Pe),
+        duplicate_for_device(device, ws.tc),
+    )
+end
+
 
 ####################################
 ## Transfer task                   ##

@@ -29,38 +29,10 @@ function setup_subdomain_caches(strategy, integrator, dh)
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
-        ws_builder = _assembly_ws_builder(device, element_cache, sdh, ivh, n)
-        dc = setup_device_cache(device, ws_builder, n)
+        ws = create_assembly_workspace(element_cache, sdh, ivh)
+        dc = setup_device_cache(device, ws, n)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
     end for (sdh, element_cache) in zip(dh.subdofhandlers, element_caches)]
-end
-
-function _assembly_ws_builder(device, element, sdh, ivh, n_workers)
-    if n_workers == 1
-        return () -> create_assembly_workspace(element, sdh, ivh)
-    else
-        return () -> create_assembly_workspace(
-            duplicate_for_device(device, element),
-            sdh,
-            duplicate_for_device(device, ivh),
-        )
-    end
-end
-
-function _transfer_ws_builder(device, element, sdh_row, sdh_col, tc_builder, n_workers)
-    if n_workers == 1
-        return () -> TransferWorkspace(
-            element,
-            allocate_transfer_element_matrix(element, sdh_row, sdh_col),
-            tc_builder(),
-        )
-    else
-        return () -> TransferWorkspace(
-            duplicate_for_device(device, element),
-            allocate_transfer_element_matrix(element, sdh_row, sdh_col),
-            tc_builder(),
-        )
-    end
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
@@ -165,9 +137,9 @@ function setup_transfer_operator(
         element = setup_transfer_element_cache(integrator, sdh_row, sdh_col)
         partition = compute_partition(strategy, sdh_row)
         n = n_workers(strategy, device, partition)
-        tc_builder = () -> SameGridCellCache(sdh_row, sdh_col)
-        ws_builder = _transfer_ws_builder(device, element, sdh_row, sdh_col, tc_builder, n)
-        dc = setup_device_cache(device, ws_builder, n)
+        tc = SameGridCellCache(sdh_row, sdh_col)
+        ws = TransferWorkspace(element, allocate_transfer_element_matrix(element, sdh_row, sdh_col), tc)
+        dc = setup_device_cache(device, ws, n)
         push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_row, sdh_col), dc, partition))
     end
 
@@ -235,9 +207,9 @@ function setup_nested_transfer_operator(
         element = setup_transfer_element_cache(integrator, sdh_fine, sdh_coarse)
         partition = compute_partition(strategy, sdh_fine)
         n = n_workers(strategy, device, partition)
-        tc_builder = () -> NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords)
-        ws_builder = _transfer_ws_builder(device, element, sdh_fine, sdh_coarse, tc_builder, n)
-        dc = setup_device_cache(device, ws_builder, n)
+        tc = NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords)
+        ws = TransferWorkspace(element, allocate_transfer_element_matrix(element, sdh_fine, sdh_coarse), tc)
+        dc = setup_device_cache(device, ws, n)
         push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_fine, sdh_coarse), dc, partition))
     end
 

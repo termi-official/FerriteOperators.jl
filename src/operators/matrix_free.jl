@@ -75,7 +75,7 @@ end
 function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::AbstractCPUDevice)
     items = (1:getnelements(A),)
     nw = n_workers(nothing, device, items)
-    dc = setup_device_cache(device, () -> EAIndexWorkspace(0), nw)
+    dc = setup_device_cache(device, EAIndexWorkspace(0), nw)
     execute_on_device!(EAProductTask(out, A, in), device, dc, items)
 end
 
@@ -90,6 +90,7 @@ mutable struct EAIndexWorkspace <: AbstractWorkspace
     ei::Int
 end
 Ferrite.reinit!(ws::EAIndexWorkspace, ei::Int) = (ws.ei = ei)
+duplicate_for_device(device::AbstractCPUDevice, ws::EAIndexWorkspace) = EAIndexWorkspace(0)
 
 struct EAProductTask{Out, EAOp, In}
     out::Out
@@ -237,7 +238,7 @@ end
 function ea_collapse!(b::Vector, bes::EAVector, device::AbstractCPUDevice)
     items = (1:length(b),)
     nw = n_workers(nothing, device, items)
-    dc = setup_device_cache(device, () -> EAIndexWorkspace(0), nw)
+    dc = setup_device_cache(device, EAIndexWorkspace(0), nw)
     execute_on_device!(EACollapseTask(b, bes), device, dc, items)
 end
 @inline function _ea_collapse_kernel!(b::AbstractVector, dof::Integer, bes::EAVector)

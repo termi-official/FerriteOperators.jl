@@ -380,7 +380,7 @@ using Polyester
     end
 
     @testset "GPU device validation" begin
-        @test_throws ArgumentError FerriteOperators.setup_device_cache(CudaDevice(), () -> nothing, 1)
+        @test_throws ArgumentError FerriteOperators.setup_device_cache(CudaDevice(), FerriteOperators.EAIndexWorkspace(0), 1)
         @test_throws ArgumentError FerriteOperators.n_workers(SequentialAssemblyStrategy(CudaDevice()), CudaDevice(), [1:5])
         @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, CudaDevice(), nothing, [])
     end
