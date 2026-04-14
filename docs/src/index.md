@@ -42,7 +42,7 @@ These layers compose into a single generic device loop shared by all operator ty
 
 ```
 for chunk in partition
-    for taskid in chunk
+    parfor taskid in chunk
         reinit!(workspace, taskid)
         execute_single_task!(task, workspace)
     end
