@@ -5,11 +5,6 @@ abstract type AbstractGPUDevice{ValueType, IndexType} <: AbstractDevice{ValueTyp
 value_type(::AbstractDevice{ValueType}) where ValueType = ValueType
 index_type(::AbstractDevice{<:Any, IndexType}) where IndexType = IndexType
 
-# Memory layout traits
-struct ArrayOfStructsLayout end
-struct StructOfArraysLayout end
-memory_layout(::AbstractCPUDevice) = ArrayOfStructsLayout()
-
 """
     SequentialCPUDevice()
 
