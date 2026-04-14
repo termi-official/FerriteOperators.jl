@@ -50,6 +50,19 @@ setup_operator_strategy_cache(strategy, integrator, dh) = strategy
 ####################################
 
 """
+    AbstractWorkspace
+
+Abstract supertype for all per-worker workspace types used by the task/device system.
+
+Every concrete workspace must implement:
+- `Ferrite.reinit!(ws, cellid)` — reinitialise geometry and element caches for the given cell
+- `execute_single_task!(task, ws)` — execute one task unit using the workspace state
+
+New device backends must allocate and manage workspaces of a concrete subtype.
+"""
+abstract type AbstractWorkspace end
+
+"""
     AssemblyWorkspace
 
 Per-worker workspace for square operator assembly (bilinear, nonlinear, linear).
@@ -63,7 +76,7 @@ Fields:
 - `ivh`: internal variable handler
 - `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
 """
-@concrete struct AssemblyWorkspace
+@concrete struct AssemblyWorkspace <: AbstractWorkspace
     Ke
     ue
     re
@@ -115,6 +128,13 @@ function setup_device_cache(::AbstractCPUDevice, ws_builder, n_workers)
     return ThreadedAssemblyCache([ws_builder() for _ in 1:n_workers])
 end
 
+function setup_device_cache(device::AbstractGPUDevice, ws_builder, n_workers)
+    throw(ArgumentError(
+        "GPU assembly is not yet implemented for $(typeof(device)). " *
+        "Implement setup_device_cache for this device type."
+    ))
+end
+
 # Extract the first usable workspace from a device cache
 _first_workspace(ws) = ws
 _first_workspace(ws::ThreadedAssemblyCache) = first(ws.task_local_caches)
@@ -147,6 +167,13 @@ n_workers(strategy, ::SequentialCPUDevice, partition) = 1
 function n_workers(strategy, device::PolyesterDevice, partition)
     ncellsmax = maximum(length, partition)
     return ceil(Int, ncellsmax / device.chunksize)
+end
+
+function n_workers(strategy, device::AbstractGPUDevice, partition)
+    throw(ArgumentError(
+        "GPU assembly is not yet implemented for $(typeof(device)). " *
+        "Implement n_workers for this device type."
+    ))
 end
 
 

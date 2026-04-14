@@ -66,7 +66,7 @@ function setup_transfer_element_cache end
 Per-worker workspace for transfer operator assembly. Holds the element cache,
 pre-allocated rectangular element matrix, and the transfer cell cache.
 """
-@concrete struct TransferWorkspace
+@concrete struct TransferWorkspace <: AbstractWorkspace
     element
     Pe
     tc

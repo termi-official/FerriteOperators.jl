@@ -3,6 +3,7 @@ import FerriteOperators: get_matrix
 using Test
 import LinearAlgebra: mul!
 using SparseArrays
+using Polyester
 
 @testset "FerriteOperators.jl" begin
     @testset "Element Assembly Matrix" begin
@@ -376,6 +377,12 @@ using SparseArrays
 
         lin_op = FerriteOperators.LinearFerriteOperator(zeros(n), strategy, FerriteOperators.SubdomainCache[])
         @test size(lin_op) == (n,)
+    end
+
+    @testset "GPU device validation" begin
+        @test_throws ArgumentError FerriteOperators.setup_device_cache(CudaDevice(), () -> nothing, 1)
+        @test_throws ArgumentError FerriteOperators.n_workers(SequentialAssemblyStrategy(CudaDevice()), CudaDevice(), [1:5])
+        @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, CudaDevice(), nothing, [])
     end
 
     @testset "Transfer setup validation" begin
