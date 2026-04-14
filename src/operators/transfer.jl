@@ -104,17 +104,11 @@ end
 Holds all pre-allocated data needed to assemble one subdomain's contribution to a transfer
 operator.  Analogous to `SubdomainCache` in the square-operator case.
 """
-struct TransferSubdomainCache{SDH_row, SDH_col, WS}
+struct TransferSubdomainCache{SDH_row, SDH_col, DC, P}
     sdh_row::SDH_row            # SubDofHandler for row space (fine / test)
     sdh_col::SDH_col            # SubDofHandler for col space (coarse / trial)
-    workspace::WS               # TransferWorkspace
-end
-
-function TransferSubdomainCache(sdh_row::SubDofHandler, sdh_col::SubDofHandler, element::AbstractTransferElementCache)
-    Pe = allocate_transfer_element_matrix(element, sdh_row, sdh_col)
-    tc = SameGridCellCache(sdh_row, sdh_col)
-    workspace = TransferWorkspace(element, Pe, tc)
-    return TransferSubdomainCache(sdh_row, sdh_col, workspace)
+    device_cache::DC            # TransferWorkspace or ThreadedAssemblyCache
+    partition::P                # iterable of iterables (cell ID groups)
 end
 
 ####################################
@@ -156,7 +150,7 @@ function update_operator!(op::TransferFerriteOperator, p)
 
     for (subdomain_id, sc) in enumerate(subdomain_caches)
         @timeit_debug "assemble transfer subdomain $subdomain_id" begin
-            execute_on_device!(task, strategy.device, sc.workspace, (sc.sdh_row.cellset,))
+            execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
         end
     end
 
@@ -184,10 +178,11 @@ Holds pre-allocated data for assembling one subdomain's contribution to a
 [`NestedTransferFerriteOperator`](@ref).  The fine and coarse DofHandlers live on
 **different** grids connected by `fine2coarse` and `child_ref_coords`.
 """
-struct NestedTransferSubdomainCache{SDH_fine, SDH_coarse, WS}
+struct NestedTransferSubdomainCache{SDH_fine, SDH_coarse, DC, P}
     sdh_fine::SDH_fine
     sdh_coarse::SDH_coarse
-    workspace::WS               # TransferWorkspace with NestedGridCellCache
+    device_cache::DC            # TransferWorkspace or ThreadedAssemblyCache
+    partition::P                # iterable of iterables (cell ID groups)
 end
 
 """
@@ -215,7 +210,7 @@ function update_operator!(op::NestedTransferFerriteOperator, p)
 
     for (subdomain_id, sc) in enumerate(subdomain_caches)
         @timeit_debug "assemble nested transfer subdomain $subdomain_id" begin
-            execute_on_device!(task, strategy.device, sc.workspace, (sc.sdh_fine.cellset,))
+            execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
         end
     end
 

@@ -28,8 +28,7 @@ function update_operator!(op::BilinearFerriteOperator, p)
     task = AssembleBilinearTerm(assembler, p)
 
     for (subdomain_id, sc) in enumerate(subdomain_caches)
-        (; strategy_cache) = sc
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy_cache.device, strategy_cache.device_cache, get_items(sc))
+        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
     end
 
     finalize_assembly!(assembler)

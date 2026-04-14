@@ -41,7 +41,7 @@ The assembly pipeline is built around four layers:
 These layers compose into a single generic device loop shared by all operator types:
 
 ```
-for chunk in items
+for chunk in partition
     for taskid in chunk
         reinit!(workspace, taskid)
         execute_single_task!(task, workspace)
@@ -49,7 +49,10 @@ for chunk in items
 end
 ```
 
-where the items encode ids for the tasks to setup the local buffers from the device cache.
+where the partition is computed at setup time by `compute_partition(strategy, sdh)` and
+encodes the work distribution (single batch for sequential, color groups for per-color,
+etc.). The device cache contains the workspace(s) for each parallel worker, constructed
+by `setup_device_cache(device, ws_builder, n_workers)`.
 
 Square operators (bilinear, nonlinear, linear) use an [`AssemblyWorkspace`](@ref)
 that holds the local element matrix `Ke`, unknown vector `ue`, residual vector

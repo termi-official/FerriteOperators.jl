@@ -6,7 +6,8 @@ struct SubdomainCache
     sdh
     ivh
     element # TODO remove this and query from device cache.
-    strategy_cache
+    device_cache
+    partition
 end
 
 """

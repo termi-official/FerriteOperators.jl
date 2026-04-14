@@ -86,8 +86,7 @@ function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector,
     task = AssembleLinearizationJ(assembler, u, p)
 
     for (subdomain_id, sc) in enumerate(subdomain_caches)
-        (; strategy_cache) = sc
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy_cache.device, strategy_cache.device_cache, get_items(sc))
+        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
     end
 
     finalize_assembly!(assembler)
@@ -99,8 +98,7 @@ function update_linearization!(op::LinearizedFerriteOperator, residual::Abstract
     task = AssembleLinearizationJR(assembler, u, p)
 
     for (subdomain_id, sc) in enumerate(subdomain_caches)
-        (; strategy_cache) = sc
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy_cache.device, strategy_cache.device_cache, get_items(sc))
+        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
     end
 
     finalize_assembly!(assembler)
@@ -112,8 +110,7 @@ function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::A
     task = AssembleLinearizationR(assembler, u, p)
 
     for (subdomain_id, sc) in enumerate(subdomain_caches)
-        (; strategy_cache) = sc
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy_cache.device, strategy_cache.device_cache, get_items(sc))
+        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
     end
 
     finalize_assembly!(assembler)
