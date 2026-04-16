@@ -14,8 +14,6 @@ import LinearAlgebra: mul!, ldiv!, qr, cholesky!, Symmetric
 
 import Base: *, +, -, @kwdef, @propagate_inbounds
 
-using Polyester # TODO extension
-
 import Atomix
 
 import Ferrite: AbstractDofHandler, AbstractGrid, AbstractRefShape, AbstractCell, get_grid, get_coordinate_eltype

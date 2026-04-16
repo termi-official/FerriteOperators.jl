@@ -3,6 +3,7 @@ import FerriteOperators: get_matrix
 using Test
 import LinearAlgebra: mul!
 using SparseArrays
+using Polyester
 
 @testset "FerriteOperators.jl" begin
     @testset "Element Assembly Matrix" begin
@@ -354,5 +355,63 @@ using SparseArrays
         apply_analytical!(u2, dh2, :u, x->1.0)
 
         @test u2 ≈ op.P * u1
+    end
+
+    @testset "Operator sizes" begin
+        grid = generate_grid(Quadrilateral, (3,3))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral,1}())
+        close!(dh)
+        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        n = ndofs(dh)
+
+        bilin_op = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
+        @test size(bilin_op) == (n, n)
+        @test size(bilin_op, 1) == n
+        @test size(bilin_op, 2) == n
+
+        nl_op = setup_operator(strategy, FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.3), QuadratureRuleCollection(2), :u), dh)
+        @test size(nl_op) == (n, n)
+        @test size(nl_op, 1) == n
+        @test size(nl_op, 2) == n
+
+        lin_op = FerriteOperators.LinearFerriteOperator(zeros(n), strategy, FerriteOperators.SubdomainCache[])
+        @test size(lin_op) == (n,)
+    end
+
+    @testset "GPU device validation" begin
+        @test_throws ArgumentError FerriteOperators.setup_device_instances(CudaDevice(), FerriteOperators.EAIndexWorkspace(0), 1)
+        @test_throws ArgumentError FerriteOperators.n_workers(SequentialAssemblyStrategy(CudaDevice()), CudaDevice(), [1:5])
+        @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, CudaDevice(), nothing, [])
+    end
+
+    @testset "Generic setup_device_instances" begin
+        # setup_device_instances should work on any duplicable object, not just AbstractWorkspace
+        struct _TestDuplicable
+            x::Int
+        end
+        FerriteOperators.duplicate_for_device(::FerriteOperators.AbstractCPUDevice, d::_TestDuplicable) = _TestDuplicable(d.x)
+
+        seq = SequentialCPUDevice()
+        dc_seq = FerriteOperators.setup_device_instances(seq, _TestDuplicable(7), 1)
+        @test length(dc_seq) == 1
+        @test dc_seq[1].x == 7
+
+        poly = PolyesterDevice()
+        dc_poly = FerriteOperators.setup_device_instances(poly, _TestDuplicable(7), 3)
+        @test length(dc_poly) == 3
+        @test all(d -> d.x == 7, dc_poly)
+    end
+
+    @testset "Transfer setup validation" begin
+        grid = generate_grid(Hexahedron, (1,1,1))
+        dh2 = DofHandler(grid)
+        add!(dh2, :u, Lagrange{RefHexahedron,2}())
+        close!(dh2)
+        dh1 = DofHandler(grid)
+        add!(dh1, :u, Lagrange{RefHexahedron,1}())
+        close!(dh1)
+        integrator = FerriteOperators.MassProlongatorIntegrator(QuadratureRuleCollection(4), :u)
+        @test_throws ArgumentError setup_transfer_operator(PerColorAssemblyStrategy(SequentialCPUDevice()), integrator, dh2, dh1)
     end
 end

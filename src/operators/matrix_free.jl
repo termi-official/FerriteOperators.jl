@@ -72,42 +72,47 @@ function mul!(out::AbstractVector{T}, operator::EAOperator, in::AbstractVector) 
     matrix_free_product!(out, operator, in, operator.device)
 end
 
-function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::SequentialCPUDevice)
-    (; device_cache) = A
-    # Element loop
-    for ei in 1:getnelements(A)
-        # Query Data
-        Aₑ   = read_data(A.element_matrices, ei, EAViewCache())
-        inₑ  = read_data(A.vector_element_map, in, ei, device_cache)
-        outₑ = read_data(A.element_vector_map, out, ei, device_cache)
-
-        # Local product kernel
-        mul!(outₑ, Aₑ, inₑ, 1, 1)
-
-        # Write data back
-        store_data!(out, outₑ, A.element_vector_map, ei, device_cache)
-    end
-end
-
-function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::PolyesterDevice)
-    (; device_cache) = A
-    (; chunksize) = device
-    # Element loop
-    @batch for ei_base in 1:chunksize:getnelements(A)
-        for ei in ei_base:min(ei_base+chunksize-1, getnelements(A))
-            product_kernel!(out, A, in, ei, A.vector_element_map, A.element_vector_map, device, device_cache)
-        end
-    end
+function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::AbstractCPUDevice)
+    items = (1:getnelements(A),)
+    nw = n_workers(nothing, device, items)
+    dc = setup_device_instances(device, EAIndexWorkspace(0), nw)
+    execute_on_device!(EAProductTask(out, A, in), device, dc, items)
 end
 
 struct EAViewCache
 end
 
-# TODO make this per subdomain
-struct EAThreadedKernelCache{T}
-    inₑ::Vector{Vector{T}}
-    Aₑ::Vector{Vector{T}}
-    outₑ::Vector{Vector{T}}
+####################################
+## EA task and workspace          ##
+####################################
+
+mutable struct EAIndexWorkspace <: AbstractWorkspace
+    ei::Int
+end
+Ferrite.reinit!(ws::EAIndexWorkspace, ei::Int) = (ws.ei = ei)
+duplicate_for_device(device::AbstractCPUDevice, ws::EAIndexWorkspace) = EAIndexWorkspace(0)
+
+struct EAProductTask{Out, EAOp, In}
+    out::Out
+    A::EAOp
+    in_vec::In
+end
+duplicate_for_device(device, task::EAProductTask) = task
+
+function execute_single_task!(task::EAProductTask, ws::EAIndexWorkspace)
+    product_kernel!(task.out, task.A, task.in_vec, ws.ei,
+                    task.A.vector_element_map, task.A.element_vector_map,
+                    task.A.device, task.A.device_cache)
+end
+
+struct EACollapseTask{B, Bes}
+    b::B
+    bes::Bes
+end
+duplicate_for_device(device, task::EACollapseTask) = task
+
+function execute_single_task!(task::EACollapseTask, ws::EAIndexWorkspace)
+    _ea_collapse_kernel!(task.b, ws.ei, task.bes)
 end
 
 function product_kernel!(out::AbstractVector{T}, A::EAOperator, in::AbstractVector, ei, vector_to_element_map::GenericIndexedData{<:GenericEAVectorIndex}, element_to_vector_map::GenericIndexedData{<:GenericEAVectorIndex}, device, device_cache) where T
@@ -231,16 +236,10 @@ function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, Kₑ
 end
 
 function ea_collapse!(b::Vector, bes::EAVector, device::AbstractCPUDevice)
-    ndofs = size(b, 1)
-    for dof ∈ 1:ndofs
-        _ea_collapse_kernel!(b, dof, bes)
-    end
-end
-function ea_collapse!(b::Vector, bes::EAVector, device::PolyesterDevice)
-    ndofs = size(b, 1)
-    @batch minbatch=max(1, device.chunksize) for dof ∈ 1:ndofs
-        _ea_collapse_kernel!(b, dof, bes)
-    end
+    items = (1:length(b),)
+    nw = n_workers(nothing, device, items)
+    dc = setup_device_instances(device, EAIndexWorkspace(0), nw)
+    execute_on_device!(EACollapseTask(b, bes), device, dc, items)
 end
 @inline function _ea_collapse_kernel!(b::AbstractVector, dof::Integer, bes::EAVector)
     for edp ∈ get_indices(bes.dof_to_element_map, dof)

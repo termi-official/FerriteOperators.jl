@@ -2,11 +2,27 @@
 # TODO energy based operator?
 # TODO maybe a trait system for operators?
 
-struct SubdomainCache
+@concrete struct AssemblyDomain
     sdh
     ivh
     element # TODO remove this and query from device cache.
-    strategy_cache
+end
+
+@concrete struct TransferDomain
+    sdh_row
+    sdh_col
+end
+
+@concrete struct SubdomainCache
+    domain
+    device_cache
+    partition
+end
+
+function execute_on_subdomains!(task, strategy, subdomain_caches)
+    for (subdomain_id, sc) in enumerate(subdomain_caches)
+        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
+    end
 end
 
 """
@@ -207,5 +223,5 @@ update_operator!(op::LinearNullOperator, time) = nothing
 Ferrite.add!(b::AbstractVector, op::AbstractLinearOperator) = __add_to_vector!(b, op.b)
 __add_to_vector!(b::AbstractVector, a::AbstractVector) = b .+= a
 Base.eltype(op::AbstractLinearOperator) = eltype(op.b)
-Base.size(op::AbstractLinearOperator) = sisze(op.b)
+Base.size(op::AbstractLinearOperator) = size(op.b)
 

@@ -76,6 +76,8 @@ Ferrite.getcoordinates(tc::SameGridCellCache) = tc.coords
 getrowdofs(tc::SameGridCellCache)  = tc.rdofs
 getcolumndofs(tc::SameGridCellCache) = tc.cdofs
 
+duplicate_for_device(device::AbstractCPUDevice, tc::SameGridCellCache) = SameGridCellCache(tc.dh_row, tc.dh_col)
+
 # Allow reinit!(cv, tc) for CellValues so the loop pattern `reinit!(cv, tc)` works.
 function Ferrite.reinit!(cv::Ferrite.AbstractCellValues, tc::SameGridCellCache)
     cell = Ferrite.reinit_needs_cell(cv) ? getcells(tc.grid, tc.cellid) : nothing
@@ -258,6 +260,8 @@ get_fine_coordinates(tc::NestedGridCellCache)   = tc.fine_coords
 get_coarse_coordinates(tc::NestedGridCellCache) = tc.coarse_coords
 getrowdofs(tc::NestedGridCellCache)          = tc.fine_dofs
 getcolumndofs(tc::NestedGridCellCache)       = tc.coarse_dofs
+
+duplicate_for_device(device::AbstractCPUDevice, tc::NestedGridCellCache) = NestedGridCellCache(tc.dh_fine, tc.dh_coarse, tc.fine2coarse, tc.child_ref_coords)
 
 """
     get_child_ref_coords(tc::NestedGridCellCache)
