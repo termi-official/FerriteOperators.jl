@@ -2,13 +2,12 @@ module FerriteOperatorsPolyesterExt
 
 using FerriteOperators, Polyester
 
-function FerriteOperators.execute_on_device!(task, device::FerriteOperators.PolyesterDevice, device_cache, items)
+function FerriteOperators.execute_on_device!(task, device::FerriteOperators.PolyesterDevice, workspaces, items)
     (; chunksize) = device
-    workspaces = device_cache
     num_items_max = maximum(length.(items))
     num_tasks_max = ceil(Int, num_items_max / chunksize)
 
-    # TODO can we sneak this into the device cache?
+    # TODO preallocate this
     tasks = [FerriteOperators.duplicate_for_device(device, task) for tid in 1:num_tasks_max]
 
     for chunk in items

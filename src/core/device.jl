@@ -14,12 +14,12 @@ struct SequentialCPUDevice{ValueType, IndexType} <: AbstractCPUDevice{ValueType,
 end
 SequentialCPUDevice() = SequentialCPUDevice{Float64, Int}()
 
-function execute_on_device!(task, device::SequentialCPUDevice, device_cache, items)
-    ws = device_cache[1]
+function execute_on_device!(task, device::SequentialCPUDevice, workspaces, items)
+    workspace = workspaces[1]
     for chunk in items
         for cellid in chunk
-            reinit!(ws, cellid)
-            execute_single_task!(task, ws)
+            reinit!(workspace, cellid)
+            execute_single_task!(task, workspace)
         end
     end
 end
@@ -36,10 +36,10 @@ end
 PolyesterDevice() = PolyesterDevice{Float64, Int}(32)
 PolyesterDevice(i::Int) = PolyesterDevice{Float64, Int}(i)
 
-function execute_on_device!(task, device::AbstractGPUDevice, device_cache, items)
+function execute_on_device!(task, device::AbstractGPUDevice, workspaces, items)
     throw(ArgumentError(
         "GPU assembly is not yet implemented for $(typeof(device)). " *
-        "Implement execute_on_device!, setup_device_cache, and n_workers for this device type."
+        "Implement execute_on_device!, setup_workspaces, and n_workers for this device type."
     ))
 end
 

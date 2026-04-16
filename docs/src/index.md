@@ -33,15 +33,15 @@ different devices (CPU threads, GPUs, ...).
 
 The assembly pipeline is built around four layers:
 
-1. **Strategies** decide *how* to partition work (sequential, per-color, element-assembly / matrix-free).
+1. **Strategies** decide *how* to partition work into items (sequential, per-color, element-assembly / matrix-free).
 2. **Devices** decide *where* to execute (e.g. sequential on the CPU, threaded via Polyester, or GPU via KernelAbstractions).
 3. **Tasks** encode *what* to execute on a device.
 4. **Workspaces** hold the pre-allocated per-worker scratch data (e.g. element cache, cell cache, local matrices/vectors, ...) allowing them to execute their assigned tasks independently.
 
-These layers compose into a single generic device loop shared by all operator types:
+These layers compose into a single generic device loop shared by all operator types, implemented as `FerriteOperators.execute_on_device!`:
 
 ```
-for chunk in partition
+for chunk in partitions
     parfor taskid in chunk
         reinit!(workspace, taskid)
         execute_single_task!(task, workspace)
@@ -52,7 +52,7 @@ end
 where the partition is computed at setup time by `compute_partition(strategy, sdh)` and
 encodes the work distribution (single batch for sequential, color groups for per-color,
 etc.). The device cache contains the workspace(s) for each parallel worker, constructed
-by `setup_device_cache(device, obj, n_workers)`, which creates independent copies of
+by `setup_device_instances(device, obj, n_workers)`, which creates independent copies of
 `obj` via `duplicate_for_device(device, obj)` for parallel execution. The function
 works on any duplicable object, not only workspaces.
 

@@ -117,7 +117,7 @@ end
 ####################################
 
 """
-    setup_device_cache(device, obj, n_workers)
+    setup_device_instances(device, obj, n_workers)
 
 Create a device cache by duplicating `obj` for `n_workers` parallel workers.
 For [`SequentialCPUDevice`](@ref), returns a 1-element tuple `(obj,)`.
@@ -126,18 +126,18 @@ produced by [`duplicate_for_device`](@ref).
 
 Works on any type that implements `duplicate_for_device`, not only workspaces.
 """
-function setup_device_cache(::SequentialCPUDevice, obj, n_workers)
+function setup_device_instances(::SequentialCPUDevice, obj, n_workers)
     return (obj,)
 end
 
-function setup_device_cache(device::AbstractCPUDevice, obj, n_workers)
+function setup_device_instances(device::AbstractCPUDevice, obj, n_workers)
     return [duplicate_for_device(device, obj) for _ in 1:n_workers]
 end
 
-function setup_device_cache(device::AbstractGPUDevice, obj, n_workers)
+function setup_device_instances(device::AbstractGPUDevice, obj, n_workers)
     throw(ArgumentError(
         "GPU assembly is not yet implemented for $(typeof(device)). " *
-        "Implement setup_device_cache for this device type."
+        "Implement setup_device_instances for this device type."
     ))
 end
 
