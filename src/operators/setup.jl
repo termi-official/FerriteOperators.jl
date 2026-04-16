@@ -22,20 +22,17 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
     return InternalVariableHandler(nothing, 0)
 end
 
-function setup_element_strategy_caches(strategy, element_caches, ivh, dh)
-    return [setup_element_strategy_cache(strategy, element_cache, ivh, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
-end
-
 function setup_subdomain_caches(strategy, integrator, dh)
-    element_caches  = setup_elements(integrator, dh)
-    ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
-    strategy_caches = setup_element_strategy_caches(strategy, element_caches, ivh, dh)
-    return [SubdomainCache(
-            sdh,
-            ivh,
-            element_cache,
-            strategy_cache,
-        ) for (sdh, element_cache, strategy_cache) in zip(dh.subdofhandlers, element_caches, strategy_caches)]
+    element_caches = setup_elements(integrator, dh)
+    ivh            = setup_internal_variable_handler(integrator, element_caches, dh)
+    device         = strategy.device
+    return [begin
+        partition = compute_partition(strategy, sdh)
+        n = n_workers(strategy, device, partition)
+        ws = create_assembly_workspace(element_cache, sdh, ivh)
+        dc = setup_device_instances(device, ws, n)
+        SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
+    end for (sdh, element_cache) in zip(dh.subdofhandlers, element_caches)]
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
@@ -123,6 +120,8 @@ function setup_transfer_operator(
         dh_row::DofHandler,
         dh_col::DofHandler,
     )
+    strategy isa SequentialAssemblyStrategy || throw(ArgumentError("Transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"))
+    strategy.device isa SequentialCPUDevice || throw(ArgumentError("Transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"))
     @assert get_grid(dh_row) === get_grid(dh_col) "Both DofHandlers must share the same grid"
     @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) "Mismatch in number of subdomains"
 
@@ -132,10 +131,16 @@ function setup_transfer_operator(
     P  = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
 
     # Build per-subdomain caches (one per SubDofHandler pair)
-    subdomain_caches = TransferSubdomainCache[]
+    device = strategy.device
+    subdomain_caches = SubdomainCache[]
     for (sdh_row, sdh_col) in zip(dh_row.subdofhandlers, dh_col.subdofhandlers)
         element = setup_transfer_element_cache(integrator, sdh_row, sdh_col)
-        push!(subdomain_caches, TransferSubdomainCache(sdh_row, sdh_col, element))
+        partition = compute_partition(strategy, sdh_row)
+        n = n_workers(strategy, device, partition)
+        tc = SameGridCellCache(sdh_row, sdh_col)
+        ws = TransferWorkspace(element, allocate_transfer_element_matrix(element, sdh_row, sdh_col), tc)
+        dc = setup_device_instances(device, ws, n)
+        push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_row, sdh_col), dc, partition))
     end
 
     return TransferFerriteOperator(P, strategy, subdomain_caches)
@@ -190,16 +195,22 @@ function setup_nested_transfer_operator(
         fine2coarse::AbstractVector{Int},
         child_ref_coords::AbstractVector,
     )
+    strategy isa SequentialAssemblyStrategy || throw(ArgumentError("Nested transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"))
+    strategy.device isa SequentialCPUDevice || throw(ArgumentError("Nested transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"))
     Tv  = value_type(strategy.device)
     sp  = init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)
     P   = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
 
-    subdomain_caches = NestedTransferSubdomainCache[]
+    device = strategy.device
+    subdomain_caches = SubdomainCache[]
     for (sdh_fine, sdh_coarse) in zip(dh_fine.subdofhandlers, dh_coarse.subdofhandlers)
         element = setup_transfer_element_cache(integrator, sdh_fine, sdh_coarse)
-        tc      = NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords)
-        Pe      = zeros(ndofs_per_cell(sdh_fine), ndofs_per_cell(sdh_coarse))
-        push!(subdomain_caches, NestedTransferSubdomainCache(sdh_fine, sdh_coarse, element, Pe, tc))
+        partition = compute_partition(strategy, sdh_fine)
+        n = n_workers(strategy, device, partition)
+        tc = NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords)
+        ws = TransferWorkspace(element, allocate_transfer_element_matrix(element, sdh_fine, sdh_coarse), tc)
+        dc = setup_device_instances(device, ws, n)
+        push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_fine, sdh_coarse), dc, partition))
     end
 
     return NestedTransferFerriteOperator(P, strategy, subdomain_caches)

@@ -16,29 +16,6 @@ struct SequentialAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
 end
 SequentialAssemblyStrategy(device) = SequentialAssemblyStrategy(device, StandardOperatorSpecification())
 
-struct SequentialAssemblyStrategyCache{DeviceType, DeviceCacheType}
-    device::DeviceType
-    # Scratch for the device to store its data
-    device_cache::DeviceCacheType
-end
-
-setup_operator_strategy_cache(strategy, integrator, dh) = strategy
-
-@concrete struct SimpleAssemblyCache
-    Ke
-    ue
-    re
-    cell
-    ivh
-    element
-end
-function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy, element_cache, ivh, sdh)
-    Ke = allocate_element_matrix(element_cache, sdh)
-    ue = allocate_element_unknown_vector(element_cache, sdh)
-    re = allocate_element_residual_vector(element_cache, sdh)
-    return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(Ke, ue, re, CellCache(sdh), ivh, element_cache))
-end
-
 """
     PerColorAssemblyStrategy(chunksize, coloralg)
 """
@@ -48,49 +25,6 @@ struct PerColorAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
     operator_specification
 end
 PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = PerColorAssemblyStrategy(device, alg, StandardOperatorSpecification())
-
-@concrete struct PerColorAssemblyStrategyCache
-    device
-    # Scratch for the device to store its data
-    device_cache
-    # Everything related to the coloring is stored here
-    colors
-end
-
-@concrete struct ThreadedAssemblyCache
-    task_local_caches
-end
-
-function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, element_cache, ivh, sdh, 1)
-end
-
-function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, element_cache, ivh, sdh, strategy.device.chunksize)
-end
-
-function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, element_cache, ivh, sdh, chunksize)
-    (; device) = strategy
-    (; dh)     = sdh
-    grid       = get_grid(dh)
-
-    colors = Ferrite.create_coloring(grid, sdh.cellset; alg=strategy.coloralg)
-
-    ncellsmax = maximum(length.(colors))
-    nchunksmax = ceil(Int, ncellsmax / chunksize)
-
-    task_local_caches = [
-        SimpleAssemblyCache(
-            allocate_element_matrix(element_cache, sdh),
-            allocate_element_unknown_vector(element_cache, sdh),
-            allocate_element_residual_vector(element_cache, sdh),
-            CellCache(sdh),
-            duplicate_for_device(device, ivh),
-            duplicate_for_device(device, element_cache),
-        )
-    for tid in 1:nchunksmax]
-    return PerColorAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(task_local_caches), colors)
-end
 
 """
     ElementAssemblyStrategy
@@ -108,44 +42,119 @@ function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy{<:Abstr
     return ElementAssemblyOperatorStrategy(strategy.device, EAVector(dh))
 end
 
-@concrete struct ElementAssemblyStrategyCache
-    device
-    # Scratch for the device to store its data
-    device_cache
+setup_operator_strategy_cache(strategy, integrator, dh) = strategy
+
+
+####################################
+## Workspace                      ##
+####################################
+
+"""
+    AbstractWorkspace
+
+Abstract supertype for all per-worker workspace types used by the task/device system.
+
+Every concrete workspace must implement:
+- `Ferrite.reinit!(ws, cellid)` — reinitialise geometry and element caches for the given cell
+- `duplicate_for_device(device::AbstractCPUDevice, ws)` — create an independent copy for a parallel worker
+
+New device backends must allocate and manage workspaces of a concrete subtype.
+"""
+abstract type AbstractWorkspace end
+
+"""
+    AssemblyWorkspace
+
+Per-worker workspace for square operator assembly (bilinear, nonlinear, linear).
+Holds pre-allocated element-local buffers and caches that are reused across cells.
+
+Fields:
+- `Ke`: element stiffness matrix
+- `ue`: element unknown vector
+- `re`: element residual vector
+- `cell`: geometry cache ([`CellCache`](@ref))
+- `ivh`: internal variable handler
+- `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
+"""
+@concrete struct AssemblyWorkspace <: AbstractWorkspace
+    Ke
+    ue
+    re
+    cell
+    ivh
+    element
 end
+
+Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
+
+function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
+    return create_assembly_workspace(
+        duplicate_for_device(device, ws.element),
+        ws.cell.dh,
+        duplicate_for_device(device, ws.ivh),
+    )
+end
+
+"""
+    create_assembly_workspace(element, sdh, ivh)
+
+Create a single [`AssemblyWorkspace`](@ref) with freshly allocated element-local buffers.
+"""
+function create_assembly_workspace(element, sdh, ivh)
+    return AssemblyWorkspace(
+        allocate_element_matrix(element, sdh),
+        allocate_element_unknown_vector(element, sdh),
+        allocate_element_residual_vector(element, sdh),
+        CellCache(sdh),
+        ivh,
+        element,
+    )
+end
+
+####################################
+## Partition                      ##
+####################################
+
+"""
+    compute_partition(strategy, sdh)
+
+Compute the work partition for the given strategy and SubDofHandler.
+Returns an iterable of iterables: the outer level represents synchronization barriers
+(e.g. colors), the inner level represents parallelizable work items (cell IDs).
+"""
+compute_partition(::SequentialAssemblyStrategy, sdh) = (sdh.cellset,)
+compute_partition(::ElementAssemblyOperatorStrategy, sdh) = (sdh.cellset,)
+
+function compute_partition(strategy::PerColorAssemblyStrategy, sdh)
+    return Ferrite.create_coloring(get_grid(sdh.dh), sdh.cellset; alg=strategy.coloralg)
+end
+
+"""
+    n_workers(strategy, device, partition) -> Int
+
+Compute the number of parallel workers needed for the given strategy, device, and partition.
+"""
+n_workers(strategy, ::SequentialCPUDevice, partition) = 1
+function n_workers(strategy, device::PolyesterDevice, partition)
+    ncellsmax = maximum(length, partition)
+    return ceil(Int, ncellsmax / device.chunksize)
+end
+
+function n_workers(strategy, device::AbstractGPUDevice, partition)
+    throw(ArgumentError(
+        "GPU assembly is not yet implemented for $(typeof(device)). " *
+        "Implement n_workers for this device type."
+    ))
+end
+
+
+####################################
+## Matrix type                    ##
+####################################
+
+matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)
+matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
 
 function Adapt.adapt_structure(::AbstractAssemblyStrategy, dh::DofHandler)
     error("Device specific implementation for `adapt_structure(::AbstractAssemblyStrategy,dh::DofHandler)` is not implemented yet")
 end
-
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:SequentialCPUDevice}, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, element_cache, ivh, sdh, getncells(get_grid(sdh.dh)))
-end
-
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:PolyesterDevice}, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, element_cache, ivh, sdh, strategy.device.chunksize)
-end
-
-function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStrategy, element_cache, ivh, sdh, chunksize)
-    (; device) = strategy
-    (; dh)     = sdh
-    grid       = get_grid(dh)
-
-    ncellsmax  = getncells(grid)
-    nchunksmax = ceil(Int, ncellsmax / chunksize)
-
-    task_local_caches = [
-        SimpleAssemblyCache(
-            allocate_element_matrix(element_cache, sdh),
-            allocate_element_unknown_vector(element_cache, sdh),
-            allocate_element_residual_vector(element_cache, sdh),
-            CellCache(sdh),
-            duplicate_for_device(device, ivh),
-            duplicate_for_device(device, element_cache),
-        )
-    for tid in 1:nchunksmax]
-    return ElementAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(task_local_caches))
-end
-
-matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)
-matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}

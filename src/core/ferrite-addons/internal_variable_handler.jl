@@ -7,6 +7,9 @@ end
 Ferrite.ndofs(lvh::InternalVariableHandler) = lvh.ndofs
 internal_variable_offset(lvh::InternalVariableHandler, cellid::Int) = lvh.internal_variable_offsets[cellid]
 
+# Offsets are shared read-only data, so duplication just returns the same instance.
+duplicate_for_device(device, ivh::InternalVariableHandler) = ivh
+
 # # Utils to distribute and visualize local variables
 # struct QuadratureInterpolation{RefShape, QR <: QuadratureRule{RefShape}} <:
 #        Ferrite.ScalarInterpolation{RefShape, -1}
