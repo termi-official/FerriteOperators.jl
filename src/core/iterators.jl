@@ -317,6 +317,16 @@ function NestedGridCellIterator(
     return NestedGridCellIterator(cache, set)
 end
 
+function NestedGridCellIterator(
+        sdh_fine::SubDofHandler, sdh_coarse::SubDofHandler,
+        fine2coarse::Vector{Int},
+        child_ref_coords::Vector{<:AbstractVector},
+    )
+    @assert length(sdh_fine.cellset) >= length(sdh_coarse.cellset) "The fine cellset must have more cells than the coarse cellset!"
+    cache = NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords)
+    return NestedGridCellIterator(cache, sdh_fine.cellset)
+end
+
 @inline _getset(it::NestedGridCellIterator)   = it.set
 @inline _getcache(it::NestedGridCellIterator) = it.cc
 
