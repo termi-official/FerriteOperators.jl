@@ -189,8 +189,8 @@ end
 
 
 
-@concrete struct EAOperatorAssembler <: Ferrite.AbstractAssembler
-    device
+@concrete struct EAOperatorAssembler{T, DeviceType <: AbstractDevice{T}} <: Ferrite.AbstractAssembler{T}
+    device::DeviceType
     K_element
     f_element
     f

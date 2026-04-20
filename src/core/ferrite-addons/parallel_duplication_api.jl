@@ -1,13 +1,34 @@
 # Adaption of the API presented in Ferrite.jl#1070 for general devices with some tweaks. Essentially a Adapt.jl wrapper.
 function duplicate_for_device(device, asm::Ferrite.CSCAssembler)
-    return Ferrite.CSCAssembler(asm.K, asm.f, duplicate_for_device(device, asm.permutation), duplicate_for_device(device, asm.sorteddofs))
+    return Ferrite.CSCAssembler(
+        asm.K,
+        asm.f,
+        duplicate_for_device(device, asm.rowpermutation),
+        duplicate_for_device(device, asm.colpermutation),
+        duplicate_for_device(device, asm.sortedrowdofs),
+        duplicate_for_device(device, asm.sortedcoldofs),
+    )
 end
 function duplicate_for_device(device, asm::Ferrite.SymmetricCSCAssembler)
-    return Ferrite.SymmetricCSCAssembler(asm.K, asm.f, duplicate_for_device(device, asm.permutation), duplicate_for_device(device, asm.sorteddofs))
+    return Ferrite.SymmetricCSCAssembler(
+        asm.K,
+        asm.f,
+        duplicate_for_device(device, asm.rowpermutation),
+        duplicate_for_device(device, asm.colpermutation),
+        duplicate_for_device(device, asm.sortedrowdofs),
+        duplicate_for_device(device, asm.sortedcoldofs),
+    )
 end
 
 function duplicate_for_device(device, asm::Ferrite.CSRAssembler)
-    return Ferrite.CSRAssembler(asm.K, asm.f, duplicate_for_device(device, asm.permutation), duplicate_for_device(device, asm.sorteddofs))
+    return Ferrite.CSRAssembler(
+        asm.K,
+        asm.f,
+        duplicate_for_device(device, asm.rowpermutation),
+        duplicate_for_device(device, asm.colpermutation),
+        duplicate_for_device(device, asm.sortedrowdofs),
+        duplicate_for_device(device, asm.sortedcoldofs),
+    )
 end
 
 function duplicate_for_device(device, fv::FacetValues)
@@ -58,7 +79,7 @@ function duplicate_for_device(device, qr::QR) where {refshape, QR <: QuadratureR
 end
 
 function duplicate_for_device(device, qr::QR) where {refshape, QR <: FacetQuadratureRule{refshape}}
-    return FacetQuadratureRule{refshape}(duplicate_for_device(device, qr.face_rules))::QR
+    return FacetQuadratureRule{refshape}(duplicate_for_device(device, qr.facet_rules))::QR
 end
 
 duplicate_for_device(device, ip::Ferrite.Interpolation) = ip
