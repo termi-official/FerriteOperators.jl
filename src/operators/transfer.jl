@@ -6,7 +6,7 @@
 ##
 ## The entry point for the rectangular assembler relies on:
 ##   Ferrite.assemble!(assembler, rdofs, cdofs, Ke)
-## which is available in Ferrite ≥ 1.2 (see Ferrite.jl PR #TODO upstream link).
+## which is available in Ferrite ≥ 1.4 (see Ferrite.jl PR https://github.com/Ferrite-FEM/Ferrite.jl/pull/1279).
 ##
 ## Usage sketch (p-multigrid prolongator):
 ##
@@ -135,7 +135,7 @@ function update_operator!(op::TransferFerriteOperator, p)
 
     n_row = maximum(sc -> ndofs_per_cell(sc.domain.sdh_row), subdomain_caches; init = 0)
     n_col = maximum(sc -> ndofs_per_cell(sc.domain.sdh_col), subdomain_caches; init = 0)
-    assembler = start_assemble2(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
+    assembler = start_assemble(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
 
     task = AssembleTransferTerm(assembler, p)
 
@@ -177,7 +177,7 @@ function update_operator!(op::NestedTransferFerriteOperator, p)
 
     n_row = maximum(sc -> ndofs_per_cell(sc.domain.sdh_row), subdomain_caches; init = 0)
     n_col = maximum(sc -> ndofs_per_cell(sc.domain.sdh_col), subdomain_caches; init = 0)
-    assembler = start_assemble2(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
+    assembler = start_assemble(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
 
     task = AssembleTransferTerm(assembler, p)
 
