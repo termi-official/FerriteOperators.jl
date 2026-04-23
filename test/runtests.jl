@@ -414,4 +414,60 @@ using Polyester
         integrator = FerriteOperators.MassProlongatorIntegrator(QuadratureRuleCollection(4), :u)
         @test_throws ArgumentError setup_transfer_operator(PerColorAssemblyStrategy(SequentialCPUDevice()), integrator, dh2, dh1)
     end
+
+    @testset "Dummy Multi-Physics" begin
+        grid = generate_grid(Hexahedron, ntuple(_ -> 4, 3))
+        addcellset!(grid, "right_cells", x -> x[1] ≥ 0.0)
+        addcellset!(grid, "left_cells", x -> x[1] ≤ 0.0)
+
+        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+        dh = DofHandler(grid)
+        sdh1 = SubDofHandler(dh, getcellset(grid, "right_cells"))
+        add!(sdh1, :u, Lagrange{RefHexahedron, 1}())
+        sdh2 = SubDofHandler(dh, getcellset(grid, "left_cells"))
+        add!(sdh2, :u, Lagrange{RefHexahedron, 1}())
+        close!(dh)
+
+        n = 5^3
+
+        # Linear case
+        lin_multi = NonlinearMultiDomainIntegrator(Dict(
+            sdh1 => FerriteOperators.SimpleLinearIntegrator( 1.0, QuadratureRuleCollection(2), :u),
+            sdh2 => FerriteOperators.SimpleLinearIntegrator(-1.0, QuadratureRuleCollection(2), :u)
+        ))
+        lin_op = setup_operator(strategy, FerriteOperators.SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
+        update_operator!(lin_op, nothing)
+        @test size(lin_op) == (n,)
+
+        # Bilinear case
+        bilin_multi = BilinearMultiDomainIntegrator(Dict(
+            sdh1 => FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u),
+            sdh2 => FerriteOperators.SimpleBilinearDiffusionIntegrator(2.0, QuadratureRuleCollection(2), :u)
+        ))
+        bilin_op = setup_operator(strategy, bilin_multi, dh)
+        update_operator!(bilin_op, nothing)
+        @test size(bilin_op) == (n, n)
+        @test size(bilin_op, 1) == n
+        @test size(bilin_op, 2) == n
+
+        # Nonlinear case
+        dh = DofHandler(grid)
+        sdh1 = SubDofHandler(dh, getcellset(grid, "right_cells"))
+        add!(sdh1, :u, Lagrange{RefHexahedron, 1}()^3)
+        sdh2 = SubDofHandler(dh, getcellset(grid, "left_cells"))
+        add!(sdh2, :u, Lagrange{RefHexahedron, 1}()^3)
+        close!(dh)
+        nl_multi = NonlinearMultiDomainIntegrator(Dict(
+            sdh1 => FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.30), QuadratureRuleCollection(2), :u),
+            sdh2 => FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(180e3, 0.35), QuadratureRuleCollection(2), :u)
+        ))
+        nl_op = setup_operator(strategy, FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.3), QuadratureRuleCollection(2), :u), dh)
+        u = zeros(ndofs(dh))
+        apply_analytical!(u, dh, :u, x->0.01x.^2)
+        update_linearization!(nl_op, u, nothing)
+        @test size(nl_op) == (3n, 3n)
+        @test size(nl_op, 1) == 3n
+        @test size(nl_op, 2) == 3n
+    end
 end
