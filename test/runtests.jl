@@ -432,11 +432,11 @@ using Polyester
         n = 5^3
 
         # Linear case
-        lin_multi = NonlinearMultiDomainIntegrator(Dict(
+        lin_multi = LinearMultiDomainIntegrator(Dict(
             sdh1 => FerriteOperators.SimpleLinearIntegrator( 1.0, QuadratureRuleCollection(2), :u),
             sdh2 => FerriteOperators.SimpleLinearIntegrator(-1.0, QuadratureRuleCollection(2), :u)
         ))
-        lin_op = setup_operator(strategy, FerriteOperators.SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
+        lin_op = setup_operator(strategy, lin_multi, dh)
         update_operator!(lin_op, nothing)
         @test size(lin_op) == (n,)
 
@@ -462,7 +462,7 @@ using Polyester
             sdh1 => FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.30), QuadratureRuleCollection(2), :u),
             sdh2 => FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(180e3, 0.35), QuadratureRuleCollection(2), :u)
         ))
-        nl_op = setup_operator(strategy, FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.3), QuadratureRuleCollection(2), :u), dh)
+        nl_op = setup_operator(strategy, nl_multi, dh)
         u = zeros(ndofs(dh))
         apply_analytical!(u, dh, :u, x->0.01x.^2)
         update_linearization!(nl_op, u, nothing)
