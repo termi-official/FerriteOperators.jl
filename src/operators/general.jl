@@ -5,7 +5,8 @@
 @concrete struct AssemblyDomain
     sdh
     ivh
-    element # TODO remove this and query from device cache.
+    element
+    boundary_element
 end
 
 @concrete struct TransferDomain

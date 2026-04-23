@@ -375,7 +375,7 @@ using Polyester
         @test size(nl_op, 1) == n
         @test size(nl_op, 2) == n
 
-        lin_op = FerriteOperators.LinearFerriteOperator(zeros(n), strategy, FerriteOperators.SubdomainCache[])
+        lin_op = setup_operator(strategy, FerriteOperators.SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
         @test size(lin_op) == (n,)
     end
 
