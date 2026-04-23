@@ -63,7 +63,7 @@ end
 assemble_facet!(rₑ::AbstractVector, cell::CellCache, local_facet_index::Int, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_facet!(rₑ, cell, local_facet_index, surface_cache.inner_caches, time)
 @unroll function assemble_composite_facet!(rₑ::AbstractVector, cell::CellCache, local_facet_index::Int, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
     @unroll for inner_cache ∈ inner_caches
-        assemble_facet!(Kₑ, cell, local_facet_index, inner_cache, time)
+        assemble_facet!(rₑ, cell, local_facet_index, inner_cache, time)
     end
 end
 # Main entry point for bilinear operators
