@@ -23,11 +23,13 @@ function assemble_element!(rₑ::AbstractVector, cell, element_cache::SimpleLine
     (; cellvalues, f) = element_cache
     n_basefuncs = getnbasefunctions(cellvalues)
 
+    reinit!(cellvalues, cell)
+
     for qp in 1:getnquadpoints(cellvalues)
         dΩ = getdetJdV(cellvalues, qp)
         for i in 1:n_basefuncs
             Nᵢ = shape_value(cellvalues, qp, i)
-            r[i] += f * Nⱼ * dΩ
+            rₑ[i] += f * Nᵢ * dΩ
         end
     end
 end
@@ -39,6 +41,8 @@ function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofH
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleLinearElementCache(element_model.f, CellValues(qr, ip, ip_geo))
 end
+
+duplicate_for_device(device, cache::SimpleLinearElementCache) = SimpleLinearElementCache(cache.f, duplicate_for_device(device, cache.cellvalues))
 
 @doc raw"""
     SimpleBilinearMassIntegrator{CoefficientType}
