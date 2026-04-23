@@ -51,6 +51,7 @@ abstract type AbstractSimpleCondensedNonlinearIntegrator <: AbstractNonlinearInt
 abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
+include("elements/domain_elements.jl")        # This is the key component to couple integrators into a single operator
 include("elements/generic_first_order_time_element.jl")
 
 include("operators/general.jl")         # Some general operators which might be handy
@@ -91,5 +92,7 @@ export NestedMassProlongatorIntegrator
 export setup_element_cache, assemble_element!
 export TransferFerriteOperator, setup_transfer_operator, init_transfer_sparsity_pattern
 export NestedTransferFerriteOperator, setup_nested_transfer_operator, init_nested_transfer_sparsity_pattern
+
+export NonlinearMultiDomainIntegrator, BilinearMultiDomainIntegrator, LinearMultiDomainIntegrator
 
 end

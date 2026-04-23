@@ -5,7 +5,181 @@ import LinearAlgebra: mul!
 using SparseArrays
 using Polyester
 
-@testset "FerriteOperators.jl" begin
+
+@testset "Element API" begin
+    import FerriteOperators: assemble_element!, assemble_facet!
+    import FerriteOperators: setup_element_cache, setup_boundary_cache
+    import FerriteOperators: SimpleBilinearMassIntegrator, SimpleBilinearDiffusionIntegrator, SimpleLinearIntegrator
+    import FerriteOperators
+
+    setup_test_cache(kwargs...) =
+        FerriteOperators.duplicate_for_device(PolyesterDevice(), setup_element_cache(kwargs...))
+    function setup_test_composite_volume_cache(kwargs...)
+        element_cache =
+            FerriteOperators.duplicate_for_device(PolyesterDevice(), setup_element_cache(kwargs...))
+        return FerriteOperators.duplicate_for_device(
+            PolyesterDevice(),
+            FerriteOperators.CompositeVolumetricElementCache((element_cache, element_cache)),
+        )
+    end
+    function setup_test_composite_surface_cache(kwargs...)
+        element_cache =
+            FerriteOperators.duplicate_for_device(PolyesterDevice(), setup_boundary_cache(kwargs...))
+        return FerriteOperators.duplicate_for_device(
+            PolyesterDevice(),
+            FerriteOperators.CompositeSurfaceElementCache((element_cache, element_cache)),
+        )
+    end
+
+    grid = generate_grid(Hexahedron, (1, 1, 1))
+    qrc  = QuadratureRuleCollection(3)
+    qr   = QuadratureRule{RefHexahedron}(3)
+    qrcf = QuadratureRuleCollection(3)
+    qrf  = FacetQuadratureRule{RefHexahedron}(3)
+    ip   = Lagrange{RefHexahedron, 1}()
+
+    dhs = DofHandler(grid)
+    add!(dhs, :u, ip)
+    close!(dhs)
+    sdhs = first(dhs.subdofhandlers)
+    cell_cache_s = Ferrite.CellCache(sdhs)
+    Ferrite.reinit!(cell_cache_s, 1)
+    uₑs = [-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0] .* 1e-4
+
+    ipv = ip^3
+    dhv = DofHandler(grid)
+    add!(dhv, :u, ipv)
+    close!(dhv)
+    sdhv = first(dhv.subdofhandlers)
+    cell_cache_v = Ferrite.CellCache(sdhv)
+    Ferrite.reinit!(cell_cache_v, 1)
+    uₑv =
+        [
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        ] .* 1e-4
+
+    # We check for pairwise consistency of the assembly operations
+    # First we check if the empty caches work correctly
+    @testset "Empty caches" begin
+        rₑ¹ = zeros(ndofs(dhs))
+        rₑ² = zeros(ndofs(dhs))
+        Kₑ¹ = zeros(ndofs(dhs), ndofs(dhs))
+        Kₑ² = zeros(ndofs(dhs), ndofs(dhs))
+
+        # Volume
+        assemble_element!(
+            Kₑ¹,
+            rₑ¹,
+            uₑs,
+            cell_cache_s,
+            FerriteOperators.EmptyVolumetricElementCache(),
+            0.0,
+        )
+        @test iszero(Kₑ¹)
+        @test iszero(rₑ¹)
+
+        assemble_element!(rₑ², uₑs, cell_cache_s, FerriteOperators.EmptyVolumetricElementCache(), 0.0)
+        @test iszero(rₑ²)
+
+        assemble_element!(Kₑ², uₑs, cell_cache_s, FerriteOperators.EmptyVolumetricElementCache(), 0.0)
+        @test iszero(Kₑ²)
+
+        # Surface
+        for local_facet_index = 1:nfacets(cell_cache_s)
+            assemble_facet!(
+                Kₑ¹,
+                rₑ¹,
+                uₑs,
+                cell_cache_s,
+                local_facet_index,
+                FerriteOperators.EmptySurfaceElementCache(),
+                0.0,
+            )
+            @test iszero(Kₑ¹)
+            @test iszero(rₑ¹)
+
+            assemble_facet!(
+                rₑ²,
+                uₑs,
+                cell_cache_s,
+                local_facet_index,
+                FerriteOperators.EmptySurfaceElementCache(),
+                0.0,
+            )
+            @test iszero(rₑ²)
+
+            assemble_facet!(
+                Kₑ²,
+                uₑs,
+                cell_cache_s,
+                local_facet_index,
+                FerriteOperators.EmptySurfaceElementCache(),
+                0.0,
+            )
+            @test iszero(Kₑ²)
+        end
+    end
+
+    @testset "Scalar volumetric bilinear composite elements: $model" for model in (
+        SimpleBilinearMassIntegrator(1.0, qrc, :u),
+        SimpleBilinearDiffusionIntegrator(1.0, qrc, :u),
+    )
+        Kₑ¹ = zeros(ndofs(dhs), ndofs(dhs))
+        Kₑ² = zeros(ndofs(dhs), ndofs(dhs))
+
+        element_cache = setup_test_cache(model, sdhs)
+
+        assemble_element!(Kₑ¹, cell_cache_s, element_cache, 0.0)
+        @test !iszero(Kₑ¹)
+
+        composite_element_cache = setup_test_composite_volume_cache(model, sdhs)
+
+        assemble_element!(Kₑ², cell_cache_s, composite_element_cache, 0.0)
+        @test 2Kₑ¹ ≈ Kₑ²
+    end
+
+    @testset "Scalar linear composite elements: $model" for model in (
+        SimpleLinearIntegrator(1.0, qrc, :u),
+    )
+        bₑ¹ = zeros(ndofs(dhs))
+        bₑ² = zeros(ndofs(dhs))
+
+        element_cache = setup_test_cache(model, sdhs)
+
+        assemble_element!(bₑ¹, cell_cache_s, element_cache, 0.0)
+        @test !iszero(bₑ¹)
+
+        composite_element_cache = setup_test_composite_volume_cache(model, sdhs)
+
+        assemble_element!(bₑ², cell_cache_s, composite_element_cache, 0.0)
+        @test 2bₑ¹ ≈ bₑ²
+    end
+end
+
+@testset "Operators" begin
     @testset "Element Assembly Matrix" begin
         Aₑ = [1.0 -1.0; -1.0 1.0]
         Aₑflat = [1.0, -1.0, -1.0, 1.0]
@@ -375,7 +549,7 @@ using Polyester
         @test size(nl_op, 1) == n
         @test size(nl_op, 2) == n
 
-        lin_op = FerriteOperators.LinearFerriteOperator(zeros(n), strategy, FerriteOperators.SubdomainCache[])
+        lin_op = setup_operator(strategy, FerriteOperators.SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
         @test size(lin_op) == (n,)
     end
 
@@ -413,5 +587,61 @@ using Polyester
         close!(dh1)
         integrator = FerriteOperators.MassProlongatorIntegrator(QuadratureRuleCollection(4), :u)
         @test_throws ArgumentError setup_transfer_operator(PerColorAssemblyStrategy(SequentialCPUDevice()), integrator, dh2, dh1)
+    end
+
+    @testset "Dummy Multi-Physics" begin
+        grid = generate_grid(Hexahedron, ntuple(_ -> 4, 3))
+        addcellset!(grid, "right_cells", x -> x[1] ≥ 0.0)
+        addcellset!(grid, "left_cells", x -> x[1] ≤ 0.0)
+
+        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+        dh = DofHandler(grid)
+        sdh1 = SubDofHandler(dh, getcellset(grid, "right_cells"))
+        add!(sdh1, :u, Lagrange{RefHexahedron, 1}())
+        sdh2 = SubDofHandler(dh, getcellset(grid, "left_cells"))
+        add!(sdh2, :u, Lagrange{RefHexahedron, 1}())
+        close!(dh)
+
+        n = 5^3
+
+        # Linear case
+        lin_multi = LinearMultiDomainIntegrator(Dict(
+            sdh1 => FerriteOperators.SimpleLinearIntegrator( 1.0, QuadratureRuleCollection(2), :u),
+            sdh2 => FerriteOperators.SimpleLinearIntegrator(-1.0, QuadratureRuleCollection(2), :u)
+        ))
+        lin_op = setup_operator(strategy, lin_multi, dh)
+        update_operator!(lin_op, nothing)
+        @test size(lin_op) == (n,)
+
+        # Bilinear case
+        bilin_multi = BilinearMultiDomainIntegrator(Dict(
+            sdh1 => FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u),
+            sdh2 => FerriteOperators.SimpleBilinearDiffusionIntegrator(2.0, QuadratureRuleCollection(2), :u)
+        ))
+        bilin_op = setup_operator(strategy, bilin_multi, dh)
+        update_operator!(bilin_op, nothing)
+        @test size(bilin_op) == (n, n)
+        @test size(bilin_op, 1) == n
+        @test size(bilin_op, 2) == n
+
+        # Nonlinear case
+        dh = DofHandler(grid)
+        sdh1 = SubDofHandler(dh, getcellset(grid, "right_cells"))
+        add!(sdh1, :u, Lagrange{RefHexahedron, 1}()^3)
+        sdh2 = SubDofHandler(dh, getcellset(grid, "left_cells"))
+        add!(sdh2, :u, Lagrange{RefHexahedron, 1}()^3)
+        close!(dh)
+        nl_multi = NonlinearMultiDomainIntegrator(Dict(
+            sdh1 => FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.30), QuadratureRuleCollection(2), :u),
+            sdh2 => FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(180e3, 0.35), QuadratureRuleCollection(2), :u)
+        ))
+        nl_op = setup_operator(strategy, nl_multi, dh)
+        u = zeros(ndofs(dh))
+        apply_analytical!(u, dh, :u, x->0.01x.^2)
+        update_linearization!(nl_op, u, nothing)
+        @test size(nl_op) == (3n, 3n)
+        @test size(nl_op, 1) == 3n
+        @test size(nl_op, 2) == 3n
     end
 end

@@ -1,11 +1,12 @@
 # This is the easiest solution for now.
 # It is assumed that the element knows how many dofs per quadrature point are there locally.
-@concrete struct InternalVariableHandler <: AbstractDofHandler
+@concrete mutable struct InternalVariableHandler <: AbstractDofHandler
     internal_variable_offsets
     ndofs <: Integer
 end
 Ferrite.ndofs(lvh::InternalVariableHandler) = lvh.ndofs
 internal_variable_offset(lvh::InternalVariableHandler, cellid::Int) = lvh.internal_variable_offsets[cellid]
+Ferrite.close!(lvh::InternalVariableHandler) = nothing
 
 # Offsets are shared read-only data, so duplication just returns the same instance.
 duplicate_for_device(device, ivh::InternalVariableHandler) = ivh

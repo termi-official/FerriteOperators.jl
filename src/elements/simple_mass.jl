@@ -1,4 +1,50 @@
 @doc raw"""
+    SimplLinearIntegrator{CoefficientType}
+
+Represents the integrand of the linear form ``b(v) = f v(x) dx`` for a given constant ``f`` and ``v`` from the test function space.
+"""
+struct SimpleLinearIntegrator <: AbstractLinearIntegrator
+    # This is specific to our model
+    f::Float64
+    # Every integrator needs these
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+end
+
+"""
+The cache associated with [`SimpleLinearElementCache`](@ref) to assemble element "constant" vectors.
+"""
+struct SimpleLinearElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+    f::Float64
+    cellvalues::CV
+end
+
+function assemble_element!(rₑ::AbstractVector, cell, element_cache::SimpleLinearElementCache, time)
+    (; cellvalues, f) = element_cache
+    n_basefuncs = getnbasefunctions(cellvalues)
+
+    reinit!(cellvalues, cell)
+
+    for qp in 1:getnquadpoints(cellvalues)
+        dΩ = getdetJdV(cellvalues, qp)
+        for i in 1:n_basefuncs
+            Nᵢ = shape_value(cellvalues, qp, i)
+            rₑ[i] += f * Nᵢ * dΩ
+        end
+    end
+end
+
+function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofHandler)
+    qr         = getquadraturerule(element_model.qrc, sdh)
+    field_name = element_model.field_name
+    ip         = Ferrite.getfieldinterpolation(sdh, field_name)
+    ip_geo     = geometric_subdomain_interpolation(sdh)
+    return SimpleLinearElementCache(element_model.f, CellValues(qr, ip, ip_geo))
+end
+
+duplicate_for_device(device, cache::SimpleLinearElementCache) = SimpleLinearElementCache(cache.f, duplicate_for_device(device, cache.cellvalues))
+
+@doc raw"""
     SimpleBilinearMassIntegrator{CoefficientType}
 
 Represents the integrand of the bilinear form ``a(u,v) = -\int v(x) \cdot D u(x) dx`` for a given Mass value ``D`` and ``u,v`` from the same function space.

@@ -6,6 +6,10 @@ function setup_elements(integrator, dh)
     return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
 end
 
+function setup_boundaries(integrator, dh)
+    return [setup_boundary_cache(integrator, sdh) for sdh in dh.subdofhandlers]
+end
+
 function setup_internal_variable_handler(integrator::AbstractCondensedNonlinearIntegrator, element_caches, dh)
     num_dofs_per_element = zeros(Int, getncells(get_grid(dh))+1)
     for (sdh, cache) in zip(dh.subdofhandlers, element_caches)
@@ -23,16 +27,17 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
 end
 
 function setup_subdomain_caches(strategy, integrator, dh)
-    element_caches = setup_elements(integrator, dh)
-    ivh            = setup_internal_variable_handler(integrator, element_caches, dh)
-    device         = strategy.device
+    element_caches  = setup_elements(integrator, dh)
+    boundary_caches = setup_boundaries(integrator, dh)
+    ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
+    device          = strategy.device
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
-        ws = create_assembly_workspace(element_cache, sdh, ivh)
+        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh)
         dc = setup_device_instances(device, ws, n)
-        SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
-    end for (sdh, element_cache) in zip(dh.subdofhandlers, element_caches)]
+        SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
+    end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
@@ -44,6 +49,8 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
         A,
         operator_strategy,
         subdomain_caches,
+        dh,
+        integrator,
     )
 end
 
@@ -56,6 +63,8 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
         J,
         operator_strategy,
         subdomain_caches,
+        dh,
+        integrator,
     )
 end
 
@@ -67,7 +76,9 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
     return LinearFerriteOperator(
         b,
         operator_strategy,
-        subdomain_caches
+        subdomain_caches,
+        dh,
+        integrator,
     )
 end
 
@@ -143,7 +154,7 @@ function setup_transfer_operator(
         push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_row, sdh_col), dc, partition))
     end
 
-    return TransferFerriteOperator(P, strategy, subdomain_caches)
+    return TransferFerriteOperator(P, strategy, subdomain_caches, dh_row, dh_col, integrator)
 end
 
 """
@@ -213,5 +224,5 @@ function setup_nested_transfer_operator(
         push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_fine, sdh_coarse), dc, partition))
     end
 
-    return NestedTransferFerriteOperator(P, strategy, subdomain_caches)
+    return NestedTransferFerriteOperator(P, strategy, subdomain_caches, dh_row, dh_col, integrator)
 end

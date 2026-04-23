@@ -33,7 +33,7 @@ struct ElementAssemblyStrategy{DeviceType} <: AbstractMatrixFreeStrategy
     device::DeviceType
 end
 
-@concrete struct ElementAssemblyOperatorStrategy
+@concrete struct ElementAssemblyOperatorStrategy <: AbstractMatrixFreeStrategy
     device
     eadata
 end
@@ -83,6 +83,7 @@ Fields:
     cell
     ivh
     element
+    boundary_element
 end
 
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
@@ -90,17 +91,18 @@ Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
 function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
     return create_assembly_workspace(
         duplicate_for_device(device, ws.element),
+        duplicate_for_device(device, ws.boundary_element),
         ws.cell.dh,
         duplicate_for_device(device, ws.ivh),
     )
 end
 
 """
-    create_assembly_workspace(element, sdh, ivh)
+    create_assembly_workspace(element, boundary_element, sdh, ivh)
 
 Create a single [`AssemblyWorkspace`](@ref) with freshly allocated element-local buffers.
 """
-function create_assembly_workspace(element, sdh, ivh)
+function create_assembly_workspace(element, boundary_element, sdh, ivh)
     return AssemblyWorkspace(
         allocate_element_matrix(element, sdh),
         allocate_element_unknown_vector(element, sdh),
@@ -108,6 +110,7 @@ function create_assembly_workspace(element, sdh, ivh)
         CellCache(sdh),
         ivh,
         element,
+        boundary_element,
     )
 end
 
@@ -149,11 +152,13 @@ end
 
 
 ####################################
-## Matrix type                    ##
+## Matrix/Vector type             ##
 ####################################
 
 matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)
 matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
+vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
+vector_type(device::AbstractDevice) = Vector{value_type(device)}
 
 function Adapt.adapt_structure(::AbstractAssemblyStrategy, dh::DofHandler)
     error("Device specific implementation for `adapt_structure(::AbstractAssemblyStrategy,dh::DofHandler)` is not implemented yet")

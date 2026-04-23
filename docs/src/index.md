@@ -80,7 +80,7 @@ FerriteOperators.AbstractVolumetricElement
 FerriteOperators.AbstractSurfaceElementCache
 FerriteOperators.AbstractInterfaceElementCache
 assemble_element!
-assemble_face!
+assemble_facet!
 assemble_interface!
 FerriteOperators.setup_element_cache
 FerriteOperators.load_element_unknowns!

@@ -123,6 +123,9 @@ apply the operator (matrix-vector product).
     P
     strategy
     subdomain_caches
+    dh_row
+    dh_col
+    integrator
 end
 
 """
@@ -170,6 +173,8 @@ Construct via [`setup_nested_transfer_operator`](@ref); update via [`update_oper
     P
     strategy
     subdomain_caches
+    dh
+    integrator
 end
 
 function update_operator!(op::NestedTransferFerriteOperator, p)

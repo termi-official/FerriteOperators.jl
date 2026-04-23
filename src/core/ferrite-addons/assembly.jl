@@ -16,3 +16,4 @@ finalize_assembly!(assembler::Ferrite.AbstractAssembler) = nothing
 finalize_assembly!(assembler::AbstractVector) = nothing
 
 allocate_vector(::Vector{T}, dh) where T = zeros(T, ndofs(dh))
+allocate_vector(::Type{Vector{T}}, dh) where T = zeros(T, ndofs(dh))

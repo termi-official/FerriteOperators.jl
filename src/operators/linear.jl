@@ -2,6 +2,8 @@
     b
     strategy
     subdomain_caches
+    dh
+    integrator
 end
 
 struct AssembleLinearTerm{A}
@@ -18,6 +20,7 @@ function execute_single_task!(task::AssembleLinearTerm, ws::AssemblyWorkspace)
     fill!(rₑ, 0.0)
 
     @timeit_debug "assemble element" assemble_element!(rₑ, ws.cell, ws.element, pₑ)
+    @timeit_debug "assemble boundary" assemble_element!(rₑ, ws.cell, ws.boundary_element, pₑ)
 
     assemble!(task.inner_assembler, ws.cell, rₑ)
 end
