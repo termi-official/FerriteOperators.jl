@@ -224,5 +224,5 @@ function setup_nested_transfer_operator(
         push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_fine, sdh_coarse), dc, partition))
     end
 
-    return NestedTransferFerriteOperator(P, strategy, subdomain_caches, dh_row, dh_col, integrator)
+    return NestedTransferFerriteOperator(P, strategy, subdomain_caches, dh_fine, dh_coarse, integrator)
 end
