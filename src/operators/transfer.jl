@@ -173,7 +173,8 @@ Construct via [`setup_nested_transfer_operator`](@ref); update via [`update_oper
     P
     strategy
     subdomain_caches
-    dh
+    dh_fine
+    dh_coarse
     integrator
 end
 
