@@ -184,7 +184,7 @@ struct ElementAssemblyStrategy{DeviceType} <: AbstractMatrixFreeStrategy
 end
 resolve_device_config(strategy::ElementAssemblyStrategy{<:AbstractGPUDevice}, dh::AbstractDofHandler) = ElementAssemblyStrategy(resolve_device_config(strategy.device, dh))
 
-@concrete struct ElementAssemblyOperatorStrategy
+@concrete struct ElementAssemblyOperatorStrategy <: AbstractMatrixFreeStrategy
     device
     eadata
 end
@@ -196,41 +196,127 @@ function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy, integr
     return ElementAssemblyOperatorStrategy(device, eadata)
 end
 
-@concrete struct ElementAssemblyStrategyCache
-    device
-    # Scratch for the device to store its data
-    device_cache
+setup_operator_strategy_cache(strategy, integrator, dh) = strategy
+
+
+####################################
+## Workspace                      ##
+####################################
+
+"""
+    AbstractWorkspace
+
+Abstract supertype for all per-worker workspace types used by the task/device system.
+
+Every concrete workspace must implement:
+- `Ferrite.reinit!(ws, cellid)` — reinitialise geometry and element caches for the given cell
+- `duplicate_for_device(device::AbstractCPUDevice, ws)` — create an independent copy for a parallel worker
+
+New device backends must allocate and manage workspaces of a concrete subtype.
+"""
+abstract type AbstractWorkspace end
+
+"""
+    AssemblyWorkspace
+
+Per-worker workspace for square operator assembly (bilinear, nonlinear, linear).
+Holds pre-allocated element-local buffers and caches that are reused across cells.
+
+Fields:
+- `Ke`: element stiffness matrix
+- `ue`: element unknown vector
+- `re`: element residual vector
+- `cell`: geometry cache ([`CellCache`](@ref))
+- `ivh`: internal variable handler
+- `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
+"""
+@concrete struct AssemblyWorkspace <: AbstractWorkspace
+    Ke
+    ue
+    re
+    cell
+    ivh
+    element
+    boundary_element
 end
 
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:SequentialCPUDevice}, integrator, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, integrator, element_cache, ivh, sdh, getncells(get_grid(sdh.dh)))
+Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
+
+function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
+    return create_assembly_workspace(
+        duplicate_for_device(device, ws.element),
+        duplicate_for_device(device, ws.boundary_element),
+        ws.cell.dh,
+        duplicate_for_device(device, ws.ivh),
+    )
 end
 
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:PolyesterDevice}, integrator, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, integrator, element_cache, ivh, sdh, strategy.device.chunksize)
+"""
+    create_assembly_workspace(element, boundary_element, sdh, ivh)
+
+Create a single [`AssemblyWorkspace`](@ref) with freshly allocated element-local buffers.
+"""
+function create_assembly_workspace(element, boundary_element, sdh, ivh)
+    return AssemblyWorkspace(
+        allocate_element_matrix(element, sdh),
+        allocate_element_unknown_vector(element, sdh),
+        allocate_element_residual_vector(element, sdh),
+        CellCache(sdh),
+        ivh,
+        element,
+        boundary_element,
+    )
 end
 
-function _setup_element_strategy_cache_cpu(strategy::ElementAssemblyOperatorStrategy, integrator, element_cache, ivh, sdh, chunksize)
-    (; device) = strategy
-    (; dh)     = sdh
-    grid       = get_grid(dh)
+####################################
+## Partition                      ##
+####################################
 
-    ncellsmax  = getncells(grid)
-    nchunksmax = ceil(Int, ncellsmax / chunksize)
+"""
+    compute_partition(strategy, sdh)
 
-    task_local_caches = [
-        SimpleAssemblyCache(
-            allocate_assembly_cache(integrator, element_cache, device, sdh),
-            CellCache(sdh),
-            duplicate_for_device(device, ivh),
-            duplicate_for_device(device, element_cache),
-        )
-    for tid in 1:nchunksmax]
-    return ElementAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(task_local_caches))
+Compute the work partition for the given strategy and SubDofHandler.
+Returns an iterable of iterables: the outer level represents synchronization barriers
+(e.g. colors), the inner level represents parallelizable work items (cell IDs).
+"""
+compute_partition(::SequentialAssemblyStrategy, sdh) = (sdh.cellset,)
+compute_partition(::ElementAssemblyOperatorStrategy, sdh) = (sdh.cellset,)
+
+function compute_partition(strategy::PerColorAssemblyStrategy, sdh)
+    return Ferrite.create_coloring(get_grid(sdh.dh), sdh.cellset; alg=strategy.coloralg)
 end
+
+"""
+    n_workers(strategy, device, partition) -> Int
+
+Compute the number of parallel workers needed for the given strategy, device, and partition.
+"""
+n_workers(strategy, ::SequentialCPUDevice, partition) = 1
+function n_workers(strategy, device::PolyesterDevice, partition)
+    ncellsmax = maximum(length, partition)
+    return ceil(Int, ncellsmax / device.chunksize)
+end
+
+function n_workers(strategy, device::AbstractGPUDevice, partition)
+    throw(ArgumentError(
+        "GPU assembly is not yet implemented for $(typeof(device)). " *
+        "Implement n_workers for this device type."
+    ))
+end
+
+
+####################################
+## Matrix/Vector type             ##
+####################################
 
 matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)
 matrix_type(device::AbstractCPUDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
+vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
+vector_type(device::AbstractDevice) = Vector{value_type(device)}
+
+function Adapt.adapt_structure(::AbstractAssemblyStrategy, dh::DofHandler)
+    error("Device specific implementation for `adapt_structure(::AbstractAssemblyStrategy,dh::DofHandler)` is not implemented yet")
+end
 
 vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
 vector_type(device::AbstractCPUDevice) = Vector{value_type(device)}

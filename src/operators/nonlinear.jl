@@ -1,9 +1,11 @@
 struct AssembleLinearizationJR{A}
     inner_assembler::A
+    u
+    p
 end
 duplicate_for_device(device, task::AssembleLinearizationJR) = AssembleLinearizationJR(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearizationJR, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_matrix(task_buffer), query_element_residual_buffer(task_buffer))
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.Ke, task_buffer.re)
 end
 function execute_task_on_single_cell!(task::AssembleLinearizationJR, task_buffer)
     Jₑ = query_element_matrix(task_buffer)
@@ -18,19 +20,20 @@ function execute_task_on_single_cell!(task::AssembleLinearizationJR, task_buffer
     element    = query_element(task_buffer)
 
     load_element_unknowns!(uₑ, task_buffer)
-
-    assemble_element!(Jₑ, rₑ, uₑ, cell_cache, element, pₑ)
+    @timeit_debug "assemble element" assemble_element!(Jₑ, rₑ, uₑ, cell_cache, element, pₑ)
     store_condensed_element_unknowns!(uₑ, task_buffer)
 
-    assemble!(task, task_buffer)
+    assemble!(task.inner_assembler, ws.cell, Jₑ, rₑ)
 end
 
 struct AssembleLinearizationJ{A}
     inner_assembler::A
+    u
+    p
 end
 duplicate_for_device(device, task::AssembleLinearizationJ) = AssembleLinearizationJ(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearizationJ, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_matrix(task_buffer))
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.Ke)
 end
 function execute_task_on_single_cell!(task::AssembleLinearizationJ, task_buffer)
     Jₑ = query_element_matrix(task_buffer)
@@ -43,20 +46,21 @@ function execute_task_on_single_cell!(task::AssembleLinearizationJ, task_buffer)
     element    = query_element(task_buffer)
 
     load_element_unknowns!(uₑ, task_buffer)
-   
-    assemble_element!(Jₑ, uₑ, cell_cache, element, pₑ)
+    @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, cell_cache, element, pₑ)
     store_condensed_element_unknowns!(uₑ, task_buffer)
 
-    assemble!(task, task_buffer)
+    assemble!(task.inner_assembler, ws.cell, Jₑ)
 end
 
 struct AssembleLinearizationR{A}
     inner_assembler::A
+    u
+    p
 end
 duplicate_for_device(device, task::AssembleLinearizationR{<:AbstractVector}) = task
 duplicate_for_device(device, task::AssembleLinearizationR) = AssembleLinearizationR(duplicate_for_device(device, task.inner_assembler))
 function Ferrite.assemble!(task::AssembleLinearizationR, task_buffer::GenericTaskBuffer)
-    assemble!(task.inner_assembler, task_buffer.geometry_cache, query_element_residual_buffer(task_buffer))
+    assemble!(task.inner_assembler, task_buffer.geometry_cache, task_buffer.re)
 end
 function execute_task_on_single_cell!(task::AssembleLinearizationR, task_buffer)
     rₑ = query_element_residual_buffer(task_buffer)
@@ -69,11 +73,10 @@ function execute_task_on_single_cell!(task::AssembleLinearizationR, task_buffer)
     element    = query_element(task_buffer)
 
     load_element_unknowns!(uₑ, task_buffer)
-    
-    assemble_element!(rₑ, uₑ, cell_cache, element, pₑ)
+    @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, cell_cache, element, pₑ)
     store_condensed_element_unknowns!(uₑ, task_buffer)
 
-    assemble!(task, task_buffer)
+    assemble!(task.inner_assembler, ws.cell, rₑ)
 end
 
 """
@@ -84,10 +87,10 @@ A model for a function with its fully assembled linearization.
 Comes with one entry point for each cache type to handle the most common cases:
     assemble_element! -> update jacobian/residual contribution with internal state variables
 """
-struct LinearizedFerriteOperator{MatrixType} <: AbstractNonlinearOperator
-    J::MatrixType
+@concrete struct LinearizedFerriteOperator <: AbstractNonlinearOperator
+    J
     strategy
-    subdomain_caches::Vector{<:SubdomainCache}
+    subdomain_caches::Vector{SubdomainCache}
 end
 
 # Interface
@@ -100,7 +103,7 @@ function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector,
     for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
         # Function barrier
         task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, subdomain_cache.strategy_cache.device, task_cache)
+        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
     end
 
     finalize_assembly!(assembler)
@@ -114,7 +117,7 @@ function update_linearization!(op::LinearizedFerriteOperator, residual::Abstract
     for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
         # Function barrier
         task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, subdomain_cache.strategy_cache.device, task_cache)
+        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
     end
 
     finalize_assembly!(assembler)
@@ -128,7 +131,7 @@ function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::A
     for (subdomain_id, subdomain_cache) in enumerate(subdomain_caches)
         # Function barrier
         task_cache = SubdomainAssemblyTaskBuffer(u, p, subdomain_cache)
-        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, subdomain_cache.strategy_cache.device, task_cache)
+        @timeit_debug "assemble subdomain $subdomain_id" execute_task_on_device!(task, strategy.device, task_cache)
     end
 
     finalize_assembly!(assembler)
@@ -144,7 +147,8 @@ mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector) = m
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.J, in, α, β)
 (op::LinearizedFerriteOperator)(residual, u, p) = residual!(op, residual, u, p)
 Base.eltype(op::LinearizedFerriteOperator) = eltype(op.J)
+Base.size(op::LinearizedFerriteOperator) = size(op.J)
 Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)
 
-residual_size(op::LinearizedFerriteOperator) = ndofs(op.subdomain_caches[1].sdh.dh)
-unknown_size(op::LinearizedFerriteOperator)  = ndofs(op.subdomain_caches[1].sdh.dh) + ndofs(op.subdomain_caches[1].ivh)
+residual_size(op::LinearizedFerriteOperator) = ndofs(op.subdomain_caches[1].domain.sdh.dh)
+unknown_size(op::LinearizedFerriteOperator)  = ndofs(op.subdomain_caches[1].domain.sdh.dh) + ndofs(op.subdomain_caches[1].domain.ivh)

@@ -63,32 +63,4 @@ query_element_unknown_buffer(b::GenericTaskBuffer) = query_element_unknown_buffe
 query_element_unknown_buffer(element, ue) = ue
 query_element_parameters(b::GenericTaskBuffer) = query_element_parameters(b.element, b.geometry_cache, b.ivh, b.p)
 query_element_parameters(element, geometry_cache, ivh, p) = p
-query_geometry_cache(b::GenericTaskBuffer) = b.geometry_cache
-query_element(b::GenericTaskBuffer) = b.element
-
-function get_items(task, cache)
-    (; subdomain)      = cache
-    (; strategy_cache) = subdomain
-    return _get_items(task, subdomain, strategy_cache)
-end
-
-function _get_items(task, subdomain, strategy_cache::SequentialAssemblyStrategyCache)
-    # This is a choice users can make if they know that their assembly is either atomic or not conflicting in first place.
-    return (subdomain.sdh.cellset, )
-end
-function _get_items(task, subdomain, strategy_cache::ElementAssemblyStrategyCache)
-    # Remember that we collapse the E-vector, so everything in the assembly is trivially parallel
-    return (subdomain.sdh.cellset, )
-end
-function _get_items(task, subdomain, strategy_cache::PerColorAssemblyStrategyCache)
-    return strategy_cache.colors
-end
-
-# TODO this is too convoluted right now. Needs probably a few rounds of refactoring.
-function get_task_buffer(task, cache, chunkid)
-    (; u, p, subdomain) = cache
-    (; strategy_cache) = subdomain
-    (; device_cache) = strategy_cache
-
-    return get_task_buffer_for_device(task, u, p, device_cache, chunkid)
-end
+query_element_unknown_buffer(element, ue) = ue
