@@ -196,8 +196,6 @@ function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy, integr
     return ElementAssemblyOperatorStrategy(device, eadata)
 end
 
-setup_operator_strategy_cache(strategy, integrator, dh) = strategy
-
 
 ####################################
 ## Workspace                      ##
@@ -254,13 +252,15 @@ end
 """
     create_assembly_workspace(element, boundary_element, sdh, ivh)
 
-Create a single [`AssemblyWorkspace`](@ref) with freshly allocated element-local buffers.
+Create a single [`AssemblyWorkspace`](@ref) with freshly allocated CPU element-local buffers.
+This is always a CPU prototype; GPU pooling is handled separately by `setup_device_instances`.
 """
 function create_assembly_workspace(element, boundary_element, sdh, ivh)
+    cpu = SequentialCPUDevice()
     return AssemblyWorkspace(
-        allocate_element_matrix(element, sdh),
-        allocate_element_unknown_vector(element, sdh),
-        allocate_element_residual_vector(element, sdh),
+        allocate_element_matrix(cpu, element, sdh),
+        allocate_element_unknown_vector(cpu, element, sdh),
+        allocate_element_residual_vector(cpu, element, sdh),
         CellCache(sdh),
         ivh,
         element,
@@ -317,9 +317,6 @@ vector_type(device::AbstractDevice) = Vector{value_type(device)}
 function Adapt.adapt_structure(::AbstractAssemblyStrategy, dh::DofHandler)
     error("Device specific implementation for `adapt_structure(::AbstractAssemblyStrategy,dh::DofHandler)` is not implemented yet")
 end
-
-vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
-vector_type(device::AbstractCPUDevice) = Vector{value_type(device)}
 
 function _setup_gpu_assembly_cache(device, integrator, element_cache, ivh, sdh)
     backend = KA.backend(device)

@@ -60,7 +60,6 @@ end
 query_element_matrix(b::GenericTaskBuffer) = get_Ke(b.assembly_cache)
 query_element_residual_buffer(b::GenericTaskBuffer) = get_re(b.assembly_cache)
 query_element_unknown_buffer(b::GenericTaskBuffer) = query_element_unknown_buffer(b.element, get_ue(b.assembly_cache))
-query_element_unknown_buffer(element, ue) = ue
 query_element_parameters(b::GenericTaskBuffer) = query_element_parameters(b.element, b.geometry_cache, b.ivh, b.p)
 query_element_parameters(element, geometry_cache, ivh, p) = p
 query_element_unknown_buffer(element, ue) = ue

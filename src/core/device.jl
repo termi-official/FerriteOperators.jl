@@ -178,6 +178,7 @@ end
 # KA compat
 KA.backend(::AbstractCPUDevice) = KA.CPU()
 KA.backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")
+KA.functional(::AbstractCPUDevice) = KA.functional(KA.CPU())
 KA.functional(device::AbstractGPUDevice) = KA.functional(KA.backend(device))
 
 #TODO: revisit this section, needs further refinment.
