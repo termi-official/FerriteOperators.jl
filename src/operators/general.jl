@@ -60,11 +60,12 @@ Setup the linearized operator `Jᵤ(u)` in op.
 update_linearization!(Jᵤ::AbstractNonlinearOperator, u::AbstractVector, p)
 
 """
-    update_residual!(op, residual, u, problem, p)
+    residual!(op, residual, u, p)
 
-Evaluate the residual `F(u)` of the problem.
+Evaluate the residual `F(u)` into `residual` without updating the Jacobian.
+Operators that support residual-only evaluation should implement this method.
 """
-update_residual!(op::AbstractNonlinearOperator, residual::AbstractVector, u::AbstractVector, p)
+function residual! end
 
 
 abstract type AbstractBlockOperator <: AbstractNonlinearOperator end

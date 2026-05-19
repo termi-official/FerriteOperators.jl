@@ -71,7 +71,7 @@ export QuadratureRuleCollection, QuadratureInterpolation, InternalVariableHandle
 export getquadraturerule
 export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
 
-export setup_operator, update_operator!, update_linearization!
+export setup_operator, update_operator!, update_linearization!, residual!
 
 export residual_size, unknown_size
 
