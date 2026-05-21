@@ -26,27 +26,7 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
     return InternalVariableHandler(nothing, 0)
 end
 
-function setup_element_strategy_caches(strategy, integrator, element_caches, ivh, dh)
-    return [setup_element_strategy_cache(strategy, integrator, element_cache, ivh, sdh) for (element_cache, sdh) in zip(element_caches, dh.subdofhandlers)]
-end
-
-#FIXME: better way, maybe? 
-function setup_element_strategy_caches(strategy::PerColorAssemblyStrategy{<:AbstractGPUDevice}, integrator, element_caches, ivh, dh_device)
-    cpu_dh  = dh_device.original_dh
-    backend = KA.backend(strategy.device)
-    return [
-        begin
-            colors     = Ferrite.create_coloring(get_grid(cpu_dh), cpu_sdh.cellset; alg=strategy.coloralg)
-            gpu_colors = [Adapt.adapt(backend, color) for color in colors]
-            setup_element_strategy_cache(strategy, integrator, element_cache, ivh, sdh, gpu_colors)
-        end
-        for (element_cache, sdh, cpu_sdh) in zip(element_caches, dh_device.subdofhandlers, cpu_dh.subdofhandlers)
-    ]
-end
-
 function setup_subdomain_caches(strategy, integrator, dh)
-    backend = KA.backend(strategy.device)
-    dh_device  = Adapt.adapt(backend, dh) #GPU ->  HostDofHandler, CPU -> DofHandler (no-op)
     element_caches  = setup_elements(integrator, dh)
     boundary_caches = setup_boundaries(integrator, dh)
     ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
@@ -54,7 +34,9 @@ function setup_subdomain_caches(strategy, integrator, dh)
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
-        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh)
+        # NOTE: we pass integrator (not the element cache) because its hierarchy (linear/bilinear/nonlinear) dispatches the matching assembly cache.
+        # create cpu prototype workspace; setup_device_instances adapts it (and ws.cell.dh) for device use.
+        ws = create_assembly_workspace(integrator, element_cache, boundary_cache, sdh, ivh)
         dc = setup_device_instances(device, ws, n)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
     end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
@@ -66,6 +48,7 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
     KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
     
     # this has the resolved device launch config.
+    # FIXME: better ? 
     resolved_staregy = resolve_device_config(strategy, dh)
 
     operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)

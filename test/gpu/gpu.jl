@@ -1,43 +1,20 @@
+# Backend-agnostic GPU test suite for FerriteOperators.
+#
+# This file defines the device-parameterised test functions and the `run_gpu_tests`
+# entry point. It does NOT load any GPU backend package. Drive it from a per-backend
+# file (`cuda.jl` / `amd.jl`) that loads its backend and calls `run_gpu_tests(device)`.
+
+using Test
+using FerriteOperators
+using FerriteOperators: duplicate_for_device
 using Adapt
 using SparseArrays
 import KernelAbstractions as KA
 import LinearAlgebra: mul!, norm
 
-## Detect backends ##
-roc_available = try
-    using AMDGPU
-    include(joinpath(@__DIR__, "..", "..", "ext", "FerriteOperatorsAMDGPUExt.jl"))
-    AMDGPU.functional()
-catch; false end
-
-cuda_available = try
-    using CUDA
-    include(joinpath(@__DIR__, "..", "..", "ext", "FerriteOperatorsCUDAExt.jl"))
-    CUDA.functional()
-catch; false end
-
-## Run tests per available backend ##
-function run_on_backends(f; cuda_f32=true, cuda_f64=true, roc=true)
-    if cuda_available
-        cuda_f32 && @testset "CUDA (Float32)" begin
-            f(CudaDevice())
-        end
-        cuda_f64 && @testset "CUDA (Float64)" begin
-            f(CudaDevice{Float64, Int32}(Int32(64), Int32(4)))
-        end
-    else
-        @info "CUDA not available, skipping"
-    end
-    if roc_available
-        roc && @testset "ROC" begin
-            f(RocDevice())
-        end
-    else
-        @info "AMDGPU not available, skipping ROC"
-    end
-end
-
-## Shared test setup ##
+#####################
+## Shared setup    ##
+#####################
 
 # NeoHookean energy (defined at top level to avoid struct-in-local-scope issues)
 struct GPUTestNeoHookean
@@ -101,5 +78,34 @@ function setup_hyperelasticity_problem(device=nothing)
         return dh, integrator, u_cpu
     else
         return dh, integrator, Adapt.adapt(KA.backend(device), u_cpu)
+    end
+end
+
+#####################
+## Test functions  ##
+#####################
+# Each file defines its `test_*` helpers and a `run_*_tests(device)` driver.
+include("test_elements.jl")
+include("test_element_assembly.jl")
+include("test_sequential_assembly.jl")
+include("test_percolor_assembly.jl")
+include("test_sizes.jl")
+
+#####################
+## Entry point     ##
+#####################
+"""
+    run_gpu_tests(device; testset_name="FerriteOperators GPU")
+
+Run the full GPU test suite for the given `device` (e.g. `CudaDevice`, `RocDevice`).
+Backend-agnostic: the caller (`cuda.jl` / `amd.jl`) loads the backend package first.
+"""
+function run_gpu_tests(device; testset_name="FerriteOperators GPU")
+    @testset "$testset_name" begin
+        run_lifecycle_tests(device)
+        run_ea_tests(device)
+        run_sequential_tests(device)
+        run_percolor_tests(device)
+        run_sizes_tests(device)
     end
 end

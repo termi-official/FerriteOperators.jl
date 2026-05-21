@@ -39,9 +39,7 @@ include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or 
 include("core/ferrite-addons/device_dofhandler.jl")
 
 include("core/strategy.jl")  # Utilities to control the assembly strategy
-include("core/tasks.jl")     # Contains the basic task system
 include("core/iterators.jl") # Transfer cell iterators for two-DofHandler assembly
-include("core/adapt_core.jl")     # Adapt.adapt_structure for GPU local cache factories + core types
 
 include("core/element_interface.jl") # This is the basic element interface used for the operators
 include("core/utils.jl")             # Internal helpers

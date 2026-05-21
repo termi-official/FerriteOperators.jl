@@ -31,6 +31,46 @@ end
 load_element_unknowns!(uₑ, u, cell, ivh, element_cache)   = uₑ .= @view u[celldofs(cell)]
 store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache) = nothing
 
+# Element-API hooks. Default fallbacks: pass through. Elements that need to derive
+# per-element parameters or remap unknowns override these.
+query_element_parameters(element, geometry_cache, ivh, p) = p
+query_element_unknown_buffer(element, ue) = ue
+
+"""
+    allocate_assembly_cache(device, kind, element_cache, sdh) -> AbstractAssemblyCache
+
+Allocate the element-local scratch buffers that the assembly loop will pass to
+`assemble_element!`. The cache shape is selected by `kind`, which is either:
+
+- an integrator (its abstract supertype encodes the kind, used at initial setup), or
+- a prototype `AbstractAssemblyCache` (used when re-allocating on a new device
+  in `duplicate_for_device` / GPU `setup_device_instances`, where the integrator
+  isn't in scope but the prototype already records the kind).
+
+The mapping is 1-to-1:
+
+    AbstractBilinearIntegrator   / BilinearAssemblyCache   → BilinearAssemblyCache    (Ke)
+    AbstractLinearIntegrator     / LinearAssemblyCache     → LinearAssemblyCache      (re)
+    AbstractNonlinearIntegrator  / NonlinearAssemblyCache  → NonlinearAssemblyCache   (Ke, ue, re)
+
+On CPU the buffers are `Matrix`/`Vector`s; on GPU they are SOA pools.
+"""
+const _BilinearCacheKind  = Union{AbstractBilinearIntegrator,  BilinearAssemblyCache}
+const _LinearCacheKind    = Union{AbstractLinearIntegrator,    LinearAssemblyCache}
+const _NonlinearCacheKind = Union{AbstractNonlinearIntegrator, NonlinearAssemblyCache}
+
+allocate_assembly_cache(device, ::_BilinearCacheKind, element_cache, sdh) =
+    BilinearAssemblyCache(allocate_element_matrix(device, element_cache, sdh))
+
+allocate_assembly_cache(device, ::_LinearCacheKind, element_cache, sdh) =
+    LinearAssemblyCache(allocate_element_residual_vector(device, element_cache, sdh))
+
+allocate_assembly_cache(device, ::_NonlinearCacheKind, element_cache, sdh) = NonlinearAssemblyCache(
+    allocate_element_matrix(device, element_cache, sdh),
+    allocate_element_unknown_vector(device, element_cache, sdh),
+    allocate_element_residual_vector(device, element_cache, sdh),
+)
+
 @doc raw"""
     assemble_element!(Kₑ::AbstractMatrix, cell::CellCache, element_cache::AbstractVolumetricElementCache, time)
 Main entry point for bilinear operators
@@ -98,35 +138,35 @@ The notation is as follows.
 assemble_facet!
 
 # If we compose a face cache into an element cache, then we loop over the faces of the elements and try to assemble
-function assemble_element!(Kₑ::AbstractMatrix, cell::CellCache, facet_cache::AbstractSurfaceElementCache, time)
+function assemble_element!(Kₑ::AbstractMatrix, cell, facet_cache::AbstractSurfaceElementCache, time)
     for local_facet_index ∈ 1:nfacets(cell)
         if is_facet_in_cache(FacetIndex(cellid(cell), local_facet_index), cell, facet_cache)
             assemble_facet!(Kₑ, cell, local_facet_index, facet_cache, time)
         end
     end
 end
-function assemble_element!(rₑ::AbstractVector, cell::CellCache, facet_cache::AbstractSurfaceElementCache, time)
+function assemble_element!(rₑ::AbstractVector, cell, facet_cache::AbstractSurfaceElementCache, time)
     for local_facet_index ∈ 1:nfacets(cell)
         if is_facet_in_cache(FacetIndex(cellid(cell), local_facet_index), cell, facet_cache)
             assemble_facet!(rₑ, cell, local_facet_index, facet_cache, time)
         end
     end
 end
-function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache, facet_cache::AbstractSurfaceElementCache, time)
+function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, facet_cache::AbstractSurfaceElementCache, time)
     for local_facet_index ∈ 1:nfacets(cell)
         if is_facet_in_cache(FacetIndex(cellid(cell), local_facet_index), cell, facet_cache)
             assemble_facet!(Kₑ, uₑ, cell, local_facet_index, facet_cache, time)
         end
     end
 end
-function assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, facet_cache::AbstractSurfaceElementCache, time)
+function assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, facet_cache::AbstractSurfaceElementCache, time)
     for local_facet_index ∈ 1:nfacets(cell)
         if is_facet_in_cache(FacetIndex(cellid(cell), local_facet_index), cell, facet_cache)
             assemble_facet!(Kₑ, residualₑ, uₑ, cell, local_facet_index, facet_cache, time)
         end
     end
 end
-function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, facet_cache::AbstractSurfaceElementCache, time)
+function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, facet_cache::AbstractSurfaceElementCache, time)
     for local_facet_index ∈ 1:nfacets(cell)
         if is_facet_in_cache(FacetIndex(cellid(cell), local_facet_index), cell, facet_cache)
             assemble_facet!(residualₑ, uₑ, cell, local_facet_index, facet_cache, time)
@@ -154,6 +194,14 @@ assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::Abstr
 assemble_facet!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptySurfaceElementCache, time)    = nothing
 assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptySurfaceElementCache, time) = nothing
 @inline is_facet_in_cache(::FacetIndex, cell, ::EmptySurfaceElementCache) = false
+
+# No-op fast path: an empty surface cache contributes nothing, so skip the facet loop
+# entirely. This also keeps GPU kernels from compiling `nfacets`/`cellid` on device cells.
+assemble_element!(Kₑ::AbstractMatrix, cell, ::EmptySurfaceElementCache, time) = nothing
+assemble_element!(rₑ::AbstractVector, cell, ::EmptySurfaceElementCache, time) = nothing
+assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, ::EmptySurfaceElementCache, time) = nothing
+assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, ::EmptySurfaceElementCache, time) = nothing
+assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, ::EmptySurfaceElementCache, time) = nothing
 
 setup_boundary_cache(integrator, sdh) = EmptySurfaceElementCache()
 

@@ -79,6 +79,27 @@ function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVe
     execute_on_device!(EAProductTask(out, A, in), device, dc, items)
 end
 
+KA.@kernel function _ea_product_gpu_kernel!(out, A, in_vec, num_elements::Ti) where {Ti <: Integer}
+    tid = convert(Ti, KA.@index(Global, Linear))
+    if tid <= num_elements
+        iter = DeviceStridedIterator(num_elements, tid, convert(Ti, prod(KA.@ndrange)))
+        for ei in iter
+            product_kernel!(out, A, in_vec, ei,
+                            A.vector_element_map, A.element_vector_map,
+                            A.device, A.device_cache)
+        end
+    end
+end
+
+function matrix_free_product!(out::AbstractVector, A::EAOperator, in::AbstractVector, device::AbstractGPUDevice)
+    backend = KA.backend(device)
+    Ti = index_type(device)
+    n = convert(Ti, getnelements(A))
+    kernel = _ea_product_gpu_kernel!(backend, Int(device.threads))
+    kernel(out, A, in, n; ndrange = Int(device.blocks * device.threads))
+    KA.synchronize(backend)
+end
+
 struct EAViewCache
 end
 

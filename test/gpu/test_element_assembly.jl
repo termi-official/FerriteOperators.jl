@@ -112,8 +112,8 @@ function test_ea_collapse(device; rtol=1e-10)
     @test isapprox(Array(b_gpu), b_cpu; rtol=rtol)
 end
 
-@testset "ElementAssemblyStrategy (GPU)" begin
-    run_on_backends(cuda_f32=false) do device
+function run_ea_tests(device)
+    @testset "ElementAssemblyStrategy (GPU)" begin
         @testset "Bilinear Diffusion" begin
             dh, integrator = setup_diffusion_problem()
             test_bilinear_ea(device, dh, integrator, atol=1e-10)

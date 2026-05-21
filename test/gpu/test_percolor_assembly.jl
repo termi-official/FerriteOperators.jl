@@ -76,8 +76,8 @@ function test_nonlinear_percolor(device, dh, integrator, u_gpu; atol=nothing, rt
     end
 end
 
-@testset "PerColorAssemblyStrategy (GPU)" begin
-    run_on_backends(cuda_f32=false) do device
+function run_percolor_tests(device)
+    @testset "PerColorAssemblyStrategy (GPU)" begin
         @testset "Bilinear Diffusion" begin
             dh, integrator = setup_diffusion_problem()
             test_bilinear_percolor(device, dh, integrator, atol=1e-10)

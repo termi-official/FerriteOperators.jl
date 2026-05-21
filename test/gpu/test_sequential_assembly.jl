@@ -76,8 +76,8 @@ function test_nonlinear_sequential(device, dh, integrator, u_gpu; atol=nothing, 
     end
 end
 
-@testset "SequentialAssemblyStrategy (GPU)" begin
-    run_on_backends(cuda_f32=false) do device
+function run_sequential_tests(device)
+    @testset "SequentialAssemblyStrategy (GPU)" begin
         @testset "Bilinear Diffusion" begin
             dh, integrator = setup_diffusion_problem()
             test_bilinear_sequential(device, dh, integrator, atol=1e-10)

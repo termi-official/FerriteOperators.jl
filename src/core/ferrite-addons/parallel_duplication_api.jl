@@ -42,6 +42,14 @@ function duplicate_for_device(device, fv::FacetValues)
     )
 end
 
+## GPU duplicate_for_device: FacetValues → FacetValuesContainer ##
+# TODO: uncomment when FacetValuesContainer is implemented in Ferrite. 
+# function duplicate_for_device(device::AbstractGPUDevice, fv::FacetValues)
+#     backend = KA.backend(device)
+#     nt = total_nthreads(device)
+#     return Ferrite.FacetValuesContainer(backend, nt, fv)
+# end
+
 function duplicate_for_device(device::AbstractCPUDevice, cv::CellValues)
     return CellValues(
         duplicate_for_device(device, cv.fun_values),
@@ -100,6 +108,7 @@ function duplicate_for_device(device, ivh::InternalVariableHandler)
     )
 end
 
+# this mainly for compiste element caches.
 function duplicate_for_device(device, x::T) where {T <: Tuple}
     if isbitstype(T)
         return x

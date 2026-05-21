@@ -24,100 +24,7 @@ function resolve_device_config(strategy::SequentialAssemblyStrategy{D}, ::Abstra
     return SequentialAssemblyStrategy(make_sequential_device(D), strategy.operator_specification)
 end
 
-struct SequentialAssemblyStrategyCache{DeviceType, DeviceCacheType}
-    device::DeviceType
-    # Scratch for the device to store its data
-    device_cache::DeviceCacheType
-end
-
 setup_operator_strategy_cache(strategy, integrator, dh) = strategy
-
-## Assembly caches ##
-@concrete struct BilinearAssemblyCache
-    Ke
-end
-
-@concrete struct NonlinearAssemblyCache
-    Ke
-    ue
-    re
-end
-
-@concrete struct LinearAssemblyCache
-    re
-end
-
-## GPU pool containers ##
-@concrete struct BilinearAssemblyCacheContainer
-    Ke_pool  # GPU array (N, N, total_nthreads)
-end
-@inline Base.getindex(c::BilinearAssemblyCacheContainer, tid) =
-    BilinearAssemblyCache(view(c.Ke_pool, :, :, tid))
-
-@concrete struct NonlinearAssemblyCacheContainer
-    Ke_pool  # GPU array (N, N, total_nthreads)
-    ue_pool  # GPU array (N, total_nthreads)
-    re_pool  # GPU array (N, total_nthreads)
-end
-@inline Base.getindex(c::NonlinearAssemblyCacheContainer, tid) =
-    NonlinearAssemblyCache(view(c.Ke_pool, :, :, tid), view(c.ue_pool, :, tid), view(c.re_pool, :, tid))
-
-@concrete struct LinearAssemblyCacheContainer
-    re_pool  # GPU array (N, total_nthreads)
-end
-@inline Base.getindex(c::LinearAssemblyCacheContainer, tid) =
-    LinearAssemblyCache(view(c.re_pool, :, tid))
-
-## Assembly cache allocation ##
-function allocate_assembly_cache(::AbstractBilinearIntegrator, element_cache, device::AbstractCPUDevice, sdh)
-    BilinearAssemblyCache(allocate_element_matrix(device, element_cache, sdh))
-end
-function allocate_assembly_cache(::AbstractNonlinearIntegrator, element_cache, device::AbstractCPUDevice, sdh)
-    NonlinearAssemblyCache(
-        allocate_element_matrix(device, element_cache, sdh),
-        allocate_element_unknown_vector(device, element_cache, sdh),
-        allocate_element_residual_vector(device, element_cache, sdh),
-    )
-end
-function allocate_assembly_cache(::AbstractLinearIntegrator, element_cache, device::AbstractCPUDevice, sdh)
-    LinearAssemblyCache(allocate_element_residual_vector(device, element_cache, sdh))
-end
-
-#TODO: should we use same inner functions like `allocate_element_matrix` for GPU, eventhough it dosn't actually allocate element matrix but a pool?
-function allocate_assembly_cache(::AbstractBilinearIntegrator, element_cache, device::AbstractGPUDevice, sdh)
-    BilinearAssemblyCacheContainer(allocate_element_matrix(device, element_cache, sdh))
-end
-function allocate_assembly_cache(::AbstractNonlinearIntegrator, element_cache, device::AbstractGPUDevice, sdh)
-    NonlinearAssemblyCacheContainer(
-        allocate_element_matrix(device, element_cache, sdh),
-        allocate_element_unknown_vector(device, element_cache, sdh),
-        allocate_element_residual_vector(device, element_cache, sdh),
-    )
-end
-function allocate_assembly_cache(::AbstractLinearIntegrator, element_cache, device::AbstractGPUDevice, sdh)
-    LinearAssemblyCacheContainer(allocate_element_residual_vector(device, element_cache, sdh))
-end
-
-@concrete struct SimpleAssemblyCache
-    # NOTE: On CPU, assembly_cache holds a concrete BilinearAssemblyCache/NonlinearAssemblyCache/LinearAssemblyCache.
-    # On GPU, it holds the corresponding *Container (e.g. BilinearAssemblyCacheContainer) — a pool indexed by thread id.
-    # Same for cell (CellCache on CPU, CellCacheContainer on GPU) and element (concrete vs container).
-    assembly_cache
-    cell
-    ivh
-    element
-end
-
-
-function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy{<:AbstractCPUDevice}, integrator, element_cache, ivh, sdh)
-    local_cache = allocate_assembly_cache(integrator, element_cache, strategy.device, sdh)
-    return SequentialAssemblyStrategyCache(strategy.device, SimpleAssemblyCache(local_cache, CellCache(sdh), ivh, element_cache))
-end
-
-function setup_element_strategy_cache(strategy::SequentialAssemblyStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh)
-    device_cache = _setup_gpu_assembly_cache(strategy.device, integrator, element_cache, ivh, sdh)
-    return SequentialAssemblyStrategyCache(strategy.device, device_cache)
-end
 
 """
     PerColorAssemblyStrategy(chunksize, coloralg)
@@ -129,52 +36,6 @@ struct PerColorAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
 end
 PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = PerColorAssemblyStrategy(device, alg, StandardOperatorSpecification())
 resolve_device_config(strategy::PerColorAssemblyStrategy{<:AbstractGPUDevice}, dh::AbstractDofHandler) = PerColorAssemblyStrategy(resolve_device_config(strategy.device, dh), strategy.coloralg, strategy.operator_specification)
-
-@concrete struct PerColorAssemblyStrategyCache
-    device
-    # Scratch for the device to store its data
-    device_cache
-    # Everything related to the coloring is stored here
-    colors
-end
-
-@concrete struct ThreadedAssemblyCache
-    task_local_caches
-end
-
-function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:SequentialCPUDevice}, integrator, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, integrator, element_cache, ivh, sdh, 1)
-end
-
-function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:PolyesterDevice}, integrator, element_cache, ivh, sdh)
-    return _setup_element_strategy_cache_cpu(strategy, integrator, element_cache, ivh, sdh, strategy.device.chunksize)
-end
-
-function _setup_element_strategy_cache_cpu(strategy::PerColorAssemblyStrategy, integrator, element_cache, ivh, sdh, chunksize)
-    (; device) = strategy
-    (; dh)     = sdh
-    grid       = get_grid(dh)
-
-    colors = Ferrite.create_coloring(grid, sdh.cellset; alg=strategy.coloralg)
-
-    ncellsmax = maximum(length.(colors))
-    nchunksmax = ceil(Int, ncellsmax / chunksize)
-
-    task_local_caches = [
-        SimpleAssemblyCache(
-            allocate_assembly_cache(integrator, element_cache, device, sdh),
-            CellCache(sdh),
-            duplicate_for_device(device, ivh),
-            duplicate_for_device(device, element_cache),
-        )
-    for tid in 1:nchunksmax]
-    return PerColorAssemblyStrategyCache(strategy.device, ThreadedAssemblyCache(task_local_caches), colors)
-end
-
-function setup_element_strategy_cache(strategy::PerColorAssemblyStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh, gpu_colors)
-    device_cache = _setup_gpu_assembly_cache(strategy.device, integrator, element_cache, ivh, sdh)
-    return PerColorAssemblyStrategyCache(strategy.device, device_cache, gpu_colors)
-end
 
 """
     ElementAssemblyStrategy
@@ -215,52 +76,124 @@ New device backends must allocate and manage workspaces of a concrete subtype.
 abstract type AbstractWorkspace end
 
 """
-    AssemblyWorkspace
+    AbstractAssemblyCache
 
-Per-worker workspace for square operator assembly (bilinear, nonlinear, linear).
-Holds pre-allocated element-local buffers and caches that are reused across cells.
+Supertype for element-local scratch caches. Concrete variants carry only the
+buffers their element actually needs (`Ke` for a pure bilinear element,
+`re` for a pure linear element, all three for a nonlinear element, …). The
+element picks the variant via [`allocate_assembly_cache`](@ref); tasks read
+their buffers directly off `ws.cache` (e.g. `ws.cache.Ke`).
 
-Fields:
-- `Ke`: element stiffness matrix
-- `ue`: element unknown vector
-- `re`: element residual vector
-- `cell`: geometry cache ([`CellCache`](@ref))
-- `ivh`: internal variable handler
-- `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
+Field types differ between CPU and GPU:
+- **CPU:** matrices/vectors per worker.
+- **GPU pool:** 3D/2D pools indexed by worker id.
+- **GPU per-thread:** views over the pool (`SubArray`s).
 """
-@concrete struct AssemblyWorkspace <: AbstractWorkspace
+abstract type AbstractAssemblyCache end
+
+"""
+    BilinearAssemblyCache(Ke)
+
+Cache for a pure bilinear element — only the local stiffness matrix `Ke`.
+"""
+@concrete struct BilinearAssemblyCache <: AbstractAssemblyCache
+    Ke
+end
+Adapt.@adapt_structure BilinearAssemblyCache
+
+"""
+    LinearAssemblyCache(re)
+
+Cache for a pure linear element — only the local residual vector `re`.
+"""
+@concrete struct LinearAssemblyCache <: AbstractAssemblyCache
+    re
+end
+Adapt.@adapt_structure LinearAssemblyCache
+
+"""
+    NonlinearAssemblyCache(Ke, ue, re)
+
+Cache for a nonlinear element — local jacobian `Ke`, unknown buffer `ue`,
+and residual `re`. Covers `AssembleLinearizationJ`, `AssembleLinearizationR`,
+and `AssembleLinearizationJR`.
+"""
+@concrete struct NonlinearAssemblyCache <: AbstractAssemblyCache
     Ke
     ue
     re
+end
+Adapt.@adapt_structure NonlinearAssemblyCache
+
+# Per-thread slicing of pool buffers — invoked by `workspace_for` on GPU.
+# Each variant slices exactly the fields it carries.
+@inline per_thread(c::BilinearAssemblyCache, tid) =
+    BilinearAssemblyCache(view(c.Ke, :, :, tid))
+@inline per_thread(c::LinearAssemblyCache, tid) =
+    LinearAssemblyCache(view(c.re, :, tid))
+@inline per_thread(c::NonlinearAssemblyCache, tid) =
+    NonlinearAssemblyCache(view(c.Ke, :, :, tid), view(c.ue, :, tid), view(c.re, :, tid))
+
+"""
+    AssemblyWorkspace
+
+Per-worker scratch for assembling local element contributions. The same struct
+is used for both CPU and GPU; the field types differ:
+
+- **CPU (per worker):** `setup_device_instances` produces a `Vector` of these,
+  one per worker. `cache` holds plain element-local buffers, `cell` is a
+  `Ferrite.CellCache` (mutated via `reinit!`).
+- **GPU (pool):** `setup_device_instances` produces a *single* workspace whose
+  `cache` holds SOA pools indexed by the global thread id, and `cell` is a
+  `Ferrite.CellCacheContainer`. Inside the kernel, `workspace_for(ws, tid, cellid)`
+  returns a *per-thread* `AssemblyWorkspace` whose buffers/caches are views and
+  functors over the pool.
+
+Fields:
+- `cache`: [`AssemblyCache`](@ref) — element-local buffers (`Ke`, `ue`, `re`)
+- `cell`: geometry cache — [`CellCache`](@ref) on CPU, `CellCacheContainer` on
+  the GPU pool, `ImmutableCellCache` per GPU thread
+- `ivh`: internal variable handler
+- `element`: element cache (subtype of [`AbstractVolumetricElementCache`](@ref))
+- `boundary_element`: surface/boundary element cache
+"""
+@concrete struct AssemblyWorkspace <: AbstractWorkspace
+    cache
     cell
     ivh
     element
     boundary_element
 end
+Adapt.@adapt_structure AssemblyWorkspace
 
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
 
 function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
-    return create_assembly_workspace(
-        duplicate_for_device(device, ws.element),
-        duplicate_for_device(device, ws.boundary_element),
-        ws.cell.dh,
+    element_dup = duplicate_for_device(device, ws.element)
+    sdh         = ws.cell.dh
+    return AssemblyWorkspace(
+        # Re-allocate same cache kind on target device using ws.cache as the prototype.
+        allocate_assembly_cache(device, ws.cache, element_dup, sdh),
+        CellCache(sdh),
         duplicate_for_device(device, ws.ivh),
+        element_dup,
+        duplicate_for_device(device, ws.boundary_element),
     )
 end
 
 """
-    create_assembly_workspace(element, boundary_element, sdh, ivh)
+    create_assembly_workspace(integrator, element, boundary_element, sdh, ivh)
 
-Create a single [`AssemblyWorkspace`](@ref) with freshly allocated CPU element-local buffers.
-This is always a CPU prototype; GPU pooling is handled separately by `setup_device_instances`.
+Create a single [`AssemblyWorkspace`](@ref) with freshly allocated CPU element-local
+buffers. The cache variant is selected by `integrator`'s supertype via
+`allocate_assembly_cache` (bilinear/linear/nonlinear → matching cache shape).
+This is always a CPU prototype; GPU pooling is handled separately by
+`setup_device_instances`.
 """
-function create_assembly_workspace(element, boundary_element, sdh, ivh)
+function create_assembly_workspace(integrator, element, boundary_element, sdh, ivh)
     cpu = SequentialCPUDevice()
     return AssemblyWorkspace(
-        allocate_element_matrix(cpu, element, sdh),
-        allocate_element_unknown_vector(cpu, element, sdh),
-        allocate_element_residual_vector(cpu, element, sdh),
+        allocate_assembly_cache(cpu, integrator, element, sdh),
         CellCache(sdh),
         ivh,
         element,
@@ -269,8 +202,93 @@ function create_assembly_workspace(element, boundary_element, sdh, ivh)
 end
 
 ####################################
+## GPU workspace (SOA)            ##
+####################################
+# On GPU, `setup_device_instances` returns a single `AssemblyWorkspace` whose
+# fields are SOA pools. `workspace_for(ws, tid, cellid)` extracts a per-thread
+# view from those pools inside the kernel — see the `AssemblyWorkspace` docs.
+
+# Per-thread workspace extraction. Input `ws` is in pool form; the returned
+# AssemblyWorkspace's fields are views/functors for one thread + one cell.
+@inline function workspace_for(ws::AssemblyWorkspace, tid, cellid)
+    return AssemblyWorkspace(
+        per_thread(ws.cache, tid),
+        ws.cell[tid](Int(cellid)),
+        ws.ivh,
+        per_thread(ws.element, tid),
+        per_thread(ws.boundary_element, tid),
+    )
+end
+
+# TODO: upstream this to Ferrite ?
+function Adapt.adapt_structure(backend::KA.Backend, sdh::SubDofHandler)
+    KAExt = Base.get_extension(Ferrite, :FerriteKAExt)
+    dh = sdh.dh
+    gpu_grid      = KAExt.DeviceGrid(backend, dh.grid)
+    dof_ranges    = Tuple(Ferrite.dof_range(sdh, i) for i in 1:length(sdh.field_names))
+    field_indices = NamedTuple{ntuple(i -> dh.field_names[i], length(dh.field_names))}(collect(1:length(dh.field_names)))
+    return KAExt.DeviceSubDofHandler(
+        Adapt.adapt(backend, collect(Int, sdh.cellset)),
+        Adapt.adapt(backend, dh.cell_dofs),
+        Adapt.adapt(backend, dh.cell_dofs_offset),
+        sdh.ndofs_per_cell,
+        Ferrite.nnodes_per_cell(dh.grid, first(sdh.cellset)),
+        field_indices,
+        dof_ranges,
+        gpu_grid,
+    )
+end
+
+function setup_device_instances(device::AbstractGPUDevice, ws::AssemblyWorkspace, n_instances)
+    backend    = KA.backend(device)
+    cpu_sdh    = ws.cell.dh
+    device_sdh = Adapt.adapt(backend, cpu_sdh)
+    return AssemblyWorkspace(
+        allocate_assembly_cache(device, ws.cache, ws.element, cpu_sdh),
+        Ferrite.CellCacheContainer(backend, n_instances, device_sdh),
+        duplicate_for_device(device, ws.ivh),
+        duplicate_for_device(device, ws.element),
+        #FIXME: this is broken upstream.
+        duplicate_for_device(device, ws.boundary_element),
+    )
+end
+
+# GPU kernel: grid-stride loop over cells. Each thread builds its per-thread
+# AssemblyWorkspace from the SOA pool and runs the (device-agnostic) task.
+KA.@kernel function _gpu_execute_kernel!(task, ws, @Const(cellids), num_items::Ti) where {Ti <: Integer}
+    tid = convert(Ti, KA.@index(Global, Linear))
+    if tid <= num_items
+        stride = convert(Ti, prod(KA.@ndrange))
+        idx = tid
+        while idx <= num_items
+            execute_single_task!(task, workspace_for(ws, tid, cellids[idx]))
+            idx += stride
+        end
+    end
+end
+
+function execute_on_device!(task, device::AbstractGPUDevice, workspaces::AssemblyWorkspace, items)
+    backend = KA.backend(device)
+    Ti = index_type(device)
+    # `items` is already device-resident (adapted once in compute_partition) — no per-launch adapt.
+    for cellids in items
+        n = convert(Ti, length(cellids))
+        kernel = _gpu_execute_kernel!(backend, Int(device.threads))
+        kernel(task, workspaces, cellids, n; ndrange = Int(device.threads * device.blocks))
+        KA.synchronize(backend)
+    end
+end
+
+####################################
 ## Partition                      ##
 ####################################
+
+# Move the partition's cell ids onto the device once, at setup time.
+# CPU: no-op (keep the host OrderedSet / color vectors).
+# GPU: collect each chunk into a device array so the kernel launch never re-adapts.
+adapt_partition(::AbstractCPUDevice, partition) = partition
+adapt_partition(device::AbstractGPUDevice, partition) =
+    map(chunk -> Adapt.adapt(KA.backend(device), collect(chunk)), partition)
 
 """
     compute_partition(strategy, sdh)
@@ -278,12 +296,14 @@ end
 Compute the work partition for the given strategy and SubDofHandler.
 Returns an iterable of iterables: the outer level represents synchronization barriers
 (e.g. colors), the inner level represents parallelizable work items (cell IDs).
+The cell ids are adapted to the strategy's device once here (no-op on CPU).
 """
-compute_partition(::SequentialAssemblyStrategy, sdh) = (sdh.cellset,)
-compute_partition(::ElementAssemblyOperatorStrategy, sdh) = (sdh.cellset,)
+compute_partition(strategy::SequentialAssemblyStrategy, sdh) = adapt_partition(strategy.device, (sdh.cellset,))
+compute_partition(strategy::ElementAssemblyOperatorStrategy, sdh) = adapt_partition(strategy.device, (sdh.cellset,))
 
 function compute_partition(strategy::PerColorAssemblyStrategy, sdh)
-    return Ferrite.create_coloring(get_grid(sdh.dh), sdh.cellset; alg=strategy.coloralg)
+    colors = Ferrite.create_coloring(get_grid(sdh.dh), sdh.cellset; alg=strategy.coloralg)
+    return adapt_partition(strategy.device, colors)
 end
 
 """
@@ -297,12 +317,9 @@ function n_workers(strategy, device::PolyesterDevice, partition)
     return ceil(Int, ncellsmax / device.chunksize)
 end
 
-function n_workers(strategy, device::AbstractGPUDevice, partition)
-    throw(ArgumentError(
-        "GPU assembly is not yet implemented for $(typeof(device)). " *
-        "Implement n_workers for this device type."
-    ))
-end
+# GPU: one worker per launched thread (threads × blocks). The device must be
+# resolved (non-zero threads/blocks) by `resolve_device_config` before this point.
+n_workers(strategy, device::AbstractGPUDevice, partition) = total_nthreads(device)
 
 
 ####################################
@@ -318,18 +335,3 @@ function Adapt.adapt_structure(::AbstractAssemblyStrategy, dh::DofHandler)
     error("Device specific implementation for `adapt_structure(::AbstractAssemblyStrategy,dh::DofHandler)` is not implemented yet")
 end
 
-function _setup_gpu_assembly_cache(device, integrator, element_cache, ivh, sdh)
-    backend = KA.backend(device)
-    nt      = total_nthreads(device)
-    return SimpleAssemblyCache(
-        allocate_assembly_cache(integrator, element_cache, device, sdh),
-        Ferrite.CellCacheContainer(backend, nt, sdh),
-        duplicate_for_device(device, ivh),
-        duplicate_for_device(device, element_cache),
-    )
-end
-
-function setup_element_strategy_cache(strategy::ElementAssemblyOperatorStrategy{<:AbstractGPUDevice}, integrator, element_cache, ivh, sdh)
-    device_cache = _setup_gpu_assembly_cache(strategy.device, integrator, element_cache, ivh, sdh)
-    return ElementAssemblyStrategyCache(strategy.device, device_cache)
-end

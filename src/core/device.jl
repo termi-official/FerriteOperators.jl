@@ -146,35 +146,6 @@ end
 Base.iterate(l::DeviceStridedIterator) = iterate(l.range)
 Base.iterate(l::DeviceStridedIterator, state) = iterate(l.range, state)
 
-# GPU kernel: grid-stride loop for cell-based task execution.
-KA.@kernel function _execute_task_kernel!(task, u, p, device_cache, @Const(items), num_items::Ti) where {Ti <: Integer}
-    tid = convert(Ti, KA.@index(Global, Linear))
-    if tid <= num_items
-        iter = DeviceStridedIterator(num_items, tid, convert(Ti, prod(KA.@ndrange)))
-        for idx in iter
-            taskid = items[idx]
-            task_buffer = get_task_buffer_for_device(task, u, p, device_cache, iter.tid, taskid)
-            execute_task_on_single_cell!(task, task_buffer)
-        end
-    end
-end
-
-function execute_task_on_device!(task, device::AbstractGPUDevice, cache)
-    #FIXME: this might be suboptimal design wise? better way to unfold this? 
-    (; u, p, subdomain) = cache
-    (; strategy_cache) = subdomain
-    (; device_cache) = strategy_cache
-    backend = KA.backend(device)
-    Ti = index_type(device)
-    for items in get_items(task, cache)
-        num_items = convert(Ti, length(items))
-        kernel = _execute_task_kernel!(backend, Int(device.threads))
-        kernel(task, u, p, device_cache, items, num_items; ndrange = Int(device.blocks * device.threads))
-        KA.synchronize(backend)
-    end
-end
-
-
 # KA compat
 KA.backend(::AbstractCPUDevice) = KA.CPU()
 KA.backend(device::AbstractGPUDevice) = error("Load the GPU package associated with $(typeof(device)) (e.g. CUDA.jl for CudaDevice).")

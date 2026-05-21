@@ -6,8 +6,8 @@
     integrator
 end
 
-struct AssembleLinearTerm{A}
-    inner_assembler::A
+@concrete struct AssembleLinearTerm
+    inner_assembler
     p
 end
 duplicate_for_device(device, task::AssembleLinearTerm{<:AbstractVector}) = task
@@ -15,12 +15,12 @@ duplicate_for_device(device, task::AssembleLinearTerm) = AssembleLinearTerm(dupl
 
 function execute_single_task!(task::AssembleLinearTerm, ws::AssemblyWorkspace)
     pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
-    rₑ = ws.re
+    rₑ = ws.cache.re
 
     fill!(rₑ, 0.0)
 
-    @timeit_debug "assemble element" assemble_element!(rₑ, ws.cell, ws.element, pₑ)
-    @timeit_debug "assemble boundary" assemble_element!(rₑ, ws.cell, ws.boundary_element, pₑ)
+    assemble_element!(rₑ, ws.cell, ws.element, pₑ)
+    assemble_element!(rₑ, ws.cell, ws.boundary_element, pₑ)
 
     assemble!(task.inner_assembler, ws.cell, rₑ)
 end

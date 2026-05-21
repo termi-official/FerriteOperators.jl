@@ -82,8 +82,8 @@ function (p::_TestNeoHookean)(F)
     return μ / 2 * (Ic - 3 - 2 * log(J)) + λ / 2 * (J - 1)^2
 end
 
-@testset "Element GPU Lifecycle" begin
-    run_on_backends(cuda_f32=false) do device
+function run_lifecycle_tests(device)
+    @testset "Element GPU Lifecycle" begin
         # --- SimpleBilinearDiffusionElementCache ---
         @testset "SimpleBilinearDiffusion" begin
             grid = generate_grid(Quadrilateral, (4, 4))
