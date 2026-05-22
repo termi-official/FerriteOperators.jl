@@ -38,6 +38,7 @@ function execute_single_task!(task::AssembleLinearizationJ, ws::AssemblyWorkspac
 
     load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
     @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, ws.cell, ws.element, pₑ)
+    @timeit_debug "assemble boundary" assemble_element!(Jₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
     store_condensed_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
 
     assemble!(task.inner_assembler, ws.cell, Jₑ)
@@ -60,6 +61,7 @@ function execute_single_task!(task::AssembleLinearizationR, ws::AssemblyWorkspac
 
     load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
     @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, ws.cell, ws.element, pₑ)
+    @timeit_debug "assemble boundary" assemble_element!(rₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
     store_condensed_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
 
     assemble!(task.inner_assembler, ws.cell, rₑ)
