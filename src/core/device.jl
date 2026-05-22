@@ -180,3 +180,5 @@ function resolve_device_config(device::D, dh::AbstractDofHandler) where {V, I, D
     nblocks = convert(I, cld(ncells, tpb))
     return make_device(D, tpb, nblocks)
 end
+
+

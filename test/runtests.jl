@@ -558,7 +558,8 @@ end
     @testset "GPU device validation" begin
         @test_throws ArgumentError FerriteOperators.setup_device_instances(CudaDevice(), FerriteOperators.EAIndexWorkspace(0), 1)
         @test FerriteOperators.n_workers(SequentialAssemblyStrategy(CudaDevice()), CudaDevice(64, 2), [1:5]) == 128
-        @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, CudaDevice(), nothing, [])
+        # Without the GPU package loaded, KA.backend(::CudaDevice) errors → ErrorException.
+        @test_throws ErrorException FerriteOperators.execute_on_device!(nothing, CudaDevice(), nothing, [])
     end
 
     @testset "Generic setup_device_instances" begin

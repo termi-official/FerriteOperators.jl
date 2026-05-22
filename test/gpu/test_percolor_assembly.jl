@@ -80,17 +80,17 @@ function run_percolor_tests(device)
     @testset "PerColorAssemblyStrategy (GPU)" begin
         @testset "Bilinear Diffusion" begin
             dh, integrator = setup_diffusion_problem()
-            test_bilinear_percolor(device, dh, integrator, atol=1e-10)
+            test_bilinear_percolor(device, dh, integrator, rtol=1e-10)
         end
 
         @testset "Bilinear Mass" begin
             dh, integrator = setup_mass_problem()
-            test_bilinear_percolor(device, dh, integrator, atol=1e-10)
+            test_bilinear_percolor(device, dh, integrator, rtol=1e-10)
         end
 
         @testset "Nonlinear Hyperelasticity" begin
             dh, integrator, u = setup_hyperelasticity_problem(device)
-            test_nonlinear_percolor(device, dh, integrator, u, atol=1e-10)
+            test_nonlinear_percolor(device, dh, integrator, u, rtol=1e-10)
         end
     end
 end

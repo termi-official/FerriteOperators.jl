@@ -201,15 +201,8 @@ function create_assembly_workspace(integrator, element, boundary_element, sdh, i
     )
 end
 
-####################################
-## GPU workspace (SOA)            ##
-####################################
-# On GPU, `setup_device_instances` returns a single `AssemblyWorkspace` whose
-# fields are SOA pools. `workspace_for(ws, tid, cellid)` extracts a per-thread
-# view from those pools inside the kernel — see the `AssemblyWorkspace` docs.
 
-# Per-thread workspace extraction. Input `ws` is in pool form; the returned
-# AssemblyWorkspace's fields are views/functors for one thread + one cell.
+# extract one ws per thread from the pool.
 @inline function workspace_for(ws::AssemblyWorkspace, tid, cellid)
     return AssemblyWorkspace(
         per_thread(ws.cache, tid),
@@ -253,8 +246,7 @@ function setup_device_instances(device::AbstractGPUDevice, ws::AssemblyWorkspace
     )
 end
 
-# GPU kernel: grid-stride loop over cells. Each thread builds its per-thread
-# AssemblyWorkspace from the SOA pool and runs the (device-agnostic) task.
+# FIXME: this should be put in device.jl but cannot due to the depedency on woorkspaces.
 KA.@kernel function _gpu_execute_kernel!(task, ws, @Const(cellids), num_items::Ti) where {Ti <: Integer}
     tid = convert(Ti, KA.@index(Global, Linear))
     if tid <= num_items
@@ -267,14 +259,14 @@ KA.@kernel function _gpu_execute_kernel!(task, ws, @Const(cellids), num_items::T
     end
 end
 
-function execute_on_device!(task, device::AbstractGPUDevice, workspaces::AssemblyWorkspace, items)
+function execute_on_device!(task, device::AbstractGPUDevice, workspaces, items)
     backend = KA.backend(device)
     Ti = index_type(device)
     # `items` is already device-resident (adapted once in compute_partition) — no per-launch adapt.
-    for cellids in items
-        n = convert(Ti, length(cellids))
+    for chunck in items
+        n = convert(Ti, length(chunck))
         kernel = _gpu_execute_kernel!(backend, Int(device.threads))
-        kernel(task, workspaces, cellids, n; ndrange = Int(device.threads * device.blocks))
+        kernel(task, workspaces, chunck, n; ndrange = Int(device.threads * device.blocks))
         KA.synchronize(backend)
     end
 end
