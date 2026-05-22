@@ -4,7 +4,9 @@ using Test
 import LinearAlgebra: mul!
 using SparseArrays
 using Polyester
+using TimerOutputs
 
+TimerOutputs.enable_debug_timings(FerriteOperators)
 
 include("test_macros.jl")
 
@@ -182,6 +184,7 @@ include("test_macros.jl")
 end
 
 @testset "Operators" begin
+    reset_timer!()
     @testset "Element Assembly Matrix" begin
         Aₑ = [1.0 -1.0; -1.0 1.0]
         Aₑflat = [1.0, -1.0, -1.0, 1.0]
@@ -647,4 +650,6 @@ end
         @test size(nl_op, 1) == 3n
         @test size(nl_op, 2) == 3n
     end
+
+    print_timer()
 end
