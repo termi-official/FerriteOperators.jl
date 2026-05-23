@@ -67,7 +67,7 @@ include("elements/simple_mass.jl")            # Example element for mass matrice
 include("elements/simple_hyperelasticity.jl") # Example element for hyperelasticity
 include("elements/simple_linear_viscoelasticity.jl")
 
-export QuadratureRuleCollection, QuadratureInterpolation, InternalVariableHandler
+export QuadratureRuleCollection, InternalVariableHandler
 export getquadraturerule
 export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
 
