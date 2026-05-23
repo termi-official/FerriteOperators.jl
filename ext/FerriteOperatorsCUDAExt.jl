@@ -10,6 +10,7 @@ KA.backend(::CudaDevice) = CUDA.CUDABackend()
 
 FerriteOperators.matrix_type(device::CudaDevice, ::FerriteOperators.StandardOperatorSpecification) = CUDA.CUSPARSE.CuSparseMatrixCSC{FerriteOperators.value_type(device), FerriteOperators.index_type(device)}
 FerriteOperators.vector_type(device::CudaDevice) = CuVector{FerriteOperators.value_type(device)}
+FerriteOperators.allocate_vector(::Type{CuVector{T}}, dh) where {T} = CUDA.zeros(T, ndofs(dh))
 
 # FIXME upstream: Ferrite's DeviceCSCAssembler requires a residual vector, so the
 # matrix-only `start_assemble(K::CuSparseMatrixCSC)` path (f === nothing) errors.

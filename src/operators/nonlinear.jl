@@ -9,13 +9,14 @@ function execute_single_task!(task::AssembleLinearizationJR, ws::AssemblyWorkspa
     Jₑ = ws.cache.Ke
     rₑ = ws.cache.re
     uₑ = query_element_unknown_buffer(ws.element, ws.cache.ue)
-    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
+    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, query_element_unknown_prev_buffer(ws.cache), task.p)
 
     fill!(Jₑ, 0.0)
     fill!(rₑ, 0.0)
 
     load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
     assemble_element!(Jₑ, rₑ, uₑ, ws.cell, ws.element, pₑ)
+    assemble_element!(Jₑ, rₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
     store_condensed_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
 
     assemble!(task.inner_assembler, ws.cell, Jₑ, rₑ)
@@ -31,13 +32,13 @@ duplicate_for_device(device, task::AssembleLinearizationJ) = AssembleLinearizati
 function execute_single_task!(task::AssembleLinearizationJ, ws::AssemblyWorkspace)
     Jₑ = ws.cache.Ke
     uₑ = query_element_unknown_buffer(ws.element, ws.cache.ue)
-    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
+    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, query_element_unknown_prev_buffer(ws.cache), task.p)
 
     fill!(Jₑ, 0.0)
 
     load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
-    @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, ws.cell, ws.element, pₑ)
-    @timeit_debug "assemble boundary" assemble_element!(Jₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
+    assemble_element!(Jₑ, uₑ, ws.cell, ws.element, pₑ)
+    assemble_element!(Jₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
     store_condensed_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
 
     assemble!(task.inner_assembler, ws.cell, Jₑ)
@@ -54,13 +55,13 @@ duplicate_for_device(device, task::AssembleLinearizationR) = AssembleLinearizati
 function execute_single_task!(task::AssembleLinearizationR, ws::AssemblyWorkspace)
     rₑ = ws.cache.re
     uₑ = query_element_unknown_buffer(ws.element, ws.cache.ue)
-    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
+    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, query_element_unknown_prev_buffer(ws.cache), task.p)
 
     fill!(rₑ, 0.0)
 
     load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
-    @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, ws.cell, ws.element, pₑ)
-    @timeit_debug "assemble boundary" assemble_element!(rₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
+    assemble_element!(rₑ, uₑ, ws.cell, ws.element, pₑ)
+    assemble_element!(rₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
     store_condensed_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
 
     assemble!(task.inner_assembler, ws.cell, rₑ)

@@ -34,6 +34,9 @@ store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache) = nothing
 # Element-API hooks. Default fallbacks: pass through. Elements that need to derive
 # per-element parameters or remap unknowns override these.
 query_element_parameters(element, geometry_cache, ivh, p) = p
+# 5-arg variant used only by the nonlinear assembly path, which can carry a preallocated
+# previous-step buffer (`uₑprev`) for history/time elements. Default ignores it.
+query_element_parameters(element, geometry_cache, ivh, uₑprev, p) = p
 query_element_unknown_buffer(element, ue) = ue
 
 """
@@ -49,9 +52,10 @@ Allocate the element-local scratch buffers that the assembly loop will pass to
 
 The mapping is 1-to-1:
 
-    AbstractBilinearIntegrator   / BilinearAssemblyCache   → BilinearAssemblyCache    (Ke)
-    AbstractLinearIntegrator     / LinearAssemblyCache     → LinearAssemblyCache      (re)
-    AbstractNonlinearIntegrator  / NonlinearAssemblyCache  → NonlinearAssemblyCache   (Ke, ue, re)
+    AbstractBilinearIntegrator           / BilinearAssemblyCache          → BilinearAssemblyCache          (Ke)
+    AbstractLinearIntegrator             / LinearAssemblyCache            → LinearAssemblyCache            (re)
+    AbstractNonlinearIntegrator          / NonlinearAssemblyCache         → NonlinearAssemblyCache         (Ke, ue, re)
+    AbstractCondensedNonlinearIntegrator / CondensedNonlinearAssemblyCache → CondensedNonlinearAssemblyCache (Ke, ue, re, ue_prev)
 
 On CPU the buffers are `Matrix`/`Vector`s; on GPU they are SOA pools.
 """
@@ -70,6 +74,20 @@ allocate_assembly_cache(device, ::_NonlinearCacheKind, element_cache, sdh) = Non
     allocate_element_unknown_vector(device, element_cache, sdh),
     allocate_element_residual_vector(device, element_cache, sdh),
 )
+
+# Condensed/time-dependent nonlinear: same as nonlinear + `ue_prev` (history buffer).
+# Dispatched on bare types (not a Union) so it is unambiguously more specific than
+# `_NonlinearCacheKind` for `AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator`.
+_allocate_condensed_nonlinear_cache(device, element_cache, sdh) = CondensedNonlinearAssemblyCache(
+    allocate_element_matrix(device, element_cache, sdh),
+    allocate_element_unknown_vector(device, element_cache, sdh),
+    allocate_element_residual_vector(device, element_cache, sdh),
+    allocate_element_unknown_vector(device, element_cache, sdh),  # ue_prev, same shape as ue
+)
+allocate_assembly_cache(device, ::AbstractCondensedNonlinearIntegrator, element_cache, sdh) =
+    _allocate_condensed_nonlinear_cache(device, element_cache, sdh)
+allocate_assembly_cache(device, ::CondensedNonlinearAssemblyCache, element_cache, sdh) =
+    _allocate_condensed_nonlinear_cache(device, element_cache, sdh)
 
 @doc raw"""
     assemble_element!(Kₑ::AbstractMatrix, cell::CellCache, element_cache::AbstractVolumetricElementCache, time)

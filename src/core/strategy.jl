@@ -125,6 +125,22 @@ and `AssembleLinearizationJR`.
 end
 Adapt.@adapt_structure NonlinearAssemblyCache
 
+"""
+    CondensedNonlinearAssemblyCache(Ke, ue, re, ue_prev)
+
+Cache for a condensed/time-dependent nonlinear element (e.g. viscoelasticity) —
+like [`NonlinearAssemblyCache`](@ref) plus `ue_prev`, the preallocated buffer that
+holds the previous time step's element unknowns (history). Selected for
+`AbstractCondensedNonlinearIntegrator`.
+"""
+@concrete struct CondensedNonlinearAssemblyCache <: AbstractAssemblyCache
+    Ke
+    ue
+    re
+    ue_prev
+end
+Adapt.@adapt_structure CondensedNonlinearAssemblyCache
+
 # Per-thread slicing of pool buffers — invoked by `workspace_for` on GPU.
 # Each variant slices exactly the fields it carries.
 @inline per_thread(c::BilinearAssemblyCache, tid) =
@@ -133,6 +149,19 @@ Adapt.@adapt_structure NonlinearAssemblyCache
     LinearAssemblyCache(view(c.re, :, tid))
 @inline per_thread(c::NonlinearAssemblyCache, tid) =
     NonlinearAssemblyCache(view(c.Ke, :, :, tid), view(c.ue, :, tid), view(c.re, :, tid))
+@inline per_thread(c::CondensedNonlinearAssemblyCache, tid) =
+    CondensedNonlinearAssemblyCache(view(c.Ke, :, :, tid), view(c.ue, :, tid), view(c.re, :, tid), view(c.ue_prev, :, tid))
+
+"""
+    query_element_unknown_prev_buffer(cache) -> buffer | nothing
+
+Preallocated previous-step element-unknown buffer (`ue_prev`) for caches that carry
+one (history/time elements, [`CondensedNonlinearAssemblyCache`](@ref)); `nothing`
+otherwise. Lets the nonlinear assembly path hand the time element a reusable buffer
+instead of allocating one per cell.
+"""
+query_element_unknown_prev_buffer(::AbstractAssemblyCache) = nothing
+query_element_unknown_prev_buffer(c::CondensedNonlinearAssemblyCache) = c.ue_prev
 
 """
     AssemblyWorkspace

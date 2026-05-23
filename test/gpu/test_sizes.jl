@@ -1,7 +1,7 @@
 ## Operator sizes (GPU) — mirror of the CPU "Operator sizes" testset. ##
 # Pure size/eltype queries on the GPU operator (no assembly, no kernel launch).
-# Linear (SimpleLinearIntegrator) is intentionally omitted: SimpleLinearElementCache
-# is not @device_element, so building a linear operator on a GPU device errors at setup.
+# Building the operators here exercises on-device setup: element-cache duplication
+# and (for linear) on-device system-vector allocation.
 function run_sizes_tests(device)
     @testset "Operator sizes (GPU)" begin
         grid = generate_grid(Quadrilateral, (3, 3))
@@ -31,6 +31,15 @@ function run_sizes_tests(device)
             @test size(nl_op) == (n, n)
             @test size(nl_op, 1) == n
             @test size(nl_op, 2) == n
+        end
+
+        @testset "Linear" begin
+            lin_op = setup_operator(
+                strategy,
+                FerriteOperators.SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u),
+                dh,
+            )
+            @test size(lin_op) == (n,)
         end
     end
 end

@@ -58,6 +58,20 @@ function setup_mass_problem()
     return dh, integrator
 end
 
+function setup_linear_problem()
+    grid = generate_grid(Quadrilateral, (4, 4))
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+
+    integrator = FerriteOperators.SimpleLinearIntegrator(
+        1.0,
+        QuadratureRuleCollection(2),
+        :u,
+    )
+    return dh, integrator
+end
+
 function setup_hyperelasticity_problem(device=nothing)
     grid = generate_grid(Hexahedron, (3, 3, 3))
     Ferrite.transform_coordinates!(grid, x -> Vec{3}(sign.(x .- 0.5) .* (x .- 0.5) .^ 2))

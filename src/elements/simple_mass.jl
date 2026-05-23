@@ -14,9 +14,9 @@ end
 """
 The cache associated with [`SimpleLinearElementCache`](@ref) to assemble element "constant" vectors.
 """
-struct SimpleLinearElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+@device_element struct SimpleLinearElementCache <: AbstractVolumetricElementCache
     f::Float64
-    cellvalues::CV
+    cellvalues::CellValues
 end
 
 function assemble_element!(rₑ::AbstractVector, cell, element_cache::SimpleLinearElementCache, time)
@@ -41,8 +41,6 @@ function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofH
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleLinearElementCache(element_model.f, CellValues(qr, ip, ip_geo))
 end
-
-duplicate_for_device(device, cache::SimpleLinearElementCache) = SimpleLinearElementCache(cache.f, duplicate_for_device(device, cache.cellvalues))
 
 @doc raw"""
     SimpleBilinearMassIntegrator{CoefficientType}

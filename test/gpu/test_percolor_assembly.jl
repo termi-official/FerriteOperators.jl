@@ -76,6 +76,33 @@ function test_nonlinear_percolor(device, dh, integrator, u_gpu; atol=nothing, rt
     end
 end
 
+# --- Linear: global vector assembly ---
+function test_linear_percolor(device, dh, integrator; atol=nothing, rtol=nothing)
+    # CPU reference
+    cpu_strategy = PerColorAssemblyStrategy(SequentialCPUDevice())
+    cpu_op = setup_operator(cpu_strategy, integrator, dh)
+    update_operator!(cpu_op, 0.0)
+
+    # GPU
+    gpu_strategy = PerColorAssemblyStrategy(device)
+    gpu_op = setup_operator(gpu_strategy, integrator, dh)
+    update_operator!(gpu_op, 0.0)
+
+    cpu_b = cpu_op.b
+    gpu_b = Array(gpu_op.b)
+
+    @testset "Global vector assembly" begin
+        @test length(cpu_b) == length(gpu_b)
+        @test isapprox(cpu_b, gpu_b; atol=something(atol, 0), rtol=something(rtol, 0))
+    end
+
+    @testset "Idempotency" begin
+        update_operator!(gpu_op, 0.0)
+        gpu_b2 = Array(gpu_op.b)
+        @test isapprox(gpu_b, gpu_b2; atol=1e-14)
+    end
+end
+
 function run_percolor_tests(device)
     @testset "PerColorAssemblyStrategy (GPU)" begin
         @testset "Bilinear Diffusion" begin
@@ -91,6 +118,11 @@ function run_percolor_tests(device)
         @testset "Nonlinear Hyperelasticity" begin
             dh, integrator, u = setup_hyperelasticity_problem(device)
             test_nonlinear_percolor(device, dh, integrator, u, rtol=1e-10)
+        end
+
+        @testset "Linear Source" begin
+            dh, integrator = setup_linear_problem()
+            test_linear_percolor(device, dh, integrator, rtol=1e-10)
         end
     end
 end
