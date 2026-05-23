@@ -87,8 +87,8 @@ end
 ## Transfer task                   ##
 ####################################
 
-struct AssembleTransferTerm{A}
-    inner_assembler::A
+@concrete struct AssembleTransferTerm
+    inner_assembler
     p
 end
 duplicate_for_device(device, task::AssembleTransferTerm) = AssembleTransferTerm(duplicate_for_device(device, task.inner_assembler), task.p)

@@ -6,8 +6,8 @@
     integrator
 end
 
-struct AssembleBilinearTerm{A}
-    inner_assembler::A
+@concrete struct AssembleBilinearTerm
+    inner_assembler
     p
 end
 duplicate_for_device(device, task::AssembleBilinearTerm) = AssembleBilinearTerm(duplicate_for_device(device, task.inner_assembler), task.p)
