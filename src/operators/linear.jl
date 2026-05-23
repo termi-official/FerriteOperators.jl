@@ -6,8 +6,8 @@
     integrator
 end
 
-struct AssembleLinearTerm{A}
-    inner_assembler::A
+@concrete struct AssembleLinearTerm
+    inner_assembler
     p
 end
 duplicate_for_device(device, task::AssembleLinearTerm{<:AbstractVector}) = task

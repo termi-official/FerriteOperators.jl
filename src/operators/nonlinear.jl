@@ -1,5 +1,5 @@
-struct AssembleLinearizationJR{A}
-    inner_assembler::A
+@concrete struct AssembleLinearizationJR
+    inner_assembler
     u
     p
 end
@@ -22,8 +22,8 @@ function execute_single_task!(task::AssembleLinearizationJR, ws::AssemblyWorkspa
     assemble!(task.inner_assembler, ws.cell, Jₑ, rₑ)
 end
 
-struct AssembleLinearizationJ{A}
-    inner_assembler::A
+@concrete struct AssembleLinearizationJ
+    inner_assembler
     u
     p
 end
@@ -44,8 +44,8 @@ function execute_single_task!(task::AssembleLinearizationJ, ws::AssemblyWorkspac
     assemble!(task.inner_assembler, ws.cell, Jₑ)
 end
 
-struct AssembleLinearizationR{A}
-    inner_assembler::A
+@concrete struct AssembleLinearizationR
+    inner_assembler
     u
     p
 end
