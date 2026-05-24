@@ -24,6 +24,7 @@ FerriteOperatorsPolyesterExt = "Polyester"
 [compat]
 Adapt = "4.3.0"
 Atomix = "1.1.2"
+Aqua = "0.8"
 ConcreteStructs = "0.2.3"
 Ferrite = "1.4"
 LinearAlgebra = "1.10.0"
@@ -31,12 +32,14 @@ Polyester = "0.7.16"
 Reexport = "1.2.2"
 SparseArrays = "1.10.0"
 StaticArrays = "1.9.13"
+Test = "1.10"
 TimerOutputs = "0.5.28"
 Unrolled = "0.1.5"
 julia = "1.10"
 
 [extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["LinearAlgebra", "SparseArrays", "Test", "TimerOutputs"]
+test = ["Aqua", "LinearAlgebra", "SparseArrays", "Test", "TimerOutputs"]
