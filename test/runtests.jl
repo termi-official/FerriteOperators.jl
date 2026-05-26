@@ -653,3 +653,5 @@ end
 
     print_timer()
 end
+
+include("test_aqua.jl")

@@ -48,7 +48,7 @@ function assemble_facet!(residualₑ::AbstractVector, uₑ::AbstractVector, cell
     assemble_facet_gto1!(residualₑ, uₑ, uₑprev, cell, local_facet_index, surface_cache, pₑ, t, Δt)
 end
 
-function assemble_facet!!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_facet_index::Int, surface_cache::AbstractGenericFirstOrderTimeSurfaceElementCache, pfot::GenericFirstOrderTimeElementParameters)
+function assemble_facet!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_facet_index::Int, surface_cache::AbstractGenericFirstOrderTimeSurfaceElementCache, pfot::GenericFirstOrderTimeElementParameters)
     (; pₑ, t, uₑprev, Δt) = pfot
     assemble_facet_gto1!(Kₑ, residualₑ, uₑ, uₑprev, cell, local_facet_index, surface_cache, pₑ, t, Δt)
 end
