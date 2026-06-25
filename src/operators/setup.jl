@@ -34,14 +34,24 @@ function setup_subdomain_caches(strategy, integrator, dh)
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
-        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh)
+        # NOTE: we pass integrator (not the element cache) because its hierarchy (linear/bilinear/nonlinear) dispatches the matching assembly cache.
+        # create cpu prototype workspace; setup_device_instances adapts it (and ws.cell.dh) for device use.
+        ws = create_assembly_workspace(integrator, element_cache, boundary_cache, sdh, ivh)
         dc = setup_device_instances(device, ws, n)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
     end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    # Check device availability
+    (;device) = strategy
+    KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
+    
+    # this has the resolved device launch config.
+    # FIXME: better ? 
+    resolved_staregy = resolve_device_config(strategy, dh)
+
+    operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)
     A                 = create_system_matrix(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 
@@ -55,7 +65,14 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    # Check device availability
+    (;device) = strategy
+    KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
+    
+    # this has the resolved device launch config.
+    resolved_staregy = resolve_device_config(strategy, dh)
+
+    operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)
     J                 = create_system_matrix(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 
@@ -69,7 +86,14 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
+    # Check device availability
+    (;device) = strategy
+    KA.functional(device) || error("Device $(device) is not functional. Please check your device setup.")
+
+    # this has the resolved device launch config.
+    resolved_staregy = resolve_device_config(strategy, dh)
+    
+    operator_strategy = setup_operator_strategy_cache(resolved_staregy, integrator, dh)
     b                 = create_system_vector(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
 

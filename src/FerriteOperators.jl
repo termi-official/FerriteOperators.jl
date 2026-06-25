@@ -15,6 +15,7 @@ import LinearAlgebra: mul!, ldiv!, qr, cholesky!, Symmetric
 import Base: *, +, -, @kwdef, @propagate_inbounds
 
 import Atomix
+import KernelAbstractions as KA
 
 import Ferrite: AbstractDofHandler, AbstractGrid, AbstractRefShape, AbstractCell, get_grid, get_coordinate_eltype
 import Ferrite: SparsityPattern, allocate_matrix
@@ -25,9 +26,19 @@ import Ferrite: reference_shape_value
 import Ferrite: IntegerCollection
 import Ferrite: nnodes_per_cell, cellnodes!, getcoordinates!
 
+# Some generic integrator types
+abstract type AbstractBilinearIntegrator end
+abstract type AbstractNonlinearIntegrator end
+abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
+# Simple means that it has a constant number of dofs per quadrature point
+abstract type AbstractSimpleCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
+abstract type AbstractLinearIntegrator end
+
 include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or GPUs)
+# Bridge methods for Ferrite's ImmutableCellCache (GPU cell cache from FerriteKAExt)
+include("core/ferrite-addons/device_dofhandler.jl")
+
 include("core/strategy.jl")  # Utilities to control the assembly strategy
-include("core/tasks.jl")     # Contains the basic task system
 include("core/iterators.jl") # Transfer cell iterators for two-DofHandler assembly
 
 include("core/element_interface.jl") # This is the basic element interface used for the operators
@@ -39,16 +50,8 @@ include("core/utils.jl")             # Internal helpers
 include("core/ferrite-addons/collections.jl")
 include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
-include("core/ferrite-addons/parallel_duplication_api.jl")
 include("core/ferrite-addons/internal_variable_handler.jl")
-
-# Some generic integrator types
-abstract type AbstractBilinearIntegrator end
-abstract type AbstractNonlinearIntegrator end
-abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
-# Simple means that it has a constant number of dofs per quadrature point
-abstract type AbstractSimpleCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
-abstract type AbstractLinearIntegrator end
+include("core/ferrite-addons/parallel_duplication_api.jl")
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
 include("elements/domain_elements.jl")        # This is the key component to couple integrators into a single operator
@@ -60,6 +63,7 @@ include("operators/nonlinear.jl")       # Here are all the tasks to handle the a
 include("operators/bilinear.jl")
 include("operators/linear.jl")
 include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
+include("operators/adapt_operators.jl") # Adapt.jl integration for GPU support (after all operator/task types)
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
 
 include("elements/simple_diffusion.jl")       # Example element for diffusion
@@ -77,7 +81,7 @@ export residual_size, unknown_size
 
 export NullOperator, DiagonalOperator
 
-export SequentialCPUDevice, PolyesterDevice, CudaDevice
+export SequentialCPUDevice, PolyesterDevice, CudaDevice, RocDevice
 export SequentialAssemblyStrategy, ElementAssemblyStrategy, PerColorAssemblyStrategy
 
 # Transfer operator infrastructure

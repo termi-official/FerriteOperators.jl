@@ -9,16 +9,9 @@ struct SimpleHyperelasticityIntegrator{EnergyType} <: AbstractNonlinearIntegrato
     field_name::Symbol
 end
 
-struct SimpleHyperelasticityElementCache{EnergyType, CV <: CellValues} <: AbstractVolumetricElementCache
-    ψ::EnergyType
-    cv::CV
-end
-
-function duplicate_for_device(device, cache::SimpleHyperelasticityElementCache)
-    return SimpleHyperelasticityElementCache(
-        cache.ψ,
-        duplicate_for_device(device, cache.cv),
-    )
+@device_element struct SimpleHyperelasticityElementCache{EnergyType} <: AbstractVolumetricElementCache
+    ψ::EnergyType # NOTE: since `EnergyType` is readonly & `isbits`, then we don't need to duplicate it for the device (GPU in particular).
+    cv::CellValues
 end
 
 # Element residual

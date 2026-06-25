@@ -1,3 +1,6 @@
+#TODO: This file is not GPU supported yet, due to convolution in parameteres. 
+
+
 @concrete struct GenericFirstOrderTimeParameters
     p
     t
@@ -30,12 +33,10 @@ function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, ele
     assemble_element_gto1!(Kₑ, uₑ, uₑprev, cell, element_cache, pₑ, t, Δt)
 end
 
-function query_element_parameters(element::AbstractGenericFirstOrderTimeVolumetricElementCache, cell, ivh, p::GenericFirstOrderTimeParameters)
-    (; cv) = element
+function query_element_parameters(element::AbstractGenericFirstOrderTimeVolumetricElementCache, cell, ivh, uₑprev, p::GenericFirstOrderTimeParameters)
     (; uprev, Δt, t) = p
-    uₑprev = allocate_element_unknown_vector(element, cell)
     load_element_unknowns!(uₑprev, uprev, cell, ivh, element)
-    pₑ = query_element_parameters(element, cell, ivh, p.p)
+    pₑ = query_element_parameters(element, cell, ivh, uₑprev, p.p)
     return GenericFirstOrderTimeElementParameters(pₑ, t, Δt, uₑprev)
 end
 
@@ -61,6 +62,8 @@ end
 function query_element_parameters(element::AbstractGenericFirstOrderTimeSurfaceElementCache, cell, ivh, p::GenericFirstOrderTimeParameters)
     (; cv) = element
     (; uprev, Δt, t) = p
+    # FIXME: uses old api
+    # FIXME: this will fail on GPU
     uₑprev = allocate_element_unknown_vector(element, cell)
     load_element_unknowns!(uₑprev, uprev, cell, ivh, element)
     pₑ = query_element_parameters(element, cell, ivh, p.p)

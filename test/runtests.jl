@@ -8,6 +8,8 @@ using TimerOutputs
 
 TimerOutputs.enable_debug_timings(FerriteOperators)
 
+include("test_macros.jl")
+
 @testset "Element API" begin
     import FerriteOperators: assemble_element!, assemble_facet!
     import FerriteOperators: setup_element_cache, setup_boundary_cache
@@ -558,8 +560,9 @@ end
 
     @testset "GPU device validation" begin
         @test_throws ArgumentError FerriteOperators.setup_device_instances(CudaDevice(), FerriteOperators.EAIndexWorkspace(0), 1)
-        @test_throws ArgumentError FerriteOperators.n_workers(SequentialAssemblyStrategy(CudaDevice()), CudaDevice(), [1:5])
-        @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, CudaDevice(), nothing, [])
+        @test FerriteOperators.n_workers(SequentialAssemblyStrategy(CudaDevice()), CudaDevice(64, 2), [1:5]) == 128
+        # Without the GPU package loaded, KA.backend(::CudaDevice) errors → ErrorException.
+        @test_throws ErrorException FerriteOperators.execute_on_device!(nothing, CudaDevice(), nothing, [])
     end
 
     @testset "Generic setup_device_instances" begin

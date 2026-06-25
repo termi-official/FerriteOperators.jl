@@ -3,14 +3,11 @@ This cache allows to combine multiple elements over the same volume.
 If surface caches are passed they are handled properly. This requred dispatching
     is_facet_in_cache(facet::FacetIndex, geometry_cache, my_cache::MyCacheType)
 """
-struct CompositeVolumetricElementCache{CacheTupleType <: Tuple} <: AbstractVolumetricElementCache
+@device_element struct CompositeVolumetricElementCache{CacheTupleType <: Tuple} <: AbstractVolumetricElementCache
     inner_caches::CacheTupleType
 end
-function duplicate_for_device(device, cache::CompositeVolumetricElementCache)
-    return CompositeVolumetricElementCache(
-        map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
-    )
-end
+# duplicate_for_device is handled by the generic recursion in parallel_duplication_api.jl
+# (struct method → tuple method over `inner_caches`).
 # Main entry point for linear operators
 assemble_element!(rₑ::AbstractVector, cell::CellCache, element_cache::CompositeVolumetricElementCache, time) = assemble_composite_element!(rₑ, cell, element_cache.inner_caches, time)
 @unroll function assemble_composite_element!(rₑ::AbstractVector, cell::CellCache, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
@@ -51,14 +48,11 @@ end
 """
 This cache allows to combine multiple elements over the same surface.
 """
-struct CompositeSurfaceElementCache{CacheTupleType <: Tuple} <: AbstractSurfaceElementCache
+@device_element struct CompositeSurfaceElementCache{CacheTupleType <: Tuple} <: AbstractSurfaceElementCache
     inner_caches::CacheTupleType
 end
-function duplicate_for_device(device, cache::CompositeSurfaceElementCache)
-    return CompositeSurfaceElementCache(
-        map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
-    )
-end
+# duplicate_for_device handled by the generic recursion in parallel_duplication_api.jl
+# (struct method → tuple method over `inner_caches`).
 # Main entry point for linear operators
 assemble_facet!(rₑ::AbstractVector, cell::CellCache, local_facet_index::Int, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_facet!(rₑ, cell, local_facet_index, surface_cache.inner_caches, time)
 @unroll function assemble_composite_facet!(rₑ::AbstractVector, cell::CellCache, local_facet_index::Int, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
@@ -107,14 +101,11 @@ assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellC
 """
 This cache allows to combine multiple elements over the same interface.
 """
-struct CompositeInterfaceElementCache{CacheTupleType <: Tuple} <: AbstractInterfaceElementCache
+@device_element struct CompositeInterfaceElementCache{CacheTupleType <: Tuple} <: AbstractInterfaceElementCache
     inner_caches::CacheTupleType
 end
-function duplicate_for_device(device, cache::CompositeInterfaceElementCache)
-    return CompositeInterfaceElementCache(
-        map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
-    )
-end
+# duplicate_for_device handled by the generic recursion in parallel_duplication_api.jl
+# (struct method → tuple method over `inner_caches`).
 # Main entry point for linear operators
 assemble_interface!(rₑ::AbstractVector, interface, interface_cache::CompositeInterfaceElementCache, time) = assemble_composite_interface!(rₑ, interface, interface_cache.inner_caches, time)
 @unroll function assemble_composite_interface!(rₑ::AbstractVector, interface, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
@@ -150,3 +141,6 @@ assemble_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, interface
         assemble_interface!(residualₑ, uₑ, interface, inner_cache, time)
     end
 end
+
+# All three composite caches (Volumetric/Surface/Interface) get adapt_structure +
+# getindex from @device_element, and duplicate_for_device from the generic recursion.

@@ -14,9 +14,9 @@ end
 """
 The cache associated with [`SimpleLinearElementCache`](@ref) to assemble element "constant" vectors.
 """
-struct SimpleLinearElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+@device_element struct SimpleLinearElementCache <: AbstractVolumetricElementCache
     f::Float64
-    cellvalues::CV
+    cellvalues::CellValues
 end
 
 function assemble_element!(rₑ::AbstractVector, cell, element_cache::SimpleLinearElementCache, time)
@@ -42,8 +42,6 @@ function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofH
     return SimpleLinearElementCache(element_model.f, CellValues(qr, ip, ip_geo))
 end
 
-duplicate_for_device(device, cache::SimpleLinearElementCache) = SimpleLinearElementCache(cache.f, duplicate_for_device(device, cache.cellvalues))
-
 @doc raw"""
     SimpleBilinearMassIntegrator{CoefficientType}
 
@@ -60,16 +58,9 @@ end
 """
 The cache associated with [`BilinearMassIntegrator`](@ref) to assemble element Mass matrices.
 """
-struct SimpleBilinearMassElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+@device_element struct SimpleBilinearMassElementCache <: AbstractVolumetricElementCache
     ρ::Float64
-    cellvalues::CV
-end
-
-function duplicate_for_device(device, cache::SimpleBilinearMassElementCache)
-    return SimpleBilinearMassElementCache(
-        cache.ρ,
-        duplicate_for_device(device, cache.cellvalues),
-    )
+    cellvalues::CellValues
 end
 
 function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBilinearMassElementCache, time)
