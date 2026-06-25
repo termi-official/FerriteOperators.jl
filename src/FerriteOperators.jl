@@ -59,6 +59,7 @@ include("operators/matrix_free.jl")     # Everything related to the fundamental 
 include("operators/nonlinear.jl")       # Here are all the tasks to handle the assembly and action of operators
 include("operators/bilinear.jl")
 include("operators/linear.jl")
+include("operators/dae.jl")
 include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
 
