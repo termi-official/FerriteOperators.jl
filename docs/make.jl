@@ -21,4 +21,5 @@ makedocs(;
 deploydocs(;
     repo="github.com/termi-official/FerriteOperators.jl",
     devbranch="main",
+    push_preview = true,
 )

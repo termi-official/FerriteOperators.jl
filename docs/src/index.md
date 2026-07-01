@@ -76,18 +76,20 @@ Users need to provide some structs and corresponding dispatches to work with Fer
 Essentially there are three super-types for elements
 
 ```@docs
-FerriteOperators.AbstractVolumetricElement
+FerriteOperators.AbstractVolumetricElementCache
 FerriteOperators.AbstractSurfaceElementCache
 FerriteOperators.AbstractInterfaceElementCache
 assemble_element!
 assemble_facet!
 assemble_interface!
 FerriteOperators.setup_element_cache
+FerriteOperators.setup_boundary_cache
+FerriteOperators.setup_interface_cache
 FerriteOperators.load_element_unknowns!
 
 ```
 
-Only `FerriteOperators.AbstractVolumetricElement` is implemented for now and it covers already all typical use-cases.
+Only `FerriteOperators.AbstractVolumetricElementCache` is implemented for now and it covers already all typical use-cases.
 
 Furthermore, each element formulation is derived from an integrator. Integrators are the bridge between elements and materials.
 Right now, these types of integrators are provided
@@ -134,4 +136,73 @@ PolyesterDevice
 SequentialAssemblyStrategy
 PerColorAssemblyStrategy
 ElementAssemblyStrategy
+```
+
+## Quadrature Data
+
+FerriteOperators provides a unified system for working with data at quadrature
+points (QPs). The same infrastructure serves three purposes:
+
+1. **Precomputed coefficients** – pass per-QP material data into element formulations.
+2. **Matrix-free precomputation** – store evaluated quantities (e.g. stresses) at
+   QPs during a separate pass for use in later matrix-free actions.
+3. **Post-processing / visualization** – query QP data for export to VTK or other
+   downstream processing.
+
+### Storage: `QVector`
+
+[`QVector`](@ref) is the flat, cell-indexed storage type.  Each cell owns a
+contiguous slice of the underlying `data` vector; slices can have different
+lengths, enabling p-adaptivity and mixed meshes.
+
+```@docs
+QVector
+setup_qvector
+get_range_for_cell
+```
+
+### Evaluation: `FerriteQuadratureOperator`
+
+[`FerriteQuadratureOperator`](@ref) is a lightweight operator that drives a
+user-supplied function over all quadrature points and writes the results into a
+[`QVector`](@ref).
+
+```@docs
+FerriteQuadratureOperator
+setup_quadrature_operator
+evaluate_quadrature!
+query_element_quadrature_data
+store_quadrature_data!
+```
+
+### Post-processing: `QuadratureDataQuery`
+
+[`QuadratureDataQuery`](@ref) bundles a [`QVector`](@ref) output buffer with an
+optional cell-ID filter.  Build one with [`prepare_quadrature_query`](@ref), run
+it with [`process_query!`](@ref), then inspect `query.buffer` or write to VTK.
+
+```@docs
+QuadratureDataQuery
+QuadratureDataMultiQuery
+prepare_quadrature_query
+process_query!
+```
+
+### VTK export: `VTKQuadratureFile`
+
+QP data can be exported to VTK for visualization in e.g. ParaView.
+The workflow mirrors `Ferrite.VTKGridFile`:
+
+```julia
+qgrid = VTKQuadratureGrid(dh, qrc)
+VTKQuadratureFile("stress_output", qgrid) do vtk
+    write_quadrature_data(vtk, σ, "stress")
+    write_quadrature_data(vtk, query, "plastic_strain")  # QuadratureDataQuery
+end
+```
+
+```@docs
+VTKQuadratureGrid
+VTKQuadratureFile
+write_quadrature_data
 ```
