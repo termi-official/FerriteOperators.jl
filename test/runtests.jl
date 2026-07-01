@@ -784,8 +784,8 @@ end
     @testset "PolyesterDevice consistency" begin
         strategy_seq = SequentialAssemblyStrategy(SequentialCPUDevice())
         strategy_par = PerColorAssemblyStrategy(PolyesterDevice(4))
-        qop_seq = setup_quadrature_operator(strategy_seq, integrator, dh)
-        qop_par = setup_quadrature_operator(strategy_par, integrator, dh)
+        qop_seq = setup_operator(strategy_seq, integrator, dh)
+        qop_par = setup_operator(strategy_par, integrator, dh)
         q_seq   = setup_qvector(Float64, dh, qrc)
         q_par   = setup_qvector(Float64, dh, qrc)
         u       = zeros(ndofs(dh))
@@ -807,9 +807,9 @@ end
     add!(dh, :u, Lagrange{RefHexahedron, 1}())
     close!(dh)
     qrc        = QuadratureRuleCollection(2)
-    integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+    integrator = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
     strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
-    qop        = setup_quadrature_operator(strategy, integrator, dh)
+    qop        = setup_operator(strategy, integrator, dh)
     q          = setup_qvector(Float64, dh, qrc)
     u          = zeros(ndofs(dh))
     evaluate_quadrature!(q, qop, u, nothing,
@@ -870,7 +870,7 @@ end
     qrc        = QuadratureRuleCollection(2)
     integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
     strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
-    qop        = setup_quadrature_operator(strategy, integrator, dh)
+    qop        = setup_operator(strategy, integrator, dh)
     u          = zeros(ndofs(dh))
     f_cellid   = (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell))
 

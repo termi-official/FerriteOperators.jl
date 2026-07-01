@@ -81,7 +81,7 @@ export getquadraturerule
 export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
 
 export QVector, setup_qvector, get_range_for_cell
-export QuadratureFerriteOperator, setup_quadrature_operator, evaluate_quadrature!
+export FerriteQuadratureOperator, setup_quadrature_operator, evaluate_quadrature!
 export query_element_quadrature_data, store_quadrature_data!
 export VTKQuadratureGrid, VTKQuadratureFile, write_quadrature_data
 export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, process_query!

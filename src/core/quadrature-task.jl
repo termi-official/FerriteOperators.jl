@@ -96,7 +96,7 @@ function execute_single_task!(task::QuadratureEvaluationTask, ws::QuadratureEval
 end
 
 """
-    QuadratureFerriteOperator
+    FerriteQuadratureOperator
 
 An operator for evaluating user-defined functions at quadrature points and storing
 the results in a [`QVector`](@ref).
@@ -104,7 +104,7 @@ the results in a [`QVector`](@ref).
 Build with [`setup_quadrature_operator`](@ref) and execute with
 [`evaluate_quadrature!`](@ref).
 """
-@concrete struct QuadratureFerriteOperator
+@concrete struct FerriteQuadratureOperator
     strategy
     subdomain_caches
     dh
@@ -112,9 +112,9 @@ Build with [`setup_quadrature_operator`](@ref) and execute with
 end
 
 """
-    setup_quadrature_operator(strategy, integrator, dh) -> QuadratureFerriteOperator
+    setup_quadrature_operator(strategy, integrator, dh) -> FerriteQuadratureOperator
 
-Set up a [`QuadratureFerriteOperator`](@ref) that can be used with
+Set up a [`FerriteQuadratureOperator`](@ref) that can be used with
 [`evaluate_quadrature!`](@ref) to evaluate a function at all quadrature points.
 """
 function setup_quadrature_operator(strategy, integrator, dh::AbstractDofHandler)
@@ -130,7 +130,7 @@ function setup_quadrature_operator(strategy, integrator, dh::AbstractDofHandler)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, EmptySurfaceElementCache()), dc, partition)
     end for (sdh, element_cache) in zip(dh.subdofhandlers, element_caches)]
 
-    return QuadratureFerriteOperator(strategy, subdomain_caches, dh, integrator)
+    return FerriteQuadratureOperator(strategy, subdomain_caches, dh, integrator)
 end
 
 """
@@ -147,6 +147,12 @@ and return the result.
 - `pe` — element-local parameters derived from `p`
 """
 function evaluate_quadrature!(q::QVector, op, u, p, f, set = nothing)
+    # TODO optimize this. We only need to swap the workspace.
+    qop = setup_quadrature_operator(op.strategy, op.integrator, op.dh)
+    evaluate_quadrature!(q::QVector, qop, u, p, f, set)
+end
+
+function evaluate_quadrature!(q::QVector, op::FerriteQuadratureOperator, u, p, f, set = nothing)
     task = QuadratureEvaluationTask(f, u, p, q, set)
     execute_on_subdomains!(task, op.strategy, op.subdomain_caches)
 end
