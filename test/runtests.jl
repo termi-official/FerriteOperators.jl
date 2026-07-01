@@ -654,7 +654,7 @@ end
 include("test_aqua.jl")
 
 @testset "QVector" begin
-    import FerriteOperators: QVector, setup_qvector, get_data_for_index
+    import FerriteOperators: QVector, setup_qvector, get_range_for_cell
 
     # --- Basic construction and AbstractVector interface ---
     @testset "AbstractVector interface" begin
@@ -669,16 +669,16 @@ include("test_aqua.jl")
     end
 
     # --- Per-cell view ---
-    @testset "get_data_for_index" begin
+    @testset "get_range_for_cell" begin
         data    = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
         offsets = [1, 3, 5]
         npoints = [2, 2, 2]
         qv = QVector(data, offsets, npoints)
-        @test get_data_for_index(qv, 1) == [10.0, 20.0]
-        @test get_data_for_index(qv, 2) == [30.0, 40.0]
-        @test get_data_for_index(qv, 3) == [50.0, 60.0]
+        @test get_range_for_cell(qv, 1) == [10.0, 20.0]
+        @test get_range_for_cell(qv, 2) == [30.0, 40.0]
+        @test get_range_for_cell(qv, 3) == [50.0, 60.0]
         # Mutations through the view affect the underlying data
-        get_data_for_index(qv, 2)[1] = 99.0
+        get_range_for_cell(qv, 2)[1] = 99.0
         @test qv[3] == 99.0
     end
 
@@ -695,7 +695,7 @@ include("test_aqua.jl")
         @test length(qv) == ncells * 8
         @test eltype(qv) == Float64
         for cellid in 1:ncells
-            @test length(get_data_for_index(qv, cellid)) == 8
+            @test length(get_range_for_cell(qv, cellid)) == 8
         end
     end
 
@@ -733,7 +733,7 @@ include("test_aqua.jl")
         qv = setup_qvector(Float64, dh, qrc)
         @test length(qv) == ncells * 8
         for cellid in 1:ncells
-            @test length(get_data_for_index(qv, cellid)) == 8
+            @test length(get_range_for_cell(qv, cellid)) == 8
         end
     end
 end
@@ -774,7 +774,7 @@ end
         nqp    = getnquadpoints(QuadratureRule{RefHexahedron}(2))
         @test length(q) == ncells * nqp
         for cellid in 1:ncells
-            @test get_data_for_index(q, cellid) == collect(1:nqp)
+            @test get_range_for_cell(q, cellid) == collect(1:nqp)
         end
     end
 
@@ -886,7 +886,7 @@ end
         process_query!(query, qop, u, nothing, f_cellid)
         # Every QP slot must hold the cell ID it belongs to
         for cellid_val in 1:getncells(grid)
-            @test all(==(Float64(cellid_val)), get_data_for_index(query.buffer, cellid_val))
+            @test all(==(Float64(cellid_val)), get_range_for_cell(query.buffer, cellid_val))
         end
     end
 
@@ -899,7 +899,7 @@ end
         # Cells in the left set must be filled; cells outside must remain zero
         for cellid_val in 1:getncells(grid)
             expected = cellid_val ∈ left_cells ? Float64(cellid_val) : 0.0
-            @test all(==(expected), get_data_for_index(query.buffer, cellid_val))
+            @test all(==(expected), get_range_for_cell(query.buffer, cellid_val))
         end
     end
 

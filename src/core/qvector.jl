@@ -2,7 +2,7 @@
     QVector{T, VT, OT, NT} <: AbstractVector{T}
 
 A flat storage vector for quadrature-point data across all cells, with per-cell
-random-access via [`get_data_for_index`](@ref).
+random-access via [`get_range_for_cell`](@ref).
 
 Fields:
 - `data`: flat storage (`AbstractVector{T}`) holding all quadrature values
@@ -10,7 +10,7 @@ Fields:
 - `npoints`: `npoints[cellid]` is the number of quadrature points for cell `cellid`
 
 Use [`setup_qvector`](@ref) to build a `QVector` from a [`DofHandler`](@ref) or an
-assembled operator. Use [`get_data_for_index`](@ref) to obtain a mutable view into
+assembled operator. Use [`get_range_for_cell`](@ref) to obtain a mutable view into
 the slice owned by a particular cell.
 """
 struct QVector{T, VT <: AbstractVector{T}, OT <: AbstractVector, NT <: AbstractVector} <: AbstractVector{T}
@@ -24,12 +24,12 @@ Base.getindex(v::QVector, i::Int) = getindex(v.data, i)
 Base.eltype(::QVector{T}) where T = T
 
 """
-    get_data_for_index(q::QVector, cellid::Integer)
+    get_range_for_cell(q::QVector, cellid::Integer)
 
 Return a mutable view into the slice of `q` that belongs to cell `cellid`.
 The view has length `q.npoints[cellid]`.
 """
-@inline function get_data_for_index(r::QVector, i::Integer)
+@inline function get_range_for_cell(r::QVector, i::Integer)
     i1 = r.offsets[i]
     n  = r.npoints[i]
     return @view r.data[i1:i1+n-1]
