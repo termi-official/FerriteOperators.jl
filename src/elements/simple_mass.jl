@@ -19,6 +19,7 @@ struct SimpleLinearElementCache{CV <: CellValues} <: AbstractVolumetricElementCa
     cellvalues::CV
 end
 
+Ferrite.getnquadpoints(e::SimpleLinearElementCache) = getnquadpoints(e.cellvalues)
 function assemble_element!(rₑ::AbstractVector, cell, element_cache::SimpleLinearElementCache, time)
     (; cellvalues, f) = element_cache
     n_basefuncs = getnbasefunctions(cellvalues)
@@ -65,6 +66,7 @@ struct SimpleBilinearMassElementCache{CV <: CellValues} <: AbstractVolumetricEle
     cellvalues::CV
 end
 
+Ferrite.getnquadpoints(e::SimpleBilinearMassElementCache) = getnquadpoints(e.cellvalues)
 function duplicate_for_device(device, cache::SimpleBilinearMassElementCache)
     return SimpleBilinearMassElementCache(
         cache.ρ,

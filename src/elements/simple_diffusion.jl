@@ -19,6 +19,7 @@ struct SimpleBilinearDiffusionElementCache{CV <: CellValues} <: AbstractVolumetr
     cellvalues::CV
 end
 
+Ferrite.getnquadpoints(e::SimpleBilinearDiffusionElementCache) = getnquadpoints(e.cellvalues)
 function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache)
     return SimpleBilinearDiffusionElementCache(
         cache.D,

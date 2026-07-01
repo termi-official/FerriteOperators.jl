@@ -16,6 +16,9 @@ import Base: *, +, -, @kwdef, @propagate_inbounds
 
 import Atomix
 
+import VTKBase
+import WriteVTK
+
 import Ferrite: AbstractDofHandler, AbstractGrid, AbstractRefShape, AbstractCell, get_grid, get_coordinate_eltype
 import Ferrite: SparsityPattern, allocate_matrix
 import Ferrite: AbstractCSCAssembler, AbstractCSRAssembler, matrix_handle, fillzero!
@@ -32,6 +35,7 @@ include("core/iterators.jl") # Transfer cell iterators for two-DofHandler assemb
 
 include("core/element_interface.jl") # This is the basic element interface used for the operators
 include("core/utils.jl")             # Internal helpers
+include("core/qvector.jl")           # Flat per-cell quadrature data storage
 
 # These are
 #   1. addons to make life with Ferrite easier
@@ -62,6 +66,11 @@ include("operators/linear.jl")
 include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
 
+include("core/quadrature-task.jl")      # Task + operator for evaluating functions at quadrature points
+
+include("postprocessing/quadrature-grid.jl")  # VTKQuadratureGrid — QP positions as a VTK mesh
+include("postprocessing/quadrature-query.jl") # VTKQuadratureFile + write_quadrature_data
+
 include("elements/simple_diffusion.jl")       # Example element for diffusion
 include("elements/simple_mass.jl")            # Example element for mass matrices
 include("elements/simple_hyperelasticity.jl") # Example element for hyperelasticity
@@ -70,6 +79,12 @@ include("elements/simple_linear_viscoelasticity.jl")
 export QuadratureRuleCollection, InternalVariableHandler
 export getquadraturerule
 export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
+
+export QVector, setup_qvector, get_data_for_index
+export QuadratureFerriteOperator, setup_quadrature_operator, evaluate_quadrature!
+export query_element_quadrature_data, store_quadrature_data!
+export VTKQuadratureGrid, VTKQuadratureFile, write_quadrature_data
+export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, process_query!
 
 export setup_operator, update_operator!, update_linearization!, residual!
 
