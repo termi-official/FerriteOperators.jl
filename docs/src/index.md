@@ -76,18 +76,20 @@ Users need to provide some structs and corresponding dispatches to work with Fer
 Essentially there are three super-types for elements
 
 ```@docs
-FerriteOperators.AbstractVolumetricElement
+FerriteOperators.AbstractVolumetricElementCache
 FerriteOperators.AbstractSurfaceElementCache
 FerriteOperators.AbstractInterfaceElementCache
 assemble_element!
 assemble_facet!
 assemble_interface!
 FerriteOperators.setup_element_cache
+FerriteOperators.setup_boundary_cache
+FerriteOperators.setup_interface_cache
 FerriteOperators.load_element_unknowns!
 
 ```
 
-Only `FerriteOperators.AbstractVolumetricElement` is implemented for now and it covers already all typical use-cases.
+Only `FerriteOperators.AbstractVolumetricElementCache` is implemented for now and it covers already all typical use-cases.
 
 Furthermore, each element formulation is derived from an integrator. Integrators are the bridge between elements and materials.
 Right now, these types of integrators are provided
@@ -156,17 +158,17 @@ lengths, enabling p-adaptivity and mixed meshes.
 ```@docs
 QVector
 setup_qvector
-get_data_for_index
+get_range_for_cell
 ```
 
-### Evaluation: `QuadratureFerriteOperator`
+### Evaluation: `FerriteQuadratureOperator`
 
-[`QuadratureFerriteOperator`](@ref) is a lightweight operator that drives a
+[`FerriteQuadratureOperator`](@ref) is a lightweight operator that drives a
 user-supplied function over all quadrature points and writes the results into a
 [`QVector`](@ref).
 
 ```@docs
-QuadratureFerriteOperator
+FerriteQuadratureOperator
 setup_quadrature_operator
 evaluate_quadrature!
 query_element_quadrature_data

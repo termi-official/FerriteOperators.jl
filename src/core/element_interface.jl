@@ -61,6 +61,13 @@ Ferrite.getnquadpoints(element_cache::EmptyVolumetricElementCache) = 0
 Ferrite.reinit!(element_cache::EmptyVolumetricElementCache, cell) = nothing
 
 """
+    setup_element_cache(integrator, sdh)
+
+Setup the element on a given subdofhandler.
+"""
+setup_element_cache(integrator, sdh) = EmptyVolumetricElementCache()
+
+"""
 Supertype for all caches to integrate over surfaces.
 
 Interface:
@@ -151,6 +158,11 @@ assemble_facet!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_f
 assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptySurfaceElementCache, time) = nothing
 @inline is_facet_in_cache(::FacetIndex, cell, ::EmptySurfaceElementCache) = false
 
+"""
+    setup_boundary_cache(integrator, sdh)
+
+Setup the boundary element on a given subdofhandler.
+"""
 setup_boundary_cache(integrator, sdh) = EmptySurfaceElementCache()
 
 Ferrite.getnquadpoints(element_cache::EmptySurfaceElementCache) = 0
@@ -161,7 +173,7 @@ Supertype for all caches to integrate over interfaces.
 
 Interface:
 
-    setup_interface_cache(model, qr, ip, sdh)
+    setup_interface_cache(integrator, sdh)
 
 """
 abstract type AbstractInterfaceElementCache end
@@ -197,6 +209,13 @@ assemble_interface!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache,
 assemble_interface!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptyInterfaceCache, time) = nothing
 # Update residual in nonlinear operators
 assemble_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptyInterfaceCache, time) = nothing
+
+"""
+    setup_interface_cache(integrator, sdh)
+
+Setup the interface element on a given subdofhandler.
+"""
+setup_interface_cache(integrator, sdh)
 
 Ferrite.getnquadpoints(element_cache::EmptyInterfaceCache) = 0
 Ferrite.reinit!(element_cache::EmptyInterfaceCache, cell) = nothing
