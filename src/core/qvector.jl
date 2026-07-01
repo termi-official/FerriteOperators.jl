@@ -13,7 +13,7 @@ Use [`setup_qvector`](@ref) to build a `QVector` from a [`DofHandler`](@ref) or 
 assembled operator. Use [`get_range_for_cell`](@ref) to obtain a mutable view into
 the slice owned by a particular cell.
 """
-struct QVector{T, VT <: AbstractVector{T}, OT <: AbstractVector, NT <: AbstractVector} <: AbstractVector{T}
+struct QVector{T, VT <: AbstractVector{T}, OT, NT} <: AbstractVector{T}
     data::VT
     offsets::OT
     npoints::NT
@@ -21,19 +21,23 @@ end
 
 Base.size(v::QVector)             = (length(v.data),)
 Base.getindex(v::QVector, i::Int) = getindex(v.data, i)
-Base.eltype(::QVector{T}) where T = T
+Base.eltype(::QVector{T}) where {T} = T
 
 """
     get_range_for_cell(q::QVector, cellid::Integer)
 
 Return a mutable view into the slice of `q` that belongs to cell `cellid`.
-The view has length `q.npoints[cellid]`.
+The view has length following `q.npoints`.
 """
 @inline function get_range_for_cell(r::QVector, i::Integer)
     i1 = r.offsets[i]
-    n  = r.npoints[i]
+    n  = _get_npoints_for_cell(r, i)
     return @view r.data[i1:i1+n-1]
 end
+
+_get_npoints_for_cell(r::QVector, i) = _get_npoints_for_cell(r, r.npoints, i)
+_get_npoints_for_cell(r, npoints::Integer, i) = npoints
+_get_npoints_for_cell(r, npoints::AbstractVector, i) = npoints[i]
 
 """
     setup_qvector(::Type{T}, dh::AbstractDofHandler, qrc) -> QVector{T}
@@ -67,8 +71,18 @@ function setup_qvector(::Type{T}, dh::AbstractDofHandler, qrc) where {T}
     end
     data = zeros(T, offset - 1)
 
-    # TODO try to compress representation into range+int
-    return QVector(data, offsets, npoints)
+    # Compress representation if possible
+    final_offsets = if offsets == offsets[1]:npoints[1]:offsets[end]
+        offsets[1]:npoints[1]:offsets[end]
+    else
+        offsets
+    end
+    final_npoints = if all(==(first(npoints)), npoints)
+        first(npoints)
+    else
+        npoints
+    end
+    return QVector(data, final_offsets, final_npoints)
 end
 
 """
@@ -101,6 +115,16 @@ function setup_qvector(::Type{T}, operator) where {T}
     end
     data = zeros(T, offset - 1)
 
-    # TODO try to compress representation into range+int
-    return QVector(data, offsets, npoints)
+    # Compress representation if possible
+    final_offsets = if offsets == offsets[1]:npoints[1]:offsets[end]
+        offsets[1]:npoints[1]:offsets[end]
+    else
+        offsets
+    end
+    final_npoints = if all(==(first(npoints)), npoints)
+        first(npoints)
+    else
+        npoints
+    end
+    return QVector(data, final_offsets, final_npoints)
 end
