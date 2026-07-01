@@ -756,7 +756,8 @@ end
 
         # f stores 1.0 at every QP
         evaluate_quadrature!(qop, q, u, nothing,
-            (qe, ue, cell, element_cache, pe) -> fill!(qe, 1.0))
+            (ue, qp, cell, element_cache, pe) -> 1.0
+        )
         @test all(==(1.0), q)
     end
 
@@ -768,7 +769,8 @@ end
 
         # f stores QP index (1..nqp) in each slot
         evaluate_quadrature!(qop, q, u, nothing,
-            (qe, ue, cell, element_cache, pe) -> (qe .= eachindex(qe)))
+            (ue, qp, cell, element_cache, pe) -> qp
+        )
 
         ncells = getncells(grid)
         nqp    = getnquadpoints(QuadratureRule{RefHexahedron}(2))
@@ -789,9 +791,9 @@ end
         u       = zeros(ndofs(dh))
 
         evaluate_quadrature!(qop_seq, q_seq, u, nothing,
-            (qe, ue, cell, element_cache, pe) -> fill!(qe, Float64(cellid(cell))))
+            (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
         evaluate_quadrature!(qop_par, q_par, u, nothing,
-            (qe, ue, cell, element_cache, pe) -> fill!(qe, Float64(cellid(cell))))
+            (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
         @test q_seq == q_par
     end
 end
@@ -811,7 +813,7 @@ end
     q          = setup_qvector(Float64, dh, qrc)
     u          = zeros(ndofs(dh))
     evaluate_quadrature!(qop, q, u, nothing,
-        (qe, ue, cell, element_cache, pe) -> fill!(qe, Float64(cellid(cell))))
+        (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
 
     # --- VTKQuadratureGrid is constructable from (dh, qrc) ---
     @testset "VTKQuadratureGrid construction" begin
@@ -835,7 +837,7 @@ end
         @testset "write_quadrature_data with Vec{3}" begin
             qv = setup_qvector(Vec{3, Float64}, dh, qrc)
             evaluate_quadrature!(qop, qv, u, nothing,
-                (qe, ue, cell, element_cache, pe) -> fill!(qe, Vec{3}(x -> Float64(cellid(cell)))))
+                (ue, qp, cell, element_cache, pe) -> Vec{3}(x -> Float64(cellid(cell))))
             VTKQuadratureFile(joinpath(tmpdir, "vec_data"), qgrid) do vtk
                 write_quadrature_data(vtk, qv, "coords")
             end
@@ -846,7 +848,7 @@ end
         @testset "write_quadrature_data from QuadratureDataQuery" begin
             query = prepare_quadrature_query(Float64, qop)
             process_query!(query, qop, u, nothing,
-                (qe, ue, cell, element_cache, pe) -> fill!(qe, Float64(cellid(cell))))
+                (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
             VTKQuadratureFile(joinpath(tmpdir, "from_query"), qgrid) do vtk
                 write_quadrature_data(vtk, query, "cell_id")
             end
@@ -870,7 +872,7 @@ end
     strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
     qop        = setup_quadrature_operator(strategy, integrator, dh)
     u          = zeros(ndofs(dh))
-    f_cellid   = (qe, ue, cell, element_cache, pe) -> fill!(qe, Float64(cellid(cell)))
+    f_cellid   = (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell))
 
     # --- prepare_quadrature_query builds a QVector-backed query ---
     @testset "prepare_quadrature_query" begin
@@ -914,11 +916,17 @@ end
     # --- QuadratureDataMultiQuery runs both queries in two passes ---
     @testset "QuadratureDataMultiQuery" begin
         q1    = prepare_quadrature_query(Float64, qop)
-        q2    = prepare_quadrature_query(Float64, qop)
-        multi = QuadratureDataMultiQuery([q1, q2])
-        fs    = [f_cellid, (qe, ue, cell, element_cache, pe) -> fill!(qe, 2.0)]
+        q2    = prepare_quadrature_query(Int, q1)
+        q3    = prepare_quadrature_query(Vec{3, Float64}, q1)
+        multi = QuadratureDataMultiQuery([q1, q2, q3])
+        fs    = [
+            f_cellid,
+            (ue, qp, cell, element_cache, pe) -> 2.0,
+            (ue, qp, cell, element_cache, pe) -> Vec{3, Float64}((1.0,1.0,1.0)),
+        ]
         process_query!(multi, qop, u, nothing, fs)
         @test all(q -> q > 0.0, q1.buffer)
         @test all(==(2.0), q2.buffer)
+        @test all(==(Vec{3, Float64}((1.0,1.0,1.0))), q3.buffer)
     end
 end

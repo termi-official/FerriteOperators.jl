@@ -8,7 +8,7 @@ so the user function `f(qe, ue, cell, element_cache, pe)` writes directly to
 the global [`QVector`](@ref) with no extra copy. Override this method together
 with [`store_quadrature_data!`](@ref) if your element needs a local staging buffer.
 """
-query_element_quadrature_data(element, cell, ivh, q::QVector) = get_data_for_index(q, cellid(cell))
+query_element_quadrature_data(element, cell, ivh, q::QVector) = get_range_for_cell(q, cellid(cell))
 
 """
     store_quadrature_data!(q::QVector, qe, cell, ivh, element_cache)
@@ -41,10 +41,11 @@ Fields:
     u
     p
     q
+    set
 end
 # q is the shared output — all workers write to disjoint cell slices, so it is not duplicated.
 duplicate_for_device(device, task::QuadratureEvaluationTask) =
-    QuadratureEvaluationTask(task.f, task.u, task.p, task.q)
+    QuadratureEvaluationTask(task.f, task.u, task.p, task.q, task.set)
 
 """
     QuadratureEvaluationWorkspace <: AbstractWorkspace
@@ -78,12 +79,19 @@ function create_quadrature_evaluation_workspace(element, sdh, ivh)
 end
 
 function execute_single_task!(task::QuadratureEvaluationTask, ws::QuadratureEvaluationWorkspace)
+    if task.set !== nothing && cellid(ws.cell) ∉ task.set
+        return nothing
+    end
+
     uₑ = query_element_unknown_buffer(ws.element, ws.ue)
     pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
     qₑ = query_element_quadrature_data(ws.element, ws.cell, ws.ivh, task.q)
 
     load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
-    task.f(qₑ, uₑ, ws.cell, ws.element, pₑ)
+    Ferrite.reinit!(ws.element, ws.cell)
+    for qp in 1:getnquadpoints(ws.element)
+        qₑ[qp] = task.f(uₑ, qp, ws.cell, ws.element, pₑ)
+    end
     store_quadrature_data!(task.q, qₑ, ws.cell, ws.ivh, ws.element)
 end
 
@@ -126,19 +134,19 @@ function setup_quadrature_operator(strategy, integrator, dh::AbstractDofHandler)
 end
 
 """
-    evaluate_quadrature!(op::QuadratureFerriteOperator, q::QVector, u, p, f)
+    evaluate_quadrature!(op::QuadratureFerriteOperator, q::QVector, u, p, f, [set = nothing])
 
-Evaluate `f(qe, ue, cell, element_cache, pe)` at every quadrature point
-and store results in `q`.
+Evaluate `f(ue, qp, cell, element_cache, pe, set)` at every quadrature point
+and return the result.
 
-- `qe` — mutable view into `q` for the current cell (length = nqp for that cell)
 - `ue` — element-local unknowns loaded from `u`
+- `qp` — the current quadrature point
 - `cell` — [`CellCache`](@ref) for the current cell
 - `element_cache` — element cache (user-provided subtype of
   [`AbstractVolumetricElementCache`](@ref))
 - `pe` — element-local parameters derived from `p`
 """
-function evaluate_quadrature!(op::QuadratureFerriteOperator, q::QVector, u, p, f)
-    task = QuadratureEvaluationTask(f, u, p, q)
+function evaluate_quadrature!(op::QuadratureFerriteOperator, q::QVector, u, p, f, set = nothing)
+    task = QuadratureEvaluationTask(f, u, p, q, set)
     execute_on_subdomains!(task, op.strategy, op.subdomain_caches)
 end

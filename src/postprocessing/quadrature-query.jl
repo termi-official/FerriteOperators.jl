@@ -54,7 +54,7 @@ end
 
 """
     process_query!(query::QuadratureDataQuery, op::QuadratureFerriteOperator, u, p, f)
-    process_query!(multi::QuadratureDataMultiQuery, fs, op, u, p)
+    process_query!(multi::QuadratureDataMultiQuery, op::QuadratureFerriteOperator, u, p, fs)
 
 Evaluate `f(qe, ue, cell, element_cache, pe)` at every quadrature point and store
 results in `query.buffer`.  If `query.set` is set, only cells whose ID is in that
@@ -63,17 +63,12 @@ set are evaluated; all other cells retain their current (typically zero) values.
 The multi-query form calls `process_query!` once per `(query, f)` pair.
 """
 function process_query!(query::QuadratureDataQuery, op::QuadratureFerriteOperator, u, p, f)
-    set = query.set
-    evaluate_quadrature!(op, query.buffer, u, p,
-        (qe, ue, cell, element_cache, pe) -> begin
-            if set === nothing || cellid(cell) ∈ set
-                f(qe, ue, cell, element_cache, pe)
-            end
-        end)
+    evaluate_quadrature!(op, query.buffer, u, p, f, query.set)
     return query
 end
 
 function process_query!(multi::QuadratureDataMultiQuery, op::QuadratureFerriteOperator, u, p, fs)
+    # TODO fuse fs into a single f, so we do not need to iterate multiple times
     for (query, f) in zip(multi.queries, fs)
         process_query!(query, op, u, p, f)
     end

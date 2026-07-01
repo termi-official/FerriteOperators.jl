@@ -66,6 +66,8 @@ function setup_qvector(::Type{T}, dh::AbstractDofHandler, qrc) where {T}
         offset += npoints[cellid]
     end
     data = zeros(T, offset - 1)
+
+    # TODO try to compress representation into range+int
     return QVector(data, offsets, npoints)
 end
 
@@ -98,5 +100,7 @@ function setup_qvector(::Type{T}, operator) where {T}
         offset += npoints[cellid]
     end
     data = zeros(T, offset - 1)
+
+    # TODO try to compress representation into range+int
     return QVector(data, offsets, npoints)
 end

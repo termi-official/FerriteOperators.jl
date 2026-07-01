@@ -17,7 +17,9 @@ allocate_element_unknown_vector(element_cache, sdh)  = zeros(ndofs_per_cell(sdh)
 allocate_element_residual_vector(element_cache, sdh) = zeros(ndofs_per_cell(sdh))
 load_element_unknowns!(uₑ, u, cell, ivh, element_cache)   = uₑ .= @view u[celldofs(cell)]
 store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache) = nothing
+
 Ferrite.getnquadpoints(element_cache::AbstractVolumetricElementCache) = getnquadpoints(element_cache.cv)
+Ferrite.reinit!(element_cache::AbstractVolumetricElementCache, cell) = Ferrite.reinit!(element_cache.cv, cell)
 
 @doc raw"""
     assemble_element!(Kₑ::AbstractMatrix, cell::CellCache, element_cache::AbstractVolumetricElementCache, time)
@@ -56,6 +58,7 @@ assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::Abstr
 assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, element_cache::EmptyVolumetricElementCache, time) = nothing
 # Utils
 Ferrite.getnquadpoints(element_cache::EmptyVolumetricElementCache) = 0
+Ferrite.reinit!(element_cache::EmptyVolumetricElementCache, cell) = nothing
 
 """
 Supertype for all caches to integrate over surfaces.
@@ -124,7 +127,8 @@ function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, ce
     end
 end
 
-Ferrite.getnquadpoints(element_cache::AbstractSurfaceElementCache) = getnquadpoints(element_cache.fv)
+Ferrite.getnquadpoints(element_cache::AbstractSurfaceElementCache) = Ferrite.getnquadpoints(element_cache.fv)
+Ferrite.reinit!(element_cache::AbstractSurfaceElementCache, cell) = Ferrite.reinit!(element_cache.fv, cell)
 
 """
     Utility to execute noop assembly.
@@ -150,6 +154,7 @@ assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local
 setup_boundary_cache(integrator, sdh) = EmptySurfaceElementCache()
 
 Ferrite.getnquadpoints(element_cache::EmptySurfaceElementCache) = 0
+Ferrite.reinit!(element_cache::EmptySurfaceElementCache, cell) = nothing
 
 """
 Supertype for all caches to integrate over interfaces.
@@ -194,3 +199,4 @@ assemble_interface!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::Abs
 assemble_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptyInterfaceCache, time) = nothing
 
 Ferrite.getnquadpoints(element_cache::EmptyInterfaceCache) = 0
+Ferrite.reinit!(element_cache::EmptyInterfaceCache, cell) = nothing
