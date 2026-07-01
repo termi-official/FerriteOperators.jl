@@ -134,7 +134,7 @@ function setup_quadrature_operator(strategy, integrator, dh::AbstractDofHandler)
 end
 
 """
-    evaluate_quadrature!(op::QuadratureFerriteOperator, q::QVector, u, p, f, [set = nothing])
+    evaluate_quadrature!(q::QVector, op, u, p, f, [set = nothing])
 
 Evaluate `f(ue, qp, cell, element_cache, pe, set)` at every quadrature point
 and return the result.
@@ -146,7 +146,7 @@ and return the result.
   [`AbstractVolumetricElementCache`](@ref))
 - `pe` — element-local parameters derived from `p`
 """
-function evaluate_quadrature!(op::QuadratureFerriteOperator, q::QVector, u, p, f, set = nothing)
+function evaluate_quadrature!(q::QVector, op, u, p, f, set = nothing)
     task = QuadratureEvaluationTask(f, u, p, q, set)
     execute_on_subdomains!(task, op.strategy, op.subdomain_caches)
 end

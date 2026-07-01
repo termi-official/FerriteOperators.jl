@@ -738,7 +738,7 @@ include("test_aqua.jl")
     end
 end
 
-@testset "QuadratureEvaluationTask" begin
+@testset "Quadrature Data Processing" begin
 
     grid       = generate_grid(Hexahedron, (2, 2, 2))
     dh         = DofHandler(grid)
@@ -755,7 +755,7 @@ end
         u   = zeros(ndofs(dh))
 
         # f stores 1.0 at every QP
-        evaluate_quadrature!(qop, q, u, nothing,
+        evaluate_quadrature!(q, qop, u, nothing,
             (ue, qp, cell, element_cache, pe) -> 1.0
         )
         @test all(==(1.0), q)
@@ -768,7 +768,7 @@ end
         u   = zeros(ndofs(dh))
 
         # f stores QP index (1..nqp) in each slot
-        evaluate_quadrature!(qop, q, u, nothing,
+        evaluate_quadrature!(q, qop, u, nothing,
             (ue, qp, cell, element_cache, pe) -> qp
         )
 
@@ -790,9 +790,9 @@ end
         q_par   = setup_qvector(Float64, dh, qrc)
         u       = zeros(ndofs(dh))
 
-        evaluate_quadrature!(qop_seq, q_seq, u, nothing,
+        evaluate_quadrature!(q_seq, qop_seq, u, nothing,
             (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
-        evaluate_quadrature!(qop_par, q_par, u, nothing,
+        evaluate_quadrature!(q_par, qop_par, u, nothing,
             (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
         @test q_seq == q_par
     end
@@ -812,7 +812,7 @@ end
     qop        = setup_quadrature_operator(strategy, integrator, dh)
     q          = setup_qvector(Float64, dh, qrc)
     u          = zeros(ndofs(dh))
-    evaluate_quadrature!(qop, q, u, nothing,
+    evaluate_quadrature!(q, qop, u, nothing,
         (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
 
     # --- VTKQuadratureGrid is constructable from (dh, qrc) ---
@@ -836,7 +836,7 @@ end
         # --- write_quadrature_data accepts Vec{3} data ---
         @testset "write_quadrature_data with Vec{3}" begin
             qv = setup_qvector(Vec{3, Float64}, dh, qrc)
-            evaluate_quadrature!(qop, qv, u, nothing,
+            evaluate_quadrature!(qv, qop, u, nothing,
                 (ue, qp, cell, element_cache, pe) -> Vec{3}(x -> Float64(cellid(cell))))
             VTKQuadratureFile(joinpath(tmpdir, "vec_data"), qgrid) do vtk
                 write_quadrature_data(vtk, qv, "coords")

@@ -27,7 +27,7 @@ struct QuadratureDataMultiQuery{Q <: QuadratureDataQuery}
 end
 
 """
-    prepare_quadrature_query(::Type{T}, op::QuadratureFerriteOperator; set = nothing)
+    prepare_quadrature_query(::Type{T}, op; set = nothing)
     prepare_quadrature_query(::Type{T}, prototype::QuadratureDataQuery)
 
 Build a [`QuadratureDataQuery{T}`](@ref).
@@ -39,7 +39,7 @@ The second form reuses the offset/npoints layout of an existing `prototype`
 query, useful for building multiple queries over the same mesh without
 recomputing the layout.
 """
-function prepare_quadrature_query(::Type{T}, op::QuadratureFerriteOperator;
+function prepare_quadrature_query(::Type{T}, op;
                                   set::Union{Nothing, AbstractSet{Int}} = nothing) where {T}
     buffer = setup_qvector(T, op)
     return QuadratureDataQuery(buffer, set)
@@ -53,8 +53,8 @@ function prepare_quadrature_query(::Type{T}, proto::QuadratureDataQuery) where {
 end
 
 """
-    process_query!(query::QuadratureDataQuery, op::QuadratureFerriteOperator, u, p, f)
-    process_query!(multi::QuadratureDataMultiQuery, op::QuadratureFerriteOperator, u, p, fs)
+    process_query!(query::QuadratureDataQuery, op, u, p, f)
+    process_query!(multi::QuadratureDataMultiQuery, op, u, p, fs)
 
 Evaluate `f(qe, ue, cell, element_cache, pe)` at every quadrature point and store
 results in `query.buffer`.  If `query.set` is set, only cells whose ID is in that
@@ -62,12 +62,12 @@ set are evaluated; all other cells retain their current (typically zero) values.
 
 The multi-query form calls `process_query!` once per `(query, f)` pair.
 """
-function process_query!(query::QuadratureDataQuery, op::QuadratureFerriteOperator, u, p, f)
-    evaluate_quadrature!(op, query.buffer, u, p, f, query.set)
+function process_query!(query::QuadratureDataQuery, op, u, p, f)
+    evaluate_quadrature!(query.buffer, op, u, p, f, query.set)
     return query
 end
 
-function process_query!(multi::QuadratureDataMultiQuery, op::QuadratureFerriteOperator, u, p, fs)
+function process_query!(multi::QuadratureDataMultiQuery, op, u, p, fs)
     # TODO fuse fs into a single f, so we do not need to iterate multiple times
     for (query, f) in zip(multi.queries, fs)
         process_query!(query, op, u, p, f)
