@@ -125,11 +125,11 @@ Compute the work partition for the given strategy and SubDofHandler.
 Returns an iterable of iterables: the outer level represents synchronization barriers
 (e.g. colors), the inner level represents parallelizable work items (cell IDs).
 """
-compute_partition(::SequentialAssemblyStrategy, sdh) = (sdh.cellset,)
-compute_partition(::ElementAssemblyOperatorStrategy, sdh) = (sdh.cellset,)
+compute_partition(::SequentialAssemblyStrategy, sdh) = (collect(sdh.cellset),)
+compute_partition(::ElementAssemblyOperatorStrategy, sdh) = (collect(sdh.cellset),)
 
 function compute_partition(strategy::PerColorAssemblyStrategy, sdh)
-    return Ferrite.create_coloring(get_grid(sdh.dh), sdh.cellset; alg=strategy.coloralg)
+    return Ferrite.create_coloring(get_grid(sdh.dh), collect(sdh.cellset); alg=strategy.coloralg)
 end
 
 """
