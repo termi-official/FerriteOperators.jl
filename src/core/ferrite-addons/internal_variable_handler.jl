@@ -1,11 +1,18 @@
 # This is the easiest solution for now.
 # It is assumed that the element knows how many dofs per quadrature point are there locally.
 @concrete mutable struct InternalVariableHandler <: AbstractDofHandler
+    # `ncells+1` offsets relative to the start of the internal variable block, with
+    # `internal_variable_offsets[1] == 0`, such that cell `cid` owns the relative entries
+    # `internal_variable_offsets[cid]+1 : internal_variable_offsets[cid+1]`.
     internal_variable_offsets
+    # Where the block starts in the solution vector, i.e. `ndofs(dh)` of the handler it was built for.
+    base_offset <: Integer
     ndofs <: Integer
 end
 Ferrite.ndofs(lvh::InternalVariableHandler) = lvh.ndofs
-internal_variable_offset(lvh::InternalVariableHandler, cellid::Int) = lvh.internal_variable_offsets[cellid]
+# Both are absolute, i.e. they address the solution vector and not the internal variable block.
+internal_variable_offset(lvh::InternalVariableHandler, cellid::Int) = lvh.base_offset + lvh.internal_variable_offsets[cellid]
+internal_variable_range(lvh::InternalVariableHandler, cellid::Int)  = (internal_variable_offset(lvh, cellid)+1):(lvh.base_offset + lvh.internal_variable_offsets[cellid+1])
 Ferrite.close!(lvh::InternalVariableHandler) = nothing
 
 # Offsets are shared read-only data, so duplication just returns the same instance.
