@@ -652,3 +652,281 @@ end
 end
 
 include("test_aqua.jl")
+
+@testset "QVector" begin
+    import FerriteOperators: QVector, setup_qvector, get_range_for_cell
+
+    # --- Basic construction and AbstractVector interface ---
+    @testset "AbstractVector interface" begin
+        data    = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        offsets = [1, 3, 5]   # cell 1 starts at 1, cell 2 at 3, cell 3 at 5
+        npoints = [2, 2, 2]
+        qv = QVector(data, offsets, npoints)
+        @test length(qv) == 6
+        @test qv[3] == 3.0
+        @test eltype(qv) == Float64
+        @test collect(qv) == data
+    end
+
+    # --- Per-cell view ---
+    @testset "get_range_for_cell" begin
+        data    = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+        offsets = [1, 3, 5]
+        npoints = [2, 2, 2]
+        qv = QVector(data, offsets, npoints)
+        @test get_range_for_cell(qv, 1) == [10.0, 20.0]
+        @test get_range_for_cell(qv, 2) == [30.0, 40.0]
+        @test get_range_for_cell(qv, 3) == [50.0, 60.0]
+        # Mutations through the view affect the underlying data
+        get_range_for_cell(qv, 2)[1] = 99.0
+        @test qv[3] == 99.0
+    end
+
+    # --- setup_qvector from DofHandler + QuadratureRuleCollection ---
+    @testset "setup_qvector from DofHandler + QRC" begin
+        grid   = generate_grid(Hexahedron, (2, 2, 2))
+        dh     = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefHexahedron, 1}())
+        close!(dh)
+        qrc    = QuadratureRuleCollection(2)   # 2^3 = 8 QPs per hex cell
+        ncells = getncells(grid)               # 8 cells
+
+        qv = setup_qvector(Float64, dh, qrc)
+        @test length(qv) == ncells * 8
+        @test eltype(qv) == Float64
+        for cellid in 1:ncells
+            @test length(get_range_for_cell(qv, cellid)) == 8
+        end
+    end
+
+    # --- setup_qvector from operator ---
+    @testset "setup_qvector from operator" begin
+        grid       = generate_grid(Hexahedron, (2, 2, 2))
+        dh         = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefHexahedron, 1}())
+        close!(dh)
+        qrc        = QuadratureRuleCollection(2)
+        integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+        strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+        op         = setup_operator(strategy, integrator, dh)
+
+        qv_op = setup_qvector(Float64, op)
+        qv_dh = setup_qvector(Float64, dh, qrc)
+        @test length(qv_op) == length(qv_dh)
+        @test eltype(qv_op) == Float64
+    end
+
+    # --- Non-contiguous cell sets: offsets are still correct ---
+    @testset "setup_qvector non-contiguous cellsets" begin
+        grid = generate_grid(Hexahedron, (4, 1, 1))
+        addcellset!(grid, "left",  x -> x[1] ≤ 0.0)  # cells not necessarily 1..2
+        addcellset!(grid, "right", x -> x[1] ≥ 0.0)
+        dh   = DofHandler(grid)
+        sdh1 = SubDofHandler(dh, getcellset(grid, "left"))
+        add!(sdh1, :u, Lagrange{RefHexahedron, 1}())
+        sdh2 = SubDofHandler(dh, getcellset(grid, "right"))
+        add!(sdh2, :u, Lagrange{RefHexahedron, 1}())
+        close!(dh)
+        qrc = QuadratureRuleCollection(2)  # 8 QPs per hex
+        ncells = getncells(grid)
+
+        qv = setup_qvector(Float64, dh, qrc)
+        @test length(qv) == ncells * 8
+        for cellid in 1:ncells
+            @test length(get_range_for_cell(qv, cellid)) == 8
+        end
+    end
+end
+
+@testset "Quadrature Data Processing" begin
+
+    grid       = generate_grid(Hexahedron, (2, 2, 2))
+    dh         = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefHexahedron, 1}())
+    close!(dh)
+    qrc        = QuadratureRuleCollection(2)
+    integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+    strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+    # --- evaluate_quadrature! fills QVector ---
+    @testset "evaluate_quadrature! fills QVector" begin
+        qop = setup_quadrature_operator(strategy, integrator, dh)
+        q   = setup_qvector(Float64, dh, qrc)
+        u   = zeros(ndofs(dh))
+
+        # f stores 1.0 at every QP
+        evaluate_quadrature!(q, qop, u, nothing,
+            (ue, qp, cell, element_cache, pe) -> 1.0
+        )
+        @test all(==(1.0), q)
+    end
+
+    # --- Result is consistent with manual per-cell indexing ---
+    @testset "evaluate_quadrature! consistent with per-cell access" begin
+        qop = setup_quadrature_operator(strategy, integrator, dh)
+        q   = setup_qvector(Float64, dh, qrc)
+        u   = zeros(ndofs(dh))
+
+        # f stores QP index (1..nqp) in each slot
+        evaluate_quadrature!(q, qop, u, nothing,
+            (ue, qp, cell, element_cache, pe) -> qp
+        )
+
+        ncells = getncells(grid)
+        nqp    = getnquadpoints(QuadratureRule{RefHexahedron}(2))
+        @test length(q) == ncells * nqp
+        for cellid in 1:ncells
+            @test get_range_for_cell(q, cellid) == collect(1:nqp)
+        end
+    end
+
+    # --- Polyester (threaded) device produces the same result ---
+    @testset "PolyesterDevice consistency" begin
+        strategy_seq = SequentialAssemblyStrategy(SequentialCPUDevice())
+        strategy_par = PerColorAssemblyStrategy(PolyesterDevice(4))
+        qop_seq = setup_operator(strategy_seq, integrator, dh)
+        qop_par = setup_operator(strategy_par, integrator, dh)
+        q_seq   = setup_qvector(Float64, dh, qrc)
+        q_par   = setup_qvector(Float64, dh, qrc)
+        u       = zeros(ndofs(dh))
+
+        evaluate_quadrature!(q_seq, qop_seq, u, nothing,
+            (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
+        evaluate_quadrature!(q_par, qop_par, u, nothing,
+            (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
+        @test q_seq == q_par
+    end
+end
+
+@testset "VTKQuadratureFile" begin
+    import FerriteOperators: VTKQuadratureFile, VTKQuadratureGrid, write_quadrature_data,
+                              QuadratureDataQuery, prepare_quadrature_query, process_query!
+
+    grid       = generate_grid(Hexahedron, (2, 2, 2))
+    dh         = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefHexahedron, 1}())
+    close!(dh)
+    qrc        = QuadratureRuleCollection(2)
+    integrator = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
+    strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+    qop        = setup_operator(strategy, integrator, dh)
+    q          = setup_qvector(Float64, dh, qrc)
+    u          = zeros(ndofs(dh))
+    evaluate_quadrature!(q, qop, u, nothing,
+        (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
+
+    # --- VTKQuadratureGrid is constructable from (dh, qrc) ---
+    @testset "VTKQuadratureGrid construction" begin
+        qgrid = VTKQuadratureGrid(dh, qrc)
+        @test Ferrite.getnnodes(qgrid) == length(q)   # one "node" per QP
+    end
+
+    mktempdir() do tmpdir
+        qgrid = VTKQuadratureGrid(dh, qrc)
+        path  = joinpath(tmpdir, "test_qp")
+
+        # --- do-block syntax, analogous to VTKGridFile ---
+        @testset "do-block creates and closes file" begin
+            VTKQuadratureFile(path, qgrid) do vtk
+                write_quadrature_data(vtk, q, "cell_id")
+            end
+            @test isfile(path * ".vtu")
+        end
+
+        # --- write_quadrature_data accepts Vec{3} data ---
+        @testset "write_quadrature_data with Vec{3}" begin
+            qv = setup_qvector(Vec{3, Float64}, dh, qrc)
+            evaluate_quadrature!(qv, qop, u, nothing,
+                (ue, qp, cell, element_cache, pe) -> Vec{3}(x -> Float64(cellid(cell))))
+            VTKQuadratureFile(joinpath(tmpdir, "vec_data"), qgrid) do vtk
+                write_quadrature_data(vtk, qv, "coords")
+            end
+            @test isfile(joinpath(tmpdir, "vec_data.vtu"))
+        end
+
+        # --- write_quadrature_data accepts a QuadratureDataQuery directly ---
+        @testset "write_quadrature_data from QuadratureDataQuery" begin
+            query = prepare_quadrature_query(Float64, qop)
+            process_query!(query, qop, u, nothing,
+                (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
+            VTKQuadratureFile(joinpath(tmpdir, "from_query"), qgrid) do vtk
+                write_quadrature_data(vtk, query, "cell_id")
+            end
+            @test isfile(joinpath(tmpdir, "from_query.vtu"))
+        end
+    end
+end
+
+@testset "QuadratureDataQuery" begin
+    import FerriteOperators: QuadratureDataQuery, QuadratureDataMultiQuery,
+                              prepare_quadrature_query, process_query!
+
+    grid       = generate_grid(Hexahedron, (4, 1, 1))
+    addcellset!(grid, "left",  x -> x[1] ≤ 0.0)
+    addcellset!(grid, "right", x -> x[1] ≥ 0.0)
+    dh         = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefHexahedron, 1}())
+    close!(dh)
+    qrc        = QuadratureRuleCollection(2)
+    integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+    strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+    qop        = setup_operator(strategy, integrator, dh)
+    u          = zeros(ndofs(dh))
+    f_cellid   = (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell))
+
+    # --- prepare_quadrature_query builds a QVector-backed query ---
+    @testset "prepare_quadrature_query" begin
+        query = prepare_quadrature_query(Float64, qop)
+        @test query.buffer isa QVector{Float64}
+        @test length(query.buffer) == getncells(grid) * 8   # 4 cells × 8 QPs each
+        @test query.set === nothing                          # no filter by default
+    end
+
+    # --- process_query! fills the underlying QVector ---
+    @testset "process_query! fills buffer" begin
+        query = prepare_quadrature_query(Float64, qop)
+        process_query!(query, qop, u, nothing, f_cellid)
+        # Every QP slot must hold the cell ID it belongs to
+        for cellid_val in 1:getncells(grid)
+            @test all(==(Float64(cellid_val)), get_range_for_cell(query.buffer, cellid_val))
+        end
+    end
+
+    # --- process_query! respects the cell-set filter ---
+    @testset "process_query! with cell-set filter" begin
+        left_cells = getcellset(grid, "left")
+        query = prepare_quadrature_query(Float64, qop; set = left_cells)
+        @test query.set === left_cells
+        process_query!(query, qop, u, nothing, f_cellid)
+        # Cells in the left set must be filled; cells outside must remain zero
+        for cellid_val in 1:getncells(grid)
+            expected = cellid_val ∈ left_cells ? Float64(cellid_val) : 0.0
+            @test all(==(expected), get_range_for_cell(query.buffer, cellid_val))
+        end
+    end
+
+    # --- prepare_quadrature_query from a prototype reuses the layout ---
+    @testset "prepare_quadrature_query from prototype" begin
+        proto  = prepare_quadrature_query(Float64, qop)
+        query2 = prepare_quadrature_query(Vec{3, Float64}, proto)
+        @test query2.buffer isa QVector{Vec{3, Float64}}
+        @test length(query2.buffer) == length(proto.buffer)
+    end
+
+    # --- QuadratureDataMultiQuery runs both queries in two passes ---
+    @testset "QuadratureDataMultiQuery" begin
+        q1    = prepare_quadrature_query(Float64, qop)
+        q2    = prepare_quadrature_query(Int, q1)
+        q3    = prepare_quadrature_query(Vec{3, Float64}, q1)
+        multi = QuadratureDataMultiQuery([q1, q2, q3])
+        fs    = [
+            f_cellid,
+            (ue, qp, cell, element_cache, pe) -> 2.0,
+            (ue, qp, cell, element_cache, pe) -> Vec{3, Float64}((1.0,1.0,1.0)),
+        ]
+        process_query!(multi, qop, u, nothing, fs)
+        @test all(q -> q > 0.0, q1.buffer)
+        @test all(==(2.0), q2.buffer)
+        @test all(==(Vec{3, Float64}((1.0,1.0,1.0))), q3.buffer)
+    end
+end

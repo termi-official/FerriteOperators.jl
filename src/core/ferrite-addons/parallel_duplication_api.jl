@@ -1,6 +1,6 @@
 # Adaption of the API presented in Ferrite.jl#1070 for general devices with some tweaks. Essentially a Adapt.jl wrapper.
-function duplicate_for_device(device, asm::Ferrite.CSCAssembler)
-    return Ferrite.CSCAssembler(
+function duplicate_for_device(device, asm::Ferrite.CSCAssembler{T, Ti, TK, atomic}) where {T, Ti, TK, atomic}
+    return Ferrite.CSCAssembler{T, Ti, TK, atomic}(
         asm.K,
         asm.f,
         duplicate_for_device(device, asm.rowpermutation),
@@ -9,8 +9,8 @@ function duplicate_for_device(device, asm::Ferrite.CSCAssembler)
         duplicate_for_device(device, asm.sortedcoldofs),
     )
 end
-function duplicate_for_device(device, asm::Ferrite.SymmetricCSCAssembler)
-    return Ferrite.SymmetricCSCAssembler(
+function duplicate_for_device(device, asm::Ferrite.SymmetricCSCAssembler{T, Ti, TK, atomic}) where {T, Ti, TK, atomic}
+    return Ferrite.SymmetricCSCAssembler{T, Ti, TK, atomic}(
         asm.K,
         asm.f,
         duplicate_for_device(device, asm.rowpermutation),
@@ -20,8 +20,8 @@ function duplicate_for_device(device, asm::Ferrite.SymmetricCSCAssembler)
     )
 end
 
-function duplicate_for_device(device, asm::Ferrite.CSRAssembler)
-    return Ferrite.CSRAssembler(
+function duplicate_for_device(device, asm::Ferrite.CSRAssembler{T, Ti, TK, atomic}) where {T, Ti, TK, atomic}
+    return Ferrite.CSRAssembler{T, Ti, TK, atomic}(
         asm.K,
         asm.f,
         duplicate_for_device(device, asm.rowpermutation),
