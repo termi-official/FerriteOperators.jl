@@ -77,6 +77,7 @@ include("elements/simple_hyperelasticity.jl") # Example element for hyperelastic
 include("elements/simple_linear_viscoelasticity.jl")
 
 export QuadratureRuleCollection, InternalVariableHandler
+export internal_variable_offset, internal_variable_range
 export getquadraturerule
 export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
 

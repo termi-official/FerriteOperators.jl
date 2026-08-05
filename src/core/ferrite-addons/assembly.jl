@@ -1,4 +1,4 @@
-strategy_needs_atomic(::AbstractAssemblyStrategy) = true
+strategy_needs_atomic(strategy::AbstractAssemblyStrategy) = !(strategy.device isa SequentialCPUDevice)
 strategy_needs_atomic(::PerColorAssemblyStrategy) = false
 
 struct VectorAssembler{T, VT <: AbstractVector{T}, atomic} <: Ferrite.AbstractAssembler{T}

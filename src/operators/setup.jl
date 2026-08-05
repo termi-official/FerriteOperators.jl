@@ -18,12 +18,14 @@ function setup_internal_variable_handler(integrator::AbstractCondensedNonlinearI
         end
     end
     @assert all(num_dofs_per_element .≥ 0) "Number of internal dofs must be non-negative!"
+    # `num_dofs_per_element` is padded with a leading zero, so the cumulative sum is exactly the
+    # `ncells+1` block relative offsets the handler expects.
     offsets = cumsum(num_dofs_per_element)
-    return InternalVariableHandler(offsets[1:end-1] .+ ndofs(dh), offsets[end])
+    return InternalVariableHandler(offsets, ndofs(dh), offsets[end])
 end
 
 function setup_internal_variable_handler(integrator, element_caches, dh)
-    return InternalVariableHandler(nothing, 0)
+    return InternalVariableHandler(nothing, 0, 0)
 end
 
 function setup_subdomain_caches(strategy, integrator, dh)
