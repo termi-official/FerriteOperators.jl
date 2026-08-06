@@ -194,20 +194,20 @@ end
 end
 duplicate_for_device(device, assembler::EAOperatorAssembler) = assembler
 
-function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, f::Vector{T}; fillzero::Bool=true) where T
+function Ferrite.start_assemble(strategy::AssemblyStrategy{<:ElementAssemblyData}, f::Vector{T}; fillzero::Bool=true) where T
     fillzero && fill!(f, 0.0)
-    fillzero && fill!(strategy.eadata, 0.0)
-    return EAOperatorAssembler(strategy.device, nothing, strategy.eadata, f)
+    fillzero && fill!(strategy.form.eadata, 0.0)
+    return EAOperatorAssembler(strategy.device, nothing, strategy.form.eadata, f)
 end
-function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, element_matrix::EAOperator; fillzero::Bool=true)
+function Ferrite.start_assemble(strategy::AssemblyStrategy{<:ElementAssemblyData}, element_matrix::EAOperator; fillzero::Bool=true)
     fillzero && fill!(element_matrix.element_matrices.data, 0.0)
     return EAOperatorAssembler(strategy.device, element_matrix, nothing, nothing)
 end
-function Ferrite.start_assemble(strategy::ElementAssemblyOperatorStrategy, element_matrix::EAOperator, f::AbstractVector; fillzero::Bool=true)
+function Ferrite.start_assemble(strategy::AssemblyStrategy{<:ElementAssemblyData}, element_matrix::EAOperator, f::AbstractVector; fillzero::Bool=true)
     fillzero && fill!(element_matrix.element_matrices.data, 0.0)
     fillzero && fill!(f, 0.0)
-    fillzero && fill!(strategy.eadata, 0.0)
-    return EAOperatorAssembler(strategy.device, element_matrix, strategy.eadata, f)
+    fillzero && fill!(strategy.form.eadata, 0.0)
+    return EAOperatorAssembler(strategy.device, element_matrix, strategy.form.eadata, f)
 end
 
 function Ferrite.assemble!(assembler::EAOperatorAssembler, cell::CellCache, Kₑ::AbstractMatrix)
@@ -253,7 +253,7 @@ end
 
 # TODO support for DG
 # TODO switch input from strategy to a cache holding EA info
-function create_system_matrix(strategy::ElementAssemblyOperatorStrategy, dh)
+function create_system_matrix(strategy::AssemblyStrategy{<:ElementAssemblyData}, dh)
     (; device) = strategy
 
     ValueType = value_type(device)

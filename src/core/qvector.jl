@@ -89,13 +89,13 @@ The number of quadrature points per cell is determined from the element caches
 stored in the operator's subdomain caches via `getnquadpoints`.
 """
 function setup_qvector(::Type{T}, operator) where {T}
-    dh     = operator.dh
+    dh     = operator.engine.dh
     grid   = get_grid(dh)
     ncells = getncells(grid)
     offsets = zeros(Int, ncells)
     npoints = zeros(Int, ncells)
 
-    for sc in operator.subdomain_caches
+    for sc in operator.engine.subdomain_caches
         domain = sc.domain
         nqp    = getnquadpoints(domain.element)
         for cellid in domain.sdh.cellset

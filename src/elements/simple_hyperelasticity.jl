@@ -123,3 +123,14 @@ function setup_element_cache(element_model::SimpleHyperelasticityIntegrator, sdh
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleHyperelasticityElementCache(element_model.ψ, CellValues(qr, ip, ip_geo))
 end
+
+# v2 request protocol. The legacy arity methods above stay callable for
+# composite caches until those are reworked; the kernels are shared.
+implements_v2_kernels(::Type{<:SimpleHyperelasticityElementCache}) = true
+provides_analytic(::Type{<:SimpleHyperelasticityElementCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
+assemble_cell!(req::ResidualRequest, cache::SimpleHyperelasticityElementCache, args::KernelArgs) =
+    assemble_element!(req.r, args.states.u, args.cell, cache, args.p)
+assemble_cell!(req::JacobianRequest{:u}, cache::SimpleHyperelasticityElementCache, args::KernelArgs) =
+    assemble_element!(req.K, args.states.u, args.cell, cache, args.p)
+assemble_cell!(req::JacobianResidualRequest, cache::SimpleHyperelasticityElementCache, args::KernelArgs) =
+    assemble_element!(req.K, req.r, args.states.u, args.cell, cache, args.p)

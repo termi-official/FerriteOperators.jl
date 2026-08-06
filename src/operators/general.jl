@@ -20,11 +20,27 @@ end
     partition
 end
 
+"""
+    AssemblyEngine
+
+The assembly machinery shared by all operators: the execution strategy, the
+per-subdomain caches (workspaces + partitions), and the dof handler the
+operator assembles against. Operators are payload (matrices/vectors) plus an
+engine plus their integrator.
+"""
+@concrete struct AssemblyEngine
+    strategy
+    subdomain_caches
+    dh
+end
+
 function execute_on_subdomains!(task, strategy, subdomain_caches)
     for (subdomain_id, sc) in enumerate(subdomain_caches)
         @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
     end
 end
+execute_on_subdomains!(task, engine::AssemblyEngine) =
+    execute_on_subdomains!(task, engine.strategy, engine.subdomain_caches)
 
 """
     AbstractNonlinearOperator

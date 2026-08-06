@@ -54,3 +54,24 @@ function setup_element_cache(element_model::SimpleBilinearDiffusionIntegrator, s
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleBilinearDiffusionElementCache(element_model.D, CellValues(qr, ip, ip_geo))
 end
+
+# v2 request protocol; the legacy arity method stays for composite caches.
+implements_v2_kernels(::Type{<:SimpleBilinearDiffusionElementCache}) = true
+provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind) = true
+assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearDiffusionElementCache, args::KernelArgs) =
+    assemble_element!(req.K, args.cell, cache, args.p)
+# The residual of a linear element is just the element matrix acting on the
+# element vector — mandatory so the element composes into nonlinear operators
+# and AD-based sensitivities.
+function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearDiffusionElementCache, args::KernelArgs)
+    (; cellvalues, D) = cache
+    uₑ = args.states.u
+    reinit!(cellvalues, args.cell)
+    for qp in 1:getnquadpoints(cellvalues)
+        dΩ = getdetJdV(cellvalues, qp)
+        ∇u = function_gradient(cellvalues, qp, uₑ)
+        for i in 1:getnbasefunctions(cellvalues)
+            req.r[i] += D * (∇u ⋅ shape_gradient(cellvalues, qp, i)) * dΩ
+        end
+    end
+end

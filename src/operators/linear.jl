@@ -1,8 +1,6 @@
 @concrete struct LinearFerriteOperator <: AbstractLinearOperator
     b
-    strategy
-    subdomain_caches
-    dh
+    engine
     integrator
 end
 

@@ -149,7 +149,7 @@ evaluated; the remaining entries of `q` are left untouched.
 """
 function evaluate_quadrature!(q::QVector, op, u, p, f, set = nothing)
     # TODO optimize this. We only need to swap the workspace.
-    qop = setup_quadrature_operator(op.strategy, op.integrator, op.dh)
+    qop = setup_quadrature_operator(op.engine.strategy, op.integrator, op.engine.dh)
     evaluate_quadrature!(q::QVector, qop, u, p, f, set)
 end
 

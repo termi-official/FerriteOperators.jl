@@ -1,5 +1,9 @@
-strategy_needs_atomic(strategy::AbstractAssemblyStrategy) = !(strategy.device isa SequentialCPUDevice)
-strategy_needs_atomic(::PerColorAssemblyStrategy) = false
+# Atomic scatter is needed when a parallel device writes into shared global
+# storage without color isolation. Element-assembly scatter targets are
+# per-element private, so the form axis exempts them entirely.
+strategy_needs_atomic(strategy::AssemblyStrategy) = needs_atomic(strategy.form, strategy.scheduling, strategy.device)
+needs_atomic(::FullAssembly, scheduling, device) = !(device isa SequentialCPUDevice) && !(scheduling isa ColoredScheduling)
+needs_atomic(::AbstractAssemblyForm, scheduling, device) = false
 
 struct VectorAssembler{T, VT <: AbstractVector{T}, atomic} <: Ferrite.AbstractAssembler{T}
     f::VT
@@ -25,6 +29,44 @@ function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic}, cel
 end
 finalize_assembly!(assembler::Ferrite.AbstractAssembler) = nothing
 finalize_assembly!(assembler::AbstractVector) = nothing
+
+# Sensitivity scatter targets. Deliberately not Ferrite.AbstractAssembler:
+# their column/entry layout is the parameter space, not the dof space, so the
+# celldofs-scatter convenience methods above must never match them.
+struct ParameterJacobianAssembler{T, MT <: AbstractMatrix{T}, atomic}
+    B::MT   # residual_size × nθ
+end
+function Ferrite.assemble!(assembler::ParameterJacobianAssembler{<:Any, <:Any, atomic}, cell::CellCache, Bₑ::AbstractMatrix) where {atomic}
+    for j in axes(Bₑ, 2)
+        for (i, dof) in enumerate(celldofs(cell))
+            if atomic
+                Atomix.@atomic assembler.B[dof, j] += Bₑ[i, j]
+            else
+                assembler.B[dof, j] += Bₑ[i, j]
+            end
+        end
+    end
+    return
+end
+
+struct ParameterVJPAssembler{T, VT <: AbstractVector{T}, atomic}
+    g::VT   # length nθ
+end
+function Ferrite.assemble!(assembler::ParameterVJPAssembler{<:Any, <:Any, atomic}, cell::CellCache, gₑ::AbstractVector) where {atomic}
+    for i in eachindex(gₑ)
+        if atomic
+            Atomix.@atomic assembler.g[i] += gₑ[i]
+        else
+            assembler.g[i] += gₑ[i]
+        end
+    end
+    return
+end
+
+duplicate_for_device(device, a::ParameterJacobianAssembler) = a
+duplicate_for_device(device, a::ParameterVJPAssembler) = a
+finalize_assembly!(::ParameterJacobianAssembler) = nothing
+finalize_assembly!(::ParameterVJPAssembler) = nothing
 
 allocate_vector(::Vector{T}, dh) where T = zeros(T, ndofs(dh))
 allocate_vector(::Type{Vector{T}}, dh) where T = zeros(T, ndofs(dh))

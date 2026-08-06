@@ -30,6 +30,7 @@ end
 
 function setup_subdomain_caches(strategy, integrator, dh)
     element_caches  = setup_elements(integrator, dh)
+    foreach(validate_element_cache, element_caches)
     boundary_caches = setup_boundaries(integrator, dh)
     ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
     device          = strategy.device
@@ -42,46 +43,28 @@ function setup_subdomain_caches(strategy, integrator, dh)
     end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
+function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
-    A                 = create_system_matrix(operator_strategy, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
+    return AssemblyEngine(operator_strategy, subdomain_caches, dh)
+end
 
-    return BilinearFerriteOperator(
-        A,
-        operator_strategy,
-        subdomain_caches,
-        dh,
-        integrator,
-    )
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
+    engine = setup_engine(strategy, integrator, dh)
+    A      = create_system_matrix(engine.strategy, dh)
+    return BilinearFerriteOperator(A, engine, integrator)
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
-    J                 = create_system_matrix(operator_strategy, dh)
-    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
-
-    return LinearizedFerriteOperator(
-        J,
-        operator_strategy,
-        subdomain_caches,
-        dh,
-        integrator,
-    )
+    engine = setup_engine(strategy, integrator, dh)
+    J      = create_system_matrix(engine.strategy, dh)
+    return LinearizedFerriteOperator(J, engine, integrator)
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
-    b                 = create_system_vector(operator_strategy, dh)
-    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
-
-    return LinearFerriteOperator(
-        b,
-        operator_strategy,
-        subdomain_caches,
-        dh,
-        integrator,
-    )
+    engine = setup_engine(strategy, integrator, dh)
+    b      = create_system_vector(engine.strategy, dh)
+    return LinearFerriteOperator(b, engine, integrator)
 end
 
 """
@@ -133,7 +116,7 @@ function setup_transfer_operator(
         dh_row::DofHandler,
         dh_col::DofHandler,
     )
-    strategy isa SequentialAssemblyStrategy || throw(ArgumentError("Transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"))
+    (strategy isa AssemblyStrategy && strategy.form isa FullAssembly && strategy.scheduling isa SequentialScheduling) || throw(ArgumentError("Transfer operators currently only support sequential full-assembly strategies (got $(typeof(strategy)))"))
     strategy.device isa SequentialCPUDevice || throw(ArgumentError("Transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"))
     @assert get_grid(dh_row) === get_grid(dh_col) "Both DofHandlers must share the same grid"
     @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) "Mismatch in number of subdomains"
@@ -208,7 +191,7 @@ function setup_nested_transfer_operator(
         fine2coarse::AbstractVector{Int},
         child_ref_coords::AbstractVector,
     )
-    strategy isa SequentialAssemblyStrategy || throw(ArgumentError("Nested transfer operators currently only support SequentialAssemblyStrategy (got $(typeof(strategy)))"))
+    (strategy isa AssemblyStrategy && strategy.form isa FullAssembly && strategy.scheduling isa SequentialScheduling) || throw(ArgumentError("Nested transfer operators currently only support sequential full-assembly strategies (got $(typeof(strategy)))"))
     strategy.device isa SequentialCPUDevice || throw(ArgumentError("Nested transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"))
     Tv  = value_type(strategy.device)
     sp  = init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)

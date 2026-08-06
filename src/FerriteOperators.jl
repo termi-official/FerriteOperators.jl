@@ -10,7 +10,9 @@ import SparseArrays: AbstractSparseMatrixCSC
 
 using ConcreteStructs
 
-import LinearAlgebra: mul!, ldiv!, qr, cholesky!, Symmetric
+import LinearAlgebra: mul!, ldiv!, qr, cholesky!, Symmetric, dot
+
+import ForwardDiff
 
 import Base: *, +, -, @kwdef, @propagate_inbounds
 
@@ -30,6 +32,8 @@ import Ferrite: nnodes_per_cell, cellnodes!, getcoordinates!
 
 include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or GPUs)
 include("core/strategy.jl")  # Utilities to control the assembly strategy
+include("core/requests.jl")  # Assembly requests: the element interface v2 contract
+include("core/ad.jl")        # ForwardDiff fallbacks deriving requests from residual kernels
 include("core/tasks.jl")     # Contains the basic task system
 include("core/iterators.jl") # Transfer cell iterators for two-DofHandler assembly
 
@@ -86,6 +90,12 @@ export VTKQuadratureGrid, VTKQuadratureFile, write_quadrature_data
 export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, process_query!
 
 export setup_operator, update_operator!, update_linearization!, residual!
+export update_parameter_jacobian!, parameter_vjp!, time_sensitivity!
+export parameter_vector, rebuild_parameters
+export TimeIntegrationContext, KernelArgs, assemble_cell!
+export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
+export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
+export implements_v2_kernels, provides_analytic
 
 export residual_size, unknown_size
 
@@ -93,6 +103,8 @@ export NullOperator, DiagonalOperator
 
 export SequentialCPUDevice, PolyesterDevice, CudaDevice
 export SequentialAssemblyStrategy, ElementAssemblyStrategy, PerColorAssemblyStrategy
+export AssemblyStrategy, AbstractAssemblyForm, FullAssembly, ElementAssembly
+export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling
 
 # Transfer operator infrastructure
 export SameGridCellCache, SameGridCellIterator

@@ -2,44 +2,73 @@ struct StandardOperatorSpecification
 end
 
 abstract type AbstractAssemblyStrategy end
-# This one is the super type for strategies giving us a full matrix with indexing and stuff
-abstract type AbstractFullAssemblyStrategy <: AbstractAssemblyStrategy end
-# This one is the super type for strategies giving us an object which we ONLY can multiply a vector with
-abstract type AbstractMatrixFreeStrategy <: AbstractAssemblyStrategy end
+
+####################################
+## Operator form (the MFEM assembly level)
+####################################
 
 """
-    SequentialAssemblyStrategy(device)
+Which representation of the operator is produced — the MFEM assembly level.
+Orthogonal to how the work is scheduled and to the device it runs on.
 """
-struct SequentialAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
-    device::DeviceType
-    operator_specification
+abstract type AbstractAssemblyForm end
+
+"FULL level: assemble into a global sparse matrix / global vector."
+struct FullAssembly{Spec} <: AbstractAssemblyForm
+    operator_specification::Spec
 end
-SequentialAssemblyStrategy(device) = SequentialAssemblyStrategy(device, StandardOperatorSpecification())
+FullAssembly() = FullAssembly(StandardOperatorSpecification())
 
-"""
-    PerColorAssemblyStrategy(device, coloralg = ColoringAlgorithm.WorkStream)
-"""
-struct PerColorAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
-    device::DeviceType
-    coloralg
-    operator_specification
-end
-PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = PerColorAssemblyStrategy(device, alg, StandardOperatorSpecification())
+"ELEMENT level: store per-element matrices; the operator acts matrix-free."
+struct ElementAssembly <: AbstractAssemblyForm end
 
-"""
-    ElementAssemblyStrategy
-"""
-struct ElementAssemblyStrategy{DeviceType} <: AbstractMatrixFreeStrategy
-    device::DeviceType
-end
-
-@concrete struct ElementAssemblyOperatorStrategy <: AbstractMatrixFreeStrategy
-    device
+"ELEMENT level after setup: carries the per-element storage layout."
+@concrete struct ElementAssemblyData <: AbstractAssemblyForm
     eadata
 end
 
-function setup_operator_strategy_cache(strategy::ElementAssemblyStrategy{<:AbstractCPUDevice}, integrator, dh)
-    return ElementAssemblyOperatorStrategy(strategy.device, EAVector(dh))
+####################################
+## Scheduling policy
+####################################
+
+"""
+How parallel work is made safe — the second strategy axis. Sequential
+scheduling relies on atomic scatter under parallel devices; colored
+scheduling provides race freedom without atomics (required for eltypes
+without atomic support, and for run-to-run reproducibility).
+"""
+abstract type AbstractSchedulingPolicy end
+struct SequentialScheduling <: AbstractSchedulingPolicy end
+struct ColoredScheduling{Alg} <: AbstractSchedulingPolicy
+    alg::Alg
+end
+ColoredScheduling() = ColoredScheduling(ColoringAlgorithm.WorkStream)
+
+####################################
+## The composed strategy
+####################################
+
+"""
+    AssemblyStrategy(form, scheduling, device)
+
+An assembly strategy is the composition of three orthogonal axes: the operator
+form ([`AbstractAssemblyForm`](@ref) — what is produced), the scheduling
+policy ([`AbstractSchedulingPolicy`](@ref) — how parallel work is made safe),
+and the device (where it runs). The historical strategy names remain as
+convenience constructors for the common compositions.
+"""
+struct AssemblyStrategy{F <: AbstractAssemblyForm, S <: AbstractSchedulingPolicy, D} <: AbstractAssemblyStrategy
+    form::F
+    scheduling::S
+    device::D
+end
+
+SequentialAssemblyStrategy(device) = AssemblyStrategy(FullAssembly(), SequentialScheduling(), device)
+PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = AssemblyStrategy(FullAssembly(), ColoredScheduling(alg), device)
+ElementAssemblyStrategy(device) = AssemblyStrategy(ElementAssembly(), SequentialScheduling(), device)
+
+function setup_operator_strategy_cache(strategy::AssemblyStrategy{ElementAssembly, <:AbstractSchedulingPolicy, <:AbstractCPUDevice}, integrator, dh)
+    return AssemblyStrategy(ElementAssemblyData(EAVector(dh)), strategy.scheduling, strategy.device)
 end
 
 setup_operator_strategy_cache(strategy, integrator, dh) = strategy
@@ -119,17 +148,30 @@ end
 ####################################
 
 """
-    compute_partition(strategy, sdh)
+    CellItems(sdh)
 
-Compute the work partition for the given strategy and SubDofHandler.
+The default work-item provider: the cells of one `SubDofHandler`. Item
+providers are what `compute_partition` consumes — future item families
+(interface pairs, contact pairs, patches, local BVPs) are further provider
+types, not `SubDofHandler`s.
+"""
+struct CellItems{SDH <: SubDofHandler}
+    sdh::SDH
+end
+
+"""
+    compute_partition(strategy, provider)
+
+Compute the work partition for the given strategy and item provider.
 Returns an iterable of iterables: the outer level represents synchronization barriers
 (e.g. colors), the inner level represents parallelizable work items (cell IDs).
 """
-compute_partition(::SequentialAssemblyStrategy, sdh) = (collect(sdh.cellset),)
-compute_partition(::ElementAssemblyOperatorStrategy, sdh) = (collect(sdh.cellset),)
+compute_partition(strategy::AssemblyStrategy, sdh::SubDofHandler) = compute_partition(strategy.scheduling, CellItems(sdh))
+compute_partition(strategy::AssemblyStrategy, provider) = compute_partition(strategy.scheduling, provider)
+compute_partition(::SequentialScheduling, provider::CellItems) = (collect(provider.sdh.cellset),)
 
-function compute_partition(strategy::PerColorAssemblyStrategy, sdh)
-    return Ferrite.create_coloring(get_grid(sdh.dh), collect(sdh.cellset); alg=strategy.coloralg)
+function compute_partition(scheduling::ColoredScheduling, provider::CellItems)
+    return Ferrite.create_coloring(get_grid(provider.sdh.dh), collect(provider.sdh.cellset); alg=scheduling.alg)
 end
 
 """
@@ -155,7 +197,7 @@ end
 ## Matrix/Vector type             ##
 ####################################
 
-matrix_type(strategy::AbstractAssemblyStrategy) = matrix_type(strategy.device, strategy.operator_specification)
+matrix_type(strategy::AssemblyStrategy) = matrix_type(strategy.device, strategy.form.operator_specification)
 matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
 vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
 vector_type(device::AbstractDevice) = Vector{value_type(device)}
