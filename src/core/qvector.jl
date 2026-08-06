@@ -71,17 +71,12 @@ function setup_qvector(::Type{T}, dh::AbstractDofHandler, qrc) where {T}
     end
     data = zeros(T, offset - 1)
 
-    # Compress representation if possible
-    final_offsets = if offsets == offsets[1]:npoints[1]:offsets[end]
-        offsets[1]:npoints[1]:offsets[end]
-    else
-        offsets
-    end
-    final_npoints = if all(==(first(npoints)), npoints)
-        first(npoints)
-    else
-        npoints
-    end
+    # Compress representation if possible. Uniform nonzero point counts imply
+    # the offsets are the arithmetic progression; a zero count cannot be a
+    # range step, so those layouts stay uncompressed.
+    uniform = first(npoints) > 0 && all(==(first(npoints)), npoints)
+    final_offsets = uniform ? (offsets[1]:npoints[1]:offsets[end]) : offsets
+    final_npoints = uniform ? first(npoints) : npoints
     return QVector(data, final_offsets, final_npoints)
 end
 
@@ -115,16 +110,11 @@ function setup_qvector(::Type{T}, operator) where {T}
     end
     data = zeros(T, offset - 1)
 
-    # Compress representation if possible
-    final_offsets = if offsets == offsets[1]:npoints[1]:offsets[end]
-        offsets[1]:npoints[1]:offsets[end]
-    else
-        offsets
-    end
-    final_npoints = if all(==(first(npoints)), npoints)
-        first(npoints)
-    else
-        npoints
-    end
+    # Compress representation if possible. Uniform nonzero point counts imply
+    # the offsets are the arithmetic progression; a zero count cannot be a
+    # range step, so those layouts stay uncompressed.
+    uniform = first(npoints) > 0 && all(==(first(npoints)), npoints)
+    final_offsets = uniform ? (offsets[1]:npoints[1]:offsets[end]) : offsets
+    final_npoints = uniform ? first(npoints) : npoints
     return QVector(data, final_offsets, final_npoints)
 end

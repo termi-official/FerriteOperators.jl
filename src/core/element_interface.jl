@@ -141,21 +141,18 @@ Ferrite.reinit!(element_cache::AbstractSurfaceElementCache, cell) = Ferrite.rein
     Utility to execute noop assembly.
 """
 struct EmptySurfaceElementCache <: AbstractSurfaceElementCache end
-# Linear
+# Facet-level no-ops
 assemble_facet!(rₑ::AbstractVector, cell::CellCache, local_face_index::Int, face_caches::EmptySurfaceElementCache, time)    = nothing
-assemble_element!(rₑ::AbstractVector, cell::CellCache, local_face_index::Int, face_caches::EmptySurfaceElementCache, time) = nothing
-# Bilinear
 assemble_facet!(Kₑ::AbstractMatrix, cell::CellCache, local_face_index::Int, face_caches::EmptySurfaceElementCache, time)    = nothing
-assemble_element!(Kₑ::AbstractMatrix, cell::CellCache, local_face_index::Int, face_caches::EmptySurfaceElementCache, time) = nothing
-# Update element matrix in nonlinear operators
 assemble_facet!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache, local_face_index::Int, face_caches::EmptySurfaceElementCache, time)    = nothing
-assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache, local_face_index::Int, face_caches::EmptySurfaceElementCache, time) = nothing
-# Update element matrix and residual in nonlinear operators
 assemble_facet!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptySurfaceElementCache, time)    = nothing
-assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptySurfaceElementCache, time) = nothing
-# Update residual in nonlinear operators
 assemble_facet!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptySurfaceElementCache, time)    = nothing
-assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, local_face_index::Int, face_caches::EmptySurfaceElementCache, time) = nothing
+# Element-level no-ops, so the empty cache skips the facet loop entirely
+assemble_element!(rₑ::AbstractVector, cell::CellCache, face_caches::EmptySurfaceElementCache, time) = nothing
+assemble_element!(Kₑ::AbstractMatrix, cell::CellCache, face_caches::EmptySurfaceElementCache, time) = nothing
+assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache, face_caches::EmptySurfaceElementCache, time) = nothing
+assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, face_caches::EmptySurfaceElementCache, time) = nothing
+assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, face_caches::EmptySurfaceElementCache, time) = nothing
 @inline is_facet_in_cache(::FacetIndex, cell, ::EmptySurfaceElementCache) = false
 
 """

@@ -28,9 +28,9 @@ Task that evaluates a user function at every quadrature point of every cell and
 stores the result in a [`QVector`](@ref).
 
 Fields:
-- `f`   – user function `f(qe, ue, cell, element_cache, pe)`, called once per cell.
-          `qe` is a mutable view into `q` for that cell; `ue` is the element-local
-          unknown vector; `pe` is the element-local parameter slice.
+- `f`   – user function `f(ue, qp, cell, element_cache, pe)`, called once per
+          quadrature point; its return value is stored at that point's slot in `q`.
+          `ue` is the element-local unknown vector; `pe` the element-local parameters.
 - `u`   – global solution vector (passed to [`load_element_unknowns!`](@ref))
 - `p`   – global parameter object (passed to [`query_element_parameters`](@ref))
 - `q`   – output [`QVector`](@ref); shared across all workers (write access is safe
@@ -136,8 +136,9 @@ end
 """
     evaluate_quadrature!(q::QVector, op, u, p, f, [set = nothing])
 
-Evaluate `f(ue, qp, cell, element_cache, pe, set)` at every quadrature point
-and return the result.
+Evaluate `f(ue, qp, cell, element_cache, pe)` at every quadrature point and
+store the returned values in `q`. If `set` is given, only cells in it are
+evaluated; the remaining entries of `q` are left untouched.
 
 - `ue` — element-local unknowns loaded from `u`
 - `qp` — the current quadrature point

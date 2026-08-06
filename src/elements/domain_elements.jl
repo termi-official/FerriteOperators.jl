@@ -1,6 +1,6 @@
 # The types in this file are merely helpers for the setup logic
-struct NonlinearMultiDomainIntegrator <: AbstractNonlinearIntegrator
-    subintegrators::Dict{<:SubDofHandler}
+struct NonlinearMultiDomainIntegrator{DictType <: Dict{<:SubDofHandler}} <: AbstractNonlinearIntegrator
+    subintegrators::DictType
 end
 function setup_element_cache(element_model::NonlinearMultiDomainIntegrator, sdh::SubDofHandler)
     return setup_element_cache(element_model.subintegrators[sdh], sdh)
@@ -10,8 +10,8 @@ function setup_boundary_cache(element_model::NonlinearMultiDomainIntegrator, sdh
 end
 
 
-struct LinearMultiDomainIntegrator <: AbstractLinearIntegrator
-    subintegrators::Dict{<:SubDofHandler}
+struct LinearMultiDomainIntegrator{DictType <: Dict{<:SubDofHandler}} <: AbstractLinearIntegrator
+    subintegrators::DictType
 end
 function setup_element_cache(element_model::LinearMultiDomainIntegrator, sdh::SubDofHandler)
     return setup_element_cache(element_model.subintegrators[sdh], sdh)
@@ -21,8 +21,8 @@ function setup_boundary_cache(element_model::LinearMultiDomainIntegrator, sdh::S
 end
 
 
-struct BilinearMultiDomainIntegrator <: AbstractBilinearIntegrator
-    subintegrators::Dict{<:SubDofHandler}
+struct BilinearMultiDomainIntegrator{DictType <: Dict{<:SubDofHandler}} <: AbstractBilinearIntegrator
+    subintegrators::DictType
 end
 function setup_element_cache(element_model::BilinearMultiDomainIntegrator, sdh::SubDofHandler)
     return setup_element_cache(element_model.subintegrators[sdh], sdh)

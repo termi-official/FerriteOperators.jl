@@ -8,7 +8,7 @@ abstract type AbstractFullAssemblyStrategy <: AbstractAssemblyStrategy end
 abstract type AbstractMatrixFreeStrategy <: AbstractAssemblyStrategy end
 
 """
-    SequentialAssemblyStrategy()
+    SequentialAssemblyStrategy(device)
 """
 struct SequentialAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
     device::DeviceType
@@ -17,7 +17,7 @@ end
 SequentialAssemblyStrategy(device) = SequentialAssemblyStrategy(device, StandardOperatorSpecification())
 
 """
-    PerColorAssemblyStrategy(chunksize, coloralg)
+    PerColorAssemblyStrategy(device, coloralg = ColoringAlgorithm.WorkStream)
 """
 struct PerColorAssemblyStrategy{DeviceType} <: AbstractFullAssemblyStrategy
     device::DeviceType

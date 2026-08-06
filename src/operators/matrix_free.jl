@@ -36,9 +36,6 @@ function EAVector(::Type{ValueType}, ::Type{IndexType}, dh::DofHandler) where {V
     next_offset = 1
     for i in 1:getncells(grid)
         ndofs = ndofs_per_cell(dh, i)
-        eadatav = @view eadata[next_offset:(next_offset+ndofs-1)]
-        # celldofs!(eadatav, dh, i) # FIXME (https://github.com/Ferrite-FEM/Ferrite.jl/pull/1252)
-        eadatav .= celldofs(dh, i)
         eaoffsets[i] = GenericEAVectorIndex(next_offset, ndofs)
         next_offset += ndofs
     end

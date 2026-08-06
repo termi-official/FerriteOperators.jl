@@ -172,14 +172,14 @@ struct DiagonalOperator{TV <: AbstractVector} <: AbstractBilinearOperator
     values::TV
 end
 
-mul!(out::AbstractVector, op::DiagonalOperator, in::AbstractVector) = out .= op.values .* out
+mul!(out::AbstractVector, op::DiagonalOperator, in::AbstractVector) = out .= op.values .* in
 mul!(out::AbstractVector, op::DiagonalOperator, in::AbstractVector, α, β) = out .= α * op.values .* in + β * out
 Base.eltype(op::DiagonalOperator) = eltype(op.values)
 Base.size(op::DiagonalOperator, axis) = length(op.values)
 
 get_matrix(op::DiagonalOperator) = spdiagm(op.values)
 
-update_linearization!(::DiagonalOperator, ::AbstractVector, ::AbstractVector, p) = nothing
+update_operator!(::DiagonalOperator, time) = nothing
 
 """
     NullOperator <: AbstractBilinearOperator
@@ -197,7 +197,7 @@ Base.size(op::NullOperator{T,S1,S2}, axis) where {T,S1,S2} = axis == 1 ? S1 : (a
 
 get_matrix(op::NullOperator{T, SIN, SOUT}) where {T, SIN, SOUT} = spzeros(T,SIN,SOUT)
 
-update_linearization!(::NullOperator, ::AbstractVector, ::AbstractVector, p) = nothing
+update_operator!(::NullOperator, time) = nothing
 
 #########################################################################################################################
 

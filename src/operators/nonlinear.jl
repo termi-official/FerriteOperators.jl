@@ -1,72 +1,3 @@
-@concrete struct AssembleLinearizationJR
-    inner_assembler
-    u
-    p
-end
-duplicate_for_device(device, task::AssembleLinearizationJR) = AssembleLinearizationJR(duplicate_for_device(device, task.inner_assembler), task.u, task.p)
-
-function execute_single_task!(task::AssembleLinearizationJR, ws::AssemblyWorkspace)
-    Jₑ = ws.Ke
-    rₑ = ws.re
-    uₑ = query_element_unknown_buffer(ws.element, ws.ue)
-    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
-
-    fill!(Jₑ, 0.0)
-    fill!(rₑ, 0.0)
-
-    load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
-    @timeit_debug "assemble element" assemble_element!(Jₑ, rₑ, uₑ, ws.cell, ws.element, pₑ)
-    @timeit_debug "assemble boundary" assemble_element!(Jₑ, rₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
-    store_condensed_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
-
-    assemble!(task.inner_assembler, ws.cell, Jₑ, rₑ)
-end
-
-@concrete struct AssembleLinearizationJ
-    inner_assembler
-    u
-    p
-end
-duplicate_for_device(device, task::AssembleLinearizationJ) = AssembleLinearizationJ(duplicate_for_device(device, task.inner_assembler), task.u, task.p)
-
-function execute_single_task!(task::AssembleLinearizationJ, ws::AssemblyWorkspace)
-    Jₑ = ws.Ke
-    uₑ = query_element_unknown_buffer(ws.element, ws.ue)
-    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
-
-    fill!(Jₑ, 0.0)
-
-    load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
-    @timeit_debug "assemble element" assemble_element!(Jₑ, uₑ, ws.cell, ws.element, pₑ)
-    @timeit_debug "assemble boundary" assemble_element!(Jₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
-    store_condensed_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
-
-    assemble!(task.inner_assembler, ws.cell, Jₑ)
-end
-
-@concrete struct AssembleLinearizationR
-    inner_assembler
-    u
-    p
-end
-duplicate_for_device(device, task::AssembleLinearizationR{<:AbstractVector}) = task
-duplicate_for_device(device, task::AssembleLinearizationR) = AssembleLinearizationR(duplicate_for_device(device, task.inner_assembler), task.u, task.p)
-
-function execute_single_task!(task::AssembleLinearizationR, ws::AssemblyWorkspace)
-    rₑ = ws.re
-    uₑ = query_element_unknown_buffer(ws.element, ws.ue)
-    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
-
-    fill!(rₑ, 0.0)
-
-    load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
-    @timeit_debug "assemble element" assemble_element!(rₑ, uₑ, ws.cell, ws.element, pₑ)
-    @timeit_debug "assemble boundary" assemble_element!(rₑ, uₑ, ws.cell, ws.boundary_element, pₑ)
-    store_condensed_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
-
-    assemble!(task.inner_assembler, ws.cell, rₑ)
-end
-
 """
     LinearizedFerriteOperator(J, caches)
 
@@ -84,36 +15,12 @@ Comes with one entry point for each cache type to handle the most common cases:
 end
 
 # Interface
-function update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector, p)
-    (; J, strategy, subdomain_caches) = op
-
-    assembler = start_assemble(strategy, J)
-    task = AssembleLinearizationJ(assembler, u, p)
-
-    execute_on_subdomains!(task, strategy, subdomain_caches)
-
-    finalize_assembly!(assembler)
-end
-function update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
-    (; J, strategy, subdomain_caches) = op
-
-    assembler = start_assemble(strategy, J, residual)
-    task = AssembleLinearizationJR(assembler, u, p)
-
-    execute_on_subdomains!(task, strategy, subdomain_caches)
-
-    finalize_assembly!(assembler)
-end
-function residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p)
-    (; strategy, subdomain_caches) = op
-
-    assembler = start_assemble(strategy, residual)
-    task = AssembleLinearizationR(assembler, u, p)
-
-    execute_on_subdomains!(task, strategy, subdomain_caches)
-
-    finalize_assembly!(assembler)
-end
+update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector, p) =
+    assemble_into!(JacobianKind(), (op.J,), op, u, p)
+update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
+    assemble_into!(JacobianResidualKind(), (op.J, residual), op, u, p)
+residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
+    assemble_into!(ResidualKind(), (residual,), op, u, p)
 
 """
     mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector)

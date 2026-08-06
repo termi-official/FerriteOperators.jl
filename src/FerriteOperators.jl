@@ -50,8 +50,6 @@ include("core/ferrite-addons/internal_variable_handler.jl")
 abstract type AbstractBilinearIntegrator end
 abstract type AbstractNonlinearIntegrator end
 abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
-# Simple means that it has a constant number of dofs per quadrature point
-abstract type AbstractSimpleCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
 abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators

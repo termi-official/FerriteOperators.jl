@@ -144,7 +144,7 @@ assemble_interface!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::Abs
     end
 end
 # Update residual in nonlinear operators
-assemble_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, interface, interface_cache::CompositeInterfaceElementCache, time) = assemble_composite_interface!(Kₑ, interface, interface_cache.inner_caches, time)
+assemble_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, interface, interface_cache::CompositeInterfaceElementCache, time) = assemble_composite_interface!(residualₑ, uₑ, interface, interface_cache.inner_caches, time)
 @unroll function assemble_composite_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, interface, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
     @unroll for inner_cache ∈ inner_caches
         assemble_interface!(residualₑ, uₑ, interface, inner_cache, time)
