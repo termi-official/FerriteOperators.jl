@@ -59,6 +59,7 @@ end
 function execute_kind!(kind::PrimalKind, task, ws)
     kind isa MatrixAssemblyKind && fill!(ws.Ke, 0.0)
     kind isa VectorAssemblyKind && fill!(ws.re, 0.0)
+    reinit_values!(ws.element, ws.cell, kind)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     if kind isa UnknownDependentKind
         statesₑ = load_slots!(ws, task.states)
@@ -125,6 +126,7 @@ v2_cell_kernel!(::LinearKind, cache, ws, statesₑ, pₑ, ctx) =
 # their target (zeroed in that branch), the ForwardDiff fallbacks overwrite
 # it fully.
 function execute_kind!(kind::SensitivityKind, task, ws)
+    reinit_values!(ws.element, ws.cell, kind)
     statesₑ = load_slots!(ws, task.states)
     @timeit_debug "assemble sensitivity" sensitivity_kernel!(kind, task, ws, statesₑ)
 end

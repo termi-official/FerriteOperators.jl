@@ -202,6 +202,10 @@ function validate_element_cache(cache, declared_requests::Tuple = ())
         "$(T) implements no `assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::KernelArgs)` " *
         "method. The residual kernel is mandatory: it is the basis for AD-derived Jacobians " *
         "and sensitivities."))
+    hasmethod(reinit_values!, Tuple{T, CellCache}) || throw(ArgumentError(
+        "$(T) implements no `reinit_values!(::$(nameof(T)), cell)` method. The engine " *
+        "reinitializes element values once per cell and sweep through this hook; " *
+        "kernels are pure evaluation and must not rely on reinit inside them."))
     for (kind, ReqT) in _primal_validatable_kinds()
         _assert_trait_backed(T, kind, ReqT)
     end

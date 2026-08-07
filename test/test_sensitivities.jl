@@ -23,11 +23,11 @@ function FerriteOperators.setup_element_cache(m::SourceDiffusionIntegrator, sdh:
 end
 FerriteOperators.duplicate_for_device(device, c::SourceDiffusionCache) =
     SourceDiffusionCache(FerriteOperators.duplicate_for_device(device, c.cv))
+FerriteOperators.reinit_values!(c::SourceDiffusionCache, cell) = reinit!(c.cv, cell)
 function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::SourceDiffusionCache, args::KernelArgs)
     (; cv) = cache
     uₑ = args.states.u
     q  = args.p
-    reinit!(cv, args.cell)
     for qp in 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
         ∇u = function_gradient(cv, qp, uₑ)
@@ -185,7 +185,6 @@ function FerriteOperators.assemble_cell!(req::TimeSensitivityRequest, cache::Sou
     ANALYTIC_TS_CALLS[] += 1
     # ∂F/∂t with p ≡ t (bare-time): ∂/∂t of −t·∫v = −∫v dΩ
     (; cv) = cache
-    reinit!(cv, args.cell)
     for qp in 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
         for i in 1:getnbasefunctions(cv)
@@ -364,6 +363,7 @@ end
 # points), loud once declared at setup.
 struct BogusClaimCache <: FerriteOperators.AbstractVolumetricElementCache end
 FerriteOperators.assemble_cell!(::ResidualRequest, ::BogusClaimCache, ::KernelArgs) = nothing
+FerriteOperators.reinit_values!(::BogusClaimCache, cell) = nothing
 FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianKind) = true
 
 @testset "Declared request kinds" begin

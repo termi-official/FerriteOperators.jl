@@ -31,7 +31,7 @@ struct SimpleCondensedLinearViscoelasticityCache{CV <: CellValues} <: AbstractVo
 end
 
 Ferrite.getnquadpoints(e::SimpleCondensedLinearViscoelasticityCache) = getnquadpoints(e.cv)
-Ferrite.reinit!(e::SimpleCondensedLinearViscoelasticityCache, cell) = Ferrite.reinit!(e.cv, cell)
+reinit_values!(e::SimpleCondensedLinearViscoelasticityCache, cell) = Ferrite.reinit!(e.cv, cell)
 
 function duplicate_for_device(device, cache::SimpleCondensedLinearViscoelasticityCache)
     return SimpleCondensedLinearViscoelasticityCache(
@@ -108,8 +108,6 @@ function _sls_assemble!(req::Union{ResidualRequest, JacobianRequest{:u}, Jacobia
     dₑ         = @view uₑ[displacement_range]
     qₑmat      = reshape((@view uₑ[viscosity_range]), (6, nqp))
     qₑprevmat  = reshape((@view uₑprev[viscosity_range]), (6, nqp))
-
-    reinit!(cv, args.cell)
 
     @inbounds for qp in 1:nqp
         dΩ = getdetJdV(cv, qp)

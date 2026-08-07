@@ -21,6 +21,21 @@ abstract type AbstractVolumetricElementCache end
 allocate_element_matrix(element_cache, sdh)          = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
 allocate_element_unknown_vector(element_cache, sdh)  = zeros(ndofs_per_cell(sdh))
 allocate_element_residual_vector(element_cache, sdh) = zeros(ndofs_per_cell(sdh))
+
+"""
+    reinit_values!(cache, cell)
+    reinit_values!(cache, cell, kind)
+
+Reinitialize the values objects an element cache carries for the given cell.
+The two-arg method is mandatory (validated at setup) and reinitializes all of
+them. The three-arg form is called by the engine once per cell and sweep,
+before any kernel of that sweep; specialize it on the request `kind` to
+reinitialize only the values that kind needs. Kernels are pure evaluation —
+repeated kernel invocations within one sweep (AD chunk passes, split
+Jacobian-then-residual fallbacks) do not reinitialize again.
+"""
+function reinit_values! end
+reinit_values!(cache, cell, kind) = reinit_values!(cache, cell)
 load_element_unknowns!(uₑ, u, cell, ivh, element_cache)   = uₑ .= @view u[celldofs(cell)]
 store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache) = nothing
 
@@ -31,7 +46,7 @@ struct EmptyVolumetricElementCache <: AbstractVolumetricElementCache end
 assemble_cell!(req::AbstractAssemblyRequest, ::EmptyVolumetricElementCache, args::KernelArgs) = nothing
 provides_analytic(::Type{EmptyVolumetricElementCache}, kind) = true
 Ferrite.getnquadpoints(::EmptyVolumetricElementCache) = 0
-Ferrite.reinit!(::EmptyVolumetricElementCache, cell) = nothing
+reinit_values!(::EmptyVolumetricElementCache, cell) = nothing
 
 """
     setup_element_cache(integrator, sdh)

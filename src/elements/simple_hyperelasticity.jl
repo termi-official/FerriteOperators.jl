@@ -22,7 +22,7 @@ function duplicate_for_device(device, cache::SimpleHyperelasticityElementCache)
 end
 
 Ferrite.getnquadpoints(e::SimpleHyperelasticityElementCache) = getnquadpoints(e.cv)
-Ferrite.reinit!(e::SimpleHyperelasticityElementCache, cell) = Ferrite.reinit!(e.cv, cell)
+reinit_values!(e::SimpleHyperelasticityElementCache, cell) = Ferrite.reinit!(e.cv, cell)
 
 # Element residual
 function assemble_cell!(req::ResidualRequest, element_cache::SimpleHyperelasticityElementCache, args::KernelArgs)
@@ -32,8 +32,6 @@ function assemble_cell!(req::ResidualRequest, element_cache::SimpleHyperelastici
     (; ψ, cv) = element_cache
 
     ndofs = getnbasefunctions(cv)
-
-    reinit!(cv, cell)
 
     @inbounds for qp ∈ 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
@@ -63,8 +61,6 @@ function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleHyperelas
     (; ψ, cv) = element_cache
 
     ndofs = getnbasefunctions(cv)
-
-    reinit!(cv, cell)
 
     @inbounds for qp ∈ 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
@@ -99,8 +95,6 @@ function assemble_cell!(req::JacobianResidualRequest, element_cache::SimpleHyper
     (; ψ, cv) = element_cache
 
     ndofs = getnbasefunctions(cv)
-
-    reinit!(cv, cell)
 
     @inbounds for qp ∈ 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)

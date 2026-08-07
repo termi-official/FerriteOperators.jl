@@ -2,16 +2,14 @@
 ## AD fallbacks (ForwardDiff over the residual kernel)
 ####################################
 #
-# Slice limitations, lifted with the facet-driver rework and the parameter
-# layout (ParameterSpace) work:
-# - AD sweeps cover the volumetric kernel only; boundary contributions keep
-#   flowing through the analytic facet path. Sensitivities of parameter- or
-#   time-dependent boundary terms are NOT captured yet.
+# Limitations:
+# - AD sweeps cover the volumetric kernel only; boundary contributions flow
+#   through the analytic facet path, so sensitivities of parameter- or
+#   time-dependent boundary terms are NOT captured.
 # - State sweeps (∂F/∂u Jacobian, JVP, VJP, ∂F/∂t) run over per-worker
-#   preallocated ForwardDiff configs. The PARAMETER sweeps still build their
-#   configs per call: their seed dimension nθ is call-time knowledge until
-#   parameter layouts land, and caching a config across nθ changes would make
-#   the field abstractly typed for little gain on these non-hot paths.
+#   preallocated ForwardDiff configs. The parameter sweeps build their
+#   configs per call: their seed dimension nθ is call-time knowledge, and a
+#   cached config would be abstractly typed across nθ changes.
 
 "Tag for the package-owned ForwardDiff configs, so per-worker configs outlive the per-cell closures."
 struct FerriteOperatorsADTag end

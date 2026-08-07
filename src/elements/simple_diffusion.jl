@@ -20,7 +20,7 @@ struct SimpleBilinearDiffusionElementCache{CV <: CellValues} <: AbstractVolumetr
 end
 
 Ferrite.getnquadpoints(e::SimpleBilinearDiffusionElementCache) = getnquadpoints(e.cellvalues)
-Ferrite.reinit!(e::SimpleBilinearDiffusionElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
+reinit_values!(e::SimpleBilinearDiffusionElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
 
 function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache)
     return SimpleBilinearDiffusionElementCache(
@@ -34,8 +34,6 @@ function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleBilinearD
     cell = args.cell
     (; cellvalues, D) = element_cache
     n_basefuncs = getnbasefunctions(cellvalues)
-
-    reinit!(cellvalues, cell)
 
     for qp in 1:getnquadpoints(cellvalues)
         dΩ = getdetJdV(cellvalues, qp)
@@ -64,7 +62,6 @@ provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind)
 function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearDiffusionElementCache, args::KernelArgs)
     (; cellvalues, D) = cache
     uₑ = args.states.u
-    reinit!(cellvalues, args.cell)
     for qp in 1:getnquadpoints(cellvalues)
         dΩ = getdetJdV(cellvalues, qp)
         ∇u = function_gradient(cellvalues, qp, uₑ)

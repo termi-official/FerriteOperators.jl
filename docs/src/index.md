@@ -59,15 +59,20 @@ device loop:
 ```
 for chunk in partition
     parfor item in chunk
-        reinit!(workspace, item)          # geometry cache only
+        reinit!(workspace, item)               # geometry cache
+        reinit_values!(element, item, kind)    # element values, once per sweep
         execute_single_task!(task, workspace)
     end
 end
 ```
 
-Elements own the `reinit!` of their values objects (`CellValues` etc.),
-selecting what to reinitialize per request kind — an element may carry
-several values objects, and not every request needs all of them.
+Elements own their values objects (`CellValues` etc.) and implement
+[`reinit_values!`](@ref): the mandatory two-arg method reinitializes all of
+them; specializing the kind-dispatched three-arg form reinitializes only what
+that request needs — an element may carry several values objects, and not
+every request needs all of them. Kernels are pure evaluation: repeated kernel
+invocations within one sweep (AD chunk passes, split Jacobian-then-residual
+fallbacks) do not reinitialize again.
 
 ## Writing an element
 
@@ -95,10 +100,11 @@ end
 FerriteOperators.duplicate_for_device(device, c::MyCache) =
     MyCache(FerriteOperators.duplicate_for_device(device, c.cv))
 
+FerriteOperators.reinit_values!(c::MyCache, cell) = reinit!(c.cv, cell)
+
 function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args::KernelArgs)
     (; cv) = cache
     uₑ = args.states.u
-    reinit!(cv, args.cell)
     for qp in 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
         # ... accumulate into req.r ...

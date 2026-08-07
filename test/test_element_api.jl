@@ -205,11 +205,13 @@ end
         element_cache = setup_test_cache(model, sdhs)
 
         args = KernelArgs((;), cell_cache_s, 0.0, nothing, nothing)
+        reinit_values!(element_cache, cell_cache_s)
         assemble_cell!(JacobianRequest{:u}(Kₑ¹), element_cache, args)
         @test !iszero(Kₑ¹)
 
         composite_element_cache = setup_test_composite_volume_cache(model, sdhs)
 
+        reinit_values!(composite_element_cache, cell_cache_s)
         assemble_cell!(JacobianRequest{:u}(Kₑ²), composite_element_cache, args)
         @test 2Kₑ¹ ≈ Kₑ²
     end
@@ -223,11 +225,13 @@ end
         element_cache = setup_test_cache(model, sdhs)
 
         args = KernelArgs((;), cell_cache_s, 0.0, nothing, nothing)
+        reinit_values!(element_cache, cell_cache_s)
         assemble_cell!(ResidualRequest(bₑ¹), element_cache, args)
         @test !iszero(bₑ¹)
 
         composite_element_cache = setup_test_composite_volume_cache(model, sdhs)
 
+        reinit_values!(composite_element_cache, cell_cache_s)
         assemble_cell!(ResidualRequest(bₑ²), composite_element_cache, args)
         @test 2bₑ¹ ≈ bₑ²
     end

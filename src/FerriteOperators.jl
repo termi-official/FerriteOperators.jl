@@ -100,6 +100,7 @@ export ResidualKind, JacobianKind, JacobianResidualKind
 export ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind
 export provides_analytic
 export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
+export reinit_values!
 
 export residual_size, unknown_size
 

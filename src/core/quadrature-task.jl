@@ -3,10 +3,10 @@
 ####################################
 #
 # Per-quadrature-point evaluation runs through the SAME engine as assembly —
-# no bespoke task system, no separate operator type. The element owns its
-# reinit (cache-level `Ferrite.reinit!(cache, cell)` selects what to
-# reinitialize); the framework provides the cell filtering, slot gathering,
-# parameter query, and the data-query/store hooks.
+# no bespoke task system, no separate operator type. Reinitialization goes
+# through the same `reinit_values!` hook as every other kind; the framework
+# provides the cell filtering, slot gathering, parameter query, and the
+# data-query/store hooks.
 
 """
     query_element_quadrature_data(element, cell, ivh, q::QVector)
@@ -44,7 +44,7 @@ function execute_kind!(kind::QuadratureEvaluationKind, task, ws)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     statesₑ = load_slots!(ws, task.states)
     qₑ = query_element_quadrature_data(ws.element, ws.cell, ws.ivh, kind.q)
-    Ferrite.reinit!(ws.element, ws.cell)
+    reinit_values!(ws.element, ws.cell, kind)
     for qp in 1:getnquadpoints(ws.element)
         qₑ[qp] = kind.f(statesₑ.u, qp, ws.cell, ws.element, pₑ)
     end

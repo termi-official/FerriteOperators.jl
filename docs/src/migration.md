@@ -24,7 +24,8 @@ grep for the patterns marked ⚠ below.
 | `op.J` / `op.A` / `op.b`, `residual_size`, `unknown_size` | unchanged |
 | `setup_quadrature_operator` / `FerriteQuadratureOperator` | any operator works: `evaluate_quadrature!(q, op, u, p, f)` |
 | silent `setup_element_cache` fallback | missing method now **throws at setup** |
-| `Ferrite.getnquadpoints`/`reinit!` via `.cv`/`.fv` field fallback | define both explicitly on your cache |
+| `reinit!` inside every cell-kernel body | engine calls `reinit_values!(cache, cell, kind)` once per cell and sweep |
+| `Ferrite.getnquadpoints`/`reinit!` via `.cv`/`.fv` field fallback | define `Ferrite.getnquadpoints` and `reinit_values!` explicitly on your cache |
 
 Constructor *calls* like `SequentialAssemblyStrategy(device)` still work — the
 names survive as convenience constructors. Only **dispatch on them as types**
@@ -42,11 +43,13 @@ function assemble_element!(Kₑ, rₑ, uₑ, cell, cache::MyCache, p) ... end
 function assemble_element!(Kₑ, uₑ, cell, cache::MyCache, p) ... end
 function assemble_element!(rₑ, uₑ, cell, cache::MyCache, p) ... end
 
-# v2 — one mandatory residual kernel …
+# v2 — reinit moves out of the kernel into the per-cache hook …
+FerriteOperators.reinit_values!(c::MyCache, cell) = reinit!(c.cv, cell)
+
+# … plus one mandatory residual kernel (pure evaluation, no reinit) …
 function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args::KernelArgs)
     uₑ = args.states.u
     pₑ = args.p
-    reinit!(cache.cv, args.cell)   # elements own reinit! of their values
     # accumulate into req.r
 end
 
@@ -60,7 +63,11 @@ end
 
 Requirements on the residual kernel: eltype-generic in `eltype(args.states.*)`,
 `eltype(args.p)` and the context time (the AD contract); never write global
-state; treat `args.cell` as read-only.
+state; treat `args.cell` as read-only; no reinit inside cell kernels — the
+engine calls `reinit_values!` once per cell and sweep (elements carrying
+several values objects can specialize the kind-dispatched form to
+reinitialize only what a request needs). Facet kernels still reinit their
+`FacetValues` per facet themselves.
 
 ## Time protocols (GTO1, Newmark)
 
@@ -169,7 +176,8 @@ op = setup_operator(strategy, integrator, dh;
 3. Replace `GenericFirstOrderTimeParameters` call sites with slots + ctx;
    declare `slots` at `setup_operator`.
 4. Declare `has_internal_state` for condensed caches; add explicit
-   `Ferrite.getnquadpoints`/`Ferrite.reinit!` methods for every cache.
+   `Ferrite.getnquadpoints` and `reinit_values!` methods for every cache,
+   and delete `reinit!` calls from cell-kernel bodies.
 5. Replace parameter-wrapper unwrapping hacks with one `unwrap_parameters`
    method; move facet-specific parameters into `query_facet_parameters`.
 6. Replace solver-state smuggling with `scratch` declarations.

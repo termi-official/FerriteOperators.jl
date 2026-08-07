@@ -47,6 +47,23 @@ end
 declare_scratch(composite::CompositeVolumetricElementCache) =
     reduce(merge, map(declare_scratch, composite.inner_caches); init = (;))
 
+# Values instances deliberately shared between inners are reinitialized once
+# per inner that holds them.
+reinit_values!(composite::CompositeVolumetricElementCache, cell) =
+    _composite_reinit!(composite.inner_caches, cell)
+reinit_values!(composite::CompositeVolumetricElementCache, cell, kind) =
+    _composite_reinit!(composite.inner_caches, cell, kind)
+@unroll function _composite_reinit!(inner_caches, cell)
+    @unroll for inner in inner_caches
+        reinit_values!(inner, cell)
+    end
+end
+@unroll function _composite_reinit!(inner_caches, cell, kind)
+    @unroll for inner in inner_caches
+        reinit_values!(inner, cell, kind)
+    end
+end
+
 function duplicate_for_device(device, cache::CompositeVolumetricElementCache)
     return CompositeVolumetricElementCache(
         map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),

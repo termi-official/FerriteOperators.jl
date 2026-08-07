@@ -20,7 +20,7 @@ struct SimpleLinearElementCache{CV <: CellValues} <: AbstractVolumetricElementCa
 end
 
 Ferrite.getnquadpoints(e::SimpleLinearElementCache) = getnquadpoints(e.cellvalues)
-Ferrite.reinit!(e::SimpleLinearElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
+reinit_values!(e::SimpleLinearElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
 function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofHandler)
     qr         = getquadraturerule(element_model.qrc, sdh)
     field_name = element_model.field_name
@@ -33,7 +33,6 @@ end
 # reads nothing from `args.states`.
 function assemble_cell!(req::ResidualRequest, cache::SimpleLinearElementCache, args::KernelArgs)
     (; cellvalues, f) = cache
-    reinit!(cellvalues, args.cell)
     for qp in 1:getnquadpoints(cellvalues)
         dΩ = getdetJdV(cellvalues, qp)
         for i in 1:getnbasefunctions(cellvalues)
@@ -66,7 +65,7 @@ struct SimpleBilinearMassElementCache{CV <: CellValues} <: AbstractVolumetricEle
 end
 
 Ferrite.getnquadpoints(e::SimpleBilinearMassElementCache) = getnquadpoints(e.cellvalues)
-Ferrite.reinit!(e::SimpleBilinearMassElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
+reinit_values!(e::SimpleBilinearMassElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
 function duplicate_for_device(device, cache::SimpleBilinearMassElementCache)
     return SimpleBilinearMassElementCache(
         cache.ρ,
@@ -87,7 +86,6 @@ end
 provides_analytic(::Type{<:SimpleBilinearMassElementCache}, ::JacobianKind) = true
 function assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearMassElementCache, args::KernelArgs)
     (; cellvalues, ρ) = cache
-    reinit!(cellvalues, args.cell)
     for qp in 1:getnquadpoints(cellvalues)
         dΩ = getdetJdV(cellvalues, qp)
         for i in 1:getnbasefunctions(cellvalues)
@@ -101,7 +99,6 @@ end
 function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearMassElementCache, args::KernelArgs)
     (; cellvalues, ρ) = cache
     uₑ = args.states.u
-    reinit!(cellvalues, args.cell)
     for qp in 1:getnquadpoints(cellvalues)
         dΩ = getdetJdV(cellvalues, qp)
         uval = function_value(cellvalues, qp, uₑ)
