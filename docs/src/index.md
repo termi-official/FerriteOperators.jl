@@ -208,6 +208,46 @@ that needs `∂v/∂u` inside its local tangent stays scheme-agnostic. The
 assembled Jacobian is ∂F/∂u at frozen slot values; the chain-rule term
 through the reconstruction is contributed by the solver's per-slot weights.
 
+### Components and stage operators
+
+A multi-slot linearization is assembled one slot at a time and folded by the
+solver, so a scheme's matrix never needs its own kernel:
+
+```julia
+comps = allocate_components(op, (:Ju, :Jdu))          # one shared sparsity pattern
+assemble_slot_jacobian!(comps.Ju,  op, JacobianKind{:u}(),  states, p, ctx)
+assemble_slot_jacobian!(comps.Jdu, op, JacobianKind{:du}(), states, p, ctx)
+combine!(W, comps, (Jdu = 1 / Δt, Ju = 1.0))          # backward Euler Newton matrix
+```
+
+[`allocate_components`](@ref) hands out square system matrices that share one
+sparsity pattern (aliased `colptr`/`rowval`, private `nzval`), which makes
+[`combine!`](@ref) a pure values operation and `apply_zero!` safe on any
+member; structural mutation of a component breaks the bag and is not
+supported. Components are plain system matrices — every existing assembly
+entry point fills them. `combine!` is eltype-generic: real components with
+complex weights combine into a complex target from
+`share_pattern(A, ComplexF64)`.
+
+The differentiated slot must carry a plain vector source. An
+[`AffineRate`](@ref) slot is reconstructed at gather time and frozen under AD,
+so `JacobianKind{:du}()` against it is rejected — assemble the components
+against plain sources and let the reconstruction slope enter as a weight.
+
+Fully implicit Runge-Kutta assembles `s` stage pairs and applies the s×s
+Newton block `δᵢⱼ Jdu⁽ⁱ⁾ + Δt aᵢⱼ Ju⁽ⁱ⁾` without ever building it:
+
+```julia
+sbop = StageBlockOperator(op, A, c, Δt)
+assemble_stages!(sbop, op, stage_states, p, ctxs)     # 2s sweeps, one per stage and slot
+mul!(y, sbop, x)                                      # x, y stage-stacked, length s·n
+```
+
+The transformed (simplified-Newton) variant needs no stage-block machinery:
+diagonalized Radau uses stage-*independent* Jacobians, i.e. a single
+`(Ju, Jdu)` bag plus one complex `combine!(W_λ, comps, (Jdu = 1.0, Ju = Δt*λ))`
+per eigenvalue of `A⁻¹`.
+
 ### Functionals
 
 ```julia

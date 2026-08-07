@@ -291,7 +291,7 @@ end
 # Payload-carrying kinds get placeholder payloads — only the type matters for
 # the trait query.
 _primal_validatable_kinds() = (
-    (JacobianKind(), JacobianRequest{:u}),
+    (JacobianKind{:u}(), JacobianRequest{:u}),
     (JacobianResidualKind(), JacobianResidualRequest),
 )
 _sensitivity_validatable_kinds() = (

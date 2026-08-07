@@ -83,13 +83,15 @@ function evaluate_cell_residual!(r, cache, args::KernelArgs)
     return r
 end
 
-# ∂F/∂u — writes the Jacobian into K and the primal residual into ws.re. The
-# `:u` slot is seeded; every other slot stays at its primal value — including
-# `AffineRate`-reconstructed slots, which are formed at gather time. Tag
-# checking is off: the config carries the package tag, not the closure's.
-function ad_state_jacobian!(K, ws, args::KernelArgs)
-    f! = (r, u) -> evaluate_cell_residual!(r, ws.element, with_states(args, merge(args.states, (u = u,))))
-    ForwardDiff.jacobian!(K, f!, ws.re, args.states.u, ws.ad.jac_cfg, Val{false}())
+# ∂F/∂slot — writes the Jacobian into K and the primal residual into ws.re.
+# Only the named slot is seeded; every other slot stays at its primal value —
+# including `AffineRate`-reconstructed slots, which are formed at gather time.
+# All slot buffers share one size, so the per-worker config serves every slot.
+# Tag checking is off: the config carries the package tag, not the closure's.
+function ad_state_jacobian!(K, ws, args::KernelArgs, ::Val{slot} = Val(:u)) where {slot}
+    f! = (r, x) -> evaluate_cell_residual!(
+        r, ws.element, with_states(args, merge(args.states, NamedTuple{(slot,)}((x,)))))
+    ForwardDiff.jacobian!(K, f!, ws.re, args.states[slot], ws.ad.jac_cfg, Val{false}())
     return K
 end
 

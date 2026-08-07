@@ -26,6 +26,19 @@ residual!(op::LinearizedFerriteOperator, residual::AbstractVector, states::Named
 residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
     residual!(op, residual, (u = u,), p, nothing)
 
+"""
+    assemble_slot_jacobian!(J, op, kind::JacobianKind, states, p, ctx)
+
+Assemble ∂F/∂slot into `J`, where `kind` names the slot
+([`JacobianKind`](@ref)). `J` is any matrix the operator's assembler accepts —
+in particular a member of a component bag from
+[`allocate_components`](@ref) — so the multi-slot linearization
+`Σ wₛ ∂F/∂s` is assembled once per slot and folded with [`combine!`](@ref).
+`op.J` is untouched unless it is passed as `J`.
+"""
+assemble_slot_jacobian!(J::AbstractMatrix, op::LinearizedFerriteOperator, kind::JacobianKind, states::NamedTuple, p, ctx) =
+    assemble_into!(kind, (J,), op, states, p, ctx)
+
 # Call-time admissibility over all subdomain caches; the same per-cache check
 # runs at setup for kinds declared via `setup_operator(...; requests)` — see
 # `assert_sensitivity_admissible` for the rationale.

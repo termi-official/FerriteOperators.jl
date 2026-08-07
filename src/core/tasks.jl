@@ -1,7 +1,6 @@
 # What a single assembly sweep computes. Kinds select which request is
 # materialized over the workspace buffers and which kernels run.
 struct JacobianResidualKind end     # nonlinear J(u) and r(u), fused
-struct JacobianKind end             # nonlinear J(u)
 struct ResidualKind end             # nonlinear r(u)
 struct BilinearKind end             # u-independent matrix
 struct LinearKind end               # u-independent vector
@@ -10,6 +9,29 @@ struct ParameterVJPKind{L}; λ::L; end          # (∂F/∂θ)ᵀλ, adjoint pul
 struct TimeSensitivityKind{T}; t::T; end       # ∂F/∂t, explicit dependence
 struct StateJVPKind{V}; v::V; end              # (∂F/∂u)·v, matrix-free J action
 struct StateVJPKind{L}; λ::L; end              # (∂F/∂u)ᵀλ, matrix-free Jᵀ action
+
+"""
+    JacobianKind{slot}
+    JacobianKind()
+
+Assembly of the Jacobian ∂F/∂slot, materialized into the operator's matrix.
+`slot` names the state slot differentiated against; `JacobianKind()` is
+`JacobianKind{:u}()`, the Newton path. Every other slot is a *component* of a
+multi-slot linearization (`JacobianKind{:du}()` for the DAE mass block,
+`JacobianKind{:v}()`/`JacobianKind{:a}()` for structural dynamics); the
+chain-rule weights that fold components into a Newton matrix are the solver's,
+not the framework's.
+
+The differentiated slot must carry a plain vector source: [`AffineRate`](@ref)
+slots are reconstructed at gather time and frozen under AD, so a Jacobian
+w.r.t. them is not what the sweep computes and the entry point rejects it.
+
+Elements serve the kind either analytically — `assemble_cell!` on
+`JacobianRequest{slot}`, declared through [`provides_analytic`](@ref) — or
+through ForwardDiff seeding of the named slot buffer.
+"""
+struct JacobianKind{slot} end
+JacobianKind() = JacobianKind{:u}()
 
 """
     FunctionalKind{tag}
@@ -129,7 +151,7 @@ function boundary_kernel!(kind::PrimalKind, cache::AbstractSurfaceElementCache, 
     end
 end
 facet_request!(::ResidualKind,         cache, ws, args, lfi) = assemble_facet!(ResidualRequest(ws.re), cache, args, lfi)
-facet_request!(::JacobianKind,         cache, ws, args, lfi) = assemble_facet!(JacobianRequest{:u}(ws.Ke), cache, args, lfi)
+facet_request!(::JacobianKind{slot},   cache, ws, args, lfi) where {slot} = assemble_facet!(JacobianRequest{slot}(ws.Ke), cache, args, lfi)
 facet_request!(::JacobianResidualKind, cache, ws, args, lfi) = assemble_facet!(JacobianResidualRequest(ws.Ke, ws.re), cache, args, lfi)
 facet_request!(::BilinearKind,         cache, ws, args, lfi) = assemble_facet!(JacobianRequest{:u}(ws.Ke), cache, args, lfi)
 facet_request!(::LinearKind,           cache, ws, args, lfi) = assemble_facet!(ResidualRequest(ws.re), cache, args, lfi)
@@ -137,12 +159,12 @@ facet_request!(::LinearKind,           cache, ws, args, lfi) = assemble_facet!(R
 function v2_cell_kernel!(::ResidualKind, cache, ws, statesₑ, pₑ, ctx, metaₑ = (;))
     assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx, metaₑ))
 end
-function v2_cell_kernel!(kind::JacobianKind, cache, ws, statesₑ, pₑ, ctx, metaₑ = (;))
+function v2_cell_kernel!(kind::JacobianKind{slot}, cache, ws, statesₑ, pₑ, ctx, metaₑ = (;)) where {slot}
     args = _v2_args(ws, statesₑ, pₑ, ctx, metaₑ)
     if provides_analytic(typeof(cache), kind)
-        assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, args)
+        assemble_cell!(JacobianRequest{slot}(ws.Ke), cache, args)
     else
-        ad_state_jacobian!(ws.Ke, ws, args)
+        ad_state_jacobian!(ws.Ke, ws, args, Val(slot))
     end
 end
 function v2_cell_kernel!(kind::JacobianResidualKind, cache, ws, statesₑ, pₑ, ctx, metaₑ = (;))
@@ -265,6 +287,32 @@ scatter_local!(::JacobianResidualKind, assembler, ws)              = assemble!(a
 scatter_local!(::Union{JacobianKind, BilinearKind}, assembler, ws) = assemble!(assembler, ws.cell, ws.Ke)
 scatter_local!(::Union{ResidualKind, LinearKind}, assembler, ws)   = assemble!(assembler, ws.cell, ws.re)
 
+# A Jacobian sweep differentiates the buffer of ONE slot, so that slot must be
+# present and must carry a plain vector source. `AffineRate` slots are formed
+# at gather time and stay frozen under AD; the chain rule through the
+# reconstruction is the solver's per-slot weight, not an assemblable quantity.
+_check_differentiated_slot(kind, engine, states) = nothing
+function _check_differentiated_slot(kind::JacobianKind{slot}, engine, states::NamedTuple{names}) where {slot, names}
+    slot in names || throw(ArgumentError(
+        "A `JacobianKind{:$slot}` sweep differentiates the `:$slot` slot, which the states " *
+        "$names do not carry."))
+    states[slot] isa AffineRate && throw(ArgumentError(
+        "Slot `:$slot` carries an `AffineRate` source, which is reconstructed at gather time " *
+        "and frozen under AD — ∂F/∂:$slot cannot be assembled against it. Assemble the " *
+        "components against plain vector sources and combine them with the reconstruction " *
+        "slope solver-side."))
+    # `provides_analytic` is declared against the `JacobianKind` UnionAll, so a
+    # cache that only implements the `:u` kernel claims every slot. Catch the
+    # missing kernel here instead of as a per-cell MethodError; `:u` itself is
+    # already covered by the setup-time validation.
+    if slot !== :u
+        for sc in engine.subdomain_caches
+            _assert_trait_backed(typeof(sc.domain.element), kind, JacobianRequest{slot})
+        end
+    end
+    return nothing
+end
+
 # The one assembly driver shared by every operator entry point. Entry points
 # with custom scatter targets (parameter space, quadrature storage) pass their
 # own pre-built assembler to `run_sweep!`; everything dof-scattered goes
@@ -272,6 +320,7 @@ scatter_local!(::Union{ResidualKind, LinearKind}, assembler, ws)   = assemble!(a
 function run_sweep!(kind, assembler, op, states::NamedTuple, p, ctx)
     _check_declared_slots(op.engine, states)
     _check_rate_slots(states)
+    _check_differentiated_slot(kind, op.engine, states)
     task = AssemblyTask(kind, assembler, states, p, ctx)
     execute_on_subdomains!(task, op.engine)
     finalize_assembly!(assembler)

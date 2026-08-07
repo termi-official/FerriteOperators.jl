@@ -6,7 +6,7 @@ using TimerOutputs
 using Adapt
 using Unrolled
 using SparseArrays, StaticArrays
-import SparseArrays: AbstractSparseMatrixCSC
+import SparseArrays: AbstractSparseMatrixCSC, getcolptr
 
 using ConcreteStructs
 
@@ -66,6 +66,8 @@ include("operators/bilinear.jl")
 include("operators/linear.jl")
 include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
+include("operators/components.jl")      # Component bags over a shared sparsity pattern + combine!
+include("operators/stage_block.jl")     # Stage-block operator for fully implicit Runge-Kutta schemes
 include("operators/verification.jl")    # check_derivatives: FD referee for analytic kernels and AD paths
 
 include("core/quadrature-task.jl")      # Task + operator for evaluating functions at quadrature points
@@ -91,6 +93,9 @@ export VTKQuadratureGrid, VTKQuadratureFile, write_quadrature_data
 export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, process_query!
 
 export setup_operator, update_operator!, update_linearization!, residual!
+export assemble_slot_jacobian!
+export allocate_components, share_pattern, combine!
+export StageBlockOperator, assemble_stages!
 export update_parameter_jacobian!, parameter_vjp!, time_sensitivity!
 export ADSensitivity, FiniteDifferenceSensitivity, has_internal_state, internal_state_insensitive
 export state_jvp!, state_vjp!, StateJVPRequest, StateVJPRequest

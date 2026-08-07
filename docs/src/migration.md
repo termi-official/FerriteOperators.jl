@@ -181,6 +181,12 @@ op = setup_operator(strategy, integrator, dh;
   admissibility failures from first use to `setup_operator`.
 - **Matrix-free state actions**: `state_jvp!` (`J·v` without a matrix),
   `state_vjp!` (`Jᵀλ` — the adjoint action).
+- **Components and stage operators**: `allocate_components` +
+  `assemble_slot_jacobian!(J, op, JacobianKind{:du}(), …)` + `combine!` replace
+  hand-matched `M`/`K` pairs and the `op.A`/`op.J` reach-through — one shared
+  sparsity pattern, weights applied by the solver, complex targets supported
+  (transformed Radau). `StageBlockOperator`/`assemble_stages!` carry the same
+  components into fully implicit Runge-Kutta.
 - **Derivative verification**: `check_derivatives(op, states, p, ctx)`
   cross-checks every analytic kernel and AD path against finite differences
   of the operator's own residual — run it once per ported element.
