@@ -155,6 +155,13 @@ using TimerOutputs
             update_operator!(bilinop_base, 0.0)
             @test norm_baseline == norm(bilinop_base.A)
 
+            # The bilinear form induces a linear operator, so the residual
+            # entry point must reproduce its action.
+            ub = sin.(0.4 .* (1:ndofs(dh)))
+            rb = zeros(ndofs(dh))
+            residual!(bilinop_base, rb, ub, 0.0)
+            @test rb ≈ bilinop_base.A * ub rtol = 1e-13
+
             @testset "Strategy $strategy" for strategy in (
                     PerColorAssemblyStrategy(SequentialCPUDevice()),
                     PerColorAssemblyStrategy(PolyesterDevice(1)),

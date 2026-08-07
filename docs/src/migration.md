@@ -93,12 +93,30 @@ updates). For a backward-Euler local state under any one-step global scheme,
 docstring for the trap.
 
 Slot names are free: a Newmark-style protocol passes whatever it needs, e.g.
-`slots = (:u, :uprev, :vanchor)`. *Interim note until the phase-2 `AffineRate`
-and slot-metadata contract land*: rate-reconstruction **slopes** (`∂v/∂u =
-γ/(βΔt)` etc.) have no framework channel yet — carry them in your parameter
-object `p` (define `unwrap_parameters` for your wrapper so plain elements see
-through it), and migrate to slot metadata when phase 2 ships. Do not put
-slopes into `ctx`.
+`slots = (:u, :v, :a)`. Rate-like slots do not have to be materialized by the
+solver — an [`AffineRate`](@ref) source reconstructs them from the primary
+unknown at gather time:
+
+```julia
+op = setup_operator(strategy, integrator, dh; slots = (:u, :v, :a))
+update_linearization!(op, r,
+    (u = u, v = AffineRate(γ/(β*Δt), uᵥ), a = AffineRate(1/(β*Δt^2), ũ)),
+    p, TimeIntegrationContext(t, Δt, Δt))
+# element: vₑ = args.states.v;  ∂v/∂u = slot_slope(args, :v)
+```
+
+The reconstruction slope is **slot metadata**, reachable from any kernel
+through [`slot_slope`](@ref) (`nothing` for plain vector slots). That is the
+channel for `∂v/∂u`, and it is the one that works for multilevel Newton on
+rate-coupled condensed materials, where the slope is needed *inside* the
+local tangent's matrix inverse. Do not carry slopes in `p`, and do not put
+them into `ctx`.
+
+The `:u` slot must be declared and must precede any reconstructed slot in the
+states NamedTuple — the sweep throws otherwise. The assembled Jacobian is
+∂F/∂u at frozen slot values (AD seeds the `:u` buffer only), so the
+chain-rule contribution `slope · ∂F/∂v` remains the solver's, applied through
+its per-slot weights.
 
 Condensed elements: declare `FerriteOperators.has_internal_state(::Type{<:MyCache}) = true`.
 The previous state arrives through your chosen slot; the local solve scales by

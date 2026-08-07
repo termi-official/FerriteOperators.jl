@@ -57,16 +57,43 @@ function _check_declared_slots(engine, states::NamedTuple{names}) where {names}
     return nothing
 end
 
+# Rate reconstruction reads the gathered `:u` buffer, so a `:u` slot must
+# exist and be gathered before any AffineRate slot.
+function _check_rate_slots(states::NamedTuple{names}) where {names}
+    iu = findfirst(==(:u), names)
+    for (i, name) in enumerate(names)
+        states[i] isa AffineRate || continue
+        (iu === nothing || iu >= i) && throw(ArgumentError(
+            "Slot `$name` is an `AffineRate` source, whose value is `slope·(u − anchor)`. " *
+            "The states NamedTuple must carry a plain `:u` slot BEFORE it, got $names."))
+    end
+    return nothing
+end
+
 # Gather every task slot into the workspace's slot buffers, returning the
 # element-local states NamedTuple. Gathering goes through
 # `load_element_unknowns!` per slot so condensed elements keep their
 # element-overridable [ū; q] layout for every slot.
 function load_slots!(ws, states::NamedTuple{names}) where {names}
     return map(NamedTuple{names}(ws.slot_buffers), states) do buf, src
-        load_element_unknowns!(buf, src, ws.cell, ws.ivh, ws.element)
+        load_slot!(buf, src, ws)
         buf
     end
 end
+load_slot!(buf, src, ws) = load_element_unknowns!(buf, src, ws.cell, ws.ivh, ws.element)
+# The anchor lands in the slot's own buffer first, then the buffer becomes the
+# reconstruction against the already-gathered `:u` buffer.
+function load_slot!(buf, src::AffineRate, ws)
+    load_element_unknowns!(buf, src.anchor, ws.cell, ws.ivh, ws.element)
+    buf .= src.slope .* (ws.slot_buffers.u .- buf)
+    return buf
+end
+
+# Per-slot reconstruction metadata reaching kernels through `slot_slope`.
+slot_metadata(states::NamedTuple{names}) where {names} =
+    NamedTuple{names}(map(_reconstruction_slope, values(states)))
+_reconstruction_slope(src::AffineRate) = src.slope
+_reconstruction_slope(src) = nothing
 
 function execute_kind!(kind::PrimalKind, task, ws)
     kind isa MatrixAssemblyKind && fill!(ws.Ke, 0.0)
@@ -75,27 +102,29 @@ function execute_kind!(kind::PrimalKind, task, ws)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     if kind isa UnknownDependentKind
         statesₑ = load_slots!(ws, task.states)
-        @timeit_debug "assemble element" v2_cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx)
-        @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, statesₑ, task)
+        metaₑ = slot_metadata(task.states)
+        @timeit_debug "assemble element" v2_cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx, metaₑ)
+        @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, statesₑ, metaₑ, task)
         store_condensed_element_unknowns!(statesₑ.u, task.states.u, ws.cell, ws.ivh, ws.element)
     else
         @timeit_debug "assemble element" v2_cell_kernel!(kind, ws.element, ws, (;), pₑ, task.ctx)
-        @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, (;), task)
+        @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, (;), (;), task)
     end
     scatter_local!(kind, task.inner_assembler, ws)
 end
 
-_v2_args(ws, statesₑ, pₑ, ctx) = KernelArgs(statesₑ, ws.cell, pₑ, ws.scratch, ctx)
+# The single KernelArgs construction seam.
+_v2_args(ws, statesₑ, pₑ, ctx, metaₑ = (;)) = KernelArgs(statesₑ, ws.cell, pₑ, ws.scratch, ctx, metaₑ)
 
 # The framework-owned facet driver: walk the cell's facets, gate on
 # is_facet_in_cache, query facet parameters SEPARATELY per facet, and hand the
 # kind's request over the shared local buffers to the facet kernel.
-boundary_kernel!(kind::PrimalKind, ::EmptySurfaceElementCache, ws, statesₑ, task) = nothing
-function boundary_kernel!(kind::PrimalKind, cache::AbstractSurfaceElementCache, ws, statesₑ, task)
+boundary_kernel!(kind::PrimalKind, ::EmptySurfaceElementCache, ws, statesₑ, metaₑ, task) = nothing
+function boundary_kernel!(kind::PrimalKind, cache::AbstractSurfaceElementCache, ws, statesₑ, metaₑ, task)
     for lfi in 1:nfacets(ws.cell)
         if is_facet_in_cache(FacetIndex(cellid(ws.cell), lfi), ws.cell, cache)
             pᵦ = query_facet_parameters(cache, ws.cell, lfi, task.p)
-            facet_request!(kind, cache, ws, _v2_args(ws, statesₑ, pᵦ, task.ctx), lfi)
+            facet_request!(kind, cache, ws, _v2_args(ws, statesₑ, pᵦ, task.ctx, metaₑ), lfi)
         end
     end
 end
@@ -105,32 +134,34 @@ facet_request!(::JacobianResidualKind, cache, ws, args, lfi) = assemble_facet!(J
 facet_request!(::BilinearKind,         cache, ws, args, lfi) = assemble_facet!(JacobianRequest{:u}(ws.Ke), cache, args, lfi)
 facet_request!(::LinearKind,           cache, ws, args, lfi) = assemble_facet!(ResidualRequest(ws.re), cache, args, lfi)
 
-function v2_cell_kernel!(::ResidualKind, cache, ws, statesₑ, pₑ, ctx)
-    assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx))
+function v2_cell_kernel!(::ResidualKind, cache, ws, statesₑ, pₑ, ctx, metaₑ = (;))
+    assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx, metaₑ))
 end
-function v2_cell_kernel!(kind::JacobianKind, cache, ws, statesₑ, pₑ, ctx)
+function v2_cell_kernel!(kind::JacobianKind, cache, ws, statesₑ, pₑ, ctx, metaₑ = (;))
+    args = _v2_args(ws, statesₑ, pₑ, ctx, metaₑ)
     if provides_analytic(typeof(cache), kind)
-        assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, _v2_args(ws, statesₑ, pₑ, ctx))
+        assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, args)
     else
-        ad_state_jacobian!(ws.Ke, ws, statesₑ, pₑ, ctx)
+        ad_state_jacobian!(ws.Ke, ws, args)
     end
 end
-function v2_cell_kernel!(kind::JacobianResidualKind, cache, ws, statesₑ, pₑ, ctx)
+function v2_cell_kernel!(kind::JacobianResidualKind, cache, ws, statesₑ, pₑ, ctx, metaₑ = (;))
+    args = _v2_args(ws, statesₑ, pₑ, ctx, metaₑ)
     if provides_analytic(typeof(cache), kind)
-        assemble_cell!(JacobianResidualRequest(ws.Ke, ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx))
+        assemble_cell!(JacobianResidualRequest(ws.Ke, ws.re), cache, args)
     elseif provides_analytic(typeof(cache), JacobianKind())
-        assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, _v2_args(ws, statesₑ, pₑ, ctx))
-        assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx))
+        assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, args)
+        assemble_cell!(ResidualRequest(ws.re), cache, args)
     else
-        ad_state_jacobian!(ws.Ke, ws, statesₑ, pₑ, ctx)   # also leaves the primal residual in ws.re
+        ad_state_jacobian!(ws.Ke, ws, args)   # also leaves the primal residual in ws.re
     end
 end
 # State-independent forms have no residual kernel to differentiate; the
 # analytic kernel is mandatory for v2 elements used in these operators.
-v2_cell_kernel!(::BilinearKind, cache, ws, statesₑ, pₑ, ctx) =
-    assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, _v2_args(ws, statesₑ, pₑ, ctx))
-v2_cell_kernel!(::LinearKind, cache, ws, statesₑ, pₑ, ctx) =
-    assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx))
+v2_cell_kernel!(::BilinearKind, cache, ws, statesₑ, pₑ, ctx, metaₑ = (;)) =
+    assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, _v2_args(ws, statesₑ, pₑ, ctx, metaₑ))
+v2_cell_kernel!(::LinearKind, cache, ws, statesₑ, pₑ, ctx, metaₑ = (;)) =
+    assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx, metaₑ))
 
 # Sensitivity sweeps: gather the trial state, never write anything back into
 # `u`, and route through analytic kernels or AD-from-residual. Local outputs
@@ -140,65 +171,63 @@ v2_cell_kernel!(::LinearKind, cache, ws, statesₑ, pₑ, ctx) =
 function execute_kind!(kind::SensitivityKind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
     statesₑ = load_slots!(ws, task.states)
-    @timeit_debug "assemble sensitivity" sensitivity_kernel!(kind, task, ws, statesₑ)
+    pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
+    args = _v2_args(ws, statesₑ, pₑ, task.ctx, slot_metadata(task.states))
+    @timeit_debug "assemble sensitivity" sensitivity_kernel!(kind, task, ws, args)
 end
 
 # Residual-shaped gather (plain celldofs slice — adjoint vectors carry no
 # condensed tail, unlike the slot gathers).
 _gather_residual_dofs!(dest, src, cell) = dest .= @view src[celldofs(cell)]
 
-function sensitivity_kernel!(kind::ParameterJacobianKind, task, ws, statesₑ)
+function sensitivity_kernel!(kind::ParameterJacobianKind, task, ws, args)
     cache = ws.element
     Bₑ = parameter_sweep_buffers!(ws.ad, length(parameter_vector(task.p))).Bₑ
     if provides_analytic(typeof(cache), kind)
         fill!(Bₑ, zero(eltype(Bₑ)))
-        pₑ = query_cell_parameters(cache, ws.cell, task.p)
-        assemble_cell!(ParameterJacobianRequest(Bₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
+        assemble_cell!(ParameterJacobianRequest(Bₑ), cache, args)
     else
-        ad_parameter_jacobian!(Bₑ, ws, statesₑ, task.p, task.ctx)
+        ad_parameter_jacobian!(Bₑ, ws, args, task.p)
     end
     assemble!(task.inner_assembler, ws.cell, Bₑ)
 end
 
-function sensitivity_kernel!(kind::ParameterVJPKind, task, ws, statesₑ)
+function sensitivity_kernel!(kind::ParameterVJPKind, task, ws, args)
     cache = ws.element
     λₑ = _gather_residual_dofs!(ws.ad.λₑ, kind.λ, ws.cell)
     gₑ = parameter_sweep_buffers!(ws.ad, length(parameter_vector(task.p))).gθ
     if provides_analytic(typeof(cache), kind)
         fill!(gₑ, zero(eltype(gₑ)))
-        pₑ = query_cell_parameters(cache, ws.cell, task.p)
-        assemble_cell!(ParameterVJPRequest(gₑ, λₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
+        assemble_cell!(ParameterVJPRequest(gₑ, λₑ), cache, args)
     else
-        ad_parameter_vjp!(gₑ, λₑ, ws, statesₑ, task.p, task.ctx)
+        ad_parameter_vjp!(gₑ, λₑ, ws, args, task.p)
     end
     assemble!(task.inner_assembler, ws.cell, gₑ)
 end
 
-function sensitivity_kernel!(kind::StateJVPKind, task, ws, statesₑ)
+function sensitivity_kernel!(kind::StateJVPKind, task, ws, args)
     cache = ws.element
     vₑ = ws.ad.vₑ
     load_element_unknowns!(vₑ, kind.v, ws.cell, ws.ivh, cache)
     Jvₑ = ws.ad.Jvₑ
-    pₑ = query_cell_parameters(cache, ws.cell, task.p)
     if provides_analytic(typeof(cache), kind)
         fill!(Jvₑ, zero(eltype(Jvₑ)))
-        assemble_cell!(StateJVPRequest(Jvₑ, vₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
+        assemble_cell!(StateJVPRequest(Jvₑ, vₑ), cache, args)
     else
-        ad_state_jvp!(Jvₑ, ws, statesₑ, vₑ, pₑ, task.ctx)
+        ad_state_jvp!(Jvₑ, ws, args, vₑ)
     end
     assemble!(task.inner_assembler, ws.cell, Jvₑ)
 end
 
-function sensitivity_kernel!(kind::StateVJPKind, task, ws, statesₑ)
+function sensitivity_kernel!(kind::StateVJPKind, task, ws, args)
     cache = ws.element
     λₑ = _gather_residual_dofs!(ws.ad.λₑ, kind.λ, ws.cell)
     gₑ = ws.ad.gu
-    pₑ = query_cell_parameters(cache, ws.cell, task.p)
     if provides_analytic(typeof(cache), kind)
         fill!(gₑ, zero(eltype(gₑ)))
-        assemble_cell!(StateVJPRequest(gₑ, λₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
+        assemble_cell!(StateVJPRequest(gₑ, λₑ), cache, args)
     else
-        ad_state_vjp!(gₑ, λₑ, ws, statesₑ, pₑ, task.ctx)
+        ad_state_vjp!(gₑ, λₑ, ws, args)
     end
     assemble!(task.inner_assembler, ws.cell, gₑ)
 end
@@ -210,7 +239,7 @@ function execute_kind!(kind::FunctionalKind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
     statesₑ = load_slots!(ws, task.states)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
-    val = evaluate_cell_functional(kind, ws.element, _v2_args(ws, statesₑ, pₑ, task.ctx))
+    val = evaluate_cell_functional(kind, ws.element, _v2_args(ws, statesₑ, pₑ, task.ctx, slot_metadata(task.states)))
     _accumulate_functional!(ws.functional, val)
 end
 _accumulate_functional!(acc, ::Nothing) = nothing
@@ -219,15 +248,14 @@ function _accumulate_functional!(acc, val)
     return nothing
 end
 
-function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, statesₑ)
+function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, args)
     cache = ws.element
     gₑ = ws.ad.gₜ
     if provides_analytic(typeof(cache), kind)
         fill!(gₑ, zero(eltype(gₑ)))
-        pₑ = query_cell_parameters(cache, ws.cell, task.p)
-        assemble_cell!(TimeSensitivityRequest(gₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
+        assemble_cell!(TimeSensitivityRequest(gₑ), cache, args)
     else
-        ad_time_sensitivity!(gₑ, ws, statesₑ, kind.t, task.ctx)
+        ad_time_sensitivity!(gₑ, ws, args, kind.t)
     end
     assemble!(task.inner_assembler, ws.cell, gₑ)
 end
@@ -243,6 +271,7 @@ scatter_local!(::Union{ResidualKind, LinearKind}, assembler, ws)   = assemble!(a
 # through `assemble_into!`, which builds the assembler from the global targets.
 function run_sweep!(kind, assembler, op, states::NamedTuple, p, ctx)
     _check_declared_slots(op.engine, states)
+    _check_rate_slots(states)
     task = AssemblyTask(kind, assembler, states, p, ctx)
     execute_on_subdomains!(task, op.engine)
     finalize_assembly!(assembler)

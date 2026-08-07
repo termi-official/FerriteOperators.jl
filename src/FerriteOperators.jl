@@ -97,6 +97,7 @@ export state_jvp!, state_vjp!, StateJVPRequest, StateVJPRequest
 export check_derivatives
 export parameter_vector, rebuild_parameters
 export TimeIntegrationContext, KernelArgs, assemble_cell!
+export AffineRate, slot_slope
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
 export ResidualKind, JacobianKind, JacobianResidualKind

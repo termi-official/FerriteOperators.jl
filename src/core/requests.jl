@@ -104,21 +104,80 @@ struct StateVJPRequest{G <: AbstractVector, L <: AbstractVector} <: AbstractAsse
 end
 
 """
+    AffineRate(slope, anchor)
+
+Slot *source* reconstructing a rate-like slot from the primary unknown: the
+slot's cell-local value is `slope · (u − anchor)`, formed at gather time from
+the `:u` slot. Solvers pass it in place of a plain vector, e.g. backward
+Euler `states = (u = u, du = AffineRate(1/Δt, uprev))` or Newmark
+`states = (u = u, v = AffineRate(γ/(β*Δt), uᵥ))`. The slot is declared like
+any other (`setup_operator(...; slots = (:u, :du))`).
+
+A `:u` slot must exist and PRECEDE the reconstructed slot in the states
+`NamedTuple` — the sweep throws otherwise. Kernels read the reconstructed
+values through `args.states.<name>` and the slope through
+[`slot_slope`](@ref), so an element never encodes a time-integration scheme.
+
+!!! warning "Reconstructed slots are frozen under AD"
+    Reconstruction happens at gather time, before any Dual seeding, and the
+    ∂F/∂u sweep seeds only the `:u` buffer. A kernel reading a reconstructed
+    slot therefore sees it at its primal value throughout the sweep, and the
+    assembled Jacobian is ∂F/∂u at frozen slot values. The chain-rule term
+    through the reconstruction (`slope · ∂F/∂slot`) belongs to the solver,
+    which contributes it through its per-slot weights.
+
+!!! note "Condensed elements"
+    The reconstruction applies uniformly to ALL entries of the element
+    buffer, because `u` and `anchor` are both `[ū; q]`-shaped gathers.
+    Internal variables are never rate-reconstructed by the framework
+    contract: the condensed tail of a reconstructed slot is an artifact of
+    the uniform formula and elements must not interpret it.
+"""
+struct AffineRate{T, V <: AbstractVector}
+    slope::T
+    anchor::V
+end
+
+"""
     KernelArgs(states, cell, p, scratch, ctx)
+    KernelArgs(states, cell, p, scratch, ctx, slot_meta)
 
 The argument bundle passed to v2 element kernels. `states` is a `NamedTuple`
 of cell-local slot buffers (e.g. `(u = uₑ,)`), `cell` the read-only geometry
-cache, `p` the user parameter bag, `scratch` per-worker scratch space, and
-`ctx` the [`TimeIntegrationContext`](@ref) (or `nothing` while the legacy
-parameter channel still carries time).
+cache, `p` the user parameter bag, `scratch` per-worker scratch space, `ctx`
+the [`TimeIntegrationContext`](@ref) (or `nothing` while the legacy parameter
+channel still carries time), and `slot_meta` the per-slot reconstruction
+metadata queried through [`slot_slope`](@ref) (empty when no slot is
+reconstructed).
 """
-struct KernelArgs{States <: NamedTuple, Cell, P, Scratch, Ctx}
+struct KernelArgs{States <: NamedTuple, Cell, P, Scratch, Ctx, Meta <: NamedTuple}
     states::States
     cell::Cell
     p::P
     scratch::Scratch
     ctx::Ctx
+    slot_meta::Meta
 end
+KernelArgs(states, cell, p, scratch, ctx) = KernelArgs(states, cell, p, scratch, ctx, (;))
+
+"""
+    slot_slope(args::KernelArgs, name::Symbol)
+
+The reconstruction linearization of the slot `name`: the [`AffineRate`](@ref)
+slope for a reconstructed slot, `nothing` for plain vector slots and for
+names the sweep does not carry. This is slot metadata, not scheme knowledge —
+a condensed corrector that needs `∂v/∂u` inside its local tangent queries it
+here instead of being told which time integrator is running.
+"""
+slot_slope(args::KernelArgs, name::Symbol) = get(args.slot_meta, name, nothing)
+
+"Rebuild `args` with the slot buffers replaced — the AD seeding seam. Slot metadata is preserved."
+with_states(args::KernelArgs, states::NamedTuple) =
+    KernelArgs(states, args.cell, args.p, args.scratch, args.ctx, args.slot_meta)
+
+"Rebuild `args` with the element-local parameter view replaced — the parameter/time seeding seam."
+with_parameters(args::KernelArgs, p) =
+    KernelArgs(args.states, args.cell, p, args.scratch, args.ctx, args.slot_meta)
 
 """
     assemble_cell!(req::AbstractAssemblyRequest, cache, args::KernelArgs)

@@ -157,6 +157,29 @@ at every trial evaluation, line search included). Declare
 [`has_internal_state`](@ref) for such caches — it governs the sensitivity
 admissibility rules below.
 
+### Unit-testing a kernel
+
+Kernels are pure evaluation, so they can be called directly on a single cell
+without an operator. Building the cell cache and the [`KernelArgs`](@ref) by
+hand is the supported testing seam:
+
+```julia
+cache = FerriteOperators.setup_element_cache(MyIntegrator(qrc, :u), sdh)
+
+cc = CellCache(dh)
+reinit!(cc, 1)                      # geometry for cell 1
+reinit_values!(cache, cc)           # the element's own values objects
+
+uₑ = rand(ndofs_per_cell(sdh))
+rₑ = zeros(ndofs_per_cell(sdh))
+args = KernelArgs((u = uₑ,), cc, p, nothing, nothing)
+assemble_cell!(ResidualRequest(rₑ), cache, args)
+```
+
+`KernelArgs` is constructed positionally as `(states, cell, p, scratch, ctx)`;
+`scratch` and `ctx` are whatever the kernel reads (`nothing` when it reads
+neither). Pass further slots as additional entries of the states NamedTuple.
+
 ## Operators and entry points
 
 ```julia
@@ -173,6 +196,17 @@ Time discretization of the global unknowns is solver-owned: solvers pass slot
 *values* (reconstructed histories, rates) and contexts; elements never encode
 a scheme. The hand-derived first-order path (an element reading `uprev` and
 `ctx` and owning its discretization) remains a supported opt-in pattern.
+
+A rate-like slot can be reconstructed from the primary unknown instead of
+being materialized by the solver: an [`AffineRate`](@ref) source gives the
+slot the cell-local value `slope · (u − anchor)`, e.g.
+`update_linearization!(op, r, (u = u, du = AffineRate(1/Δt, uprev)), p, ctx)`
+for backward Euler. The `:u` slot must precede the reconstructed one. Kernels
+read the values through `args.states.du` and the linearization through
+[`slot_slope`](@ref) — the slope is slot metadata, so a condensed corrector
+that needs `∂v/∂u` inside its local tangent stays scheme-agnostic. The
+assembled Jacobian is ∂F/∂u at frozen slot values; the chain-rule term
+through the reconstruction is contributed by the solver's per-slot weights.
 
 ### Functionals
 
