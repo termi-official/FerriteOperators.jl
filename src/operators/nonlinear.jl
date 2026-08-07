@@ -211,7 +211,7 @@ end
     mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector)
     mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β)
 
-Apply the (scaled) action of the linearization of the contained nonlinear form to the vector `in`.
+Apply the (scaled) action of the linearization of the contained nonlinear operator to the vector `in`.
 """
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector) = mul!(out, op.J, in)
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.J, in, α, β)

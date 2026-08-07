@@ -81,8 +81,8 @@ function setup_element_cache(element_model::SimpleBilinearMassIntegrator, sdh::S
     return SimpleBilinearMassElementCache(element_model.ρ, CellValues(qr, ip, ip_geo))
 end
 
-# v2 request protocol. The residual of the linear element is the element
-# matrix acting on the element vector.
+# v2 request protocol. The bilinear form induces a linear operator, so its
+# residual is the element matrix acting on the element vector.
 provides_analytic(::Type{<:SimpleBilinearMassElementCache}, ::JacobianKind) = true
 function assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearMassElementCache, args::KernelArgs)
     (; cellvalues, ρ) = cache

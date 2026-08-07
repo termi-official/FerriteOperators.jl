@@ -56,9 +56,9 @@ function setup_element_cache(element_model::SimpleBilinearDiffusionIntegrator, s
 end
 
 provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind) = true
-# The residual of a linear element is just the element matrix acting on the
-# element vector — mandatory so the element composes into nonlinear operators
-# and AD-based sensitivities.
+# The bilinear form induces a linear operator, so its residual is the element
+# matrix acting on the element vector — mandatory so the element composes
+# into nonlinear operators and AD-based sensitivities.
 function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearDiffusionElementCache, args::KernelArgs)
     (; cellvalues, D) = cache
     uₑ = args.states.u
