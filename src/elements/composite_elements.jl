@@ -31,6 +31,21 @@ has_internal_state(::Type{CompositeVolumetricElementCache{CT}}) where {CT <: Tup
 _any_internal(::Type{Tuple{}}) = false
 _any_internal(::Type{T}) where {T <: Tuple} =
     has_internal_state(Base.tuple_type_head(T)) || _any_internal(Base.tuple_type_tail(T))
+# A composite is insensitive for a kind iff every STATEFUL inner declares so —
+# stateless inners differentiate exactly under plain AD regardless.
+internal_state_insensitive(::Type{CompositeVolumetricElementCache{CT}}, kind) where {CT <: Tuple} =
+    _all_stateful_insensitive(CT, kind)
+_all_stateful_insensitive(::Type{Tuple{}}, kind) = true
+function _all_stateful_insensitive(::Type{T}, kind) where {T <: Tuple}
+    H = Base.tuple_type_head(T)
+    return (!has_internal_state(H) || internal_state_insensitive(H, kind)) &&
+        _all_stateful_insensitive(Base.tuple_type_tail(T), kind)
+end
+
+# Inner scratch declarations survive composition (later inners win on name
+# collisions, like the solver-vs-element merge at setup).
+declare_scratch(composite::CompositeVolumetricElementCache) =
+    reduce(merge, map(declare_scratch, composite.inner_caches); init = (;))
 
 function duplicate_for_device(device, cache::CompositeVolumetricElementCache)
     return CompositeVolumetricElementCache(
@@ -73,16 +88,5 @@ is_facet_in_cache(idx::FacetIndex, cell, composite::CompositeSurfaceElementCache
     return false
 end
 
-"""
-This cache allows to combine multiple elements over the same interface.
-Interface kernels are reserved for the DG work (phase 4); composition will
-follow the same request fan-out pattern as cells and facets.
-"""
-struct CompositeInterfaceElementCache{CacheTupleType <: Tuple} <: AbstractInterfaceElementCache
-    inner_caches::CacheTupleType
-end
-function duplicate_for_device(device, cache::CompositeInterfaceElementCache)
-    return CompositeInterfaceElementCache(
-        map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
-    )
-end
+# Interface composition is reserved for the DG work (phase 4) and will follow
+# the same request fan-out pattern as cells and facets.

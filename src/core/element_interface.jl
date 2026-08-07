@@ -93,14 +93,6 @@ Supertype for all caches to integrate over interfaces (facet pairs).
 Reserved for the DG work: interface kernels are request-typed over a
 two-sided argument bundle (see the plan's `InterfaceKernelArgs`); the
 one-to-many generalization for non-local coupling reserves its own shape.
-
-    setup_interface_cache(integrator, sdh)
+Concrete interface caches and their setup hook land with that work.
 """
 abstract type AbstractInterfaceElementCache end
-
-"""
-    Utility to execute noop assembly.
-"""
-struct EmptyInterfaceCache <: AbstractInterfaceElementCache end
-Ferrite.getnquadpoints(::EmptyInterfaceCache) = 0
-Ferrite.reinit!(::EmptyInterfaceCache, cell) = nothing

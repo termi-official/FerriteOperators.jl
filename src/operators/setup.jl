@@ -28,12 +28,8 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
     return InternalVariableHandler(nothing, 0, 0)
 end
 
-function setup_subdomain_caches(strategy, integrator, dh; slots::NTuple{<:Any, Symbol} = (:u,), scratch::NamedTuple = (;), requests::Tuple = ())
-    element_caches  = setup_elements(integrator, dh)
-    foreach(cache -> validate_element_cache(cache, requests), element_caches)
-    boundary_caches = setup_boundaries(integrator, dh)
-    ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
-    device          = strategy.device
+function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh; slots::NTuple{<:Any, Symbol}, scratch::NamedTuple)
+    device = strategy.device
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
@@ -59,8 +55,12 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     # a declaration silently miss its validation entry.
     requests          = map(r -> Base.typename(r isa Type ? r : typeof(r)).wrapper, requests)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
-    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh; slots, scratch, requests)
-    return AssemblyEngine(operator_strategy, subdomain_caches, dh, requests)
+    element_caches    = setup_elements(integrator, dh)
+    foreach(cache -> validate_element_cache(cache, requests), element_caches)
+    boundary_caches   = setup_boundaries(integrator, dh)
+    ivh               = setup_internal_variable_handler(integrator, element_caches, dh)
+    subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh; slots, scratch)
+    return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, slots, requests)
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler; kwargs...)

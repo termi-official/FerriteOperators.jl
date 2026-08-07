@@ -63,17 +63,17 @@ function create_ad_workspace(element, sdh)
 end
 
 """
-    parameter_sweep_buffers!(ad::ADWorkspace, nres, nθ) -> ADWorkspace
+    parameter_sweep_buffers!(ad::ADWorkspace, nθ) -> ADWorkspace
 
 Size the parameter-sweep members (`θ`, `Bₑ`, `gθ`) for `nθ` flat parameters,
-reallocating only when the size changed since the last sweep on this worker.
+reallocating only when nθ changed since the last sweep on this worker.
 """
-function parameter_sweep_buffers!(ad::ADWorkspace, nres::Int, nθ::Int)
-    if length(ad.θ) != nθ || size(ad.Bₑ, 1) != nres
+function parameter_sweep_buffers!(ad::ADWorkspace, nθ::Int)
+    if length(ad.θ) != nθ
         T = eltype(ad.θ)
         ad.θ  = Vector{T}(undef, nθ)
         ad.gθ = Vector{T}(undef, nθ)
-        ad.Bₑ = Matrix{T}(undef, nres, nθ)
+        ad.Bₑ = Matrix{T}(undef, size(ad.Bₑ, 1), nθ)
     end
     return ad
 end

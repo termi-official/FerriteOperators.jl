@@ -50,11 +50,7 @@ determined by `getnquadpoints(getquadraturerule(qrc, sdh))`. Cells not belonging
 to any subdomain receive zero quadrature points.
 """
 function setup_qvector(::Type{T}, dh::AbstractDofHandler, qrc) where {T}
-    grid   = get_grid(dh)
-    ncells = getncells(grid)
-    offsets = zeros(Int, ncells)
-    npoints = zeros(Int, ncells)
-
+    npoints = zeros(Int, getncells(get_grid(dh)))
     for sdh in dh.subdofhandlers
         qr  = getquadraturerule(qrc, sdh)
         nqp = getnquadpoints(qr)
@@ -62,22 +58,7 @@ function setup_qvector(::Type{T}, dh::AbstractDofHandler, qrc) where {T}
             npoints[cellid] = nqp
         end
     end
-
-    # Build 1-based start offsets
-    offset = 1
-    for cellid in 1:ncells
-        offsets[cellid] = offset
-        offset += npoints[cellid]
-    end
-    data = zeros(T, offset - 1)
-
-    # Compress representation if possible. Uniform nonzero point counts imply
-    # the offsets are the arithmetic progression; a zero count cannot be a
-    # range step, so those layouts stay uncompressed.
-    uniform = first(npoints) > 0 && all(==(first(npoints)), npoints)
-    final_offsets = uniform ? (offsets[1]:npoints[1]:offsets[end]) : offsets
-    final_npoints = uniform ? first(npoints) : npoints
-    return QVector(data, final_offsets, final_npoints)
+    return _qvector_from_npoints(T, npoints)
 end
 
 """
@@ -89,12 +70,7 @@ The number of quadrature points per cell is determined from the element caches
 stored in the operator's subdomain caches via `getnquadpoints`.
 """
 function setup_qvector(::Type{T}, operator) where {T}
-    dh     = operator.engine.dh
-    grid   = get_grid(dh)
-    ncells = getncells(grid)
-    offsets = zeros(Int, ncells)
-    npoints = zeros(Int, ncells)
-
+    npoints = zeros(Int, getncells(get_grid(operator.engine.dh)))
     for sc in operator.engine.subdomain_caches
         domain = sc.domain
         nqp    = getnquadpoints(domain.element)
@@ -102,17 +78,21 @@ function setup_qvector(::Type{T}, operator) where {T}
             npoints[cellid] = nqp
         end
     end
+    return _qvector_from_npoints(T, npoints)
+end
 
+# Shared layout builder: 1-based start offsets from the per-cell point counts,
+# then compression where possible. Uniform nonzero point counts imply the
+# offsets are the arithmetic progression; a zero count cannot be a range step,
+# so those layouts stay uncompressed.
+function _qvector_from_npoints(::Type{T}, npoints::Vector{Int}) where {T}
+    offsets = similar(npoints)
     offset = 1
-    for cellid in 1:ncells
+    for cellid in eachindex(npoints)
         offsets[cellid] = offset
         offset += npoints[cellid]
     end
     data = zeros(T, offset - 1)
-
-    # Compress representation if possible. Uniform nonzero point counts imply
-    # the offsets are the arithmetic progression; a zero count cannot be a
-    # range step, so those layouts stay uncompressed.
     uniform = first(npoints) > 0 && all(==(first(npoints)), npoints)
     final_offsets = uniform ? (offsets[1]:npoints[1]:offsets[end]) : offsets
     final_npoints = uniform ? first(npoints) : npoints

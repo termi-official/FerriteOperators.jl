@@ -42,7 +42,7 @@ end
 function execute_kind!(kind::QuadratureEvaluationKind, task, ws)
     kind.set !== nothing && cellid(ws.cell) ∉ kind.set && return
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
-    statesₑ = load_slots!(ws, task.states, ws.cell, ws.ivh, ws.element)
+    statesₑ = load_slots!(ws, task.states)
     qₑ = query_element_quadrature_data(ws.element, ws.cell, ws.ivh, kind.q)
     Ferrite.reinit!(ws.element, ws.cell)
     for qp in 1:getnquadpoints(ws.element)
@@ -61,7 +61,7 @@ given, only cells in it are evaluated; the remaining entries of `q` are left
 untouched.
 """
 function evaluate_quadrature!(q::QVector, op, u, p, f, set = nothing)
-    task = AssemblyTask(QuadratureEvaluationKind(f, q, set), nothing, (u = u,), p, nothing)
-    execute_on_subdomains!(task, op.engine)
+    # The sink is the QVector inside the kind — no scatter assembler.
+    run_sweep!(QuadratureEvaluationKind(f, q, set), nothing, op, (u = u,), p, nothing)
     return q
 end

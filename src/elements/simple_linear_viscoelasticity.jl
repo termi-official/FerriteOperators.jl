@@ -89,12 +89,11 @@ end
     return ctx.γ̃
 end
 
-function assemble_cell!(req::AbstractAssemblyRequest, cache::SimpleCondensedLinearViscoelasticityCache, args::KernelArgs)
-    _sls_assemble!(req, cache, args)
-end
-# Restrict to the kernels this element actually provides.
-_sls_assemble!(req, cache, args) = throw(ArgumentError(
-    "SimpleCondensedLinearViscoelasticityCache implements Residual/Jacobian/JacobianResidual requests, got $(typeof(req))"))
+# One concrete entry method per provided kernel (no blanket request method:
+# it would satisfy every `hasmethod` probe in the setup-time validation).
+assemble_cell!(req::ResidualRequest, cache::SimpleCondensedLinearViscoelasticityCache, args::KernelArgs) = _sls_assemble!(req, cache, args)
+assemble_cell!(req::JacobianRequest{:u}, cache::SimpleCondensedLinearViscoelasticityCache, args::KernelArgs) = _sls_assemble!(req, cache, args)
+assemble_cell!(req::JacobianResidualRequest, cache::SimpleCondensedLinearViscoelasticityCache, args::KernelArgs) = _sls_assemble!(req, cache, args)
 
 function _sls_assemble!(req::Union{ResidualRequest, JacobianRequest{:u}, JacobianResidualRequest}, cache::SimpleCondensedLinearViscoelasticityCache, args::KernelArgs)
     (; displacement_range, viscosity_range, cv) = cache

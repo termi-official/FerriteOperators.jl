@@ -7,21 +7,28 @@
 #   REGARDLESS of the operator form (an EA operator's residual sweep into a
 #   plain global vector still races);
 # - element-private targets (EA per-element storage) never need atomics;
-# - parameter-space accumulators (VJP) are never color-isolated and handle
-#   their own atomicity at the entry point.
+# - parameter-space accumulators (VJP columns, future functional reductions)
+#   are never color-isolated — every parallel device needs atomics there.
 dof_scatter_needs_atomic(strategy::AssemblyStrategy) =
     !(strategy.device isa SequentialCPUDevice) && !(strategy.scheduling isa ColoredScheduling)
-strategy_needs_atomic(strategy::AssemblyStrategy) = dof_scatter_needs_atomic(strategy)
+parameter_scatter_needs_atomic(strategy::AssemblyStrategy) =
+    !(strategy.device isa SequentialCPUDevice)
+
+# The single point where atomic and plain accumulation differ.
+@inline _accum!(::Val{true},  A, v, i)    = Atomix.@atomic A[i] += v
+@inline _accum!(::Val{true},  A, v, i, j) = Atomix.@atomic A[i, j] += v
+@inline _accum!(::Val{false}, A, v, i)    = A[i] += v
+@inline _accum!(::Val{false}, A, v, i, j) = A[i, j] += v
 
 struct VectorAssembler{T, VT <: AbstractVector{T}, atomic} <: Ferrite.AbstractAssembler{T}
     f::VT
 end
 
-Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix; fillzero::Bool=true) = start_assemble(J, atomic = strategy_needs_atomic(strategy); fillzero)
-Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix, residual::AbstractVector; fillzero::Bool=true) = start_assemble(J, residual, atomic = strategy_needs_atomic(strategy); fillzero)
+Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix; fillzero::Bool=true) = start_assemble(J, atomic = dof_scatter_needs_atomic(strategy); fillzero)
+Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix, residual::AbstractVector; fillzero::Bool=true) = start_assemble(J, residual, atomic = dof_scatter_needs_atomic(strategy); fillzero)
 function Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, residual::AbstractVector{T}; fillzero::Bool=true) where T
     fillzero && fill!(residual, zero(T))
-    return VectorAssembler{T, typeof(residual), strategy_needs_atomic(strategy)}(residual)
+    return VectorAssembler{T, typeof(residual), dof_scatter_needs_atomic(strategy)}(residual)
 end
 duplicate_for_device(device, a::VectorAssembler) = a
 
@@ -31,12 +38,13 @@ Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, Ke::Abs
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, fe::AbstractVector) = assemble!(assembler, celldofs(cell), fe)
 function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic}, cell::CellCache, fe::AbstractVector) where {atomic}
     for (i, dof) in enumerate(celldofs(cell))
-        Ferrite._addindex!(assembler.f, dof, fe[i], Val{atomic}())
+        _accum!(Val(atomic), assembler.f, fe[i], dof)
     end
     return
 end
 finalize_assembly!(assembler::Ferrite.AbstractAssembler) = nothing
 finalize_assembly!(assembler::AbstractVector) = nothing
+finalize_assembly!(::Nothing) = nothing   # sweeps whose sink is request-owned (quadrature storage)
 
 # Sensitivity scatter targets. Deliberately not Ferrite.AbstractAssembler:
 # their column/entry layout is the parameter space, not the dof space, so the
@@ -47,11 +55,7 @@ end
 function Ferrite.assemble!(assembler::ParameterJacobianAssembler{<:Any, <:Any, atomic}, cell::CellCache, Bₑ::AbstractMatrix) where {atomic}
     for j in axes(Bₑ, 2)
         for (i, dof) in enumerate(celldofs(cell))
-            if atomic
-                Atomix.@atomic assembler.B[dof, j] += Bₑ[i, j]
-            else
-                assembler.B[dof, j] += Bₑ[i, j]
-            end
+            _accum!(Val(atomic), assembler.B, Bₑ[i, j], dof, j)
         end
     end
     return
@@ -62,11 +66,7 @@ struct ParameterVJPAssembler{T, VT <: AbstractVector{T}, atomic}
 end
 function Ferrite.assemble!(assembler::ParameterVJPAssembler{<:Any, <:Any, atomic}, cell::CellCache, gₑ::AbstractVector) where {atomic}
     for i in eachindex(gₑ)
-        if atomic
-            Atomix.@atomic assembler.g[i] += gₑ[i]
-        else
-            assembler.g[i] += gₑ[i]
-        end
+        _accum!(Val(atomic), assembler.g, gₑ[i], i)
     end
     return
 end

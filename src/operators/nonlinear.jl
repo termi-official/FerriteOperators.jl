@@ -26,6 +26,16 @@ residual!(op::LinearizedFerriteOperator, residual::AbstractVector, states::Named
 residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
     residual!(op, residual, (u = u,), p, nothing)
 
+# Call-time admissibility over all subdomain caches; the same per-cache check
+# runs at setup for kinds declared via `setup_operator(...; requests)` — see
+# `assert_sensitivity_admissible` for the rationale.
+function _check_sensitivity_supported(op, kind)
+    for sc in op.engine.subdomain_caches
+        assert_sensitivity_admissible(typeof(sc.domain.element), kind)
+    end
+    return nothing
+end
+
 """
     update_parameter_jacobian!(B, op, u, p)
 
@@ -40,25 +50,14 @@ their residual. Never writes back into `u`.
     `states = (u = u,)` with no time-integration context. Elements reading
     further slots (`uprev`, …) or `args.ctx` must use the states/ctx forms.
 """
-# Call-time admissibility over all subdomain caches; the same per-cache check
-# runs at setup for kinds declared via `setup_operator(...; requests)` — see
-# `assert_sensitivity_admissible` for the rationale.
-function _check_sensitivity_supported(op, kind)
-    for sc in op.engine.subdomain_caches
-        assert_sensitivity_admissible(typeof(sc.domain.element), kind)
-    end
-    return nothing
-end
-
 function update_parameter_jacobian!(B::AbstractMatrix, op::LinearizedFerriteOperator, states::NamedTuple, p, ctx)
     _check_sensitivity_supported(op, ParameterJacobianKind())
     nθ = length(parameter_vector(p))
     size(B) == (residual_size(op), nθ) || throw(DimensionMismatch(
         "expected B of size $((residual_size(op), nθ)), got $(size(B))"))
     fill!(B, zero(eltype(B)))
-    assembler = ParameterJacobianAssembler{eltype(B), typeof(B), strategy_needs_atomic(op.engine.strategy)}(B)
-    task = AssemblyTask(ParameterJacobianKind(), assembler, states, p, ctx)
-    execute_on_subdomains!(task, op.engine)
+    assembler = ParameterJacobianAssembler{eltype(B), typeof(B), dof_scatter_needs_atomic(op.engine.strategy)}(B)
+    run_sweep!(ParameterJacobianKind(), assembler, op, states, p, ctx)
     return B
 end
 update_parameter_jacobian!(B::AbstractMatrix, op::LinearizedFerriteOperator, u::AbstractVector, p) =
@@ -77,16 +76,13 @@ function parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::Ab
     length(λ) == residual_size(op) || throw(DimensionMismatch(
         "expected λ of length $(residual_size(op)), got $(length(λ))"))
     fill!(g, zero(eltype(g)))
-    # The VJP target is indexed by parameter, not by dof: coloring provides no
-    # isolation here, so any parallel device needs atomic accumulation.
-    atomic = !(op.engine.strategy.device isa SequentialCPUDevice)
+    atomic = parameter_scatter_needs_atomic(op.engine.strategy)
     if atomic && op.engine.strategy.scheduling isa ColoredScheduling
         @warn "PerColorAssemblyStrategy provides no isolation for parameter-space " *
               "accumulation; the VJP scatter falls back to atomic adds." maxlog = 1
     end
     assembler = ParameterVJPAssembler{eltype(g), typeof(g), atomic}(g)
-    task = AssemblyTask(ParameterVJPKind(λ), assembler, states, p, ctx)
-    execute_on_subdomains!(task, op.engine)
+    run_sweep!(ParameterVJPKind(λ), assembler, op, states, p, ctx)
     return g
 end
 parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, u::AbstractVector, p) =
@@ -111,10 +107,7 @@ function state_jvp!(Jv::AbstractVector, op::LinearizedFerriteOperator, v::Abstra
         "expected Jv of length $(residual_size(op)), got $(length(Jv))"))
     length(v) == unknown_size(op) || throw(DimensionMismatch(
         "expected v of length $(unknown_size(op)), got $(length(v))"))
-    assembler = start_assemble(op.engine.strategy, Jv)
-    task = AssemblyTask(StateJVPKind(v), assembler, states, p, ctx)
-    execute_on_subdomains!(task, op.engine)
-    finalize_assembly!(assembler)
+    assemble_into!(StateJVPKind(v), (Jv,), op, states, p, ctx)
     return Jv
 end
 state_jvp!(Jv::AbstractVector, op::LinearizedFerriteOperator, v::AbstractVector, u::AbstractVector, p) =
@@ -138,10 +131,7 @@ function state_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::Abstra
         "expected g of length $(unknown_size(op)), got $(length(g))"))
     length(λ) == residual_size(op) || throw(DimensionMismatch(
         "expected λ of length $(residual_size(op)), got $(length(λ))"))
-    assembler = start_assemble(op.engine.strategy, g)
-    task = AssemblyTask(StateVJPKind(λ), assembler, states, p, ctx)
-    execute_on_subdomains!(task, op.engine)
-    finalize_assembly!(assembler)
+    assemble_into!(StateVJPKind(λ), (g,), op, states, p, ctx)
     return g
 end
 state_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, u::AbstractVector, p) =
@@ -197,10 +187,7 @@ time_sensitivity!(g::AbstractVector, op::LinearizedFerriteOperator, u::AbstractV
 
 function _time_sensitivity!(::ADSensitivity, g, op, states, t, ctx)
     _check_sensitivity_supported(op, TimeSensitivityKind(t))
-    assembler = start_assemble(op.engine.strategy, g)
-    task = AssemblyTask(TimeSensitivityKind(t), assembler, states, t, ctx)
-    execute_on_subdomains!(task, op.engine)
-    finalize_assembly!(assembler)
+    assemble_into!(TimeSensitivityKind(t), (g,), op, states, t, ctx)
     return g
 end
 
@@ -234,4 +221,4 @@ Base.size(op::LinearizedFerriteOperator) = size(op.J)
 Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)
 
 residual_size(op::LinearizedFerriteOperator) = ndofs(op.engine.dh)
-unknown_size(op::LinearizedFerriteOperator)  = ndofs(op.engine.dh) + ndofs(op.engine.subdomain_caches[1].domain.ivh)
+unknown_size(op::LinearizedFerriteOperator)  = ndofs(op.engine.dh) + ndofs(op.engine.ivh)

@@ -37,6 +37,18 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::SourceDiff
     end
 end
 
+# Shared condensed-viscoelasticity fixture: single hex, vector displacement
+# plus hidden per-QP εᵛ, slots (:u, :uprev).
+function setup_visco_operator(strategy, qrc; kwargs...)
+    vgrid = generate_grid(Hexahedron, (1, 1, 1))
+    vdh = DofHandler(vgrid)
+    add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
+    close!(vdh)
+    vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
+        FerriteOperators.MaxwellParameters(), qrc, :u, :εᵛ)
+    return setup_operator(strategy, vint, vdh; slots = (:u, :uprev), kwargs...)
+end
+
 @testset "Sensitivities" begin
     grid = generate_grid(Quadrilateral, (4, 3))
     dh   = DofHandler(grid)
@@ -144,13 +156,7 @@ end
     end
 
     @testset "condensed operators are rejected loudly" begin
-        vgrid = generate_grid(Hexahedron, (1, 1, 1))
-        vdh = DofHandler(vgrid)
-        add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
-        close!(vdh)
-        vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
-            FerriteOperators.MaxwellParameters(), qrc, :u, :εᵛ)
-        vop = setup_operator(strategy, vint, vdh; slots = (:u, :uprev))
+        vop = setup_visco_operator(strategy, qrc)
         vu = zeros(unknown_size(vop))
         @test_throws ArgumentError update_parameter_jacobian!(zeros(residual_size(vop), 1), vop, vu, 1.0)
         @test_throws ArgumentError parameter_vjp!(zeros(1), vop, zeros(residual_size(vop)), vu, 1.0)
@@ -228,13 +234,7 @@ FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperators.SimpleCond
     end
 
     @testset "condensed: analytic parameter kernel is admissible" begin
-        vgrid = generate_grid(Hexahedron, (1, 1, 1))
-        vdh = DofHandler(vgrid)
-        add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
-        close!(vdh)
-        vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
-            FerriteOperators.MaxwellParameters(), qrc, :u, :εᵛ)
-        vop = setup_operator(strategy, vint, vdh; slots = (:u, :uprev))
+        vop = setup_visco_operator(strategy, qrc)
         vu = 1e-4 .* sin.(0.2 .* (1:unknown_size(vop)))
         vuprev = zeros(unknown_size(vop))
         vctx = TimeIntegrationContext(0.0, 0.1, 0.1)
@@ -329,20 +329,6 @@ end
 end
 
 @testset "Analytic vs AD cross-checks (hyperelasticity)" begin
-    struct NeoHookeanSens
-        E::Float64
-        ν::Float64
-    end
-    function (mat::NeoHookeanSens)(F)
-        (; E, ν) = mat
-        μ = E / (2(1 + ν))
-        λ = (E * ν) / ((1 + ν) * (1 - 2ν))
-        C = tdot(F)
-        Ic = tr(C)
-        J = sqrt(det(C))
-        return μ / 2 * (Ic - 3 - 2 * log(J)) + λ / 2 * (J - 1)^2
-    end
-
     grid = generate_grid(Hexahedron, (2, 2, 2))
     dh   = DofHandler(grid)
     add!(dh, :u, Lagrange{RefHexahedron, 1}()^3)
@@ -351,7 +337,7 @@ end
     n    = ndofs(dh)
 
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-    integrator = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookeanSens(10.0, 0.3), qrc, :u)
+    integrator = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
     op = setup_operator(strategy, integrator, dh)
 
     u = 0.05 .* sin.(0.3 .* (1:n))
@@ -408,22 +394,13 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
     end
 
     @testset "declared inadmissible kinds fail at setup, not first use" begin
-        vgrid = generate_grid(Hexahedron, (1, 1, 1))
-        vdh = DofHandler(vgrid)
-        add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
-        close!(vdh)
-        vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
-            FerriteOperators.MaxwellParameters(), qrc, :u, :εᵛ)
         # condensed state, no analytic StateVJP kernel, no insensitivity declaration
-        @test_throws ArgumentError setup_operator(strategy, vint, vdh;
-            slots = (:u, :uprev), requests = (StateVJPKind,))
+        @test_throws ArgumentError setup_visco_operator(strategy, qrc; requests = (StateVJPKind,))
         # time sensitivities stay declarable: the FD escape is a call-time choice
-        vop = setup_operator(strategy, vint, vdh;
-            slots = (:u, :uprev), requests = (TimeSensitivityKind,))
+        vop = setup_visco_operator(strategy, qrc; requests = (TimeSensitivityKind,))
         @test vop.engine.requests == (TimeSensitivityKind,)
         # kinds made admissible above (analytic kernel / insensitivity) pass setup
-        vop2 = setup_operator(strategy, vint, vdh;
-            slots = (:u, :uprev), requests = (ParameterJacobianKind, ParameterVJPKind))
+        vop2 = setup_visco_operator(strategy, qrc; requests = (ParameterJacobianKind, ParameterVJPKind))
         @test vop2.engine.requests == (ParameterJacobianKind, ParameterVJPKind)
     end
 end

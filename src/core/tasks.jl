@@ -39,11 +39,9 @@ execute_single_task!(task::AssemblyTask, ws::AssemblyWorkspace) = execute_kind!(
 
 # Loud once-per-sweep check instead of a raw NamedTuple field error per cell.
 function _check_declared_slots(engine, states::NamedTuple{names}) where {names}
-    isempty(engine.subdomain_caches) && return nothing
-    declared = keys(first(first(engine.subdomain_caches).device_cache).slot_buffers)
-    issubset(names, declared) || throw(ArgumentError(
-        "States pass slots $names but the operator declared slots $declared. " *
-        "Declare every slot at setup: `setup_operator(...; slots = $(Tuple(union(declared, names))))`."))
+    issubset(names, engine.slots) || throw(ArgumentError(
+        "States pass slots $names but the operator declared slots $(engine.slots). " *
+        "Declare every slot at setup: `setup_operator(...; slots = $(Tuple(union(engine.slots, names))))`."))
     return nothing
 end
 
@@ -51,9 +49,9 @@ end
 # element-local states NamedTuple. Gathering goes through
 # `load_element_unknowns!` per slot so condensed elements keep their
 # element-overridable [ū; q] layout for every slot.
-function load_slots!(ws, states::NamedTuple{names}, cell, ivh, element) where {names}
+function load_slots!(ws, states::NamedTuple{names}) where {names}
     return map(NamedTuple{names}(ws.slot_buffers), states) do buf, src
-        load_element_unknowns!(buf, src, cell, ivh, element)
+        load_element_unknowns!(buf, src, ws.cell, ws.ivh, ws.element)
         buf
     end
 end
@@ -63,7 +61,7 @@ function execute_kind!(kind::PrimalKind, task, ws)
     kind isa VectorAssemblyKind && fill!(ws.re, 0.0)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     if kind isa UnknownDependentKind
-        statesₑ = load_slots!(ws, task.states, ws.cell, ws.ivh, ws.element)
+        statesₑ = load_slots!(ws, task.states)
         @timeit_debug "assemble element" v2_cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx)
         @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, statesₑ, task)
         store_condensed_element_unknowns!(statesₑ.u, task.states.u, ws.cell, ws.ivh, ws.element)
@@ -114,37 +112,32 @@ function v2_cell_kernel!(kind::JacobianResidualKind, cache, ws, statesₑ, pₑ,
         ad_state_jacobian!(ws.Ke, ws, statesₑ, pₑ, ctx)   # also leaves the primal residual in ws.re
     end
 end
-function v2_cell_kernel!(kind::Union{BilinearKind, LinearKind}, cache, ws, statesₑ, pₑ, ctx)
-    # State-independent forms have no residual kernel to differentiate; the
-    # analytic kernel is mandatory for v2 elements used in these operators.
-    kind isa BilinearKind ?
-        assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, _v2_args(ws, statesₑ, pₑ, ctx)) :
-        assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx))
-end
+# State-independent forms have no residual kernel to differentiate; the
+# analytic kernel is mandatory for v2 elements used in these operators.
+v2_cell_kernel!(::BilinearKind, cache, ws, statesₑ, pₑ, ctx) =
+    assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, _v2_args(ws, statesₑ, pₑ, ctx))
+v2_cell_kernel!(::LinearKind, cache, ws, statesₑ, pₑ, ctx) =
+    assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx))
 
 # Sensitivity sweeps: gather the trial state, never write anything back into
 # `u`, and route through analytic kernels or AD-from-residual. Local outputs
-# live in the per-worker `ws.ad` buffers.
+# live in the per-worker `ws.ad` buffers; analytic kernels ACCUMULATE into
+# their target (zeroed in that branch), the ForwardDiff fallbacks overwrite
+# it fully.
 function execute_kind!(kind::SensitivityKind, task, ws)
-    statesₑ = load_slots!(ws, task.states, ws.cell, ws.ivh, ws.element)
+    statesₑ = load_slots!(ws, task.states)
     @timeit_debug "assemble sensitivity" sensitivity_kernel!(kind, task, ws, statesₑ)
 end
 
 # Residual-shaped gather (plain celldofs slice — adjoint vectors carry no
 # condensed tail, unlike the slot gathers).
-function _gather_residual_dofs!(dest, src, cell)
-    for (i, dof) in pairs(celldofs(cell))
-        dest[i] = src[dof]
-    end
-    return dest
-end
+_gather_residual_dofs!(dest, src, cell) = dest .= @view src[celldofs(cell)]
 
 function sensitivity_kernel!(kind::ParameterJacobianKind, task, ws, statesₑ)
     cache = ws.element
-    nθ = length(parameter_vector(task.p))
-    Bₑ = parameter_sweep_buffers!(ws.ad, length(ws.re), nθ).Bₑ
-    fill!(Bₑ, zero(eltype(Bₑ)))
+    Bₑ = parameter_sweep_buffers!(ws.ad, length(parameter_vector(task.p))).Bₑ
     if provides_analytic(typeof(cache), kind)
+        fill!(Bₑ, zero(eltype(Bₑ)))
         pₑ = query_cell_parameters(cache, ws.cell, task.p)
         assemble_cell!(ParameterJacobianRequest(Bₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
     else
@@ -155,11 +148,10 @@ end
 
 function sensitivity_kernel!(kind::ParameterVJPKind, task, ws, statesₑ)
     cache = ws.element
-    nθ = length(parameter_vector(task.p))
     λₑ = _gather_residual_dofs!(ws.ad.λₑ, kind.λ, ws.cell)
-    gₑ = parameter_sweep_buffers!(ws.ad, length(ws.re), nθ).gθ
-    fill!(gₑ, zero(eltype(gₑ)))
+    gₑ = parameter_sweep_buffers!(ws.ad, length(parameter_vector(task.p))).gθ
     if provides_analytic(typeof(cache), kind)
+        fill!(gₑ, zero(eltype(gₑ)))
         pₑ = query_cell_parameters(cache, ws.cell, task.p)
         assemble_cell!(ParameterVJPRequest(gₑ, λₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
     else
@@ -173,9 +165,9 @@ function sensitivity_kernel!(kind::StateJVPKind, task, ws, statesₑ)
     vₑ = ws.ad.vₑ
     load_element_unknowns!(vₑ, kind.v, ws.cell, ws.ivh, cache)
     Jvₑ = ws.ad.Jvₑ
-    fill!(Jvₑ, zero(eltype(Jvₑ)))
     pₑ = query_cell_parameters(cache, ws.cell, task.p)
     if provides_analytic(typeof(cache), kind)
+        fill!(Jvₑ, zero(eltype(Jvₑ)))
         assemble_cell!(StateJVPRequest(Jvₑ, vₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
     else
         ad_state_jvp!(Jvₑ, ws, statesₑ, vₑ, pₑ, task.ctx)
@@ -187,9 +179,9 @@ function sensitivity_kernel!(kind::StateVJPKind, task, ws, statesₑ)
     cache = ws.element
     λₑ = _gather_residual_dofs!(ws.ad.λₑ, kind.λ, ws.cell)
     gₑ = ws.ad.gu
-    fill!(gₑ, zero(eltype(gₑ)))
     pₑ = query_cell_parameters(cache, ws.cell, task.p)
     if provides_analytic(typeof(cache), kind)
+        fill!(gₑ, zero(eltype(gₑ)))
         assemble_cell!(StateVJPRequest(gₑ, λₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
     else
         ad_state_vjp!(gₑ, λₑ, ws, statesₑ, pₑ, task.ctx)
@@ -200,8 +192,8 @@ end
 function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, statesₑ)
     cache = ws.element
     gₑ = ws.ad.gₜ
-    fill!(gₑ, zero(eltype(gₑ)))
     if provides_analytic(typeof(cache), kind)
+        fill!(gₑ, zero(eltype(gₑ)))
         pₑ = query_cell_parameters(cache, ws.cell, task.p)
         assemble_cell!(TimeSensitivityRequest(gₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
     else
@@ -215,12 +207,15 @@ scatter_local!(::JacobianResidualKind, assembler, ws)              = assemble!(a
 scatter_local!(::Union{JacobianKind, BilinearKind}, assembler, ws) = assemble!(assembler, ws.cell, ws.Ke)
 scatter_local!(::Union{ResidualKind, LinearKind}, assembler, ws)   = assemble!(assembler, ws.cell, ws.re)
 
-# The one assembly driver shared by every operator entry point. `out` is the
-# tuple of global targets handed to `start_assemble`.
-function assemble_into!(kind, out::Tuple, op, states::NamedTuple, p, ctx)
+# The one assembly driver shared by every operator entry point. Entry points
+# with custom scatter targets (parameter space, quadrature storage) pass their
+# own pre-built assembler to `run_sweep!`; everything dof-scattered goes
+# through `assemble_into!`, which builds the assembler from the global targets.
+function run_sweep!(kind, assembler, op, states::NamedTuple, p, ctx)
     _check_declared_slots(op.engine, states)
-    assembler = start_assemble(op.engine.strategy, out...)
     task = AssemblyTask(kind, assembler, states, p, ctx)
     execute_on_subdomains!(task, op.engine)
     finalize_assembly!(assembler)
 end
+assemble_into!(kind, out::Tuple, op, states::NamedTuple, p, ctx) =
+    run_sweep!(kind, start_assemble(op.engine.strategy, out...), op, states, p, ctx)
