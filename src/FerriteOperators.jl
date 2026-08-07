@@ -69,6 +69,7 @@ include("operators/setup.jl")           # Nitty gritty helpers to handle the set
 include("operators/verification.jl")    # check_derivatives: FD referee for analytic kernels and AD paths
 
 include("core/quadrature-task.jl")      # Task + operator for evaluating functions at quadrature points
+include("core/patch-task.jl")           # Patch items: multi-cell work items with patch-local scatter (experimental)
 
 include("postprocessing/quadrature-grid.jl")  # VTKQuadratureGrid — QP positions as a VTK mesh
 include("postprocessing/quadrature-query.jl") # VTKQuadratureFile + write_quadrature_data
@@ -101,6 +102,7 @@ export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
 export ResidualKind, JacobianKind, JacobianResidualKind
 export ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind
 export FunctionalKind, evaluate_functional, evaluate_cell_functional
+export PatchItems, patch_dofs, patch_ndofs, assemble_patch_matrices!
 export provides_analytic
 export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
 export reinit_values!
