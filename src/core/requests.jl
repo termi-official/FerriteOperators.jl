@@ -91,6 +91,18 @@ struct TimeSensitivityRequest{V <: AbstractVector} <: AbstractAssemblyRequest
     g::V
 end
 
+"Accumulate the state Jacobian-vector product (∂Fₑ/∂u)·vₑ into `Jv` (matrix-free J action)."
+struct StateJVPRequest{W <: AbstractVector, V <: AbstractVector} <: AbstractAssemblyRequest
+    Jv::W
+    vₑ::V
+end
+
+"Accumulate the state pullback (∂Fₑ/∂u)ᵀλₑ into `g` (matrix-free Jᵀ action)."
+struct StateVJPRequest{G <: AbstractVector, L <: AbstractVector} <: AbstractAssemblyRequest
+    g::G
+    λₑ::L
+end
+
 """
     KernelArgs(states, cell, p, scratch, ctx)
 
@@ -168,41 +180,84 @@ wrong. Kernel/trait consistency is validated once at operator setup
 provides_analytic(::Type, kind) = kind isa ResidualKind
 
 """
-    validate_element_cache(cache)
+    validate_element_cache(cache, declared_requests = ())
 
 Setup-time consistency check for v2 element caches: a cache that opts into the
 request protocol must implement the mandatory [`ResidualRequest`](@ref)
-kernel. Runs once per subdomain at `setup_operator` time — a typo'd port fails
-loudly here instead of silently assembling through the wrong path.
+kernel, and every request kind the [`provides_analytic`](@ref) trait claims
+must have a matching kernel method. Runs once per subdomain at
+`setup_operator` time — a typo'd port fails loudly here instead of silently
+assembling through the wrong path.
+
+The trait ↔ kernel check always covers the primal kinds (the operator will
+issue them). Sensitivity kinds are checked only when declared via
+`setup_operator(...; requests = (ParameterVJPKind, …))`; declared sensitivity
+kinds additionally run the internal-state admissibility check
+([`has_internal_state`](@ref)) at setup instead of on first use. Undeclared
+kinds stay usable — their checks simply run at the call-time entry points.
 """
-function validate_element_cache(cache)
+function validate_element_cache(cache, declared_requests::Tuple = ())
     T = typeof(cache)
     hasmethod(assemble_cell!, Tuple{ResidualRequest, T, KernelArgs}) || throw(ArgumentError(
         "$(T) implements no `assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::KernelArgs)` " *
         "method. The residual kernel is mandatory: it is the basis for AD-derived Jacobians " *
         "and sensitivities."))
-    # Trait ↔ kernel consistency: every kind the trait claims analytic must
-    # have a matching kernel method — a mistyped declaration fails here, not
-    # as a MethodError at first assembly.
-    for (kind, ReqT) in _validatable_kinds()
-        if provides_analytic(T, kind) && !hasmethod(assemble_cell!, Tuple{ReqT, T, KernelArgs})
-            throw(ArgumentError(
-                "$(T) declares `provides_analytic` for $(typeof(kind)) but implements no " *
-                "matching `assemble_cell!(::$(ReqT), ::$(nameof(T)), ::KernelArgs)` method."))
-        end
+    for (kind, ReqT) in _primal_validatable_kinds()
+        _assert_trait_backed(T, kind, ReqT)
+    end
+    for (kind, ReqT) in _sensitivity_validatable_kinds()
+        any(D -> kind isa D, declared_requests) || continue
+        _assert_trait_backed(T, kind, ReqT)
+        # Declaring moves the admissibility failure from first use to setup.
+        # Time sensitivities are exempt: their FD escape is chosen per call.
+        kind isa TimeSensitivityKind || assert_sensitivity_admissible(T, kind)
     end
     return nothing
 end
+
+function _assert_trait_backed(T, kind, ReqT)
+    if provides_analytic(T, kind) && !hasmethod(assemble_cell!, Tuple{ReqT, T, KernelArgs})
+        throw(ArgumentError(
+            "$(T) declares `provides_analytic` for $(typeof(kind)) but implements no " *
+            "matching `assemble_cell!(::$(ReqT), ::$(nameof(T)), ::KernelArgs)` method."))
+    end
+    return nothing
+end
+
 # Kind instances paired with the request types their analytic kernels take.
 # Payload-carrying kinds get placeholder payloads — only the type matters for
 # the trait query.
-_validatable_kinds() = (
+_primal_validatable_kinds() = (
     (JacobianKind(), JacobianRequest{:u}),
     (JacobianResidualKind(), JacobianResidualRequest),
+)
+_sensitivity_validatable_kinds() = (
     (ParameterJacobianKind(), ParameterJacobianRequest),
     (ParameterVJPKind(nothing), ParameterVJPRequest),
     (TimeSensitivityKind(nothing), TimeSensitivityRequest),
+    (StateJVPKind(nothing), StateJVPRequest),
+    (StateVJPKind(nothing), StateVJPRequest),
 )
+
+# AD-from-residual through an element-local solve is wrong in principle
+# (implicit function; see references/implicit-ad-plasti.jl), so the rejection
+# is PER CACHE and PER KIND: a cache with internal state is admissible when
+# the requested kind is served analytically (the author carries dq/∂seed,
+# like the consistent tangent), or when the author asserts the local
+# equations are insensitive to the seeded quantity (`dq/∂seed ≡ 0`, making
+# plain AD exact). Only the would-be AD fallback is rejected.
+function assert_sensitivity_admissible(T::Type, kind)
+    if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
+        throw(ArgumentError(
+            "$(nameof(T)) carries condensed internal state, and AD-from-residual through " *
+            "its local solve would be silently wrong. Either implement the analytic " *
+            "`assemble_cell!` kernel for $(typeof(kind)) (declared via `provides_analytic`), " *
+            "declare `internal_state_insensitive` if the local equations do not depend on " *
+            "the seeded quantity, or (for time sensitivities) use " *
+            "`FiniteDifferenceSensitivity`."))
+    end
+    return nothing
+end
 
 """
     has_internal_state(::Type{CacheType}) -> Bool

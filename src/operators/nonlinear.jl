@@ -40,25 +40,12 @@ their residual. Never writes back into `u`.
     `states = (u = u,)` with no time-integration context. Elements reading
     further slots (`uprev`, …) or `args.ctx` must use the states/ctx forms.
 """
-# AD-from-residual through an element-local solve is wrong in principle
-# (implicit function; see references/implicit-ad-plasti.jl), so the rejection
-# is PER CACHE and PER KIND: a cache with internal state is admissible when
-# the requested kind is served analytically (the author carries dq/∂seed,
-# like the consistent tangent), or when the author asserts the local
-# equations are insensitive to the seeded quantity (`dq/∂seed ≡ 0`, making
-# plain AD exact). Only the would-be AD fallback is rejected.
+# Call-time admissibility over all subdomain caches; the same per-cache check
+# runs at setup for kinds declared via `setup_operator(...; requests)` — see
+# `assert_sensitivity_admissible` for the rationale.
 function _check_sensitivity_supported(op, kind)
     for sc in op.engine.subdomain_caches
-        T = typeof(sc.domain.element)
-        if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
-            throw(ArgumentError(
-                "$(nameof(T)) carries condensed internal state, and AD-from-residual through " *
-                "its local solve would be silently wrong. Either implement the analytic " *
-                "`assemble_cell!` kernel for $(typeof(kind)) (declared via `provides_analytic`), " *
-                "declare `internal_state_insensitive` if the local equations do not depend on " *
-                "the seeded quantity, or (for time sensitivities) use " *
-                "`FiniteDifferenceSensitivity`."))
-        end
+        assert_sensitivity_admissible(typeof(sc.domain.element), kind)
     end
     return nothing
 end
@@ -104,6 +91,61 @@ function parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::Ab
 end
 parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, u::AbstractVector, p) =
     parameter_vjp!(g, op, λ, (u = u,), p, nothing)
+
+"""
+    state_jvp!(Jv, op, v, states, p, ctx)
+    state_jvp!(Jv, op, v, u, p)
+
+Matrix-free action of the state Jacobian: `Jv = (∂F/∂u)·v` at the trial
+state, computed kernel-level (one directional-Dual sweep per cell for the AD
+fallback; analytic [`StateJVPRequest`](@ref) kernels win per cache) — no
+matrix is materialized anywhere. Never writes back into the caller's state.
+Restricted to operators without condensed unknowns for now
+(`unknown_size == residual_size`).
+"""
+function state_jvp!(Jv::AbstractVector, op::LinearizedFerriteOperator, v::AbstractVector, states::NamedTuple, p, ctx)
+    unknown_size(op) == residual_size(op) || throw(ArgumentError(
+        "state_jvp!/state_vjp! are not yet supported for operators with condensed unknowns."))
+    _check_sensitivity_supported(op, StateJVPKind(v))
+    length(Jv) == residual_size(op) || throw(DimensionMismatch(
+        "expected Jv of length $(residual_size(op)), got $(length(Jv))"))
+    length(v) == unknown_size(op) || throw(DimensionMismatch(
+        "expected v of length $(unknown_size(op)), got $(length(v))"))
+    assembler = start_assemble(op.engine.strategy, Jv)
+    task = AssemblyTask(StateJVPKind(v), assembler, states, p, ctx)
+    execute_on_subdomains!(task, op.engine)
+    finalize_assembly!(assembler)
+    return Jv
+end
+state_jvp!(Jv::AbstractVector, op::LinearizedFerriteOperator, v::AbstractVector, u::AbstractVector, p) =
+    state_jvp!(Jv, op, v, (u = u,), p, nothing)
+
+"""
+    state_vjp!(g, op, λ, states, p, ctx)
+    state_vjp!(g, op, λ, u, p)
+
+Matrix-free pullback of the state Jacobian: `g = (∂F/∂u)ᵀλ` at the trial
+state — the action adjoint time stepping applies. Kernel-level (per-cell
+gradient of `λₑ·rₑ` for the AD fallback; analytic [`StateVJPRequest`](@ref)
+kernels win per cache). Never writes back into the caller's state. Restricted
+to operators without condensed unknowns for now.
+"""
+function state_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, states::NamedTuple, p, ctx)
+    unknown_size(op) == residual_size(op) || throw(ArgumentError(
+        "state_jvp!/state_vjp! are not yet supported for operators with condensed unknowns."))
+    _check_sensitivity_supported(op, StateVJPKind(λ))
+    length(g) == unknown_size(op) || throw(DimensionMismatch(
+        "expected g of length $(unknown_size(op)), got $(length(g))"))
+    length(λ) == residual_size(op) || throw(DimensionMismatch(
+        "expected λ of length $(residual_size(op)), got $(length(λ))"))
+    assembler = start_assemble(op.engine.strategy, g)
+    task = AssemblyTask(StateVJPKind(λ), assembler, states, p, ctx)
+    execute_on_subdomains!(task, op.engine)
+    finalize_assembly!(assembler)
+    return g
+end
+state_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, u::AbstractVector, p) =
+    state_vjp!(g, op, λ, (u = u,), p, nothing)
 
 """
     ADSensitivity()

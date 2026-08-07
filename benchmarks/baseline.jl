@@ -1,4 +1,4 @@
-using FerriteOperators, Ferrite, Tensors, TimerOutputs, BenchmarkTools
+using FerriteOperators, Tensors, TimerOutputs, BenchmarkTools  # Ferrite via FerriteOperators reexport
 TimerOutputs.enable_debug_timings(FerriteOperators)
 
 struct NeoHookean
@@ -145,15 +145,15 @@ function benchmark_assembly_ferriteoperators(N = 20)
 
     ## Setup the operator
     op = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
-    u = zeros(ndofs(op.dh))
-    g = zeros(ndofs(op.dh))
+    u = zeros(ndofs(op.engine.dh))
+    g = zeros(ndofs(op.engine.dh))
     update_linearization!(op, g, u, 0.5)
 
     reset_timer!()
     update_linearization!(op, g, u, 0.5)
     print_timer()
 
-    # @btime update_linearization!($op, $g, $u, 0.5)
+    @btime update_linearization!($op, $g, $u, 0.5)
 end
 
 benchmark_assembly_ferriteoperators()

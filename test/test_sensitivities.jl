@@ -262,6 +262,72 @@ FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperators.SimpleCond
     end
 end
 
+struct NeoHookeanState
+    E::Float64
+    ν::Float64
+end
+function (mat::NeoHookeanState)(F)
+    (; E, ν) = mat
+    μ = E / (2(1 + ν))
+    λ = (E * ν) / ((1 + ν) * (1 - 2ν))
+    C = tdot(F)
+    Ic = tr(C)
+    J = sqrt(det(C))
+    return μ / 2 * (Ic - 3 - 2 * log(J)) + λ / 2 * (J - 1)^2
+end
+
+@testset "State JVP/VJP actions" begin
+    grid = generate_grid(Quadrilateral, (4, 3))
+    dh   = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    qrc = QuadratureRuleCollection(2)
+    n   = ndofs(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
+    u = sin.(0.3 .* (1:n))
+    p = 1.7
+
+    update_linearization!(op, u, p)   # materialize J for reference
+
+    @testset "JVP matches materialized J·v" begin
+        v  = cos.(0.11 .* (1:n))
+        Jv = zeros(n)
+        state_jvp!(Jv, op, v, u, p)
+        @test Jv ≈ op.J * v rtol = 1e-12
+    end
+
+    @testset "VJP matches materialized Jᵀλ" begin
+        λ = cos.(0.7 .* (1:n))
+        g = zeros(n)
+        state_vjp!(g, op, λ, u, p)
+        @test g ≈ op.J' * λ rtol = 1e-12
+    end
+
+    @testset "nonlinear element, parallel consistency, no mutation" begin
+        hgrid = generate_grid(Hexahedron, (2, 2, 2))
+        hdh = DofHandler(hgrid)
+        add!(hdh, :u, Lagrange{RefHexahedron, 1}()^3)
+        close!(hdh)
+        hint = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
+        hop = setup_operator(strategy, hint, hdh)
+        hn = ndofs(hdh)
+        hu = 0.05 .* sin.(0.3 .* (1:hn))
+        hv = cos.(0.17 .* (1:hn))
+        update_linearization!(hop, hu, 0.0)   # analytic J
+        Jv = zeros(hn)
+        hu_before = copy(hu)
+        state_jvp!(Jv, hop, hv, hu, 0.0)      # AD directional sweep
+        @test Jv ≈ hop.J * hv rtol = 1e-10
+        @test hu == hu_before
+
+        pop = setup_operator(PerColorAssemblyStrategy(PolyesterDevice(2)), hint, hdh)
+        Jvp = zeros(hn)
+        state_jvp!(Jvp, pop, hv, hu, 0.0)
+        @test Jvp ≈ Jv rtol = 1e-13
+    end
+end
+
 @testset "Analytic vs AD cross-checks (hyperelasticity)" begin
     struct NeoHookeanSens
         E::Float64
@@ -303,4 +369,123 @@ end
     update_linearization!(op, r_fused, u, 0.0)
     r_split = zeros(n); residual!(op, r_split, u, 0.0)
     @test r_fused ≈ r_split rtol = 1e-14
+end
+
+# --- Declared request kinds (setup-scoped validation) and preallocated sweeps ---
+
+# A cache whose trait CLAIMS an analytic parameter Jacobian without providing
+# the kernel: legal while the kind is undeclared (checked lazily at the entry
+# points), loud once declared at setup.
+struct BogusClaimCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.assemble_cell!(::ResidualRequest, ::BogusClaimCache, ::KernelArgs) = nothing
+FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianKind) = true
+
+@testset "Declared request kinds" begin
+    grid = generate_grid(Quadrilateral, (4, 3))
+    dh   = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    qrc = QuadratureRuleCollection(2)
+    n   = ndofs(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+    @testset "trait check is scoped to declared kinds" begin
+        @test isnothing(FerriteOperators.validate_element_cache(BogusClaimCache()))
+        @test_throws ArgumentError FerriteOperators.validate_element_cache(
+            BogusClaimCache(), (ParameterJacobianKind,))
+    end
+
+    @testset "declaration is normalized, stored, and does not change results" begin
+        # instances normalize to their UnionAll kind type
+        op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh;
+                            requests = (ParameterVJPKind(zeros(n)), TimeSensitivityKind))
+        @test op.engine.requests == (ParameterVJPKind, TimeSensitivityKind)
+        u = sin.(0.3 .* (1:n))
+        λ = ones(n)
+        g = zeros(1); parameter_vjp!(g, op, λ, u, 1.7)
+        B = zeros(n, 1); update_parameter_jacobian!(B, op, u, 1.7)
+        @test g ≈ B' * λ rtol = 1e-12
+    end
+
+    @testset "declared inadmissible kinds fail at setup, not first use" begin
+        vgrid = generate_grid(Hexahedron, (1, 1, 1))
+        vdh = DofHandler(vgrid)
+        add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
+        close!(vdh)
+        vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
+            FerriteOperators.MaxwellParameters(), qrc, :u, :εᵛ)
+        # condensed state, no analytic StateVJP kernel, no insensitivity declaration
+        @test_throws ArgumentError setup_operator(strategy, vint, vdh;
+            slots = (:u, :uprev), requests = (StateVJPKind,))
+        # time sensitivities stay declarable: the FD escape is a call-time choice
+        vop = setup_operator(strategy, vint, vdh;
+            slots = (:u, :uprev), requests = (TimeSensitivityKind,))
+        @test vop.engine.requests == (TimeSensitivityKind,)
+        # kinds made admissible above (analytic kernel / insensitivity) pass setup
+        vop2 = setup_operator(strategy, vint, vdh;
+            slots = (:u, :uprev), requests = (ParameterJacobianKind, ParameterVJPKind))
+        @test vop2.engine.requests == (ParameterJacobianKind, ParameterVJPKind)
+    end
+end
+
+@testset "Preallocated AD sweeps" begin
+    qrc = QuadratureRuleCollection(2)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+    @testset "chunked AD Jacobian (local size > chunk) equals assembled stiffness" begin
+        # 27 dofs per cell forces ForwardDiff's chunk mode through the
+        # per-worker jacobian config.
+        grid = generate_grid(Hexahedron, (1, 1, 1))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefHexahedron, 2}())
+        close!(dh)
+        op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
+        u = sin.(0.3 .* (1:ndofs(dh)))
+        update_linearization!(op, u, 1.7)
+        Kop = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        update_operator!(Kop, nothing)
+        @test op.J ≈ Kop.A rtol = 1e-13
+    end
+
+    @testset "chunked state VJP matches materialized Jᵀλ" begin
+        # 24 dofs per cell: chunk-mode gradient over the preallocated Dual
+        # residual buffer.
+        grid = generate_grid(Hexahedron, (2, 2, 2))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefHexahedron, 1}()^3)
+        close!(dh)
+        hint = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
+        hop = setup_operator(strategy, hint, dh)
+        hn = ndofs(dh)
+        hu = 0.05 .* sin.(0.3 .* (1:hn))
+        λ = cos.(0.7 .* (1:hn))
+        update_linearization!(hop, hu, 0.0)
+        g = zeros(hn)
+        state_vjp!(g, hop, λ, hu, 0.0)
+        @test g ≈ hop.J' * λ rtol = 1e-10
+    end
+
+    @testset "state and time sweeps do not allocate per cell" begin
+        grid = generate_grid(Quadrilateral, (4, 3))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        close!(dh)
+        n = ndofs(dh)
+        op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
+        u = sin.(0.3 .* (1:n)); p = 1.7
+        v = cos.(0.11 .* (1:n)); λ = cos.(0.7 .* (1:n))
+        Jv = zeros(n); g = zeros(n); r = zeros(n)
+        for _ in 1:2   # warmup: compilation + lazy parameter-buffer sizing
+            state_jvp!(Jv, op, v, u, p)
+            state_vjp!(g, op, λ, u, p)
+            time_sensitivity!(g, op, u, 0.9)
+            update_linearization!(op, r, u, p)
+        end
+        # A per-cell allocation regression shows up as ≳10 KiB on 12 cells
+        # (measured: 0 B for the sweeps, ~400 B assembler setup for fused J+r).
+        @test @allocated(state_jvp!(Jv, op, v, u, p)) == 0
+        @test @allocated(state_vjp!(g, op, λ, u, p)) == 0
+        @test @allocated(time_sensitivity!(g, op, u, 0.9)) == 0
+        @test @allocated(update_linearization!(op, r, u, p)) < 1024
+    end
 end

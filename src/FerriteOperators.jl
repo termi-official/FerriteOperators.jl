@@ -91,10 +91,13 @@ export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, 
 export setup_operator, update_operator!, update_linearization!, residual!
 export update_parameter_jacobian!, parameter_vjp!, time_sensitivity!
 export ADSensitivity, FiniteDifferenceSensitivity, has_internal_state, internal_state_insensitive
+export state_jvp!, state_vjp!, StateJVPRequest, StateVJPRequest
 export parameter_vector, rebuild_parameters
 export TimeIntegrationContext, KernelArgs, assemble_cell!
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
+export ResidualKind, JacobianKind, JacobianResidualKind
+export ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind
 export provides_analytic
 export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
 

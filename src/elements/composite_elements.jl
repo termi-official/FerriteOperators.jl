@@ -22,8 +22,8 @@ end
 provides_analytic(::Type{CompositeVolumetricElementCache{CT}}, kind) where {CT <: Tuple} = _all_provide(CT, kind)
 # The composite's blanket fan-out method would satisfy any hasmethod check,
 # so validation must recurse into the inner caches.
-validate_element_cache(composite::CompositeVolumetricElementCache) =
-    foreach(validate_element_cache, composite.inner_caches)
+validate_element_cache(composite::CompositeVolumetricElementCache, declared_requests::Tuple = ()) =
+    foreach(cache -> validate_element_cache(cache, declared_requests), composite.inner_caches)
 _all_provide(::Type{Tuple{}}, kind) = true
 _all_provide(::Type{T}, kind) where {T <: Tuple} =
     provides_analytic(Base.tuple_type_head(T), kind) && _all_provide(Base.tuple_type_tail(T), kind)

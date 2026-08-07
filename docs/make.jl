@@ -15,6 +15,7 @@ makedocs(;
     warnonly=true,
     pages=[
         "Home" => "index.md",
+        "Migration to v2" => "migration.md",
     ],
 )
 

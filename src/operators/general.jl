@@ -24,14 +24,17 @@ end
     AssemblyEngine
 
 The assembly machinery shared by all operators: the execution strategy, the
-per-subdomain caches (workspaces + partitions), and the dof handler the
-operator assembles against. Operators are payload (matrices/vectors) plus an
-engine plus their integrator.
+per-subdomain caches (workspaces + partitions), the dof handler the operator
+assembles against, and the request kinds declared at setup (a tuple of kind
+types; declared sensitivity kinds are validated eagerly at setup, undeclared
+ones on first use). Operators are payload (matrices/vectors) plus an engine
+plus their integrator.
 """
 @concrete struct AssemblyEngine
     strategy
     subdomain_caches
     dh
+    requests
 end
 
 function execute_on_subdomains!(task, strategy, subdomain_caches)

@@ -106,6 +106,7 @@ Fields:
 - `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
 - `boundary_element`: surface cache walked by the facet driver
 - `scratch`/`scratch_decls`: per-worker scratch instances and their constructors
+- `ad`: per-worker derivative-sweep buffers and ForwardDiff configs ([`ADWorkspace`](@ref))
 """
 @concrete struct AssemblyWorkspace <: AbstractWorkspace
     Ke
@@ -117,6 +118,7 @@ Fields:
     boundary_element
     scratch        # per-worker scratch instances: solver-declared ∪ element-declared
     scratch_decls  # the nullary constructors, kept for per-worker re-instantiation
+    ad             # per-worker derivative-sweep buffers + ForwardDiff configs
 end
 
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
@@ -152,6 +154,7 @@ function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::N
         boundary_element,
         map(f -> f(), scratch_decls),
         scratch_decls,
+        create_ad_workspace(element, sdh),
     )
 end
 

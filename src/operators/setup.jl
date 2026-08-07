@@ -28,9 +28,9 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
     return InternalVariableHandler(nothing, 0, 0)
 end
 
-function setup_subdomain_caches(strategy, integrator, dh; slots::NTuple{<:Any, Symbol} = (:u,), scratch::NamedTuple = (;))
+function setup_subdomain_caches(strategy, integrator, dh; slots::NTuple{<:Any, Symbol} = (:u,), scratch::NamedTuple = (;), requests::Tuple = ())
     element_caches  = setup_elements(integrator, dh)
-    foreach(validate_element_cache, element_caches)
+    foreach(cache -> validate_element_cache(cache, requests), element_caches)
     boundary_caches = setup_boundaries(integrator, dh)
     ivh             = setup_internal_variable_handler(integrator, element_caches, dh)
     device          = strategy.device
@@ -43,26 +43,40 @@ function setup_subdomain_caches(strategy, integrator, dh; slots::NTuple{<:Any, S
     end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
 end
 
-function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;))
+"""
+    setup_engine(strategy, integrator, dh; slots = (:u,), scratch = (;), requests = ())
+
+Build the [`AssemblyEngine`](@ref) shared by all operator kinds. `requests`
+declares the sensitivity request kinds the operator will be asked to compute
+(kind types or instances, e.g. `requests = (ParameterVJPKind,)`): declared
+kinds run their trait ↔ kernel and internal-state admissibility checks
+eagerly at setup instead of on first use. Undeclared kinds remain usable —
+the declaration is a hint, not a capability restriction.
+"""
+function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;), requests::Tuple = ())
+    # Normalize declared kinds (types or instances) to their UnionAll base so
+    # payload type parameters (`ParameterVJPKind{Vector{Float64}}`) never make
+    # a declaration silently miss its validation entry.
+    requests          = map(r -> Base.typename(r isa Type ? r : typeof(r)).wrapper, requests)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
-    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh; slots, scratch)
-    return AssemblyEngine(operator_strategy, subdomain_caches, dh)
+    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh; slots, scratch, requests)
+    return AssemblyEngine(operator_strategy, subdomain_caches, dh, requests)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;))
-    engine = setup_engine(strategy, integrator, dh; slots, scratch)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler; kwargs...)
+    engine = setup_engine(strategy, integrator, dh; kwargs...)
     A      = create_system_matrix(engine.strategy, dh)
     return BilinearFerriteOperator(A, engine, integrator)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;))
-    engine = setup_engine(strategy, integrator, dh; slots, scratch)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler; kwargs...)
+    engine = setup_engine(strategy, integrator, dh; kwargs...)
     J      = create_system_matrix(engine.strategy, dh)
     return LinearizedFerriteOperator(J, engine, integrator)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;))
-    engine = setup_engine(strategy, integrator, dh; slots, scratch)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler; kwargs...)
+    engine = setup_engine(strategy, integrator, dh; kwargs...)
     b      = create_system_vector(engine.strategy, dh)
     return LinearFerriteOperator(b, engine, integrator)
 end

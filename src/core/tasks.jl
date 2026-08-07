@@ -8,12 +8,14 @@ struct LinearKind end               # u-independent vector
 struct ParameterJacobianKind end                # ∂F/∂θ, materialized
 struct ParameterVJPKind{L}; λ::L; end          # (∂F/∂θ)ᵀλ, adjoint pullback
 struct TimeSensitivityKind{T}; t::T; end       # ∂F/∂t, explicit dependence
+struct StateJVPKind{V}; v::V; end              # (∂F/∂u)·v, matrix-free J action
+struct StateVJPKind{L}; λ::L; end              # (∂F/∂u)ᵀλ, matrix-free Jᵀ action
 
 const MatrixAssemblyKind  = Union{JacobianResidualKind, JacobianKind, BilinearKind}
 const VectorAssemblyKind  = Union{JacobianResidualKind, ResidualKind, LinearKind}
 const UnknownDependentKind = Union{JacobianResidualKind, JacobianKind, ResidualKind}
 const PrimalKind = Union{JacobianResidualKind, JacobianKind, ResidualKind, BilinearKind, LinearKind}
-const SensitivityKind = Union{ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind}
+const SensitivityKind = Union{ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind}
 
 """
     AssemblyTask(kind, inner_assembler, states, p, ctx)
@@ -121,16 +123,27 @@ function v2_cell_kernel!(kind::Union{BilinearKind, LinearKind}, cache, ws, state
 end
 
 # Sensitivity sweeps: gather the trial state, never write anything back into
-# `u`, and route through analytic kernels or AD-from-residual.
+# `u`, and route through analytic kernels or AD-from-residual. Local outputs
+# live in the per-worker `ws.ad` buffers.
 function execute_kind!(kind::SensitivityKind, task, ws)
     statesₑ = load_slots!(ws, task.states, ws.cell, ws.ivh, ws.element)
     @timeit_debug "assemble sensitivity" sensitivity_kernel!(kind, task, ws, statesₑ)
 end
 
+# Residual-shaped gather (plain celldofs slice — adjoint vectors carry no
+# condensed tail, unlike the slot gathers).
+function _gather_residual_dofs!(dest, src, cell)
+    for (i, dof) in pairs(celldofs(cell))
+        dest[i] = src[dof]
+    end
+    return dest
+end
+
 function sensitivity_kernel!(kind::ParameterJacobianKind, task, ws, statesₑ)
     cache = ws.element
     nθ = length(parameter_vector(task.p))
-    Bₑ = zeros(length(ws.re), nθ)   # FIXME per-worker buffer once request kinds are declared at setup
+    Bₑ = parameter_sweep_buffers!(ws.ad, length(ws.re), nθ).Bₑ
+    fill!(Bₑ, zero(eltype(Bₑ)))
     if provides_analytic(typeof(cache), kind)
         pₑ = query_cell_parameters(cache, ws.cell, task.p)
         assemble_cell!(ParameterJacobianRequest(Bₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
@@ -142,8 +155,10 @@ end
 
 function sensitivity_kernel!(kind::ParameterVJPKind, task, ws, statesₑ)
     cache = ws.element
-    λₑ = kind.λ[celldofs(ws.cell)]   # FIXME per-worker buffer
-    gₑ = zeros(length(parameter_vector(task.p)))
+    nθ = length(parameter_vector(task.p))
+    λₑ = _gather_residual_dofs!(ws.ad.λₑ, kind.λ, ws.cell)
+    gₑ = parameter_sweep_buffers!(ws.ad, length(ws.re), nθ).gθ
+    fill!(gₑ, zero(eltype(gₑ)))
     if provides_analytic(typeof(cache), kind)
         pₑ = query_cell_parameters(cache, ws.cell, task.p)
         assemble_cell!(ParameterVJPRequest(gₑ, λₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
@@ -153,9 +168,39 @@ function sensitivity_kernel!(kind::ParameterVJPKind, task, ws, statesₑ)
     assemble!(task.inner_assembler, ws.cell, gₑ)
 end
 
+function sensitivity_kernel!(kind::StateJVPKind, task, ws, statesₑ)
+    cache = ws.element
+    vₑ = ws.ad.vₑ
+    load_element_unknowns!(vₑ, kind.v, ws.cell, ws.ivh, cache)
+    Jvₑ = ws.ad.Jvₑ
+    fill!(Jvₑ, zero(eltype(Jvₑ)))
+    pₑ = query_cell_parameters(cache, ws.cell, task.p)
+    if provides_analytic(typeof(cache), kind)
+        assemble_cell!(StateJVPRequest(Jvₑ, vₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
+    else
+        ad_state_jvp!(Jvₑ, ws, statesₑ, vₑ, pₑ, task.ctx)
+    end
+    assemble!(task.inner_assembler, ws.cell, Jvₑ)
+end
+
+function sensitivity_kernel!(kind::StateVJPKind, task, ws, statesₑ)
+    cache = ws.element
+    λₑ = _gather_residual_dofs!(ws.ad.λₑ, kind.λ, ws.cell)
+    gₑ = ws.ad.gu
+    fill!(gₑ, zero(eltype(gₑ)))
+    pₑ = query_cell_parameters(cache, ws.cell, task.p)
+    if provides_analytic(typeof(cache), kind)
+        assemble_cell!(StateVJPRequest(gₑ, λₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
+    else
+        ad_state_vjp!(gₑ, λₑ, ws, statesₑ, pₑ, task.ctx)
+    end
+    assemble!(task.inner_assembler, ws.cell, gₑ)
+end
+
 function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, statesₑ)
     cache = ws.element
-    gₑ = zeros(length(ws.re))   # FIXME per-worker buffer
+    gₑ = ws.ad.gₜ
+    fill!(gₑ, zero(eltype(gₑ)))
     if provides_analytic(typeof(cache), kind)
         pₑ = query_cell_parameters(cache, ws.cell, task.p)
         assemble_cell!(TimeSensitivityRequest(gₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
