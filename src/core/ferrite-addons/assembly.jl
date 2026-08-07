@@ -1,9 +1,17 @@
 # Atomic scatter is needed when a parallel device writes into shared global
-# storage without color isolation. Element-assembly scatter targets are
-# per-element private, so the form axis exempts them entirely.
-strategy_needs_atomic(strategy::AssemblyStrategy) = needs_atomic(strategy.form, strategy.scheduling, strategy.device)
-needs_atomic(::FullAssembly, scheduling, device) = !(device isa SequentialCPUDevice) && !(scheduling isa ColoredScheduling)
-needs_atomic(::AbstractAssemblyForm, scheduling, device) = false
+# storage without color isolation. Atomicity is a property of the SCATTER
+# TARGET, not of the strategy alone:
+# - dof-scattered shared targets (global sparse matrices, global vectors,
+#   dense parameter-Jacobian rows) follow `dof_scatter_needs_atomic` —
+#   coloring isolates them, otherwise a parallel device needs atomics,
+#   REGARDLESS of the operator form (an EA operator's residual sweep into a
+#   plain global vector still races);
+# - element-private targets (EA per-element storage) never need atomics;
+# - parameter-space accumulators (VJP) are never color-isolated and handle
+#   their own atomicity at the entry point.
+dof_scatter_needs_atomic(strategy::AssemblyStrategy) =
+    !(strategy.device isa SequentialCPUDevice) && !(strategy.scheduling isa ColoredScheduling)
+strategy_needs_atomic(strategy::AssemblyStrategy) = dof_scatter_needs_atomic(strategy)
 
 struct VectorAssembler{T, VT <: AbstractVector{T}, atomic} <: Ferrite.AbstractAssembler{T}
     f::VT

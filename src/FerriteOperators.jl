@@ -90,6 +90,7 @@ export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, 
 
 export setup_operator, update_operator!, update_linearization!, residual!
 export update_parameter_jacobian!, parameter_vjp!, time_sensitivity!
+export ADSensitivity, FiniteDifferenceSensitivity, has_internal_state, internal_state_insensitive
 export parameter_vector, rebuild_parameters
 export TimeIntegrationContext, KernelArgs, assemble_cell!
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest

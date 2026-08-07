@@ -143,12 +143,122 @@ end
         @test r ≈ dop.J * u rtol = 1e-12
     end
 
+    @testset "condensed operators are rejected loudly" begin
+        vgrid = generate_grid(Hexahedron, (1, 1, 1))
+        vdh = DofHandler(vgrid)
+        add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
+        close!(vdh)
+        vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
+            FerriteOperators.MaxwellParameters(), qrc, :u, :εᵛ)
+        vop = setup_operator(strategy, vint, vdh; slots = (:u, :uprev))
+        vu = zeros(unknown_size(vop))
+        @test_throws ArgumentError update_parameter_jacobian!(zeros(residual_size(vop), 1), vop, vu, 1.0)
+        @test_throws ArgumentError parameter_vjp!(zeros(1), vop, zeros(residual_size(vop)), vu, 1.0)
+        @test_throws ArgumentError time_sensitivity!(zeros(residual_size(vop)), vop, vu, 0.5)
+    end
+
+    @testset "undeclared slots error loudly" begin
+        @test_throws ArgumentError update_linearization!(op, zeros(n), (u = u, uprev = copy(u)), p, nothing)
+    end
+
     @testset "sensitivity sweeps never mutate u" begin
         ucopy = copy(u)
         update_parameter_jacobian!(zeros(n, 1), op, u, p)
         parameter_vjp!(zeros(1), op, ones(n), u, p)
         time_sensitivity!(zeros(n), op, u, 0.9)
         @test u == ucopy
+    end
+end
+
+# --- Sensitivity admissibility refinements and method selection ---
+
+# Analytic sensitivity kernels win per cache: prove selection via a counter.
+const ANALYTIC_TS_CALLS = Ref(0)
+FerriteOperators.provides_analytic(::Type{<:SourceDiffusionCache}, ::FerriteOperators.TimeSensitivityKind) = true
+function FerriteOperators.assemble_cell!(req::TimeSensitivityRequest, cache::SourceDiffusionCache, args::KernelArgs)
+    ANALYTIC_TS_CALLS[] += 1
+    # ∂F/∂t with p ≡ t (bare-time): ∂/∂t of −t·∫v = −∫v dΩ
+    (; cv) = cache
+    reinit!(cv, args.cell)
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        for i in 1:getnbasefunctions(cv)
+            req.g[i] -= shape_value(cv, qp, i) * dΩ
+        end
+    end
+end
+
+# Condensed admissibility: analytic parameter kernel on the viscoelastic cache
+# (trivially zero — the material is parameter-independent), and an
+# insensitivity declaration for the VJP kind.
+FerriteOperators.provides_analytic(::Type{<:FerriteOperators.SimpleCondensedLinearViscoelasticityCache}, ::FerriteOperators.ParameterJacobianKind) = true
+FerriteOperators.assemble_cell!(req::ParameterJacobianRequest, ::FerriteOperators.SimpleCondensedLinearViscoelasticityCache, args::KernelArgs) = nothing
+FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperators.SimpleCondensedLinearViscoelasticityCache}, ::FerriteOperators.ParameterVJPKind) = true
+
+@testset "Sensitivity admissibility and methods" begin
+    grid = generate_grid(Quadrilateral, (4, 3))
+    dh   = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    qrc = QuadratureRuleCollection(2)
+    n   = ndofs(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
+    u = sin.(0.3 .* (1:n))
+
+    @testset "analytic time kernel is selected and agrees with AD-by-construction" begin
+        ANALYTIC_TS_CALLS[] = 0
+        g_analytic = zeros(n)
+        time_sensitivity!(g_analytic, op, u, 0.9)
+        @test ANALYTIC_TS_CALLS[] == getncells(grid)
+        # −b, independently derived from residual structure
+        r0 = zeros(n); residual!(op, r0, u, 0.0)
+        r1 = zeros(n); residual!(op, r1, u, 1.0)
+        @test g_analytic ≈ -(r0 .- r1) rtol = 1e-12
+    end
+
+    @testset "FD method agrees with the derivative (and bypasses kernels)" begin
+        ANALYTIC_TS_CALLS[] = 0
+        g_fd = zeros(n)
+        time_sensitivity!(g_fd, op, u, 0.9; method = FiniteDifferenceSensitivity())
+        @test ANALYTIC_TS_CALLS[] == 0     # operator-level differencing, kernels untouched
+        g_ref = zeros(n)
+        time_sensitivity!(g_ref, op, u, 0.9)
+        @test g_fd ≈ g_ref rtol = 1e-6
+    end
+
+    @testset "condensed: analytic parameter kernel is admissible" begin
+        vgrid = generate_grid(Hexahedron, (1, 1, 1))
+        vdh = DofHandler(vgrid)
+        add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
+        close!(vdh)
+        vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
+            FerriteOperators.MaxwellParameters(), qrc, :u, :εᵛ)
+        vop = setup_operator(strategy, vint, vdh; slots = (:u, :uprev))
+        vu = 1e-4 .* sin.(0.2 .* (1:unknown_size(vop)))
+        vuprev = zeros(unknown_size(vop))
+        vctx = TimeIntegrationContext(0.0, 0.1, 0.1)
+
+        # analytic (trivially zero) parameter kernel: accepted, runs, B stays 0
+        B = zeros(residual_size(vop), 1)
+        update_parameter_jacobian!(B, vop, (u = vu, uprev = vuprev), 1.0, vctx)
+        @test iszero(B)
+
+        # insensitivity declaration: VJP runs through AD with zero result
+        # (the material has no parameter dependence)
+        gv = zeros(1)
+        parameter_vjp!(gv, vop, ones(residual_size(vop)), (u = vu, uprev = vuprev), 1.0, vctx)
+        @test abs(gv[1]) < 1e-12
+
+        # time sensitivity via AD is still rejected (no analytic kernel, no
+        # declaration for that kind) …
+        @test_throws ArgumentError time_sensitivity!(zeros(residual_size(vop)), vop, (u = vu, uprev = vuprev), 0.5, vctx)
+        # … but FD is admissible: primal evaluations on a protected copy.
+        vu_before = copy(vu)
+        g = zeros(residual_size(vop))
+        time_sensitivity!(g, vop, (u = vu, uprev = vuprev), 0.5, vctx; method = FiniteDifferenceSensitivity())
+        @test vu == vu_before                       # trial write-back never leaked
+        @test norm(g) < 1e-8                        # no explicit t-dependence via p
     end
 end
 

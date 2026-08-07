@@ -35,6 +35,16 @@ duplicate_for_device(device, task::AssemblyTask) =
 
 execute_single_task!(task::AssemblyTask, ws::AssemblyWorkspace) = execute_kind!(task.kind, task, ws)
 
+# Loud once-per-sweep check instead of a raw NamedTuple field error per cell.
+function _check_declared_slots(engine, states::NamedTuple{names}) where {names}
+    isempty(engine.subdomain_caches) && return nothing
+    declared = keys(first(first(engine.subdomain_caches).device_cache).slot_buffers)
+    issubset(names, declared) || throw(ArgumentError(
+        "States pass slots $names but the operator declared slots $declared. " *
+        "Declare every slot at setup: `setup_operator(...; slots = $(Tuple(union(declared, names))))`."))
+    return nothing
+end
+
 # Gather every task slot into the workspace's slot buffers, returning the
 # element-local states NamedTuple. Gathering goes through
 # `load_element_unknowns!` per slot so condensed elements keep their
@@ -125,7 +135,7 @@ function sensitivity_kernel!(kind::ParameterJacobianKind, task, ws, statesₑ)
         pₑ = query_cell_parameters(cache, ws.cell, task.p)
         assemble_cell!(ParameterJacobianRequest(Bₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
     else
-        ad_parameter_jacobian!(Bₑ, ws, statesₑ, task.p)
+        ad_parameter_jacobian!(Bₑ, ws, statesₑ, task.p, task.ctx)
     end
     assemble!(task.inner_assembler, ws.cell, Bₑ)
 end
@@ -138,7 +148,7 @@ function sensitivity_kernel!(kind::ParameterVJPKind, task, ws, statesₑ)
         pₑ = query_cell_parameters(cache, ws.cell, task.p)
         assemble_cell!(ParameterVJPRequest(gₑ, λₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
     else
-        ad_parameter_vjp!(gₑ, λₑ, ws, statesₑ, task.p)
+        ad_parameter_vjp!(gₑ, λₑ, ws, statesₑ, task.p, task.ctx)
     end
     assemble!(task.inner_assembler, ws.cell, gₑ)
 end
@@ -150,7 +160,7 @@ function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, statesₑ)
         pₑ = query_cell_parameters(cache, ws.cell, task.p)
         assemble_cell!(TimeSensitivityRequest(gₑ), cache, _v2_args(ws, statesₑ, pₑ, task.ctx))
     else
-        ad_time_sensitivity!(gₑ, ws, statesₑ, kind.t)
+        ad_time_sensitivity!(gₑ, ws, statesₑ, kind.t, task.ctx)
     end
     assemble!(task.inner_assembler, ws.cell, gₑ)
 end
@@ -163,6 +173,7 @@ scatter_local!(::Union{ResidualKind, LinearKind}, assembler, ws)   = assemble!(a
 # The one assembly driver shared by every operator entry point. `out` is the
 # tuple of global targets handed to `start_assemble`.
 function assemble_into!(kind, out::Tuple, op, states::NamedTuple, p, ctx)
+    _check_declared_slots(op.engine, states)
     assembler = start_assemble(op.engine.strategy, out...)
     task = AssemblyTask(kind, assembler, states, p, ctx)
     execute_on_subdomains!(task, op.engine)

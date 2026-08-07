@@ -27,23 +27,23 @@ end
 # ∂F/∂θ — dense local parameter Jacobian. The parameter sweep re-queries the
 # element parameters from the Dual-rebuilt global `p` so wrappers forward
 # Duals transparently.
-function ad_parameter_jacobian!(Bₑ, ws, statesₑ, p)
+function ad_parameter_jacobian!(Bₑ, ws, statesₑ, p, ctx)
     θ = Vector(parameter_vector(p))
     f! = (r, θᵢ) -> begin
         pₑ = query_cell_parameters(ws.element, ws.cell, rebuild_parameters(p, θᵢ))
-        evaluate_cell_residual!(r, statesₑ, ws, pₑ, nothing)
+        evaluate_cell_residual!(r, statesₑ, ws, pₑ, ctx)
     end
     ForwardDiff.jacobian!(Bₑ, f!, ws.re, θ)
     return Bₑ
 end
 
 # (∂F/∂θ)ᵀλₑ — adjoint pullback as the gradient of the scalar λₑ·rₑ(θ).
-function ad_parameter_vjp!(gₑ, λₑ, ws, statesₑ, p)
+function ad_parameter_vjp!(gₑ, λₑ, ws, statesₑ, p, ctx)
     θ = Vector(parameter_vector(p))
     fscalar = θᵢ -> begin
         pₑ = query_cell_parameters(ws.element, ws.cell, rebuild_parameters(p, θᵢ))
         r = zeros(eltype(θᵢ), length(λₑ))
-        evaluate_cell_residual!(r, statesₑ, ws, pₑ, nothing)
+        evaluate_cell_residual!(r, statesₑ, ws, pₑ, ctx)
         return dot(λₑ, r)
     end
     ForwardDiff.gradient!(gₑ, fscalar, θ)
@@ -52,16 +52,16 @@ end
 
 # ∂F/∂t — explicit time dependence, seeded through the bare-time parameter
 # channel. The ctx-based seed (`with_time`) replaces this in phase 2.
-function ad_time_sensitivity!(gₑ, ws, statesₑ, t::Real)
+function ad_time_sensitivity!(gₑ, ws, statesₑ, t::Real, ctx)
     f! = (r, t̃) -> begin
         pₑ = query_cell_parameters(ws.element, ws.cell, t̃)
-        evaluate_cell_residual!(r, statesₑ, ws, pₑ, nothing)
+        evaluate_cell_residual!(r, statesₑ, ws, pₑ, ctx)
     end
     ForwardDiff.derivative!(gₑ, f!, ws.re, t)
     return gₑ
 end
 
-function ad_time_sensitivity!(gₑ, ws, statesₑ, t)
+function ad_time_sensitivity!(gₑ, ws, statesₑ, t, ctx)
     throw(ArgumentError(
         "Time sensitivities currently require the bare evaluation time as the parameter " *
         "object (got $(typeof(t))). Context-based seeding lands with the phase-2 API."))

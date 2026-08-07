@@ -1,10 +1,9 @@
 """
     LinearizedFerriteOperator(J, caches)
 
-A model for a function with its fully assembled linearization.
-
-Comes with one entry point for each cache type to handle the most common cases:
-    assemble_element! -> update jacobian/residual contribution with internal state variables
+A model for a function with its fully assembled linearization. Entry points
+route request kinds through the shared assembly engine; element kernels are
+the request-typed `assemble_cell!`/`assemble_facet!` methods.
 """
 @concrete struct LinearizedFerriteOperator <: AbstractNonlinearOperator
     J
@@ -35,31 +34,48 @@ evaluated at the trial state `u`. θ is the flat parameter view defined by
 [`parameter_vector`](@ref)/[`rebuild_parameters`](@ref); elements provide
 analytic [`ParameterJacobianRequest`](@ref) kernels or fall back to AD of
 their residual. Never writes back into `u`.
+
+!!! note
+    The u-vector convenience forms evaluate at the stationary point
+    `states = (u = u,)` with no time-integration context. Elements reading
+    further slots (`uprev`, …) or `args.ctx` must use the states/ctx forms.
 """
-# Sensitivity sweeps differentiate the residual at fixed local state; a
-# condensed element's residual contains an implicit function (the local
-# solve), whose correct treatment needs implicit differentiation (see
-# references/implicit-ad-plasti.jl). Reject loudly instead of returning a
-# silently wrong adjoint.
-function _check_sensitivity_supported(op)
-    unknown_size(op) == residual_size(op) || throw(ArgumentError(
-        "Sensitivity sweeps are not yet supported for operators with condensed internal " *
-        "variables: the element-local solves require implicit differentiation, which is " *
-        "not implemented. See the v2 plan and references/implicit-ad-plasti.jl."))
+# AD-from-residual through an element-local solve is wrong in principle
+# (implicit function; see references/implicit-ad-plasti.jl), so the rejection
+# is PER CACHE and PER KIND: a cache with internal state is admissible when
+# the requested kind is served analytically (the author carries dq/∂seed,
+# like the consistent tangent), or when the author asserts the local
+# equations are insensitive to the seeded quantity (`dq/∂seed ≡ 0`, making
+# plain AD exact). Only the would-be AD fallback is rejected.
+function _check_sensitivity_supported(op, kind)
+    for sc in op.engine.subdomain_caches
+        T = typeof(sc.domain.element)
+        if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
+            throw(ArgumentError(
+                "$(nameof(T)) carries condensed internal state, and AD-from-residual through " *
+                "its local solve would be silently wrong. Either implement the analytic " *
+                "`assemble_cell!` kernel for $(typeof(kind)) (declared via `provides_analytic`), " *
+                "declare `internal_state_insensitive` if the local equations do not depend on " *
+                "the seeded quantity, or (for time sensitivities) use " *
+                "`FiniteDifferenceSensitivity`."))
+        end
+    end
     return nothing
 end
 
-function update_parameter_jacobian!(B::AbstractMatrix, op::LinearizedFerriteOperator, u::AbstractVector, p)
-    _check_sensitivity_supported(op)
+function update_parameter_jacobian!(B::AbstractMatrix, op::LinearizedFerriteOperator, states::NamedTuple, p, ctx)
+    _check_sensitivity_supported(op, ParameterJacobianKind())
     nθ = length(parameter_vector(p))
     size(B) == (residual_size(op), nθ) || throw(DimensionMismatch(
         "expected B of size $((residual_size(op), nθ)), got $(size(B))"))
     fill!(B, zero(eltype(B)))
     assembler = ParameterJacobianAssembler{eltype(B), typeof(B), strategy_needs_atomic(op.engine.strategy)}(B)
-    task = AssemblyTask(ParameterJacobianKind(), assembler, (u = u,), p, nothing)
+    task = AssemblyTask(ParameterJacobianKind(), assembler, states, p, ctx)
     execute_on_subdomains!(task, op.engine)
     return B
 end
+update_parameter_jacobian!(B::AbstractMatrix, op::LinearizedFerriteOperator, u::AbstractVector, p) =
+    update_parameter_jacobian!(B, op, (u = u,), p, nothing)
 
 """
     parameter_vjp!(g, op, λ, u, p)
@@ -67,8 +83,8 @@ end
 Accumulate the adjoint pullback `g = (∂F/∂θ)ᵀ λ` (length nθ) at the trial
 state `u` without materializing ∂F/∂θ. Never writes back into `u`.
 """
-function parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, u::AbstractVector, p)
-    _check_sensitivity_supported(op)
+function parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, states::NamedTuple, p, ctx)
+    _check_sensitivity_supported(op, ParameterVJPKind(λ))
     length(g) == length(parameter_vector(p)) || throw(DimensionMismatch(
         "expected g of length $(length(parameter_vector(p))), got $(length(g))"))
     length(λ) == residual_size(op) || throw(DimensionMismatch(
@@ -82,27 +98,83 @@ function parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::Ab
               "accumulation; the VJP scatter falls back to atomic adds." maxlog = 1
     end
     assembler = ParameterVJPAssembler{eltype(g), typeof(g), atomic}(g)
-    task = AssemblyTask(ParameterVJPKind(λ), assembler, (u = u,), p, nothing)
+    task = AssemblyTask(ParameterVJPKind(λ), assembler, states, p, ctx)
     execute_on_subdomains!(task, op.engine)
     return g
 end
+parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, u::AbstractVector, p) =
+    parameter_vjp!(g, op, λ, (u = u,), p, nothing)
 
 """
-    time_sensitivity!(g, op, u, t)
+    ADSensitivity()
 
-Assemble the explicit time sensitivity ∂F/∂t into `g` (`residual_size(op)`)
-at the trial state `u` and evaluation time `t`. Until the phase-2 context API
-lands, `t` doubles as the parameter object handed to the elements (the
-bare-time convention). Never writes back into `u`.
+Default derivative method: ForwardDiff seeding through the residual kernel.
 """
-function time_sensitivity!(g::AbstractVector, op::LinearizedFerriteOperator, u::AbstractVector, t)
-    _check_sensitivity_supported(op)
+struct ADSensitivity end
+
+"""
+    FiniteDifferenceSensitivity(h = cbrt(eps(Float64)))
+
+Central-difference derivative method: evaluates the PRIMAL residual at
+perturbed times on a protected copy of `u` (so trial write-back never leaks)
+and forms `(F(t+h) − F(t−h)) / 2h`. Exact local solves, no Dual propagation —
+admissible for condensed elements, where it yields the total t-derivative at
+fixed `u` including the element-local state's response (as does AD, when
+admissible). Accuracy O(h²).
+"""
+struct FiniteDifferenceSensitivity{T}
+    h::T
+end
+FiniteDifferenceSensitivity() = FiniteDifferenceSensitivity(cbrt(eps(Float64)))
+
+"""
+    time_sensitivity!(g, op, states, t, ctx; method = ADSensitivity())
+    time_sensitivity!(g, op, u, t; method = ADSensitivity())
+
+Assemble the time sensitivity ∂F/∂t into `g` (`residual_size(op)`) at the
+trial state, never writing back into the caller's state. Until the phase-2
+context seeding lands, `t` doubles as the parameter object handed to the
+elements (the bare-time convention).
+
+Method hierarchy: with [`ADSensitivity`](@ref) (default), each element cache
+that declares an analytic [`TimeSensitivityRequest`](@ref) kernel is used
+directly, and every other cache falls back to ForwardDiff through its
+residual kernel — analytic kernels always win per cache.
+[`FiniteDifferenceSensitivity`](@ref) is an operator-level override that
+differences primal residual evaluations and therefore BYPASSES analytic
+sensitivity kernels; prefer it only where AD is inadmissible (condensed
+internal state without analytic kernels or insensitivity declarations).
+"""
+function time_sensitivity!(g::AbstractVector, op::LinearizedFerriteOperator, states::NamedTuple, t, ctx; method = ADSensitivity())
     length(g) == residual_size(op) || throw(DimensionMismatch(
         "expected g of length $(residual_size(op)), got $(length(g))"))
+    return _time_sensitivity!(method, g, op, states, t, ctx)
+end
+time_sensitivity!(g::AbstractVector, op::LinearizedFerriteOperator, u::AbstractVector, t; method = ADSensitivity()) =
+    time_sensitivity!(g, op, (u = u,), t, nothing; method)
+
+function _time_sensitivity!(::ADSensitivity, g, op, states, t, ctx)
+    _check_sensitivity_supported(op, TimeSensitivityKind(t))
     assembler = start_assemble(op.engine.strategy, g)
-    task = AssemblyTask(TimeSensitivityKind(t), assembler, (u = u,), t, nothing)
+    task = AssemblyTask(TimeSensitivityKind(t), assembler, states, t, ctx)
     execute_on_subdomains!(task, op.engine)
     finalize_assembly!(assembler)
+    return g
+end
+
+function _time_sensitivity!(method::FiniteDifferenceSensitivity, g, op, states, t, ctx)
+    # Primal evaluations at perturbed times (bare-time p convention) — no
+    # internal-state admissibility check needed: the local solves run exactly
+    # as in a normal residual evaluation. The u slot is copied so the
+    # condensation trial write-back of the perturbed evaluations never leaks
+    # into the caller's state; ctx is held fixed.
+    h  = method.h * max(one(t), abs(t))
+    uw = copy(states.u)
+    statesw = merge(states, (u = uw,))
+    rp = similar(g); residual!(op, rp, statesw, t + h, ctx)
+    copyto!(uw, states.u)
+    rm = similar(g); residual!(op, rm, statesw, t - h, ctx)
+    g .= (rp .- rm) ./ (2h)
     return g
 end
 

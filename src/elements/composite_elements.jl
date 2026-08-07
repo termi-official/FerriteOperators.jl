@@ -20,9 +20,17 @@ assemble_cell!(req::AbstractAssemblyRequest, composite::CompositeVolumetricEleme
 end
 
 provides_analytic(::Type{CompositeVolumetricElementCache{CT}}, kind) where {CT <: Tuple} = _all_provide(CT, kind)
+# The composite's blanket fan-out method would satisfy any hasmethod check,
+# so validation must recurse into the inner caches.
+validate_element_cache(composite::CompositeVolumetricElementCache) =
+    foreach(validate_element_cache, composite.inner_caches)
 _all_provide(::Type{Tuple{}}, kind) = true
 _all_provide(::Type{T}, kind) where {T <: Tuple} =
     provides_analytic(Base.tuple_type_head(T), kind) && _all_provide(Base.tuple_type_tail(T), kind)
+has_internal_state(::Type{CompositeVolumetricElementCache{CT}}) where {CT <: Tuple} = _any_internal(CT)
+_any_internal(::Type{Tuple{}}) = false
+_any_internal(::Type{T}) where {T <: Tuple} =
+    has_internal_state(Base.tuple_type_head(T)) || _any_internal(Base.tuple_type_tail(T))
 
 function duplicate_for_device(device, cache::CompositeVolumetricElementCache)
     return CompositeVolumetricElementCache(

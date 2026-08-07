@@ -6,6 +6,84 @@ using SparseArrays
 using Polyester
 using TimerOutputs
 
+# A real facet kernel exercising the framework-owned boundary driver: a
+# constant Neumann load t̄ on a facet set, with the analytic reference
+# sum(b) = t̄ · |Γ|.
+struct NeumannTestIntegrator <: AbstractLinearIntegrator
+    t̄::Float64
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+    facetset::Set{FacetIndex}
+end
+struct NeumannTestCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+    t̄::Float64
+    fv::FV
+    facetset::Set{FacetIndex}
+end
+function FerriteOperators.setup_element_cache(m::NeumannTestIntegrator, sdh::SubDofHandler)
+    return FerriteOperators.EmptyVolumetricElementCache()
+end
+function FerriteOperators.setup_boundary_cache(m::NeumannTestIntegrator, sdh::SubDofHandler)
+    fqr = FacetQuadratureRule{RefHexahedron}(2)
+    ip  = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return NeumannTestCache(m.t̄, FacetValues(fqr, ip, ip_geo), m.facetset)
+end
+FerriteOperators.duplicate_for_device(device, c::NeumannTestCache) =
+    NeumannTestCache(c.t̄, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
+FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::NeumannTestCache) = idx ∈ c.facetset
+function FerriteOperators.assemble_facet!(req::ResidualRequest, c::NeumannTestCache, args::KernelArgs, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    for qp in 1:getnquadpoints(c.fv)
+        dΓ = getdetJdV(c.fv, qp)
+        for i in 1:getnbasefunctions(c.fv)
+            req.r[i] += c.t̄ * shape_value(c.fv, qp, i) * dΓ
+        end
+    end
+end
+
+@testset "Facet driver with a real Neumann kernel" begin
+    grid = generate_grid(Hexahedron, (2, 2, 2))   # unit cube [-1,1]³ → right face area 4.0
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefHexahedron, 1}())
+    close!(dh)
+    t̄ = 3.25
+    right = Set(getfacetset(grid, "right"))
+    integrator = NeumannTestIntegrator(t̄, QuadratureRuleCollection(2), :u, right)
+
+    op = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+    update_operator!(op, nothing)
+    area = 4.0
+    @test sum(op.b) ≈ t̄ * area rtol = 1e-12
+    # only dofs on the loaded face carry entries
+    @test count(!iszero, op.b) == 9
+
+    # parallel path through the same driver
+    opp = setup_operator(PerColorAssemblyStrategy(PolyesterDevice(2)), integrator, dh)
+    update_operator!(opp, nothing)
+    @test opp.b ≈ op.b rtol = 1e-13
+
+    # composite surface fan-out re-gates per inner cache: two identical inner
+    # caches double the load
+    sdh = first(dh.subdofhandlers)
+    inner = FerriteOperators.setup_boundary_cache(integrator, sdh)
+    comp  = FerriteOperators.CompositeSurfaceElementCache((inner, inner))
+    b2 = zeros(ndofs(dh))
+    cc = Ferrite.CellCache(sdh)
+    for cellid in 1:getncells(grid)
+        reinit!(cc, cellid)
+        rₑ = zeros(ndofs_per_cell(sdh))
+        args = KernelArgs((;), cc, nothing, nothing, nothing)
+        for lfi in 1:nfacets(cc)
+            if FerriteOperators.is_facet_in_cache(FacetIndex(cellid, lfi), cc, comp)
+                FerriteOperators.assemble_facet!(ResidualRequest(rₑ), comp, args, lfi)
+            end
+        end
+        b2[celldofs(cc)] .+= rₑ
+    end
+    @test sum(b2) ≈ 2 * t̄ * area rtol = 1e-12
+end
+
 @testset "Element API" begin
     import FerriteOperators: assemble_cell!, assemble_facet!
     import FerriteOperators: setup_element_cache, setup_boundary_cache

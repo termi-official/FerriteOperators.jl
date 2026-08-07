@@ -47,6 +47,7 @@ function get_number_of_internal_dofs_per_element(element_model, cache::SimpleCon
 end
 
 provides_analytic(::Type{<:SimpleCondensedLinearViscoelasticityCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
+has_internal_state(::Type{<:SimpleCondensedLinearViscoelasticityCache}) = true
 
 # The elastic stiffness (unit modulus) — shared by predictor and corrector.
 @inline function _sls_unit_stiffness(ε, ν)

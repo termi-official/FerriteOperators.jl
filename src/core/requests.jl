@@ -7,12 +7,19 @@
 
 Solver-controlled scalars the framework must understand. `t` is the evaluation
 time (Dual-typed during ∂F/∂t sweeps), `Δt` the physical step size for
-reference, and `γ̃` is defined as the scalar in the canonical local-stage form
+reference, and `γ̃` the effective local stage interval of the element-local
+internal-variable problem. Its NORMALIZATION is fixed by the canonical form
 
     q = q_ref + γ̃ · g(·, q)
 
-of the element-local internal-variable problem (the reference state `q_ref`
-is dof-shaped and flows through a slot, solver-folded for multistep schemes).
+— i.e. a solver passing `γ̃` means "an implicit-Euler local integrator would
+solve exactly this" (the reference state `q_ref` is dof-shaped and flows
+through a slot, solver-folded for multistep schemes). The canonical form
+normalizes the *number*, it does not prescribe the element's local rule: the
+element owns its local integrator and may realize the update with any
+consistent rule over `γ̃` — implicit Euler, exact exponential
+(Rush-Larsen/EME-type `q = q∞ + (q_ref − q∞)·exp(−γ̃/τ)`), or local
+substepping.
 
 !!! warning
     `γ̃` is NOT the rate-reconstruction slope of any state slot. Under
@@ -174,8 +181,51 @@ function validate_element_cache(cache)
         "$(T) implements no `assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::KernelArgs)` " *
         "method. The residual kernel is mandatory: it is the basis for AD-derived Jacobians " *
         "and sensitivities."))
+    # Trait ↔ kernel consistency: every kind the trait claims analytic must
+    # have a matching kernel method — a mistyped declaration fails here, not
+    # as a MethodError at first assembly.
+    for (kind, ReqT) in _validatable_kinds()
+        if provides_analytic(T, kind) && !hasmethod(assemble_cell!, Tuple{ReqT, T, KernelArgs})
+            throw(ArgumentError(
+                "$(T) declares `provides_analytic` for $(typeof(kind)) but implements no " *
+                "matching `assemble_cell!(::$(ReqT), ::$(nameof(T)), ::KernelArgs)` method."))
+        end
+    end
     return nothing
 end
+# Kind instances paired with the request types their analytic kernels take.
+# Payload-carrying kinds get placeholder payloads — only the type matters for
+# the trait query.
+_validatable_kinds() = (
+    (JacobianKind(), JacobianRequest{:u}),
+    (JacobianResidualKind(), JacobianResidualRequest),
+    (ParameterJacobianKind(), ParameterJacobianRequest),
+    (ParameterVJPKind(nothing), ParameterVJPRequest),
+    (TimeSensitivityKind(nothing), TimeSensitivityRequest),
+)
+
+"""
+    has_internal_state(::Type{CacheType}) -> Bool
+
+`true` iff the element cache carries condensed per-item internal state whose
+residual contains a local solve. Governs the sensitivity admissibility check:
+AD-from-residual through a local solve is wrong in principle, so such caches
+need an analytic kernel, an [`internal_state_insensitive`](@ref) declaration,
+or a finite-difference method for the requested sensitivity.
+"""
+has_internal_state(::Type) = false
+
+"""
+    internal_state_insensitive(::Type{CacheType}, kind) -> Bool
+
+Author-asserted declaration that the element-local internal-state equations
+do NOT depend on the quantity the sensitivity `kind` seeds (`∂L/∂seed ≡ 0`).
+When true, `dq/∂seed = 0` and plain AD-from-residual is exactly correct even
+through the local solve — zero seed partials propagate exactly. The framework
+CANNOT verify this claim; a wrong assertion produces a silently wrong
+sensitivity. Same trust model as [`provides_analytic`](@ref).
+"""
+internal_state_insensitive(::Type, kind) = false
 
 """
     declare_scratch(cache) -> NamedTuple of nullary constructors
