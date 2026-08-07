@@ -8,6 +8,12 @@ end
 
 @doc raw"""
     SimpleCondensedLinearViscoelasticity
+
+Linear viscoelasticity (standard linear solid) with the viscous strain εᵛ as a
+condensed per-quadrature-point internal variable. The element owns the LOCAL
+stage problem for εᵛ (scaled by `ctx.γ̃`); the previous state arrives through
+the `uprev` slot and the trial state is written back into the element-local
+`u` buffer per the condensation contract.
 """
 struct SimpleCondensedLinearViscoelasticity <: AbstractCondensedNonlinearIntegrator
     material_parameters::MaxwellParameters
@@ -17,12 +23,15 @@ struct SimpleCondensedLinearViscoelasticity <: AbstractCondensedNonlinearIntegra
     viscosity_name::Symbol
 end
 
-struct SimpleCondensedLinearViscoelasticityCache{CV <: CellValues} <: AbstractGenericFirstOrderTimeVolumetricElementCache
+struct SimpleCondensedLinearViscoelasticityCache{CV <: CellValues} <: AbstractVolumetricElementCache
     material_parameters::MaxwellParameters
     displacement_range::UnitRange{Int}
     viscosity_range::UnitRange{Int}
     cv::CV
 end
+
+Ferrite.getnquadpoints(e::SimpleCondensedLinearViscoelasticityCache) = getnquadpoints(e.cv)
+Ferrite.reinit!(e::SimpleCondensedLinearViscoelasticityCache, cell) = Ferrite.reinit!(e.cv, cell)
 
 function duplicate_for_device(device, cache::SimpleCondensedLinearViscoelasticityCache)
     return SimpleCondensedLinearViscoelasticityCache(
@@ -37,215 +46,94 @@ function get_number_of_internal_dofs_per_element(element_model, cache::SimpleCon
     return [length(cache.viscosity_range) for i in sdh.cellset]
 end
 
-# Element residual
-function assemble_element_gto1!(residualₑ::AbstractVector, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p, t, Δt)
-    (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
-    (; E₀, E₁, μ, η₁, ν) = material_parameters
+provides_analytic(::Type{<:SimpleCondensedLinearViscoelasticityCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
 
-    nqp = getnquadpoints(cv)
-    ndofs = getnbasefunctions(cv)
-
-    dₑ = @view uₑ[displacement_range]
-    qₑ = @view uₑ[viscosity_range]
-    qₑmat = reshape(qₑ, (6, nqp))
-    qprevₑ = @view uₑprev[viscosity_range]
-    qₑprevmat = reshape(qprevₑ, (6, nqp))
-
-    reinit!(cv, cell)
-
-    @inbounds for qp ∈ 1:nqp
-        dΩ = getdetJdV(cv, qp)
-
-        # Compute strain tensor
-        ∇u = function_gradient(cv, qp, dₑ)
-        ε = symmetric(∇u)
-
-        # Extract viscous strain tensor
-        εᵛ₀flat = @view qₑprevmat[:, qp]
-        εᵛ₀ = SymmetricTensor{2,3}(εᵛ₀flat)
-
-        # This is the used discretization:
-        #     dεᵛdt = E₁/η₁ c : (ε - εᵛ)
-        # <=> (εᵛ₁ - εᵛ₀) / Δt = E₁/η₁ c : (ε - εᵛ₁) = E₁/η₁ c : ε - E₁/η₁ c : εᵛ₁
-        # <=> εᵛ₁ / Δt + E₁/η₁ c : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
-        # <=> (𝐈 / Δt + E₁/η₁ c) : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
-
-        # Predictor
-        I = one(ε)
-        c₁ = ν / ((ν + 1)*(1-2ν)) * I ⊗ I
-        c₂ = 1 / (1+ν) * one(c₁)
-        ℂ = c₁ + c₂
-
-        # FIXME non-allocating version by using state_cache nlsolver
-        A = tomandel(SMatrix, one(ℂ)/Δt + E₁/η₁ * ℂ)
-        b = tomandel(SVector, εᵛ₀/Δt + E₁/η₁ * ℂ ⊡ ε)
-        εᵛ₁flat = @view qₑmat[:, qp]
-        εᵛ₁ = frommandel(typeof(ε), A \ b)
-
-        # Store solution
-        εᵛ₁flat .= εᵛ₁.data
-
-        # Compute stress and tangent
-        σ = E₀ * ℂ ⊡ ε + E₁ * ℂ ⊡ (ε - εᵛ₁)
-
-        # Loop over test functions
-        for i in 1:ndofs
-            ∇δui = shape_gradient(cv, qp, i)
-
-            # Add contribution to the residual from this test function
-            residualₑ[i] += ∇δui ⊡ σ * dΩ
-        end
-    end
+# The elastic stiffness (unit modulus) — shared by predictor and corrector.
+@inline function _sls_unit_stiffness(ε, ν)
+    I = one(ε)
+    c₁ = ν / ((ν + 1) * (1 - 2ν)) * I ⊗ I
+    c₂ = 1 / (1 + ν) * one(c₁)
+    return c₁ + c₂
 end
 
-# jac
-function assemble_element_gto1!(Kₑ::AbstractMatrix, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p, t, Δt)
-    (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
-    (; E₀, E₁, μ, η₁, ν) = material_parameters
+# Local stage problem (backward-Euler form scaled by γ̃):
+#     dεᵛdt = E₁/η₁ ℂ : (ε - εᵛ)
+# <=> (𝐈/γ̃ + E₁/η₁ ℂ) : εᵛ₁ = εᵛ₀/γ̃ + E₁/η₁ ℂ : ε
+# Returns (ℂ, A, εᵛ₁); A is the Mandel matrix of the local operator, reused by
+# the corrector.
+@inline function _sls_local_solve(cache::SimpleCondensedLinearViscoelasticityCache, ε, εᵛ₀, γ̃)
+    (; E₁, η₁, ν) = cache.material_parameters
+    ℂ = _sls_unit_stiffness(ε, ν)
+    # FIXME non-allocating version by using state_cache nlsolver
+    A = tomandel(SMatrix, one(ℂ) / γ̃ + E₁ / η₁ * ℂ)
+    b = tomandel(SVector, εᵛ₀ / γ̃ + E₁ / η₁ * ℂ ⊡ ε)
+    εᵛ₁ = frommandel(typeof(ε), A \ b)
+    return ℂ, A, εᵛ₁
+end
 
-    nqp = getnquadpoints(cv)
+# Corrector: consistent (algorithmic) tangent through the local solve.
+@inline function _sls_consistent_tangent(cache::SimpleCondensedLinearViscoelasticityCache, ℂ, A)
+    (; E₀, E₁, η₁) = cache.material_parameters
+    # FIXME non-allocating version by using state_cache nlsolver
+    B = tomandel(SMatrix, E₁ / η₁ * ℂ)
+    dqdε = frommandel(typeof(ℂ), A \ B)
+    ∂σ∂q = -E₁ * ℂ
+    return (E₀ + E₁) * ℂ + ∂σ∂q ⊡ dqdε
+end
+
+@inline function _sls_stage_scaling(ctx)
+    ctx === nothing && throw(ArgumentError(
+        "SimpleCondensedLinearViscoelasticity requires a TimeIntegrationContext: " *
+        "the local εᵛ stage problem scales by ctx.γ̃."))
+    return ctx.γ̃
+end
+
+function assemble_cell!(req::AbstractAssemblyRequest, cache::SimpleCondensedLinearViscoelasticityCache, args::KernelArgs)
+    _sls_assemble!(req, cache, args)
+end
+# Restrict to the kernels this element actually provides.
+_sls_assemble!(req, cache, args) = throw(ArgumentError(
+    "SimpleCondensedLinearViscoelasticityCache implements Residual/Jacobian/JacobianResidual requests, got $(typeof(req))"))
+
+function _sls_assemble!(req::Union{ResidualRequest, JacobianRequest{:u}, JacobianResidualRequest}, cache::SimpleCondensedLinearViscoelasticityCache, args::KernelArgs)
+    (; displacement_range, viscosity_range, cv) = cache
+    (; E₀, E₁ ) = cache.material_parameters
+    γ̃ = _sls_stage_scaling(args.ctx)
+    uₑ     = args.states.u
+    uₑprev = args.states.uprev
+
+    nqp   = getnquadpoints(cv)
     ndofs = getnbasefunctions(cv)
 
-    dₑ = @view uₑ[displacement_range]
-    qₑ = @view uₑ[viscosity_range]
-    qₑmat = reshape(qₑ, (6, nqp))
-    qprevₑ = @view uₑprev[viscosity_range]
-    qₑprevmat = reshape(qprevₑ, (6, nqp))
+    dₑ         = @view uₑ[displacement_range]
+    qₑmat      = reshape((@view uₑ[viscosity_range]), (6, nqp))
+    qₑprevmat  = reshape((@view uₑprev[viscosity_range]), (6, nqp))
 
-    reinit!(cv, cell)
+    reinit!(cv, args.cell)
 
-    @inbounds for qp ∈ 1:nqp
+    @inbounds for qp in 1:nqp
         dΩ = getdetJdV(cv, qp)
+        ε  = symmetric(function_gradient(cv, qp, dₑ))
+        εᵛ₀ = SymmetricTensor{2, 3}(@view qₑprevmat[:, qp])
 
-        # Compute strain tensor
-        ∇u = function_gradient(cv, qp, dₑ)
-        ε = symmetric(∇u)
+        ℂ, A, εᵛ₁ = _sls_local_solve(cache, ε, εᵛ₀, γ̃)
+        # Trial write-back into the element-local buffer (the condensation
+        # contract; the framework's store step propagates it into global u).
+        (@view qₑmat[:, qp]) .= εᵛ₁.data
 
-        # Extract viscous strain tensor
-        εᵛ₀flat = @view qₑprevmat[:, qp]
-        εᵛ₀ = SymmetricTensor{2,3}(εᵛ₀flat)
-
-        # This is the used discretization:
-        #     dεᵛdt = E₁/η₁ c : (ε - εᵛ)
-        # <=> (εᵛ₁ - εᵛ₀) / Δt = E₁/η₁ c : (ε - εᵛ₁) = E₁/η₁ c : ε - E₁/η₁ c : εᵛ₁
-        # <=> εᵛ₁ / Δt + E₁/η₁ c : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
-        # <=> (𝐈 / Δt + E₁/η₁ c) : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
-
-        # Predictor
-        I = one(ε)
-        c₁ = ν / ((ν + 1)*(1-2ν)) * I ⊗ I
-        c₂ = 1 / (1+ν) * one(c₁)
-        ℂ = c₁ + c₂
-
-        # FIXME non-allocating version by using state_cache nlsolver
-        A = tomandel(SMatrix, one(ℂ)/Δt + E₁/η₁ * ℂ)
-        b = tomandel(SVector, εᵛ₀/Δt + E₁/η₁ * ℂ ⊡ ε)
-        εᵛ₁flat = @view qₑmat[:, qp]
-        εᵛ₁ = frommandel(typeof(ε), A \ b)
-
-        # Store solution
-        εᵛ₁flat .= εᵛ₁.data
-
-        # Corrector
-        # Local problem: (𝐈 / Δt + E₁/η₁ c) : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
-        # =>  dLdQ = 𝐈 / Δt + E₁/η₁ c   := A
-        # => -dLdF = E₁/η₁ c            := B
-
-        # FIXME non-allocating version by using state_cache nlsolver
-        B = tomandel(SMatrix, E₁/η₁ * ℂ)
-        dqdε = frommandel(typeof(ℂ), A \ B)
-        ∂σ∂q = - E₁ * ℂ
-
-        # Compute tangent
-        ∂σ∂ε = (E₀ + E₁) * ℂ + ∂σ∂q ⊡ dqdε
-
-        # Loop over test functions
-        for i in 1:ndofs
-            ∇δui = shape_gradient(cv, qp, i)
-
-            ∇δui∂σ∂ε = ∇δui ⊡ ∂σ∂ε # Hoisted computation
-            for j in 1:ndofs
-                ∇δuj = shape_gradient(cv, qp, j)
-                # Add contribution to the tangent
-                Kₑ[i, j] += ( ∇δui∂σ∂ε ⊡ ∇δuj ) * dΩ
+        if req isa Union{ResidualRequest, JacobianResidualRequest}
+            σ = E₀ * ℂ ⊡ ε + E₁ * ℂ ⊡ (ε - εᵛ₁)
+            for i in 1:ndofs
+                req.r[i] += shape_gradient(cv, qp, i) ⊡ σ * dΩ
             end
         end
-    end
-end
-
-# Combined residual and jac
-function assemble_element_gto1!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, uₑprev::AbstractVector, cell, element_cache::SimpleCondensedLinearViscoelasticityCache, p, t, Δt)
-    (; material_parameters, displacement_range, viscosity_range, cv) = element_cache
-    (; E₀, E₁, μ, η₁, ν) = material_parameters
-
-    nqp = getnquadpoints(cv)
-    ndofs = getnbasefunctions(cv)
-
-    dₑ = @view uₑ[displacement_range]
-    qₑ = @view uₑ[viscosity_range]
-    qₑmat = reshape(qₑ, (6, nqp))
-    qprevₑ = @view uₑprev[viscosity_range]
-    qₑprevmat = reshape(qprevₑ, (6, nqp))
-
-    reinit!(cv, cell)
-
-    @inbounds for qp ∈ 1:nqp
-        dΩ = getdetJdV(cv, qp)
-
-        # Compute strain tensor
-        ∇u = function_gradient(cv, qp, dₑ)
-        ε = symmetric(∇u)
-
-        # Extract viscous strain tensor
-        εᵛ₀flat = @view qₑprevmat[:, qp]
-        εᵛ₀ = SymmetricTensor{2,3}(εᵛ₀flat)
-
-        # This is the used discretization:
-        #     dεᵛdt = E₁/η₁ c : (ε - εᵛ)
-        # <=> (εᵛ₁ - εᵛ₀) / Δt = E₁/η₁ c : (ε - εᵛ₁) = E₁/η₁ c : ε - E₁/η₁ c : εᵛ₁
-        # <=> εᵛ₁ / Δt + E₁/η₁ c : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
-        # <=> (𝐈 / Δt + E₁/η₁ c) : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
-
-        # Predictor
-        I = one(ε)
-        c₁ = ν / ((ν + 1)*(1-2ν)) * I ⊗ I
-        c₂ = 1 / (1+ν) * one(c₁)
-        ℂ = c₁ + c₂
-
-        # FIXME non-allocating version by using state_cache nlsolver
-        A = tomandel(SMatrix, one(ℂ)/Δt + E₁/η₁ * ℂ)
-        b = tomandel(SVector, εᵛ₀/Δt + E₁/η₁ * ℂ ⊡ ε)
-        εᵛ₁flat = @view qₑmat[:, qp]
-        εᵛ₁ = frommandel(typeof(ε), A \ b)
-        # Store solution
-        εᵛ₁flat .= εᵛ₁.data
-
-        # Corrector
-        # Local problem: (𝐈 / Δt + E₁/η₁ c) : εᵛ₁ = εᵛ₀/Δt + E₁/η₁ c : ε
-        # =>  dLdQ = 𝐈 / Δt + E₁/η₁ c   := A
-        # => -dLdF = E₁/η₁ c            := B
-
-        # FIXME non-allocating version by using state_cache nlsolver
-        B = tomandel(SMatrix, E₁/η₁ * ℂ)
-        dqdε = frommandel(typeof(ℂ), A \ B)
-        ∂σ∂q = - E₁ * ℂ
-
-        # Compute stress and tangent
-        σ = E₀ * ℂ ⊡ ε + E₁ * ℂ ⊡ (ε - εᵛ₁)
-        ∂σ∂ε = (E₀ + E₁) * ℂ + ∂σ∂q ⊡ dqdε
-
-        # Loop over test functions
-        for i in 1:ndofs
-            ∇δui = shape_gradient(cv, qp, i)
-
-            # Add contribution to the residual from this test function
-            residualₑ[i] += ∇δui ⊡ σ * dΩ
-
-            ∇δui∂σ∂ε = ∇δui ⊡ ∂σ∂ε # Hoisted computation
-            for j in 1:ndofs
-                ∇δuj = shape_gradient(cv, qp, j)
-                # Add contribution to the tangent
-                Kₑ[i, j] += ( ∇δui∂σ∂ε ⊡ ∇δuj ) * dΩ
+        if req isa Union{JacobianRequest{:u}, JacobianResidualRequest}
+            ∂σ∂ε = _sls_consistent_tangent(cache, ℂ, A)
+            for i in 1:ndofs
+                ∇δui∂σ∂ε = shape_gradient(cv, qp, i) ⊡ ∂σ∂ε
+                for j in 1:ndofs
+                    req.K[i, j] += (∇δui∂σ∂ε ⊡ shape_gradient(cv, qp, j)) * dΩ
+                end
             end
         end
     end
@@ -290,4 +178,4 @@ function store_condensed_element_unknowns!(uₑ, u, cell, ivh, element::SimpleCo
     return nothing
 end
 
-allocate_element_unknown_vector(element::SimpleCondensedLinearViscoelasticityCache, cell) = zeros(getnbasefunctions(element.cv)+6getnquadpoints(element.cv))
+allocate_element_unknown_vector(element::SimpleCondensedLinearViscoelasticityCache, sdh) = zeros(getnbasefunctions(element.cv)+6getnquadpoints(element.cv))

@@ -20,27 +20,26 @@ struct SimpleLinearElementCache{CV <: CellValues} <: AbstractVolumetricElementCa
 end
 
 Ferrite.getnquadpoints(e::SimpleLinearElementCache) = getnquadpoints(e.cellvalues)
-function assemble_element!(rₑ::AbstractVector, cell, element_cache::SimpleLinearElementCache, time)
-    (; cellvalues, f) = element_cache
-    n_basefuncs = getnbasefunctions(cellvalues)
-
-    reinit!(cellvalues, cell)
-
-    for qp in 1:getnquadpoints(cellvalues)
-        dΩ = getdetJdV(cellvalues, qp)
-        for i in 1:n_basefuncs
-            Nᵢ = shape_value(cellvalues, qp, i)
-            rₑ[i] += f * Nᵢ * dΩ
-        end
-    end
-end
-
+Ferrite.reinit!(e::SimpleLinearElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
 function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofHandler)
     qr         = getquadraturerule(element_model.qrc, sdh)
     field_name = element_model.field_name
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleLinearElementCache(element_model.f, CellValues(qr, ip, ip_geo))
+end
+
+# v2 request protocol. The load form is state-independent: the residual kernel
+# reads nothing from `args.states`.
+function assemble_cell!(req::ResidualRequest, cache::SimpleLinearElementCache, args::KernelArgs)
+    (; cellvalues, f) = cache
+    reinit!(cellvalues, args.cell)
+    for qp in 1:getnquadpoints(cellvalues)
+        dΩ = getdetJdV(cellvalues, qp)
+        for i in 1:getnbasefunctions(cellvalues)
+            req.r[i] += f * shape_value(cellvalues, qp, i) * dΩ
+        end
+    end
 end
 
 duplicate_for_device(device, cache::SimpleLinearElementCache) = SimpleLinearElementCache(cache.f, duplicate_for_device(device, cache.cellvalues))
@@ -67,29 +66,12 @@ struct SimpleBilinearMassElementCache{CV <: CellValues} <: AbstractVolumetricEle
 end
 
 Ferrite.getnquadpoints(e::SimpleBilinearMassElementCache) = getnquadpoints(e.cellvalues)
+Ferrite.reinit!(e::SimpleBilinearMassElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
 function duplicate_for_device(device, cache::SimpleBilinearMassElementCache)
     return SimpleBilinearMassElementCache(
         cache.ρ,
         duplicate_for_device(device, cache.cellvalues),
     )
-end
-
-function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBilinearMassElementCache, time)
-    (; cellvalues, ρ) = element_cache
-    n_basefuncs = getnbasefunctions(cellvalues)
-
-    reinit!(cellvalues, cell)
-
-    for qp in 1:getnquadpoints(cellvalues)
-        dΩ = getdetJdV(cellvalues, qp)
-        for i in 1:n_basefuncs
-            Nᵢ = shape_value(cellvalues, qp, i)
-            for j in 1:n_basefuncs
-                Nⱼ = shape_value(cellvalues, qp, j)
-                Kₑ[i,j] += ρ * Nⱼ ⋅ Nᵢ * dΩ
-            end
-        end
-    end
 end
 
 function setup_element_cache(element_model::SimpleBilinearMassIntegrator, sdh::SubDofHandler)
@@ -98,6 +80,35 @@ function setup_element_cache(element_model::SimpleBilinearMassIntegrator, sdh::S
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleBilinearMassElementCache(element_model.ρ, CellValues(qr, ip, ip_geo))
+end
+
+# v2 request protocol. The residual of the linear element is the element
+# matrix acting on the element vector.
+provides_analytic(::Type{<:SimpleBilinearMassElementCache}, ::JacobianKind) = true
+function assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearMassElementCache, args::KernelArgs)
+    (; cellvalues, ρ) = cache
+    reinit!(cellvalues, args.cell)
+    for qp in 1:getnquadpoints(cellvalues)
+        dΩ = getdetJdV(cellvalues, qp)
+        for i in 1:getnbasefunctions(cellvalues)
+            Nᵢ = shape_value(cellvalues, qp, i)
+            for j in 1:getnbasefunctions(cellvalues)
+                req.K[i, j] += ρ * shape_value(cellvalues, qp, j) ⋅ Nᵢ * dΩ
+            end
+        end
+    end
+end
+function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearMassElementCache, args::KernelArgs)
+    (; cellvalues, ρ) = cache
+    uₑ = args.states.u
+    reinit!(cellvalues, args.cell)
+    for qp in 1:getnquadpoints(cellvalues)
+        dΩ = getdetJdV(cellvalues, qp)
+        uval = function_value(cellvalues, qp, uₑ)
+        for i in 1:getnbasefunctions(cellvalues)
+            req.r[i] += ρ * uval ⋅ shape_value(cellvalues, qp, i) * dΩ
+        end
+    end
 end
 
 @doc raw"""

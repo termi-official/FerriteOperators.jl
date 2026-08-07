@@ -32,7 +32,7 @@ end
 
     # --- evaluate_quadrature! fills QVector ---
     @testset "evaluate_quadrature! fills QVector" begin
-        qop = setup_quadrature_operator(strategy, integrator, dh)
+        qop = setup_operator(strategy, integrator, dh)
         q   = setup_qvector(Float64, dh, qrc)
         u   = zeros(ndofs(dh))
 
@@ -45,7 +45,7 @@ end
 
     # --- Result is consistent with manual per-cell indexing ---
     @testset "evaluate_quadrature! consistent with per-cell access" begin
-        qop = setup_quadrature_operator(strategy, integrator, dh)
+        qop = setup_operator(strategy, integrator, dh)
         q   = setup_qvector(Float64, dh, qrc)
         u   = zeros(ndofs(dh))
 

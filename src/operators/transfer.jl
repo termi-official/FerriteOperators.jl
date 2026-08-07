@@ -94,7 +94,7 @@ end
 duplicate_for_device(device, task::AssembleTransferTerm) = AssembleTransferTerm(duplicate_for_device(device, task.inner_assembler), task.p)
 
 function execute_single_task!(task::AssembleTransferTerm, ws::TransferWorkspace)
-    pₑ = query_element_parameters(ws.element, ws.tc, nothing, task.p)
+    pₑ = query_cell_parameters(ws.element, ws.tc, task.p)
 
     fill!(ws.Pe, 0.0)
     @timeit_debug "assemble transfer element" assemble_transfer_element!(ws.Pe, ws.tc, ws.element, pₑ)

@@ -29,7 +29,9 @@ function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache
     )
 end
 
-function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBilinearDiffusionElementCache, time)
+function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleBilinearDiffusionElementCache, args::KernelArgs)
+    Kₑ = req.K
+    cell = args.cell
     (; cellvalues, D) = element_cache
     n_basefuncs = getnbasefunctions(cellvalues)
 
@@ -55,11 +57,7 @@ function setup_element_cache(element_model::SimpleBilinearDiffusionIntegrator, s
     return SimpleBilinearDiffusionElementCache(element_model.D, CellValues(qr, ip, ip_geo))
 end
 
-# v2 request protocol; the legacy arity method stays for composite caches.
-implements_v2_kernels(::Type{<:SimpleBilinearDiffusionElementCache}) = true
 provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind) = true
-assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearDiffusionElementCache, args::KernelArgs) =
-    assemble_element!(req.K, args.cell, cache, args.p)
 # The residual of a linear element is just the element matrix acting on the
 # element vector — mandatory so the element composes into nonlinear operators
 # and AD-based sensitivities.

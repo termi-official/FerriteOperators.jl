@@ -12,13 +12,20 @@ Comes with one entry point for each cache type to handle the most common cases:
     integrator
 end
 
-# Interface
+# Interface. The states/ctx forms are canonical; the u-vector forms are
+# conveniences for stationary problems (states = (u = u,), no context).
+update_linearization!(op::LinearizedFerriteOperator, states::NamedTuple, p, ctx) =
+    assemble_into!(JacobianKind(), (op.J,), op, states, p, ctx)
 update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector, p) =
-    assemble_into!(JacobianKind(), (op.J,), op, u, p)
+    update_linearization!(op, (u = u,), p, nothing)
+update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, states::NamedTuple, p, ctx) =
+    assemble_into!(JacobianResidualKind(), (op.J, residual), op, states, p, ctx)
 update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
-    assemble_into!(JacobianResidualKind(), (op.J, residual), op, u, p)
+    update_linearization!(op, residual, (u = u,), p, nothing)
+residual!(op::LinearizedFerriteOperator, residual::AbstractVector, states::NamedTuple, p, ctx) =
+    assemble_into!(ResidualKind(), (residual,), op, states, p, ctx)
 residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
-    assemble_into!(ResidualKind(), (residual,), op, u, p)
+    residual!(op, residual, (u = u,), p, nothing)
 
 """
     update_parameter_jacobian!(B, op, u, p)
@@ -49,7 +56,7 @@ function update_parameter_jacobian!(B::AbstractMatrix, op::LinearizedFerriteOper
         "expected B of size $((residual_size(op), nθ)), got $(size(B))"))
     fill!(B, zero(eltype(B)))
     assembler = ParameterJacobianAssembler{eltype(B), typeof(B), strategy_needs_atomic(op.engine.strategy)}(B)
-    task = AssemblyTask(ParameterJacobianKind(), assembler, u, p)
+    task = AssemblyTask(ParameterJacobianKind(), assembler, (u = u,), p, nothing)
     execute_on_subdomains!(task, op.engine)
     return B
 end
@@ -75,7 +82,7 @@ function parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::Ab
               "accumulation; the VJP scatter falls back to atomic adds." maxlog = 1
     end
     assembler = ParameterVJPAssembler{eltype(g), typeof(g), atomic}(g)
-    task = AssemblyTask(ParameterVJPKind(λ), assembler, u, p)
+    task = AssemblyTask(ParameterVJPKind(λ), assembler, (u = u,), p, nothing)
     execute_on_subdomains!(task, op.engine)
     return g
 end
@@ -93,7 +100,7 @@ function time_sensitivity!(g::AbstractVector, op::LinearizedFerriteOperator, u::
     length(g) == residual_size(op) || throw(DimensionMismatch(
         "expected g of length $(residual_size(op)), got $(length(g))"))
     assembler = start_assemble(op.engine.strategy, g)
-    task = AssemblyTask(TimeSensitivityKind(t), assembler, u, t)
+    task = AssemblyTask(TimeSensitivityKind(t), assembler, (u = u,), t, nothing)
     execute_on_subdomains!(task, op.engine)
     finalize_assembly!(assembler)
     return g

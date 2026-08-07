@@ -1,159 +1,67 @@
+####################################
+## Quadrature evaluation as a request kind
+####################################
+#
+# Per-quadrature-point evaluation runs through the SAME engine as assembly —
+# no bespoke task system, no separate operator type. The element owns its
+# reinit (cache-level `Ferrite.reinit!(cache, cell)` selects what to
+# reinitialize); the framework provides the cell filtering, slot gathering,
+# parameter query, and the data-query/store hooks.
+
 """
-    query_element_quadrature_data(element_cache, cell, ivh, q::QVector)
+    query_element_quadrature_data(element, cell, ivh, q::QVector)
 
-Return the per-element quadrature data buffer for the current cell.
-
-The default implementation returns a mutable view into `q` for `cellid(cell)`,
-so the user function `f(qe, ue, cell, element_cache, pe)` writes directly to
-the global [`QVector`](@ref) with no extra copy. Override this method together
-with [`store_quadrature_data!`](@ref) if your element needs a local staging buffer.
+Element-overridable query producing the mutable per-cell quadrature-data
+slice the evaluation writes into. Defaults to the cell's slice of `q`.
 """
 query_element_quadrature_data(element, cell, ivh, q::QVector) = get_range_for_cell(q, cellid(cell))
 
 """
-    store_quadrature_data!(q::QVector, qe, cell, ivh, element_cache)
+    store_quadrature_data!(q::QVector, qe, cell, ivh, element)
 
-Copy the element-local quadrature results `qe` back into the global [`QVector`](@ref).
-
-The default implementation is a no-op because `qe` is already a view into `q`
-(see [`query_element_quadrature_data`](@ref)). Override if your element uses a
-local staging buffer.
+Element-overridable write-back counterpart of
+[`query_element_quadrature_data`](@ref). The default is a no-op because the
+default query hands out a mutable view.
 """
 store_quadrature_data!(q::QVector, qe, cell, ivh, element) = nothing
 
 """
-    QuadratureEvaluationTask
+    QuadratureEvaluationKind(f, q, set)
 
-Task that evaluates a user function at every quadrature point of every cell and
-stores the result in a [`QVector`](@ref).
-
-Fields:
-- `f`   – user function `f(ue, qp, cell, element_cache, pe)`, called once per
-          quadrature point; its return value is stored at that point's slot in `q`.
-          `ue` is the element-local unknown vector; `pe` the element-local parameters.
-- `u`   – global solution vector (passed to [`load_element_unknowns!`](@ref))
-- `p`   – global parameter object (passed to [`query_element_parameters`](@ref))
-- `q`   – output [`QVector`](@ref); shared across all workers (write access is safe
-          because different cells own disjoint slices)
+Evaluate `f(uₑ, qp, cell, element_cache, pₑ)` at every quadrature point of
+every cell (optionally restricted to `set`), storing the returned values in
+the [`QVector`](@ref) `q`. `q` is shared across workers — different cells own
+disjoint slices, so no duplication is needed.
 """
-@concrete struct QuadratureEvaluationTask
+@concrete struct QuadratureEvaluationKind
     f
-    u
-    p
     q
     set
 end
-# q is the shared output — all workers write to disjoint cell slices, so it is not duplicated.
-duplicate_for_device(device, task::QuadratureEvaluationTask) =
-    QuadratureEvaluationTask(task.f, task.u, task.p, task.q, task.set)
 
-"""
-    QuadratureEvaluationWorkspace <: AbstractWorkspace
-
-Per-worker scratch data for [`QuadratureEvaluationTask`](@ref).
-"""
-@concrete struct QuadratureEvaluationWorkspace <: AbstractWorkspace
-    ue
-    element
-    cell
-    ivh
-end
-
-Ferrite.reinit!(ws::QuadratureEvaluationWorkspace, cellid) = reinit!(ws.cell, cellid)
-
-function duplicate_for_device(device::AbstractCPUDevice, ws::QuadratureEvaluationWorkspace)
-    return create_quadrature_evaluation_workspace(
-        duplicate_for_device(device, ws.element),
-        ws.cell.dh,
-        duplicate_for_device(device, ws.ivh),
-    )
-end
-
-function create_quadrature_evaluation_workspace(element, sdh, ivh)
-    return QuadratureEvaluationWorkspace(
-        allocate_element_unknown_vector(element, sdh),
-        element,
-        CellCache(sdh),
-        ivh,
-    )
-end
-
-function execute_single_task!(task::QuadratureEvaluationTask, ws::QuadratureEvaluationWorkspace)
-    if task.set !== nothing && cellid(ws.cell) ∉ task.set
-        return nothing
-    end
-
-    uₑ = query_element_unknown_buffer(ws.element, ws.ue)
-    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
-    qₑ = query_element_quadrature_data(ws.element, ws.cell, ws.ivh, task.q)
-
-    load_element_unknowns!(uₑ, task.u, ws.cell, ws.ivh, ws.element)
+function execute_kind!(kind::QuadratureEvaluationKind, task, ws)
+    kind.set !== nothing && cellid(ws.cell) ∉ kind.set && return
+    pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
+    statesₑ = load_slots!(ws, task.states, ws.cell, ws.ivh, ws.element)
+    qₑ = query_element_quadrature_data(ws.element, ws.cell, ws.ivh, kind.q)
     Ferrite.reinit!(ws.element, ws.cell)
     for qp in 1:getnquadpoints(ws.element)
-        qₑ[qp] = task.f(uₑ, qp, ws.cell, ws.element, pₑ)
+        qₑ[qp] = kind.f(statesₑ.u, qp, ws.cell, ws.element, pₑ)
     end
-    store_quadrature_data!(task.q, qₑ, ws.cell, ws.ivh, ws.element)
-end
-
-"""
-    FerriteQuadratureOperator
-
-An operator for evaluating user-defined functions at quadrature points and storing
-the results in a [`QVector`](@ref).
-
-Build with [`setup_quadrature_operator`](@ref) and execute with
-[`evaluate_quadrature!`](@ref).
-"""
-@concrete struct FerriteQuadratureOperator
-    strategy
-    subdomain_caches
-    dh
-    integrator
-end
-
-"""
-    setup_quadrature_operator(strategy, integrator, dh) -> FerriteQuadratureOperator
-
-Set up a [`FerriteQuadratureOperator`](@ref) that can be used with
-[`evaluate_quadrature!`](@ref) to evaluate a function at all quadrature points.
-"""
-function setup_quadrature_operator(strategy, integrator, dh::AbstractDofHandler)
-    element_caches = setup_elements(integrator, dh)
-    ivh    = setup_internal_variable_handler(integrator, element_caches, dh)
-    device = strategy.device
-
-    subdomain_caches = [begin
-        partition = compute_partition(strategy, sdh)
-        n  = n_workers(strategy, device, partition)
-        ws = create_quadrature_evaluation_workspace(element_cache, sdh, ivh)
-        dc = setup_device_instances(device, ws, n)
-        SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, EmptySurfaceElementCache()), dc, partition)
-    end for (sdh, element_cache) in zip(dh.subdofhandlers, element_caches)]
-
-    return FerriteQuadratureOperator(strategy, subdomain_caches, dh, integrator)
+    store_quadrature_data!(kind.q, qₑ, ws.cell, ws.ivh, ws.element)
+    return nothing
 end
 
 """
     evaluate_quadrature!(q::QVector, op, u, p, f, [set = nothing])
 
-Evaluate `f(ue, qp, cell, element_cache, pe)` at every quadrature point and
-store the returned values in `q`. If `set` is given, only cells in it are
-evaluated; the remaining entries of `q` are left untouched.
-
-- `ue` — element-local unknowns loaded from `u`
-- `qp` — the current quadrature point
-- `cell` — [`CellCache`](@ref) for the current cell
-- `element_cache` — element cache (user-provided subtype of
-  [`AbstractVolumetricElementCache`](@ref))
-- `pe` — element-local parameters derived from `p`
+Evaluate `f(uₑ, qp, cell, element_cache, pₑ)` at every quadrature point and
+store the returned values in `q`, using `op`'s assembly engine. If `set` is
+given, only cells in it are evaluated; the remaining entries of `q` are left
+untouched.
 """
 function evaluate_quadrature!(q::QVector, op, u, p, f, set = nothing)
-    # TODO optimize this. We only need to swap the workspace.
-    qop = setup_quadrature_operator(op.engine.strategy, op.integrator, op.engine.dh)
-    evaluate_quadrature!(q::QVector, qop, u, p, f, set)
-end
-
-function evaluate_quadrature!(q::QVector, op::FerriteQuadratureOperator, u, p, f, set = nothing)
-    task = QuadratureEvaluationTask(f, u, p, q, set)
-    execute_on_subdomains!(task, op.strategy, op.subdomain_caches)
+    task = AssemblyTask(QuadratureEvaluationKind(f, q, set), nothing, (u = u,), p, nothing)
+    execute_on_subdomains!(task, op.engine)
+    return q
 end

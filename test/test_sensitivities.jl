@@ -23,7 +23,6 @@ function FerriteOperators.setup_element_cache(m::SourceDiffusionIntegrator, sdh:
 end
 FerriteOperators.duplicate_for_device(device, c::SourceDiffusionCache) =
     SourceDiffusionCache(FerriteOperators.duplicate_for_device(device, c.cv))
-FerriteOperators.implements_v2_kernels(::Type{<:SourceDiffusionCache}) = true
 function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::SourceDiffusionCache, args::KernelArgs)
     (; cv) = cache
     uₑ = args.states.u

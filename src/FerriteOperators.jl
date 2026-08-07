@@ -32,12 +32,12 @@ import Ferrite: nnodes_per_cell, cellnodes!, getcoordinates!
 
 include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or GPUs)
 include("core/strategy.jl")  # Utilities to control the assembly strategy
-include("core/requests.jl")  # Assembly requests: the element interface v2 contract
-include("core/ad.jl")        # ForwardDiff fallbacks deriving requests from residual kernels
-include("core/tasks.jl")     # Contains the basic task system
-include("core/iterators.jl") # Transfer cell iterators for two-DofHandler assembly
+include("core/requests.jl")           # Assembly requests: the element interface v2 contract
+include("core/element_interface.jl")  # Cache supertypes + the empty caches
+include("core/ad.jl")                 # ForwardDiff fallbacks deriving requests from residual kernels
+include("core/tasks.jl")              # Contains the basic task system
+include("core/iterators.jl")          # Transfer cell iterators for two-DofHandler assembly
 
-include("core/element_interface.jl") # This is the basic element interface used for the operators
 include("core/utils.jl")             # Internal helpers
 include("core/qvector.jl")           # Flat per-cell quadrature data storage
 
@@ -58,7 +58,6 @@ abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
 include("elements/domain_elements.jl")        # This is the key component to couple integrators into a single operator
-include("elements/generic_first_order_time_element.jl")
 
 include("operators/general.jl")         # Some general operators which might be handy
 include("operators/matrix_free.jl")     # Everything related to the fundamental decomposition
@@ -84,7 +83,7 @@ export getquadraturerule
 export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
 
 export QVector, setup_qvector, get_range_for_cell
-export FerriteQuadratureOperator, setup_quadrature_operator, evaluate_quadrature!
+export evaluate_quadrature!
 export query_element_quadrature_data, store_quadrature_data!
 export VTKQuadratureGrid, VTKQuadratureFile, write_quadrature_data
 export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, process_query!
@@ -95,7 +94,8 @@ export parameter_vector, rebuild_parameters
 export TimeIntegrationContext, KernelArgs, assemble_cell!
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
-export implements_v2_kernels, provides_analytic
+export provides_analytic
+export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
 
 export residual_size, unknown_size
 
@@ -115,7 +115,7 @@ export AbstractTransferIntegrator, AbstractTransferElementCache
 export AbstractVolumetricElementCache
 export MassProlongatorIntegrator
 export NestedMassProlongatorIntegrator
-export setup_element_cache, assemble_element!
+export setup_element_cache, setup_boundary_cache
 export TransferFerriteOperator, setup_transfer_operator, init_transfer_sparsity_pattern
 export NestedTransferFerriteOperator, setup_nested_transfer_operator, init_nested_transfer_sparsity_pattern
 

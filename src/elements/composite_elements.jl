@@ -1,111 +1,74 @@
 """
 This cache allows to combine multiple elements over the same volume.
-If surface caches are passed they are handled properly. This requred dispatching
-    is_facet_in_cache(facet::FacetIndex, geometry_cache, my_cache::MyCacheType)
+
+v2 composition is pure iteration: the request carries the buffers, so ONE
+generic fan-out serves every request type. The composite is analytic for a
+kind iff every inner cache is; otherwise the whole composite falls back to AD
+over the fused residual (one Dual sweep, one geometry pass for the fused
+Jacobian).
 """
 struct CompositeVolumetricElementCache{CacheTupleType <: Tuple} <: AbstractVolumetricElementCache
     inner_caches::CacheTupleType
 end
+
+assemble_cell!(req::AbstractAssemblyRequest, composite::CompositeVolumetricElementCache, args::KernelArgs) =
+    _composite_assemble_cell!(req, composite.inner_caches, args)
+@unroll function _composite_assemble_cell!(req, inner_caches, args)
+    @unroll for inner in inner_caches
+        assemble_cell!(req, inner, args)
+    end
+end
+
+provides_analytic(::Type{CompositeVolumetricElementCache{CT}}, kind) where {CT <: Tuple} = _all_provide(CT, kind)
+_all_provide(::Type{Tuple{}}, kind) = true
+_all_provide(::Type{T}, kind) where {T <: Tuple} =
+    provides_analytic(Base.tuple_type_head(T), kind) && _all_provide(Base.tuple_type_tail(T), kind)
+
 function duplicate_for_device(device, cache::CompositeVolumetricElementCache)
     return CompositeVolumetricElementCache(
         map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
     )
 end
-# Main entry point for linear operators
-assemble_element!(rₑ::AbstractVector, cell::CellCache, element_cache::CompositeVolumetricElementCache, time) = assemble_composite_element!(rₑ, cell, element_cache.inner_caches, time)
-@unroll function assemble_composite_element!(rₑ::AbstractVector, cell::CellCache, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_element!(rₑ, cell, inner_cache, time)
-    end
-end
-# Main entry point for bilinear operators
-assemble_element!(Kₑ::AbstractMatrix, cell::CellCache, element_cache::CompositeVolumetricElementCache, time) = assemble_composite_element!(Kₑ, cell, element_cache.inner_caches, time)
-@unroll function assemble_composite_element!(Kₑ::AbstractMatrix, cell::CellCache, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_element!(Kₑ, cell, inner_cache, time)
-    end
-end
-# Update element matrix in nonlinear operators
-assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache, element_cache::CompositeVolumetricElementCache, time) = assemble_composite_element!(Kₑ, uₑ, cell, element_cache.inner_caches, time)
-@unroll function assemble_composite_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_element!(Kₑ, uₑ, cell, inner_cache, time)
-    end
-end
-# Update element matrix and residual in nonlinear operators
-assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, element_cache::CompositeVolumetricElementCache, time) = assemble_composite_element!(Kₑ, residualₑ, uₑ, cell, element_cache.inner_caches, time)
-@unroll function assemble_composite_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_element!(Kₑ, residualₑ, uₑ, cell, inner_cache, time)
-    end
-end
-# Update residual in nonlinear operators
-assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, element_cache::CompositeVolumetricElementCache, time) = assemble_composite_element!(residualₑ, uₑ, cell, element_cache.inner_caches, time)
-@unroll function assemble_composite_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_element!(residualₑ, uₑ, cell, inner_cache, time)
-    end
-end
-
 
 """
-This cache allows to combine multiple elements over the same surface.
+This cache allows to combine multiple elements over the same surface. The
+boundary driver gates on the composite (`is_facet_in_cache` = any inner covers
+the facet); the fan-out re-gates per inner cache, since inner caches may cover
+different facet sets.
 """
 struct CompositeSurfaceElementCache{CacheTupleType <: Tuple} <: AbstractSurfaceElementCache
     inner_caches::CacheTupleType
 end
+
 function duplicate_for_device(device, cache::CompositeSurfaceElementCache)
     return CompositeSurfaceElementCache(
         map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
     )
 end
-# Main entry point for linear operators
-assemble_facet!(rₑ::AbstractVector, cell::CellCache, local_facet_index::Int, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_facet!(rₑ, cell, local_facet_index, surface_cache.inner_caches, time)
-@unroll function assemble_composite_facet!(rₑ::AbstractVector, cell::CellCache, local_facet_index::Int, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_facet!(rₑ, cell, local_facet_index, inner_cache, time)
-    end
-end
-# Main entry point for bilinear operators
-assemble_facet!(Kₑ::AbstractMatrix, cell::CellCache, local_facet_index::Int, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_facet!(Kₑ, cell, local_facet_index, surface_cache.inner_caches, time)
-@unroll function assemble_composite_facet!(Kₑ::AbstractMatrix, cell::CellCache, local_facet_index::Int, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_facet!(Kₑ, cell, local_facet_index, inner_cache, time)
-    end
-end
-# Update element matrix in nonlinear operators
-assemble_facet!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache, local_facet_index::Int, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_facet!(Kₑ, uₑ, cell, local_facet_index, surface_cache.inner_caches, time)
-@unroll function assemble_composite_facet!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache, local_facet_index::Int, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_facet!(Kₑ, uₑ, cell, local_facet_index, inner_cache, time)
-    end
-end
-# Update element matrix and residual in nonlinear operators
-assemble_facet!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, local_facet_index::Int, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_facet!(Kₑ, residualₑ, uₑ, cell, local_facet_index, surface_cache.inner_caches, time)
-@unroll function assemble_composite_facet!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, local_facet_index::Int, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_facet!(Kₑ, residualₑ, uₑ, cell, local_facet_index, inner_cache, time)
-    end
-end
-# Update residual in nonlinear operators
-assemble_facet!(residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, local_facet_index::Int, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_facet!(residualₑ, uₑ, cell, local_facet_index, surface_cache.inner_caches, time)
-@unroll function assemble_composite_facet!(residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, local_facet_index::Int, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_facet!(residualₑ, uₑ, cell, local_facet_index, inner_cache, time)
+
+assemble_facet!(req::AbstractAssemblyRequest, composite::CompositeSurfaceElementCache, args::KernelArgs, local_facet_index::Int) =
+    _composite_assemble_facet!(req, composite.inner_caches, args, local_facet_index)
+@unroll function _composite_assemble_facet!(req, inner_caches, args, local_facet_index)
+    @unroll for inner in inner_caches
+        if is_facet_in_cache(FacetIndex(cellid(args.cell), local_facet_index), args.cell, inner)
+            assemble_facet!(req, inner, args, local_facet_index)
+        end
     end
 end
 
-# If we compose a face cache into an element cache, then we loop over the faces of the elements and try to assemble
-# Update element matrix in nonlinear operators
-assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell::CellCache, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_element!(Kₑ, uₑ, cell, surface_cache.inner_caches, time)
-# Update element matrix and residual in nonlinear operators
-assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_element!(Kₑ, residualₑ, uₑ, cell, surface_cache.inner_caches, time)
-# Update residual in nonlinear operators
-assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell::CellCache, surface_cache::CompositeSurfaceElementCache, time) = assemble_composite_element!(residualₑ, uₑ, cell, surface_cache.inner_caches, time)
-
+is_facet_in_cache(idx::FacetIndex, cell, composite::CompositeSurfaceElementCache) =
+    _any_facet_in_cache(idx, cell, composite.inner_caches)
+@unroll function _any_facet_in_cache(idx, cell, inner_caches)
+    @unroll for inner in inner_caches
+        is_facet_in_cache(idx, cell, inner) && return true
+    end
+    return false
+end
 
 """
 This cache allows to combine multiple elements over the same interface.
+Interface kernels are reserved for the DG work (phase 4); composition will
+follow the same request fan-out pattern as cells and facets.
 """
 struct CompositeInterfaceElementCache{CacheTupleType <: Tuple} <: AbstractInterfaceElementCache
     inner_caches::CacheTupleType
@@ -114,39 +77,4 @@ function duplicate_for_device(device, cache::CompositeInterfaceElementCache)
     return CompositeInterfaceElementCache(
         map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
     )
-end
-# Main entry point for linear operators
-assemble_interface!(rₑ::AbstractVector, interface, interface_cache::CompositeInterfaceElementCache, time) = assemble_composite_interface!(rₑ, interface, interface_cache.inner_caches, time)
-@unroll function assemble_composite_interface!(rₑ::AbstractVector, interface, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_interface!(rₑ, interface, inner_cache, time)
-    end
-end
-# Main entry point for bilinear operators
-assemble_interface!(Kₑ::AbstractMatrix, interface, interface_cache::CompositeInterfaceElementCache, time) = assemble_composite_interface!(Kₑ, interface, interface_cache.inner_caches, time)
-@unroll function assemble_composite_interface!(Kₑ::AbstractMatrix, interface, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_interface!(Kₑ, interface, inner_cache, time)
-    end
-end
-# Update element matrix in nonlinear operators
-assemble_interface!(Kₑ::AbstractMatrix, uₑ::AbstractVector, interface, interface_cache::CompositeInterfaceElementCache, time) = assemble_composite_interface!(Kₑ, uₑ, interface, interface_cache.inner_caches, time)
-@unroll function assemble_composite_interface!(Kₑ::AbstractMatrix, uₑ::AbstractVector, interface, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_interface!(Kₑ, uₑ, interface, inner_cache, time)
-    end
-end
-# Update element matrix and residual in nonlinear operators
-assemble_interface!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, interface, interface_cache::CompositeInterfaceElementCache, time) = assemble_composite_interface!(Kₑ, residualₑ, uₑ, interface, interface_cache.inner_caches, time)
-@unroll function assemble_composite_interface!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, interface, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_interface!(Kₑ, residualₑ, uₑ, interface, inner_cache, time)
-    end
-end
-# Update residual in nonlinear operators
-assemble_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, interface, interface_cache::CompositeInterfaceElementCache, time) = assemble_composite_interface!(residualₑ, uₑ, interface, interface_cache.inner_caches, time)
-@unroll function assemble_composite_interface!(residualₑ::AbstractVector, uₑ::AbstractVector, interface, inner_caches::CacheTupleType, time) where CacheTupleType <: Tuple
-    @unroll for inner_cache ∈ inner_caches
-        assemble_interface!(residualₑ, uₑ, interface, inner_cache, time)
-    end
 end

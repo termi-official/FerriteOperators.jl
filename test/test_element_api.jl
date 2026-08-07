@@ -7,7 +7,7 @@ using Polyester
 using TimerOutputs
 
 @testset "Element API" begin
-    import FerriteOperators: assemble_element!, assemble_facet!
+    import FerriteOperators: assemble_cell!, assemble_facet!
     import FerriteOperators: setup_element_cache, setup_boundary_cache
     import FerriteOperators: SimpleBilinearMassIntegrator, SimpleBilinearDiffusionIntegrator, SimpleLinearIntegrator
     import FerriteOperators
@@ -89,56 +89,30 @@ using TimerOutputs
         Kₑ¹ = zeros(ndofs(dhs), ndofs(dhs))
         Kₑ² = zeros(ndofs(dhs), ndofs(dhs))
 
+        args = KernelArgs((u = uₑs,), cell_cache_s, 0.0, nothing, nothing)
+
         # Volume
-        assemble_element!(
-            Kₑ¹,
-            rₑ¹,
-            uₑs,
-            cell_cache_s,
-            FerriteOperators.EmptyVolumetricElementCache(),
-            0.0,
-        )
+        assemble_cell!(JacobianResidualRequest(Kₑ¹, rₑ¹), FerriteOperators.EmptyVolumetricElementCache(), args)
         @test iszero(Kₑ¹)
         @test iszero(rₑ¹)
 
-        assemble_element!(rₑ², uₑs, cell_cache_s, FerriteOperators.EmptyVolumetricElementCache(), 0.0)
+        assemble_cell!(ResidualRequest(rₑ²), FerriteOperators.EmptyVolumetricElementCache(), args)
         @test iszero(rₑ²)
 
-        assemble_element!(Kₑ², uₑs, cell_cache_s, FerriteOperators.EmptyVolumetricElementCache(), 0.0)
+        assemble_cell!(JacobianRequest{:u}(Kₑ²), FerriteOperators.EmptyVolumetricElementCache(), args)
         @test iszero(Kₑ²)
 
-        # Surface
+        # Surface: the empty cache never claims a facet, and its kernels are no-ops
         for local_facet_index = 1:nfacets(cell_cache_s)
-            assemble_facet!(
-                Kₑ¹,
-                rₑ¹,
-                uₑs,
-                cell_cache_s,
-                local_facet_index,
-                FerriteOperators.EmptySurfaceElementCache(),
-                0.0,
-            )
+            @test !FerriteOperators.is_facet_in_cache(FacetIndex(1, local_facet_index), cell_cache_s, FerriteOperators.EmptySurfaceElementCache())
+            assemble_facet!(JacobianResidualRequest(Kₑ¹, rₑ¹), FerriteOperators.EmptySurfaceElementCache(), args, local_facet_index)
             @test iszero(Kₑ¹)
             @test iszero(rₑ¹)
 
-            assemble_facet!(
-                rₑ²,
-                uₑs,
-                cell_cache_s,
-                local_facet_index,
-                FerriteOperators.EmptySurfaceElementCache(),
-                0.0,
-            )
+            assemble_facet!(ResidualRequest(rₑ²), FerriteOperators.EmptySurfaceElementCache(), args, local_facet_index)
             @test iszero(rₑ²)
 
-            assemble_facet!(
-                Kₑ²,
-                uₑs,
-                cell_cache_s,
-                local_facet_index,
-                FerriteOperators.EmptySurfaceElementCache(),
-                0.0,
-            )
+            assemble_facet!(JacobianRequest{:u}(Kₑ²), FerriteOperators.EmptySurfaceElementCache(), args, local_facet_index)
             @test iszero(Kₑ²)
         end
     end
@@ -152,12 +126,13 @@ using TimerOutputs
 
         element_cache = setup_test_cache(model, sdhs)
 
-        assemble_element!(Kₑ¹, cell_cache_s, element_cache, 0.0)
+        args = KernelArgs((;), cell_cache_s, 0.0, nothing, nothing)
+        assemble_cell!(JacobianRequest{:u}(Kₑ¹), element_cache, args)
         @test !iszero(Kₑ¹)
 
         composite_element_cache = setup_test_composite_volume_cache(model, sdhs)
 
-        assemble_element!(Kₑ², cell_cache_s, composite_element_cache, 0.0)
+        assemble_cell!(JacobianRequest{:u}(Kₑ²), composite_element_cache, args)
         @test 2Kₑ¹ ≈ Kₑ²
     end
 
@@ -169,12 +144,13 @@ using TimerOutputs
 
         element_cache = setup_test_cache(model, sdhs)
 
-        assemble_element!(bₑ¹, cell_cache_s, element_cache, 0.0)
+        args = KernelArgs((;), cell_cache_s, 0.0, nothing, nothing)
+        assemble_cell!(ResidualRequest(bₑ¹), element_cache, args)
         @test !iszero(bₑ¹)
 
         composite_element_cache = setup_test_composite_volume_cache(model, sdhs)
 
-        assemble_element!(bₑ², cell_cache_s, composite_element_cache, 0.0)
+        assemble_cell!(ResidualRequest(bₑ²), composite_element_cache, args)
         @test 2bₑ¹ ≈ bₑ²
     end
 end

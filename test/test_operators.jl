@@ -316,7 +316,8 @@ using TimerOutputs
         close!(ch)
 
         strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-        nlop = setup_operator(strategy, integrator, dh)
+        nlop = setup_operator(strategy, integrator, dh; slots = (:u, :uprev))
+        ctx  = TimeIntegrationContext(0.0, π, π)   # backward-Euler local stage: γ̃ = Δt
 
         residual = zeros(residual_size(nlop))
         u        = zeros(unknown_size(nlop))
@@ -326,7 +327,7 @@ using TimerOutputs
         @test length(u)        == 3 * (3+1)*(3+1)*(3+1) + 6 * 8 * 3*3*3 # vdim=3, 4 nodes in each dim, 8 quadrature points, 6 unknowns for the symmetric viscosity tensor, 3*3*3 elements
 
         apply!(u, ch)
-        update_linearization!(nlop, residual, u, FerriteOperators.GenericFirstOrderTimeParameters(nothing, 0.0, π, uprev))
+        update_linearization!(nlop, residual, (u = u, uprev = uprev), nothing, ctx)
 
         apply!(u, ch)
         apply_zero!(nlop.J, residual, ch)
@@ -334,7 +335,7 @@ using TimerOutputs
         d = @view u[1:ndofs(dh)]
         d .-= Δd
 
-        update_linearization!(nlop, residual, u, FerriteOperators.GenericFirstOrderTimeParameters(nothing, 0.0, π, uprev))
+        update_linearization!(nlop, residual, (u = u, uprev = uprev), nothing, ctx)
 
         apply_zero!(nlop.J, residual, ch)
         Δd = nlop.J \ residual

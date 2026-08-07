@@ -99,20 +99,24 @@ Holds pre-allocated element-local buffers and caches that are reused across cell
 
 Fields:
 - `Ke`: element stiffness matrix
-- `ue`: element unknown vector
+- `slot_buffers`: NamedTuple of element-local state buffers, one per declared slot
 - `re`: element residual vector
 - `cell`: geometry cache ([`CellCache`](@ref))
 - `ivh`: internal variable handler
 - `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
+- `boundary_element`: surface cache walked by the facet driver
+- `scratch`/`scratch_decls`: per-worker scratch instances and their constructors
 """
 @concrete struct AssemblyWorkspace <: AbstractWorkspace
     Ke
-    ue
+    slot_buffers   # NamedTuple of element-local state buffers keyed by slot name
     re
     cell
     ivh
     element
     boundary_element
+    scratch        # per-worker scratch instances: solver-declared ∪ element-declared
+    scratch_decls  # the nullary constructors, kept for per-worker re-instantiation
 end
 
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
@@ -123,23 +127,31 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
         duplicate_for_device(device, ws.boundary_element),
         ws.cell.dh,
         duplicate_for_device(device, ws.ivh),
+        keys(ws.slot_buffers),
+        ws.scratch_decls,
     )
 end
 
 """
-    create_assembly_workspace(element, boundary_element, sdh, ivh)
+    create_assembly_workspace(element, boundary_element, sdh, ivh, slots)
 
-Create a single [`AssemblyWorkspace`](@ref) with freshly allocated element-local buffers.
+Create a single [`AssemblyWorkspace`](@ref) with freshly allocated
+element-local buffers, one state buffer per declared slot name. Slot buffers
+are sized by `allocate_element_unknown_vector`, so condensed elements get
+their full `[ū; q]`-sized local vectors for every slot.
 """
-function create_assembly_workspace(element, boundary_element, sdh, ivh)
+function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,), scratch_decls::NamedTuple = (;)) where {N}
+    slot_buffers = NamedTuple{slots}(ntuple(_ -> allocate_element_unknown_vector(element, sdh), N))
     return AssemblyWorkspace(
         allocate_element_matrix(element, sdh),
-        allocate_element_unknown_vector(element, sdh),
+        slot_buffers,
         allocate_element_residual_vector(element, sdh),
         CellCache(sdh),
         ivh,
         element,
         boundary_element,
+        map(f -> f(), scratch_decls),
+        scratch_decls,
     )
 end
 

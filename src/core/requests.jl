@@ -7,14 +7,29 @@
 
 Solver-controlled scalars the framework must understand. `t` is the evaluation
 time (Dual-typed during ∂F/∂t sweeps), `Δt` the physical step size for
-reference, and `γ̃` the stage scaling of the local internal-variable problem.
-`γ̃` is deliberately distinct from `Δt`: collapsing them makes rate-coupled
-materials silently wrong under any scheme but backward Euler.
+reference, and `γ̃` is defined as the scalar in the canonical local-stage form
+
+    q = q_ref + γ̃ · g(·, q)
+
+of the element-local internal-variable problem (the reference state `q_ref`
+is dof-shaped and flows through a slot, solver-folded for multistep schemes).
+
+!!! warning
+    `γ̃` is NOT the rate-reconstruction slope of any state slot. Under
+    backward Euler the two happen to be reciprocals (`slope = 1/Δt`,
+    `γ̃ = Δt`), so writing `1/γ̃` for a rate slope is accidentally right under
+    BE and silently wrong under every other scheme (Newmark:
+    `slope = γ/(βΔt)` while `γ̃ = Δt`). Rate slopes belong to the slot that
+    carries the reconstruction, never to the context.
 """
 struct TimeIntegrationContext{T}
     t::T
     Δt::T
     γ̃::T
+end
+function TimeIntegrationContext(t, Δt, γ̃)
+    tp, Δtp, γ̃p = promote(t, Δt, γ̃)
+    return TimeIntegrationContext{typeof(tp)}(tp, Δtp, γ̃p)
 end
 # Deliberately no 1-arg convenience constructor: a defaulted γ̃ (e.g. zero)
 # would silently break local internal-variable stage problems that scale by
@@ -89,23 +104,43 @@ end
 """
     assemble_cell!(req::AbstractAssemblyRequest, cache, args::KernelArgs)
 
-The v2 volumetric kernel entry point. Elements opt in via
-[`implements_v2_kernels`](@ref) and must at least provide the
-[`ResidualRequest`](@ref) method; every other request falls back to automatic
+The v2 volumetric kernel entry point. Elements must at least provide the
+[`ResidualRequest`](@ref) method (validated at setup); every other request falls back to automatic
 differentiation of the residual kernel unless [`provides_analytic`](@ref)
 declares an analytic method.
 """
 function assemble_cell! end
 
-"""
-    implements_v2_kernels(::Type{CacheType}) -> Bool
+####################################
+## Query protocol
+####################################
 
-Transitional trait: `true` iff the element cache implements the v2
-[`assemble_cell!`](@ref) request protocol. Defaults to `false`, routing the
-cache through the legacy arity-dispatched `assemble_element!` interface. Dies
-with the legacy interface.
 """
-implements_v2_kernels(::Type) = false
+    unwrap_parameters(p) -> p′
+
+Solver-side wrapper trait: a solver that must wrap the user parameter bag
+defines one unwrapping rule here instead of every element handling the
+wrapper. Defaults to identity.
+"""
+unwrap_parameters(p) = p
+
+"""
+    query_cell_parameters(cache, cell, p)
+
+Element-overridable query producing the element-local parameter view `pₑ`
+handed to volumetric kernels. The default applies [`unwrap_parameters`](@ref)
+and passes the bag through. Parameter layouts (parameter fields) gather their
+per-element views through this seam.
+"""
+query_cell_parameters(cache, cell, p) = unwrap_parameters(p)
+
+"""
+    query_facet_parameters(cache, cell, local_facet_index, p)
+
+Facet analogue of [`query_cell_parameters`](@ref) — boundary caches get their
+own parameter query per facet instead of reusing the volumetric object.
+"""
+query_facet_parameters(cache, cell, local_facet_index, p) = unwrap_parameters(p)
 
 """
     provides_analytic(::Type{CacheType}, kind) -> Bool
@@ -135,13 +170,40 @@ loudly here instead of silently assembling through the wrong path.
 """
 function validate_element_cache(cache)
     T = typeof(cache)
-    implements_v2_kernels(T) || return nothing
     hasmethod(assemble_cell!, Tuple{ResidualRequest, T, KernelArgs}) || throw(ArgumentError(
-        "$(T) opts into the v2 kernel protocol (`implements_v2_kernels`) but implements no " *
-        "`assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::KernelArgs)` method. The residual " *
-        "kernel is mandatory: it is the basis for AD-derived Jacobians and sensitivities."))
+        "$(T) implements no `assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::KernelArgs)` " *
+        "method. The residual kernel is mandatory: it is the basis for AD-derived Jacobians " *
+        "and sensitivities."))
     return nothing
 end
+
+"""
+    declare_scratch(cache) -> NamedTuple of nullary constructors
+
+Element-side scratch declaration: each entry is instantiated once per worker
+and reaches kernels via `args.scratch`. Solvers declare their own entries via
+`setup_operator(...; scratch = (name = () -> ...,))`; both land merged in the
+workspace. This replaces smuggling solver state through model trees or
+parameter bags.
+"""
+declare_scratch(cache) = (;)
+
+####################################
+## Reserved item shapes (contract space only — see the plan §2.1b)
+####################################
+
+"""
+    InterfaceKernelArgs
+
+RESERVED: the N-participant argument bundle for interface/pair items (DG
+facet pairs as the `N = 2` case, contact pairs, non-local one-to-many
+couplings with an indexed collection of secondary sides). Each participant
+carries its own states/geometry/restriction; `p`, `scratch`, and
+per-participant contexts ride alongside. Implemented with the phase-4
+interface work — the name and shape are reserved now so nothing forecloses
+them.
+"""
+abstract type InterfaceKernelArgs end
 
 ####################################
 ## Differentiable parameter protocol

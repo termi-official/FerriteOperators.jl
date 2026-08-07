@@ -28,7 +28,7 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
     return InternalVariableHandler(nothing, 0, 0)
 end
 
-function setup_subdomain_caches(strategy, integrator, dh)
+function setup_subdomain_caches(strategy, integrator, dh; slots::NTuple{<:Any, Symbol} = (:u,), scratch::NamedTuple = (;))
     element_caches  = setup_elements(integrator, dh)
     foreach(validate_element_cache, element_caches)
     boundary_caches = setup_boundaries(integrator, dh)
@@ -37,32 +37,32 @@ function setup_subdomain_caches(strategy, integrator, dh)
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
-        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh)
+        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots, merge(declare_scratch(element_cache), scratch))
         dc = setup_device_instances(device, ws, n)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
     end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
 end
 
-function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler)
+function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;))
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
-    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh)
+    subdomain_caches  = setup_subdomain_caches(operator_strategy, integrator, dh; slots, scratch)
     return AssemblyEngine(operator_strategy, subdomain_caches, dh)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler)
-    engine = setup_engine(strategy, integrator, dh)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;))
+    engine = setup_engine(strategy, integrator, dh; slots, scratch)
     A      = create_system_matrix(engine.strategy, dh)
     return BilinearFerriteOperator(A, engine, integrator)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler)
-    engine = setup_engine(strategy, integrator, dh)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;))
+    engine = setup_engine(strategy, integrator, dh; slots, scratch)
     J      = create_system_matrix(engine.strategy, dh)
     return LinearizedFerriteOperator(J, engine, integrator)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler)
-    engine = setup_engine(strategy, integrator, dh)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;))
+    engine = setup_engine(strategy, integrator, dh; slots, scratch)
     b      = create_system_vector(engine.strategy, dh)
     return LinearFerriteOperator(b, engine, integrator)
 end

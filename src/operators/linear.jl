@@ -5,4 +5,4 @@
 end
 
 update_operator!(op::LinearFerriteOperator, p) =
-    assemble_into!(LinearKind(), (op.b,), op, nothing, p)
+    assemble_into!(LinearKind(), (op.b,), op, (;), p, nothing)

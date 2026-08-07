@@ -21,8 +21,14 @@ function duplicate_for_device(device, cache::SimpleHyperelasticityElementCache)
     )
 end
 
+Ferrite.getnquadpoints(e::SimpleHyperelasticityElementCache) = getnquadpoints(e.cv)
+Ferrite.reinit!(e::SimpleHyperelasticityElementCache, cell) = Ferrite.reinit!(e.cv, cell)
+
 # Element residual
-function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, cell, element_cache::SimpleHyperelasticityElementCache, p)
+function assemble_cell!(req::ResidualRequest, element_cache::SimpleHyperelasticityElementCache, args::KernelArgs)
+    residualₑ = req.r
+    uₑ = args.states.u
+    cell = args.cell
     (; ψ, cv) = element_cache
 
     ndofs = getnbasefunctions(cv)
@@ -50,7 +56,10 @@ function assemble_element!(residualₑ::AbstractVector, uₑ::AbstractVector, ce
 end
 
 # jac
-function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, element_cache::SimpleHyperelasticityElementCache, p)
+function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleHyperelasticityElementCache, args::KernelArgs)
+    Kₑ = req.K
+    uₑ = args.states.u
+    cell = args.cell
     (; ψ, cv) = element_cache
 
     ndofs = getnbasefunctions(cv)
@@ -82,7 +91,11 @@ function assemble_element!(Kₑ::AbstractMatrix, uₑ::AbstractVector, cell, ele
 end
 
 # Combined residual and jac
-function assemble_element!(Kₑ::AbstractMatrix, residualₑ::AbstractVector, uₑ::AbstractVector, cell, element_cache::SimpleHyperelasticityElementCache, p)
+function assemble_cell!(req::JacobianResidualRequest, element_cache::SimpleHyperelasticityElementCache, args::KernelArgs)
+    Kₑ = req.K
+    residualₑ = req.r
+    uₑ = args.states.u
+    cell = args.cell
     (; ψ, cv) = element_cache
 
     ndofs = getnbasefunctions(cv)
@@ -124,13 +137,4 @@ function setup_element_cache(element_model::SimpleHyperelasticityIntegrator, sdh
     return SimpleHyperelasticityElementCache(element_model.ψ, CellValues(qr, ip, ip_geo))
 end
 
-# v2 request protocol. The legacy arity methods above stay callable for
-# composite caches until those are reworked; the kernels are shared.
-implements_v2_kernels(::Type{<:SimpleHyperelasticityElementCache}) = true
 provides_analytic(::Type{<:SimpleHyperelasticityElementCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
-assemble_cell!(req::ResidualRequest, cache::SimpleHyperelasticityElementCache, args::KernelArgs) =
-    assemble_element!(req.r, args.states.u, args.cell, cache, args.p)
-assemble_cell!(req::JacobianRequest{:u}, cache::SimpleHyperelasticityElementCache, args::KernelArgs) =
-    assemble_element!(req.K, args.states.u, args.cell, cache, args.p)
-assemble_cell!(req::JacobianResidualRequest, cache::SimpleHyperelasticityElementCache, args::KernelArgs) =
-    assemble_element!(req.K, req.r, args.states.u, args.cell, cache, args.p)
