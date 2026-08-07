@@ -100,6 +100,7 @@ export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidu
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
 export ResidualKind, JacobianKind, JacobianResidualKind
 export ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind
+export FunctionalKind, evaluate_functional, evaluate_cell_functional
 export provides_analytic
 export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
 export reinit_values!

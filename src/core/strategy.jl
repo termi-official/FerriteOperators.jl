@@ -107,6 +107,7 @@ Fields:
 - `boundary_element`: surface cache walked by the facet driver
 - `scratch`/`scratch_decls`: per-worker scratch instances and their constructors
 - `ad`: per-worker derivative-sweep buffers and ForwardDiff configs ([`ADWorkspace`](@ref))
+- `functional`: per-worker reduction slot for functional sweeps
 """
 @concrete struct AssemblyWorkspace <: AbstractWorkspace
     Ke
@@ -119,6 +120,13 @@ Fields:
     scratch        # per-worker scratch instances: solver-declared ∪ element-declared
     scratch_decls  # the nullary constructors, kept for per-worker re-instantiation
     ad             # per-worker derivative-sweep buffers + ForwardDiff configs
+    functional     # per-worker reduction slot for functional sweeps
+end
+
+# Reduction slot for one worker's functional partial; `nothing` = no
+# contribution this sweep. Untyped: the value type belongs to the kind.
+mutable struct FunctionalAccumulator
+    value::Any
 end
 
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
@@ -155,6 +163,7 @@ function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::N
         map(f -> f(), scratch_decls),
         scratch_decls,
         create_ad_workspace(element, sdh),
+        FunctionalAccumulator(nothing),
     )
 end
 

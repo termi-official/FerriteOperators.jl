@@ -11,6 +11,18 @@ struct TimeSensitivityKind{T}; t::T; end       # ∂F/∂t, explicit dependence
 struct StateJVPKind{V}; v::V; end              # (∂F/∂u)·v, matrix-free J action
 struct StateVJPKind{L}; λ::L; end              # (∂F/∂u)ᵀλ, matrix-free Jᵀ action
 
+"""
+    FunctionalKind{tag}
+    FunctionalKind(tag::Symbol)
+
+Names a functional (reduction) query: a global scalar or Tensors tensor
+integrated from per-cell contributions (energy, dissipation, …). Elements
+implement [`evaluate_cell_functional`](@ref) dispatching on the tag; solvers
+evaluate through [`evaluate_functional`](@ref).
+"""
+struct FunctionalKind{tag} end
+FunctionalKind(tag::Symbol) = FunctionalKind{tag}()
+
 const MatrixAssemblyKind  = Union{JacobianResidualKind, JacobianKind, BilinearKind}
 const VectorAssemblyKind  = Union{JacobianResidualKind, ResidualKind, LinearKind}
 const UnknownDependentKind = Union{JacobianResidualKind, JacobianKind, ResidualKind}
@@ -191,6 +203,22 @@ function sensitivity_kernel!(kind::StateVJPKind, task, ws, statesₑ)
     assemble!(task.inner_assembler, ws.cell, gₑ)
 end
 
+# Functional sweeps: the kernel RETURNS the cell contribution; it accumulates
+# into the per-worker slot and reduces at the entry point. `nothing` means "no
+# contribution" (empty caches).
+function execute_kind!(kind::FunctionalKind, task, ws)
+    reinit_values!(ws.element, ws.cell, kind)
+    statesₑ = load_slots!(ws, task.states)
+    pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
+    val = evaluate_cell_functional(kind, ws.element, _v2_args(ws, statesₑ, pₑ, task.ctx))
+    _accumulate_functional!(ws.functional, val)
+end
+_accumulate_functional!(acc, ::Nothing) = nothing
+function _accumulate_functional!(acc, val)
+    acc.value = acc.value === nothing ? val : acc.value + val
+    return nothing
+end
+
 function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, statesₑ)
     cache = ws.element
     gₑ = ws.ad.gₜ
@@ -221,3 +249,31 @@ function run_sweep!(kind, assembler, op, states::NamedTuple, p, ctx)
 end
 assemble_into!(kind, out::Tuple, op, states::NamedTuple, p, ctx) =
     run_sweep!(kind, start_assemble(op.engine.strategy, out...), op, states, p, ctx)
+
+"""
+    evaluate_functional(op, kind::FunctionalKind, states, p, ctx = nothing)
+    evaluate_functional(op, kind::FunctionalKind, u::AbstractVector, p)
+
+Evaluate the functional named by `kind` over the operator's domain: the sum
+of the per-cell contributions returned by
+[`evaluate_cell_functional`](@ref) (a `Number` or a Tensors tensor).
+Contributions accumulate per worker and reduce in a fixed order — results
+are deterministic for a fixed worker count. Volumetric contributions only.
+"""
+function evaluate_functional(op, kind::FunctionalKind, states::NamedTuple, p, ctx = nothing)
+    for sc in op.engine.subdomain_caches, ws in sc.device_cache
+        ws.functional.value = nothing
+    end
+    run_sweep!(kind, nothing, op, states, p, ctx)
+    total = nothing
+    for sc in op.engine.subdomain_caches, ws in sc.device_cache
+        v = ws.functional.value
+        v === nothing || (total = total === nothing ? v : total + v)
+    end
+    total === nothing && throw(ArgumentError(
+        "No element contributed to $(typeof(kind)). Implement " *
+        "`evaluate_cell_functional` for the operator's element caches."))
+    return total
+end
+evaluate_functional(op, kind::FunctionalKind, u::AbstractVector, p) =
+    evaluate_functional(op, kind, (u = u,), p, nothing)

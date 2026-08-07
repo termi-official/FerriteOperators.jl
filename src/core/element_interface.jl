@@ -36,6 +36,15 @@ Jacobian-then-residual fallbacks) do not reinitialize again.
 """
 function reinit_values! end
 reinit_values!(cache, cell, kind) = reinit_values!(cache, cell)
+
+"""
+    evaluate_cell_functional(kind::FunctionalKind, cache, args::KernelArgs) -> value
+
+Element kernel for functional (reduction) queries: returns this cell's
+contribution to the functional named by `kind` — a `Number` or a Tensors
+tensor, summed across cells — or `nothing` for no contribution.
+"""
+function evaluate_cell_functional end
 load_element_unknowns!(uₑ, u, cell, ivh, element_cache)   = uₑ .= @view u[celldofs(cell)]
 store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache) = nothing
 
@@ -47,6 +56,7 @@ assemble_cell!(req::AbstractAssemblyRequest, ::EmptyVolumetricElementCache, args
 provides_analytic(::Type{EmptyVolumetricElementCache}, kind) = true
 Ferrite.getnquadpoints(::EmptyVolumetricElementCache) = 0
 reinit_values!(::EmptyVolumetricElementCache, cell) = nothing
+evaluate_cell_functional(kind, ::EmptyVolumetricElementCache, args) = nothing
 
 """
     setup_element_cache(integrator, sdh)

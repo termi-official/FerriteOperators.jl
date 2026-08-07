@@ -166,6 +166,9 @@ op = setup_operator(strategy, integrator, dh;
 - **Derivative verification**: `check_derivatives(op, states, p, ctx)`
   cross-checks every analytic kernel and AD path against finite differences
   of the operator's own residual — run it once per ported element.
+- **Functionals**: `evaluate_functional(op, FunctionalKind(:energy), states, p, ctx)`
+  reduces per-cell contributions returned by `evaluate_cell_functional`
+  kernels — global scalars/tensors without hand-rolled loops.
 - Admissibility with internal state is per cache and per kind: analytic
   kernel, `internal_state_insensitive` declaration, or FD — never a silent
   wrong adjoint, never a blanket rejection.

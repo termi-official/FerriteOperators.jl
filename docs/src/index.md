@@ -174,6 +174,20 @@ Time discretization of the global unknowns is solver-owned: solvers pass slot
 a scheme. The hand-derived first-order path (an element reading `uprev` and
 `ctx` and owning its discretization) remains a supported opt-in pattern.
 
+### Functionals
+
+```julia
+FerriteOperators.evaluate_cell_functional(::FunctionalKind{:energy}, cache::MyCache, args::KernelArgs) =
+    # return this cell's ∫ contribution (a Number or a Tensors tensor)
+
+Φ = evaluate_functional(op, FunctionalKind(:energy), states, p, ctx)
+```
+
+Global reductions (energies for line searches, dissipation, quantities of
+interest) are request kinds whose kernels *return* their cell contribution;
+the engine sums per worker and reduces in a fixed order (deterministic for a
+fixed worker count). Volumetric contributions only.
+
 ### Sensitivities
 
 ```julia
