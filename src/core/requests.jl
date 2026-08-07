@@ -324,6 +324,10 @@ abstract type InterfaceKernelArgs end
 Flat vector view θ of the differentiable parameters in `p`. Together with
 [`rebuild_parameters`](@ref) this is the seam through which parameter
 sensitivities are seeded. Implement both for custom parameter types.
+
+θ need not cover all of `p`: entries not exposed here are static — held
+fixed by every sensitivity sweep — and all parameter-sensitivity costs
+(seed dimension, local Jacobian columns) scale with `length(θ)`.
 """
 parameter_vector(p::Real) = SVector(p)
 parameter_vector(p::AbstractVector) = p
