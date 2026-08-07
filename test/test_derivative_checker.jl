@@ -1,0 +1,134 @@
+using FerriteOperators
+using Test
+
+# Diffusion with a scalar source; the analytic Jacobian kernel can be scaled
+# to emulate a WRONG analytic implementation (exact for scale = 1).
+struct CheckerDiffusionIntegrator <: AbstractNonlinearIntegrator
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+    jac_scale::Float64
+end
+struct CheckerDiffusionCache{CV <: CellValues} <: AbstractVolumetricElementCache
+    cv::CV
+    jac_scale::Float64
+end
+function FerriteOperators.setup_element_cache(m::CheckerDiffusionIntegrator, sdh::SubDofHandler)
+    qr     = getquadraturerule(m.qrc, sdh)
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return CheckerDiffusionCache(CellValues(qr, ip, ip_geo), m.jac_scale)
+end
+FerriteOperators.duplicate_for_device(device, c::CheckerDiffusionCache) =
+    CheckerDiffusionCache(FerriteOperators.duplicate_for_device(device, c.cv), c.jac_scale)
+FerriteOperators.reinit_values!(c::CheckerDiffusionCache, cell) = reinit!(c.cv, cell)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::CheckerDiffusionCache, args::KernelArgs)
+    (; cv) = cache
+    uₑ = args.states.u
+    q  = _source(args.p, cellid(args.cell))
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        ∇u = function_gradient(cv, qp, uₑ)
+        for i in 1:getnbasefunctions(cv)
+            req.r[i] += (shape_gradient(cv, qp, i) ⋅ ∇u - q * shape_value(cv, qp, i)) * dΩ
+        end
+    end
+end
+FerriteOperators.provides_analytic(::Type{<:CheckerDiffusionCache}, ::JacobianKind) = true
+function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::CheckerDiffusionCache, args::KernelArgs)
+    (; cv, jac_scale) = cache
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        for i in 1:getnbasefunctions(cv)
+            ∇Nᵢ = shape_gradient(cv, qp, i)
+            for j in 1:getnbasefunctions(cv)
+                req.K[i, j] += jac_scale * (∇Nᵢ ⋅ shape_gradient(cv, qp, j)) * dΩ
+            end
+        end
+    end
+end
+
+# Parameter bag with a static per-cell field and ONE differentiable scalar:
+# θ = (E,), the field never enters any parameter Jacobian.
+struct SplitParams{V <: AbstractVector, T}
+    field::V
+    E::T
+end
+_source(p::Real, cellid) = p
+_source(p::SplitParams, cellid) = p.E * p.field[cellid]
+FerriteOperators.parameter_vector(p::SplitParams) = [p.E]
+FerriteOperators.rebuild_parameters(p::SplitParams, θ) = SplitParams(p.field, θ[1])
+
+function setup_checker_operator(jac_scale)
+    grid = generate_grid(Quadrilateral, (4, 3))
+    dh   = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    op = setup_operator(strategy, CheckerDiffusionIntegrator(QuadratureRuleCollection(2), :u, jac_scale), dh)
+    return op, dh
+end
+
+@testset "Derivative checker" begin
+    @testset "correct analytic Jacobian and AD sensitivities pass" begin
+        op, dh = setup_checker_operator(1.0)
+        u = sin.(0.3 .* (1:ndofs(dh)))
+        res = check_derivatives(op, u, 1.7; t = 1.7)
+        @test res.passed
+        @test all(c.skipped === nothing for c in values(res.checks))
+        @test res.checks.jacobian.err < 1e-7
+        @test res.checks.parameter_jacobian.err < 1e-7
+    end
+
+    @testset "wrong analytic Jacobian is detected" begin
+        op, dh = setup_checker_operator(1.01)
+        u = sin.(0.3 .* (1:ndofs(dh)))
+        res = check_derivatives(op, u, 1.7)
+        @test !res.passed
+        @test !res.checks.jacobian.passed
+        # the residual-derived paths are untouched by the broken Jacobian kernel
+        @test res.checks.parameter_jacobian.passed
+        @test res.checks.state_jvp.passed
+    end
+
+    @testset "differentiable/static parameter split" begin
+        op, dh = setup_checker_operator(1.0)
+        n = ndofs(dh)
+        u = sin.(0.3 .* (1:n))
+        p = SplitParams(collect(range(0.5, 2.0; length = getncells(Ferrite.get_grid(dh)))), 1.3)
+
+        # θ covers only E: the parameter Jacobian has ONE column.
+        @test length(parameter_vector(p)) == 1
+        B = zeros(n, 1)
+        update_parameter_jacobian!(B, op, u, p)
+        @test !iszero(B)
+        @test_throws DimensionMismatch update_parameter_jacobian!(zeros(n, 2), op, u, p)
+
+        res = check_derivatives(op, (u = u,), p)
+        @test res.checks.parameter_jacobian.passed
+        @test res.checks.parameter_vjp.passed
+        @test res.checks.jacobian.passed
+    end
+
+    @testset "condensed operator: consistent tangent vs FD, inadmissible kinds skipped" begin
+        vgrid = generate_grid(Hexahedron, (1, 1, 1))
+        vdh = DofHandler(vgrid)
+        add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
+        close!(vdh)
+        vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
+            FerriteOperators.MaxwellParameters(), QuadratureRuleCollection(2), :u, :εᵛ)
+        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        vop = setup_operator(strategy, vint, vdh; slots = (:u, :uprev))
+        vu = 1e-3 .* sin.(0.2 .* (1:unknown_size(vop)))
+        vstates = (u = vu, uprev = zeros(unknown_size(vop)))
+        vctx = TimeIntegrationContext(0.0, 0.1, 0.1)
+
+        vu_before = copy(vu)
+        res = check_derivatives(vop, vstates, FerriteOperators.MaxwellParameters(), vctx)
+        @test res.passed
+        @test res.checks.jacobian.passed              # condensed tangent vs FD through local solves
+        @test res.checks.jacobian.skipped === nothing
+        @test res.checks.state_jvp.skipped !== nothing    # condensed: state actions unsupported
+        @test res.checks.parameter_jacobian.skipped !== nothing  # no parameter_vector for MaxwellParameters
+        @test vu == vu_before                         # caller state protected
+    end
+end

@@ -197,6 +197,23 @@ sensitivities, the caller selects [`FiniteDifferenceSensitivity`](@ref)
 (primal central differences on a protected copy — exact local solves, but it
 bypasses analytic sensitivity kernels).
 
+### Verifying derivative implementations
+
+```julia
+res = check_derivatives(op, states, p, ctx; t = tₙ)
+res.passed                      # conjunction of all non-skipped checks
+res.checks.jacobian.err         # per-check relative error / skip reason
+```
+
+[`check_derivatives`](@ref) cross-checks every derivative path — the
+assembled Jacobian, fused-vs-split residual, parameter Jacobian/VJP, state
+JVP/VJP, time sensitivity — against central finite differences of the
+operator's own residual, through the public entry points. A wrong analytic
+kernel fails its check against the FD referee; inadmissible or unsupported
+checks are skipped with the reason recorded. The parameter checks respect
+the differentiable/static split: only the entries exposed by
+[`parameter_vector`](@ref) are probed.
+
 ### Declaring request kinds at setup
 
 ```julia

@@ -10,7 +10,7 @@ import SparseArrays: AbstractSparseMatrixCSC
 
 using ConcreteStructs
 
-import LinearAlgebra: mul!, ldiv!, qr, cholesky!, Symmetric, dot
+import LinearAlgebra: mul!, ldiv!, qr, cholesky!, Symmetric, dot, norm
 
 import ForwardDiff
 
@@ -66,6 +66,7 @@ include("operators/bilinear.jl")
 include("operators/linear.jl")
 include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
+include("operators/verification.jl")    # check_derivatives: FD referee for analytic kernels and AD paths
 
 include("core/quadrature-task.jl")      # Task + operator for evaluating functions at quadrature points
 
@@ -92,6 +93,7 @@ export setup_operator, update_operator!, update_linearization!, residual!
 export update_parameter_jacobian!, parameter_vjp!, time_sensitivity!
 export ADSensitivity, FiniteDifferenceSensitivity, has_internal_state, internal_state_insensitive
 export state_jvp!, state_vjp!, StateJVPRequest, StateVJPRequest
+export check_derivatives
 export parameter_vector, rebuild_parameters
 export TimeIntegrationContext, KernelArgs, assemble_cell!
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest

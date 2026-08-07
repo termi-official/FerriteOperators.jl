@@ -163,6 +163,9 @@ op = setup_operator(strategy, integrator, dh;
   admissibility failures from first use to `setup_operator`.
 - **Matrix-free state actions**: `state_jvp!` (`J·v` without a matrix),
   `state_vjp!` (`Jᵀλ` — the adjoint action).
+- **Derivative verification**: `check_derivatives(op, states, p, ctx)`
+  cross-checks every analytic kernel and AD path against finite differences
+  of the operator's own residual — run it once per ported element.
 - Admissibility with internal state is per cache and per kind: analytic
   kernel, `internal_state_insensitive` declaration, or FD — never a silent
   wrong adjoint, never a blanket rejection.
