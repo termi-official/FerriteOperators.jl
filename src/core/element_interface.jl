@@ -3,7 +3,7 @@ Supertype for all caches to integrate over volumes.
 
 The v2 contract: elements implement request-typed kernels
 
-    assemble_cell!(req, cache, args::KernelArgs)
+    assemble_cell!(req, cache, args)
 
 with a mandatory [`ResidualRequest`](@ref) method (the AD basis) and optional
 analytic methods declared via [`provides_analytic`](@ref). Element caches own
@@ -38,7 +38,7 @@ function reinit_values! end
 reinit_values!(cache, cell, kind) = reinit_values!(cache, cell)
 
 """
-    evaluate_cell_functional(kind::FunctionalKind, cache, args::KernelArgs) -> value
+    evaluate_cell_functional(kind::FunctionalKind, cache, args) -> value
 
 Element kernel for functional (reduction) queries: returns this cell's
 contribution to the functional named by `kind` — a `Number` or a Tensors
@@ -52,7 +52,7 @@ store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache) = nothing
     Utility to execute noop assembly.
 """
 struct EmptyVolumetricElementCache <: AbstractVolumetricElementCache end
-assemble_cell!(req::AbstractAssemblyRequest, ::EmptyVolumetricElementCache, args::KernelArgs) = nothing
+assemble_cell!(req::AbstractAssemblyRequest, ::EmptyVolumetricElementCache, args) = nothing
 provides_analytic(::Type{EmptyVolumetricElementCache}, kind) = true
 Ferrite.getnquadpoints(::EmptyVolumetricElementCache) = 0
 reinit_values!(::EmptyVolumetricElementCache, cell) = nothing
@@ -77,7 +77,7 @@ Supertype for all caches to integrate over surfaces.
 
 The v2 contract: facet kernels are request-typed,
 
-    assemble_facet!(req, cache, args::KernelArgs, local_facet_index::Int)
+    assemble_facet!(req, cache, args, local_facet_index::Int)
 
 gated by `is_facet_in_cache(::FacetIndex, cell, cache)`. The framework's
 boundary driver walks the facets of each cell; facet parameters are queried
@@ -89,7 +89,7 @@ through
 abstract type AbstractSurfaceElementCache end
 
 """
-    assemble_facet!(req, cache, args::KernelArgs, local_facet_index::Int)
+    assemble_facet!(req, cache, args, local_facet_index::Int)
 
 The v2 facet kernel entry point.
 """
@@ -99,7 +99,7 @@ function assemble_facet! end
     Utility to execute noop assembly.
 """
 struct EmptySurfaceElementCache <: AbstractSurfaceElementCache end
-assemble_facet!(req::AbstractAssemblyRequest, ::EmptySurfaceElementCache, args::KernelArgs, local_facet_index::Int) = nothing
+assemble_facet!(req::AbstractAssemblyRequest, ::EmptySurfaceElementCache, args, local_facet_index::Int) = nothing
 @inline is_facet_in_cache(::FacetIndex, cell, ::EmptySurfaceElementCache) = false
 Ferrite.getnquadpoints(::EmptySurfaceElementCache) = 0
 Ferrite.reinit!(::EmptySurfaceElementCache, cell) = nothing

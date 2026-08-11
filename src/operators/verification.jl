@@ -23,7 +23,7 @@ end
 _check_entry(passed, err) = (passed = passed, err = err, skipped = nothing)
 
 """
-    check_derivatives(op, states, p, ctx = nothing; t = nothing, h = cbrt(eps(Float64)),
+    check_derivatives(op, states, p, ctx = nothing; h = cbrt(eps(Float64)),
                       rtol = 1e-5, atol = 1e-8, nprobes = 3) -> (passed, checks)
 
 Cross-check the operator's derivative paths against central finite differences
@@ -31,9 +31,10 @@ of its own residual, through the same entry points solvers use — a wrong
 analytic kernel ([`provides_analytic`](@ref)) fails its check against the FD
 referee. Checks: assembled Jacobian action along `nprobes` deterministic
 directions, fused-vs-split residual consistency, parameter Jacobian (per
-flat-θ column) and VJP, matrix-free state JVP/VJP actions, and — when `t` is
+flat-θ column) and VJP, matrix-free state JVP/VJP actions, and — when `ctx` is
 given — the time sensitivity (default method against
-[`FiniteDifferenceSensitivity`](@ref)).
+[`FiniteDifferenceSensitivity`](@ref); the evaluation time comes from the
+context, which is where ∂F/∂t seeds).
 
 `checks` holds one `(passed, err, skipped)` entry per check; inadmissible or
 unsupported checks are skipped with the reason recorded, and `passed` is the
@@ -43,7 +44,7 @@ probed along the field dofs only; the FD evaluations exercise the full local
 solves, so the check validates the consistent condensed tangent.
 """
 function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
-        t = nothing, h::Float64 = cbrt(eps(Float64)),
+        h::Float64 = cbrt(eps(Float64)),
         rtol::Float64 = 1e-5, atol::Float64 = 1e-8, nprobes::Int = 3)
     nres  = residual_size(op)
     ubase = copy(states.u)
@@ -144,12 +145,13 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
     end
 
     time_sensitivity = _run_check() do
-        t === nothing && return (passed = true, err = NaN, skipped = "no evaluation time given (pass `t`)")
+        ctx === nothing && return (passed = true, err = NaN, skipped =
+            "no context given — time sensitivities seed through ctx; pass a TimeIntegrationContext")
         g = zeros(nres); gfd = zeros(nres)
         uw .= ubase
-        time_sensitivity!(g, op, statesw, t, ctx)
+        time_sensitivity!(g, op, statesw, p, ctx)
         uw .= ubase
-        time_sensitivity!(gfd, op, statesw, t, ctx; method = FiniteDifferenceSensitivity())
+        time_sensitivity!(gfd, op, statesw, p, ctx; method = FiniteDifferenceSensitivity())
         _check_entry(isapprox(g, gfd; rtol, atol), _relerr(g, gfd))
     end
 

@@ -21,7 +21,7 @@ end
 FerriteOperators.duplicate_for_device(device, c::CheckerDiffusionCache) =
     CheckerDiffusionCache(FerriteOperators.duplicate_for_device(device, c.cv), c.jac_scale)
 FerriteOperators.reinit_values!(c::CheckerDiffusionCache, cell) = reinit!(c.cv, cell)
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::CheckerDiffusionCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::CheckerDiffusionCache, args)
     (; cv) = cache
     uₑ = args.states.u
     q  = _source(args.p, cellid(args.cell))
@@ -34,7 +34,7 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::CheckerDif
     end
 end
 FerriteOperators.provides_analytic(::Type{<:CheckerDiffusionCache}, ::JacobianKind) = true
-function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::CheckerDiffusionCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::CheckerDiffusionCache, args)
     (; cv, jac_scale) = cache
     for qp in 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
@@ -68,15 +68,63 @@ function setup_checker_operator(jac_scale)
     return op, dh
 end
 
+# Same diffusion element, but with the source scaled by the evaluation time —
+# a residual with genuine ∂F/∂t through the context channel.
+struct TimedCheckerIntegrator <: AbstractNonlinearIntegrator
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+end
+struct TimedCheckerCache{CV <: CellValues} <: AbstractVolumetricElementCache
+    cv::CV
+end
+function FerriteOperators.setup_element_cache(m::TimedCheckerIntegrator, sdh::SubDofHandler)
+    qr     = getquadraturerule(m.qrc, sdh)
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return TimedCheckerCache(CellValues(qr, ip, ip_geo))
+end
+FerriteOperators.duplicate_for_device(device, c::TimedCheckerCache) =
+    TimedCheckerCache(FerriteOperators.duplicate_for_device(device, c.cv))
+FerriteOperators.reinit_values!(c::TimedCheckerCache, cell) = reinit!(c.cv, cell)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::TimedCheckerCache, args)
+    (; cv) = cache
+    uₑ = args.states.u
+    q  = args.p * evaluation_time(args.ctx)
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        ∇u = function_gradient(cv, qp, uₑ)
+        for i in 1:getnbasefunctions(cv)
+            req.r[i] += (shape_gradient(cv, qp, i) ⋅ ∇u - q * shape_value(cv, qp, i)) * dΩ
+        end
+    end
+end
+
 @testset "Derivative checker" begin
     @testset "correct analytic Jacobian and AD sensitivities pass" begin
         op, dh = setup_checker_operator(1.0)
         u = sin.(0.3 .* (1:ndofs(dh)))
-        res = check_derivatives(op, u, 1.7; t = 1.7)
+        res = check_derivatives(op, u, 1.7)
         @test res.passed
-        @test all(c.skipped === nothing for c in values(res.checks))
+        # every check but the time sensitivity, which needs a context
+        @test res.checks.time_sensitivity.skipped !== nothing
+        @test occursin("seed through ctx", res.checks.time_sensitivity.skipped)
+        @test all(c.skipped === nothing for (name, c) in pairs(res.checks) if name !== :time_sensitivity)
         @test res.checks.jacobian.err < 1e-7
         @test res.checks.parameter_jacobian.err < 1e-7
+    end
+
+    @testset "the time check runs with a context" begin
+        grid = generate_grid(Quadrilateral, (4, 3))
+        dh   = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        close!(dh)
+        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        op = setup_operator(strategy, TimedCheckerIntegrator(QuadratureRuleCollection(2), :u), dh)
+        u = sin.(0.3 .* (1:ndofs(dh)))
+        res = check_derivatives(op, (u = u,), 1.7, TimeIntegrationContext(0.9, 0.1, 0.1))
+        @test res.passed
+        @test res.checks.time_sensitivity.skipped === nothing
+        @test res.checks.time_sensitivity.err < 1e-6
     end
 
     @testset "wrong analytic Jacobian is detected" begin
@@ -129,6 +177,7 @@ end
         @test res.checks.jacobian.skipped === nothing
         @test res.checks.state_jvp.skipped !== nothing    # condensed: state actions unsupported
         @test res.checks.parameter_jacobian.skipped !== nothing  # no parameter_vector for MaxwellParameters
+        @test res.checks.time_sensitivity.skipped !== nothing     # condensed: AD-from-residual inadmissible
         @test vu == vu_before                         # caller state protected
     end
 end

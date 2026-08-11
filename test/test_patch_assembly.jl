@@ -48,7 +48,7 @@ struct WeightedSource
 end
 function FerriteOperators.assemble_patch_cell!(
         req::ResidualRequest, cache::FerriteOperators.SimpleBilinearDiffusionElementCache,
-        args::KernelArgs, data::WeightedSource
+        args, data::WeightedSource
     )
     cv = cache.cellvalues
     for qp in 1:getnquadpoints(cv), i in 1:getnbasefunctions(cv)

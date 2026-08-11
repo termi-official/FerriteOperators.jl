@@ -11,7 +11,7 @@ struct CompositeVolumetricElementCache{CacheTupleType <: Tuple} <: AbstractVolum
     inner_caches::CacheTupleType
 end
 
-assemble_cell!(req::AbstractAssemblyRequest, composite::CompositeVolumetricElementCache, args::KernelArgs) =
+assemble_cell!(req::AbstractAssemblyRequest, composite::CompositeVolumetricElementCache, args) =
     _composite_assemble_cell!(req, composite.inner_caches, args)
 @unroll function _composite_assemble_cell!(req, inner_caches, args)
     @unroll for inner in inner_caches
@@ -22,8 +22,8 @@ end
 provides_analytic(::Type{CompositeVolumetricElementCache{CT}}, kind) where {CT <: Tuple} = _all_provide(CT, kind)
 # The composite's blanket fan-out method would satisfy any hasmethod check,
 # so validation must recurse into the inner caches.
-validate_element_cache(composite::CompositeVolumetricElementCache, declared_requests::Tuple = ()) =
-    foreach(cache -> validate_element_cache(cache, declared_requests), composite.inner_caches)
+validate_element_cache(composite::CompositeVolumetricElementCache, declared_requests::Tuple = (), ::Type{A} = KernelArgs) where {A} =
+    foreach(cache -> validate_element_cache(cache, declared_requests, A), composite.inner_caches)
 _all_provide(::Type{Tuple{}}, kind) = true
 _all_provide(::Type{T}, kind) where {T <: Tuple} =
     provides_analytic(Base.tuple_type_head(T), kind) && _all_provide(Base.tuple_type_tail(T), kind)
@@ -86,7 +86,7 @@ function duplicate_for_device(device, cache::CompositeSurfaceElementCache)
     )
 end
 
-assemble_facet!(req::AbstractAssemblyRequest, composite::CompositeSurfaceElementCache, args::KernelArgs, local_facet_index::Int) =
+assemble_facet!(req::AbstractAssemblyRequest, composite::CompositeSurfaceElementCache, args, local_facet_index::Int) =
     _composite_assemble_facet!(req, composite.inner_caches, args, local_facet_index)
 @unroll function _composite_assemble_facet!(req, inner_caches, args, local_facet_index)
     @unroll for inner in inner_caches

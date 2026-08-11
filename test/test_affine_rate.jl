@@ -3,8 +3,7 @@ using Test
 using SparseArrays
 
 # Transient diffusion element: r(u, u̇) = ∫ (u̇ v + ∇u⋅∇v) dΩ. It reads the
-# rate through a slot and never encodes a time-integration scheme; the slope
-# it records is the one the framework attaches to that slot.
+# rate through a slot and never encodes a time-integration scheme.
 struct TransientDiffusionIntegrator <: AbstractNonlinearIntegrator
     qrc::QuadratureRuleCollection
     field_name::Symbol
@@ -22,13 +21,9 @@ FerriteOperators.duplicate_for_device(device, c::TransientDiffusionCache) =
     TransientDiffusionCache(FerriteOperators.duplicate_for_device(device, c.cv))
 FerriteOperators.reinit_values!(c::TransientDiffusionCache, cell) = reinit!(c.cv, cell)
 
-# Slot metadata seen by the last kernel invocation, as (du slope, u slope).
-const RECORDED_SLOPES = Ref{Any}(nothing)
-
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::TransientDiffusionCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::TransientDiffusionCache, args)
     (; cv) = cache
     uₑ, duₑ = args.states.u, args.states.du
-    RECORDED_SLOPES[] = (slot_slope(args, :du), slot_slope(args, :u))
     for qp in 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
         u̇  = function_value(cv, qp, duₑ)
@@ -67,15 +62,12 @@ end
         @test r ≈ Mop.A * (u .- uprev) ./ Δt .+ Kop.A * u rtol = 1e-12
     end
 
-    @testset "slot_slope inside the kernel" begin
-        RECORDED_SLOPES[] = nothing
-        evaluate!(op, zeros(n), (u = u, du = AffineRate(1 / Δt, uprev)), nothing, ctx)
-        @test RECORDED_SLOPES[] == (1 / Δt, nothing)
-
-        # A plain vector source carries no reconstruction linearization.
-        RECORDED_SLOPES[] = nothing
-        evaluate!(op, zeros(n), (u = u, du = uprev), nothing, ctx)
-        @test RECORDED_SLOPES[] == (nothing, nothing)
+    @testset "plain vector source in the same slot" begin
+        # The kernel sees slot values only, so a materialized rate vector and
+        # its reconstruction are interchangeable at the element interface.
+        r = zeros(n)
+        evaluate!(op, r, (u = u, du = (u .- uprev) ./ Δt), nothing, ctx)
+        @test r ≈ Mop.A * (u .- uprev) ./ Δt .+ Kop.A * u rtol = 1e-12
     end
 
     @testset "AffineRate without a preceding :u slot" begin

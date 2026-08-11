@@ -77,7 +77,7 @@ function parameter_sweep_buffers!(ad::ADWorkspace, nθ::Int)
 end
 
 # Evaluate the volumetric local residual for `args`, overwriting `r`.
-function evaluate_cell_residual!(r, cache, args::KernelArgs)
+function evaluate_cell_residual!(r, cache, args)
     fill!(r, zero(eltype(r)))
     assemble_cell!(ResidualRequest(r), cache, args)
     return r
@@ -88,7 +88,7 @@ end
 # including `AffineRate`-reconstructed slots, which are formed at gather time.
 # All slot buffers share one size, so the per-worker config serves every slot.
 # Tag checking is off: the config carries the package tag, not the closure's.
-function ad_state_jacobian!(K, ws, args::KernelArgs, ::Val{slot} = Val(:u)) where {slot}
+function ad_state_jacobian!(K, ws, args, ::Val{slot} = Val(:u)) where {slot}
     f! = (r, x) -> evaluate_cell_residual!(
         r, ws.element, with_states(args, merge(args.states, NamedTuple{(slot,)}((x,)))))
     ForwardDiff.jacobian!(K, f!, ws.re, args.states[slot], ws.ad.jac_cfg, Val{false}())
@@ -98,7 +98,7 @@ end
 # ∂F/∂θ — dense local parameter Jacobian. The parameter sweep re-queries the
 # element parameters from the Dual-rebuilt global `p` so wrappers forward
 # Duals transparently.
-function ad_parameter_jacobian!(Bₑ, ws, args::KernelArgs, p)
+function ad_parameter_jacobian!(Bₑ, ws, args, p)
     θ = copyto!(ws.ad.θ, parameter_vector(p))
     f! = (r, θᵢ) -> begin
         pₑ = query_cell_parameters(ws.element, ws.cell, rebuild_parameters(p, θᵢ))
@@ -109,7 +109,7 @@ function ad_parameter_jacobian!(Bₑ, ws, args::KernelArgs, p)
 end
 
 # (∂F/∂θ)ᵀλₑ — adjoint pullback as the gradient of the scalar λₑ·rₑ(θ).
-function ad_parameter_vjp!(gₑ, λₑ, ws, args::KernelArgs, p)
+function ad_parameter_vjp!(gₑ, λₑ, ws, args, p)
     θ = copyto!(ws.ad.θ, parameter_vector(p))
     fscalar = θᵢ -> begin
         pₑ = query_cell_parameters(ws.element, ws.cell, rebuild_parameters(p, θᵢ))
@@ -121,15 +121,15 @@ function ad_parameter_vjp!(gₑ, λₑ, ws, args::KernelArgs, p)
     return gₑ
 end
 
-# ∂F/∂t — explicit time dependence, seeded through the bare-time parameter
-# channel. The ctx-based seed (`with_time`) replaces this in phase 2. The
-# preallocated config is Float64-typed; exotic time types fall back to the
-# per-call config.
-function ad_time_sensitivity!(gₑ, ws, args::KernelArgs, t::Real)
-    f! = (r, t̃) -> begin
-        pₑ = query_cell_parameters(ws.element, ws.cell, t̃)
-        evaluate_cell_residual!(r, ws.element, with_parameters(args, pₑ))
-    end
+# ∂F/∂t — explicit time dependence, seeded through the context channel: the
+# sweep's ctx is rebuilt with a Dual evaluation time, so an element reading
+# `evaluation_time(args.ctx)` differentiates exactly. The preallocated config
+# is typed for the residual eltype; exotic time types fall back to a per-call
+# config.
+function ad_time_sensitivity!(gₑ, ws, args)
+    ctx = args.ctx
+    t = evaluation_time(ctx)
+    f! = (r, t̃) -> evaluate_cell_residual!(r, ws.element, with_context(args, with_time(ctx, t̃)))
     if t isa eltype(ws.re)
         ForwardDiff.derivative!(gₑ, f!, ws.re, t, ws.ad.deriv_cfg, Val{false}())
     else
@@ -138,16 +138,10 @@ function ad_time_sensitivity!(gₑ, ws, args::KernelArgs, t::Real)
     return gₑ
 end
 
-function ad_time_sensitivity!(gₑ, ws, args::KernelArgs, t)
-    throw(ArgumentError(
-        "Time sensitivities currently require the bare evaluation time as the parameter " *
-        "object (got $(typeof(t))). Context-based seeding lands with the phase-2 API."))
-end
-
 # (∂F/∂u)·v — one directional-Dual sweep through the residual kernel: the
 # MFEM NONE level, no matrices anywhere. The perturbed state is written into
 # the per-worker Dual buffer instead of allocating per cell.
-function ad_state_jvp!(Jvₑ, ws, args::KernelArgs, vₑ)
+function ad_state_jvp!(Jvₑ, ws, args, vₑ)
     ud = ws.ad.u_dual
     f! = (r, s) -> begin
         @. ud = args.states.u + s * vₑ
@@ -159,7 +153,7 @@ end
 
 # (∂F/∂u)ᵀλₑ — gradient of the scalar λₑ·rₑ(u) w.r.t. the element state, with
 # the Dual residual evaluated into the per-worker buffer.
-function ad_state_vjp!(gₑ, λₑ, ws, args::KernelArgs)
+function ad_state_vjp!(gₑ, λₑ, ws, args)
     rd = ws.ad.re_dual
     fscalar = u -> begin
         evaluate_cell_residual!(rd, ws.element, with_states(args, merge(args.states, (u = u,))))

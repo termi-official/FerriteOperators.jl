@@ -468,7 +468,7 @@ patch_element_kind(::PatchMatrixKind) = JacobianKind()
 patch_element_kind(::PatchVectorKind) = ResidualKind()
 
 """
-    assemble_patch_cell!(req, cache, args::KernelArgs, data)
+    assemble_patch_cell!(req, cache, args, data)
 
 Element kernel for one [`PatchTerm`](@ref) on one cell: accumulate the term's
 contribution into `req`'s buffer, exactly as `assemble_cell!` does. `data` is

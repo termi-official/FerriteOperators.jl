@@ -40,7 +40,8 @@ function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, 
 end
 
 """
-    setup_engine(strategy, integrator, dh; slots = (:u,), scratch = (;), requests = ())
+    setup_engine(strategy, integrator, dh; slots = (:u,), scratch = (;), requests = (),
+                 args_type = KernelArgs)
 
 Build the [`AssemblyEngine`](@ref) shared by all operator kinds. `requests`
 declares the sensitivity request kinds the operator will be asked to compute
@@ -48,19 +49,22 @@ declares the sensitivity request kinds the operator will be asked to compute
 kinds run their trait ↔ kernel and internal-state admissibility checks
 eagerly at setup instead of on first use. Undeclared kinds remain usable —
 the declaration is a hint, not a capability restriction.
+
+`args_type` is the concrete kernel-args type the engine hands to element
+kernels; setup-time method lookups query against it.
 """
-function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;), requests::Tuple = ())
+function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;), requests::Tuple = (), args_type::Type = KernelArgs)
     # Normalize declared kinds (types or instances) to their UnionAll base so
     # payload type parameters (`ParameterVJPKind{Vector{Float64}}`) never make
     # a declaration silently miss its validation entry.
     requests          = map(r -> Base.typename(r isa Type ? r : typeof(r)).wrapper, requests)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     element_caches    = setup_elements(integrator, dh)
-    foreach(cache -> validate_element_cache(cache, requests), element_caches)
+    foreach(cache -> validate_element_cache(cache, requests, args_type), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
     ivh               = setup_internal_variable_handler(integrator, element_caches, dh)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh; slots, scratch)
-    return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, slots, requests)
+    return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, slots, requests, args_type)
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler; kwargs...)

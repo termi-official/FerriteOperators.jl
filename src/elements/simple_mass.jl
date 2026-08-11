@@ -31,7 +31,7 @@ end
 
 # v2 request protocol. The load form is state-independent: the residual kernel
 # reads nothing from `args.states`.
-function assemble_cell!(req::ResidualRequest, cache::SimpleLinearElementCache, args::KernelArgs)
+function assemble_cell!(req::ResidualRequest, cache::SimpleLinearElementCache, args)
     (; cellvalues, f) = cache
     for qp in 1:getnquadpoints(cellvalues)
         dΩ = getdetJdV(cellvalues, qp)
@@ -84,7 +84,7 @@ end
 # v2 request protocol. The bilinear form induces a linear operator, so its
 # residual is the element matrix acting on the element vector.
 provides_analytic(::Type{<:SimpleBilinearMassElementCache}, ::JacobianKind) = true
-function assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearMassElementCache, args::KernelArgs)
+function assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearMassElementCache, args)
     (; cellvalues, ρ) = cache
     for qp in 1:getnquadpoints(cellvalues)
         dΩ = getdetJdV(cellvalues, qp)
@@ -96,7 +96,7 @@ function assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearMassEleme
         end
     end
 end
-function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearMassElementCache, args::KernelArgs)
+function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearMassElementCache, args)
     (; cellvalues, ρ) = cache
     uₑ = args.states.u
     for qp in 1:getnquadpoints(cellvalues)

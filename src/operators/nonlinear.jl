@@ -161,11 +161,11 @@ struct ADSensitivity end
     FiniteDifferenceSensitivity(h = cbrt(eps(Float64)))
 
 Central-difference derivative method: evaluates the PRIMAL residual at
-perturbed times on a protected copy of `u` (so trial write-back never leaks)
-and forms `(F(t+h) − F(t−h)) / 2h`. Exact local solves, no Dual propagation —
-admissible for condensed elements, where it yields the total t-derivative at
-fixed `u` including the element-local state's response (as does AD, when
-admissible). Accuracy O(h²).
+contexts carrying perturbed evaluation times, on a protected copy of `u` (so
+trial write-back never leaks), and forms `(F(t+h) − F(t−h)) / 2h`. Exact local
+solves, no Dual propagation — admissible for condensed elements, where it
+yields the total t-derivative at fixed `u` including the element-local state's
+response (as does AD, when admissible). Accuracy O(h²).
 """
 struct FiniteDifferenceSensitivity{T}
     h::T
@@ -173,49 +173,52 @@ end
 FiniteDifferenceSensitivity() = FiniteDifferenceSensitivity(cbrt(eps(Float64)))
 
 """
-    time_sensitivity!(g, op, states, t, ctx; method = ADSensitivity())
-    time_sensitivity!(g, op, u, t; method = ADSensitivity())
+    time_sensitivity!(g, op, states, p, ctx; method = ADSensitivity())
 
 Assemble the time sensitivity ∂F/∂t into `g` (`residual_size(op)`) at the
-trial state, never writing back into the caller's state. Until the phase-2
-context seeding lands, `t` doubles as the parameter object handed to the
-elements (the bare-time convention).
+trial state, never writing back into the caller's state. The evaluation time
+is `evaluation_time(ctx)` — time reaches elements through the context channel
+only, so `ctx` is mandatory here and `p` carries user parameters as in every
+other entry point.
 
 Method hierarchy: with [`ADSensitivity`](@ref) (default), each element cache
 that declares an analytic [`TimeSensitivityRequest`](@ref) kernel is used
-directly, and every other cache falls back to ForwardDiff through its
-residual kernel — analytic kernels always win per cache.
+directly, and every other cache falls back to ForwardDiff of its residual
+kernel over a Dual-timed context — analytic kernels always win per cache.
 [`FiniteDifferenceSensitivity`](@ref) is an operator-level override that
 differences primal residual evaluations and therefore BYPASSES analytic
 sensitivity kernels; prefer it only where AD is inadmissible (condensed
 internal state without analytic kernels or insensitivity declarations).
 """
-function time_sensitivity!(g::AbstractVector, op::LinearizedFerriteOperator, states::NamedTuple, t, ctx; method = ADSensitivity())
+function time_sensitivity!(g::AbstractVector, op::LinearizedFerriteOperator, states::NamedTuple, p, ctx; method = ADSensitivity())
     length(g) == residual_size(op) || throw(DimensionMismatch(
         "expected g of length $(residual_size(op)), got $(length(g))"))
-    return _time_sensitivity!(method, g, op, states, t, ctx)
+    ctx === nothing && throw(ArgumentError(
+        "∂F/∂t seeds through the context channel, so `time_sensitivity!` needs a context " *
+        "and got `nothing`. Pass a `TimeIntegrationContext(t, Δt, γ̃)` (or a custom context " *
+        "type implementing `evaluation_time`/`with_time`) as the last positional argument."))
+    return _time_sensitivity!(method, g, op, states, p, ctx)
 end
-time_sensitivity!(g::AbstractVector, op::LinearizedFerriteOperator, u::AbstractVector, t; method = ADSensitivity()) =
-    time_sensitivity!(g, op, (u = u,), t, nothing; method)
 
-function _time_sensitivity!(::ADSensitivity, g, op, states, t, ctx)
-    _check_sensitivity_supported(op, TimeSensitivityKind(t))
-    assemble_into!(TimeSensitivityKind(t), (g,), op, states, t, ctx)
+function _time_sensitivity!(::ADSensitivity, g, op, states, p, ctx)
+    _check_sensitivity_supported(op, TimeSensitivityKind())
+    assemble_into!(TimeSensitivityKind(), (g,), op, states, p, ctx)
     return g
 end
 
-function _time_sensitivity!(method::FiniteDifferenceSensitivity, g, op, states, t, ctx)
-    # Primal evaluations at perturbed times (bare-time p convention) — no
-    # internal-state admissibility check needed: the local solves run exactly
-    # as in a normal residual evaluation. The u slot is copied so the
-    # condensation trial write-back of the perturbed evaluations never leaks
-    # into the caller's state; ctx is held fixed.
+function _time_sensitivity!(method::FiniteDifferenceSensitivity, g, op, states, p, ctx)
+    # Primal evaluations at perturbed contexts — no internal-state
+    # admissibility check needed: the local solves run exactly as in a normal
+    # residual evaluation. The u slot is copied so the condensation trial
+    # write-back of the perturbed evaluations never leaks into the caller's
+    # state.
+    t  = evaluation_time(ctx)
     h  = method.h * max(one(t), abs(t))
     uw = copy(states.u)
     statesw = merge(states, (u = uw,))
-    rp = similar(g); evaluate!(op, rp, statesw, t + h, ctx)
+    rp = similar(g); evaluate!(op, rp, statesw, p, with_time(ctx, t + h))
     copyto!(uw, states.u)
-    rm = similar(g); evaluate!(op, rm, statesw, t - h, ctx)
+    rm = similar(g); evaluate!(op, rm, statesw, p, with_time(ctx, t - h))
     g .= (rp .- rm) ./ (2h)
     return g
 end

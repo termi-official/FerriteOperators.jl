@@ -10,11 +10,13 @@ grep for the patterns marked ⚠ below.
 
 | 0.3.x | v2 |
 |---|---|
-| `assemble_element!(Kₑ, [rₑ,] [uₑ,] cell, cache, t)` (5 arities) | `assemble_cell!(req, cache, args::KernelArgs)` — request-typed |
+| `assemble_element!(Kₑ, [rₑ,] [uₑ,] cell, cache, t)` (5 arities) | `assemble_cell!(req, cache, args)` — request-typed |
 | `assemble_facet!(Kₑ, …, cell, lfi, cache, t)` ⚠ | `assemble_facet!(req, cache, args, lfi)` |
 | `assemble_element_gto1!(…, uₑprev, …, p, t, Δt)` | kernel reads `args.states.uprev`, `args.ctx` |
 | `GenericFirstOrderTimeParameters(p, t, Δt, uprev)` | `slots = (:u, :uprev)` at setup + `TimeIntegrationContext(t, Δt, γ̃)` |
 | `AbstractGenericFirstOrderTime*ElementCache` | plain `AbstractVolumetricElementCache`/`AbstractSurfaceElementCache` |
+| bare `t` as the parameter object (`evaluate!(op, r, u, t)`, `time_sensitivity!(g, op, u, t)`) | `p` is user parameters; time rides in `ctx`: `time_sensitivity!(g, op, states, p, ctx)` |
+| `check_derivatives(op, states, p, ctx; t = tₙ)` | `check_derivatives(op, states, p, ctx)` — the time check reads `evaluation_time(ctx)` |
 | `query_element_parameters(cache, cell, ivh, p)` | `query_cell_parameters(cache, cell, p)` (no `ivh`) |
 | — (volumetric `pₑ` reused on facets) | `query_facet_parameters(cache, cell, lfi, p)` per facet |
 | `query_element_unknown_buffer(cache, ue)` | removed — slot buffers are workspace-owned |
@@ -47,7 +49,7 @@ function assemble_element!(rₑ, uₑ, cell, cache::MyCache, p) ... end
 FerriteOperators.reinit_values!(c::MyCache, cell) = reinit!(c.cv, cell)
 
 # … plus one mandatory residual kernel (pure evaluation, no reinit) …
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args)
     uₑ = args.states.u
     pₑ = args.p
     # accumulate into req.r
@@ -55,7 +57,7 @@ end
 
 # … and optional analytic kernels, declared via a trait
 FerriteOperators.provides_analytic(::Type{<:MyCache}, ::FerriteOperators.JacobianKind) = true
-function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args)
     # accumulate into req.K
 end
 # fused Newton path: JacobianResidualRequest (req.K and req.r), kind JacobianResidualKind
@@ -68,6 +70,15 @@ engine calls `reinit_values!` once per cell and sweep (elements carrying
 several values objects can specialize the kind-dispatched form to
 reinitialize only what a request needs). Facet kernels still reinit their
 `FacetValues` per facet themselves.
+
+**Leave the `args` parameter unannotated.** Kernels select on the
+`(request, cache)` pair; the third argument is a *channel protocol*
+(`args.states`, `args.cell`, `args.p`, `args.scratch`, `args.ctx`) with no
+supertype. `KernelArgs` is the type this package's
+operators build — annotating `args::KernelArgs` pins the element to that one
+family and makes it unusable to an operator family building its own args type.
+`setup_operator` emits an advisory warning per element cache whose residual
+kernel carries a concrete args annotation.
 
 ## Time protocols (GTO1, Newmark)
 
@@ -82,8 +93,15 @@ update_linearization!(op, r, u, GenericFirstOrderTimeParameters(p, t, Δt, uprev
 # v2
 op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev))
 update_linearization!(op, r, (u = u, uprev = uprev), p, TimeIntegrationContext(t, Δt, γ̃))
-# element: uₑprev = args.states.uprev;  γ̃ = args.ctx.γ̃
+# element: uₑprev = args.states.uprev;  t = evaluation_time(args.ctx);  γ̃ = args.ctx.γ̃
 ```
+
+**Time reaches elements through `ctx`, and only through `ctx`.** `p` is the
+user parameter bag: passing a bare `t` as the parameter object, or hiding `t`
+inside `p`, is not a supported convention — every wrapper would then need an
+unwrapping rule, and the framework itself must see `t` to seed ∂F/∂t. An
+element reads the evaluation time as `evaluation_time(args.ctx)`; a kernel
+that reads it from `args.p` gets no time sensitivity at all.
 
 `γ̃` is the *normalized local stage interval* of the element-local
 internal-variable problem (`q = q_ref + γ̃·g` is the normalization; the element
@@ -102,15 +120,12 @@ op = setup_operator(strategy, integrator, dh; slots = (:u, :v, :a))
 update_linearization!(op, r,
     (u = u, v = AffineRate(γ/(β*Δt), uᵥ), a = AffineRate(1/(β*Δt^2), ũ)),
     p, TimeIntegrationContext(t, Δt, Δt))
-# element: vₑ = args.states.v;  ∂v/∂u = slot_slope(args, :v)
+# element: vₑ = args.states.v
 ```
 
-The reconstruction slope is **slot metadata**, reachable from any kernel
-through [`slot_slope`](@ref) (`nothing` for plain vector slots). That is the
-channel for `∂v/∂u`, and it is the one that works for multilevel Newton on
-rate-coupled condensed materials, where the slope is needed *inside* the
-local tangent's matrix inverse. Do not carry slopes in `p`, and do not put
-them into `ctx`.
+A kernel reads slot *values* and nothing else — the reconstruction is a
+solver-side statement about where those values came from. Do not carry
+reconstruction slopes in `p`, and do not put them into `ctx`.
 
 The `:u` slot must be declared and must precede any reconstructed slot in the
 states NamedTuple — the sweep throws otherwise. The assembled Jacobian is
@@ -133,7 +148,7 @@ kernels become request-typed and facet parameters are queried per facet:
 function assemble_facet!(rₑ, uₑ, cell, lfi, cache::MyFacetCache, p) ... end
 
 # v2
-function FerriteOperators.assemble_facet!(req::ResidualRequest, cache::MyFacetCache, args::KernelArgs, lfi::Int)
+function FerriteOperators.assemble_facet!(req::ResidualRequest, cache::MyFacetCache, args, lfi::Int)
     reinit!(cache.fv, args.cell, lfi)
     # accumulate into req.r; args.p came from query_facet_parameters(cache, cell, lfi, p)
 end
@@ -174,10 +189,17 @@ op = setup_operator(strategy, integrator, dh;
 
 ## New capabilities worth adopting during the port
 
-- **Sensitivities**: `update_parameter_jacobian!`, `parameter_vjp!`,
-  `time_sensitivity!` (AD by default, analytic kernels win per cache,
-  `FiniteDifferenceSensitivity` for condensed time derivatives). Declare the
-  kinds you will use at setup (`requests = (ParameterVJPKind, …)`) to move
+- **Sensitivities**: `update_parameter_jacobian!(B, op, states, p, ctx)`,
+  `parameter_vjp!(g, op, λ, states, p, ctx)`,
+  `time_sensitivity!(g, op, states, p, ctx)` (AD by default, analytic kernels
+  win per cache, `FiniteDifferenceSensitivity` for condensed time
+  derivatives). ∂F/∂t seeds through the context — the AD sweep hands the
+  kernel a Dual-timed context and the FD method perturbs the context time — so
+  `time_sensitivity!` takes the same `(states, p, ctx)` triple as every other
+  entry point, reads `t` from `evaluation_time(ctx)`, and throws when `ctx` is
+  `nothing`. Likewise `check_derivatives(op, states, p, ctx)` runs its time
+  check only with a context and records a skip without one. Declare the kinds
+  you will use at setup (`requests = (ParameterVJPKind, …)`) to move
   admissibility failures from first use to `setup_operator`.
 - **Matrix-free state actions**: `state_jvp!` (`J·v` without a matrix),
   `state_vjp!` (`Jᵀλ` — the adjoint action).
@@ -211,5 +233,8 @@ op = setup_operator(strategy, integrator, dh;
 5. Replace parameter-wrapper unwrapping hacks with one `unwrap_parameters`
    method; move facet-specific parameters into `query_facet_parameters`.
 6. Replace solver-state smuggling with `scratch` declarations.
-7. Run your suite; every port failure except facets is a loud
+7. Drop `::KernelArgs` annotations from kernel signatures (setup warns about
+   the ones you miss), and move every kernel that read time out of `p` onto
+   `evaluation_time(args.ctx)`.
+8. Run your suite; every port failure except facets is a loud
    `MethodError`/`ArgumentError` at setup or first assembly.

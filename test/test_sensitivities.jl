@@ -5,9 +5,8 @@ using SparseArrays
 using Polyester
 
 # A v2-native nonlinear element: r(u, p) = ∫ ∇v⋅∇u dΩ − ∫ p v dΩ.
-# The scalar source p is the differentiable parameter (and doubles as the
-# bare time in the ∂F/∂t test). Only the residual kernel exists — every
-# derivative is exercised through the AD fallback.
+# The scalar source p is the differentiable parameter. Only the residual
+# kernel exists — every derivative is exercised through the AD fallback.
 struct SourceDiffusionIntegrator <: AbstractNonlinearIntegrator
     qrc::QuadratureRuleCollection
     field_name::Symbol
@@ -24,7 +23,7 @@ end
 FerriteOperators.duplicate_for_device(device, c::SourceDiffusionCache) =
     SourceDiffusionCache(FerriteOperators.duplicate_for_device(device, c.cv))
 FerriteOperators.reinit_values!(c::SourceDiffusionCache, cell) = reinit!(c.cv, cell)
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::SourceDiffusionCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::SourceDiffusionCache, args)
     (; cv) = cache
     uₑ = args.states.u
     q  = args.p
@@ -36,6 +35,60 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::SourceDiff
         end
     end
 end
+
+# A v2-native element with EXPLICIT time dependence, read where the contract
+# puts time: r(u, ctx) = ∫ ∇v⋅∇u dΩ − t ∫ v dΩ with t = evaluation_time(ctx).
+# Hence ∂F/∂t = −∫ v dΩ, the same vector the parameter Jacobian of
+# `SourceDiffusionCache` produces. The `analytic` type parameter selects
+# between the AD fallback and an analytic ∂F/∂t kernel.
+struct TimeSourceDiffusionIntegrator <: AbstractNonlinearIntegrator
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+    analytic::Bool
+end
+TimeSourceDiffusionIntegrator(qrc, field_name) = TimeSourceDiffusionIntegrator(qrc, field_name, false)
+struct TimeSourceDiffusionCache{analytic, CV <: CellValues} <: AbstractVolumetricElementCache
+    cv::CV
+end
+function FerriteOperators.setup_element_cache(m::TimeSourceDiffusionIntegrator, sdh::SubDofHandler)
+    qr     = getquadraturerule(m.qrc, sdh)
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    cv     = CellValues(qr, ip, ip_geo)
+    return TimeSourceDiffusionCache{m.analytic, typeof(cv)}(cv)
+end
+FerriteOperators.duplicate_for_device(device, c::TimeSourceDiffusionCache{a}) where {a} =
+    TimeSourceDiffusionCache{a, typeof(c.cv)}(FerriteOperators.duplicate_for_device(device, c.cv))
+FerriteOperators.reinit_values!(c::TimeSourceDiffusionCache, cell) = reinit!(c.cv, cell)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::TimeSourceDiffusionCache, args)
+    (; cv) = cache
+    uₑ = args.states.u
+    t  = evaluation_time(args.ctx)
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        ∇u = function_gradient(cv, qp, uₑ)
+        for i in 1:getnbasefunctions(cv)
+            req.r[i] += (shape_gradient(cv, qp, i) ⋅ ∇u - t * shape_value(cv, qp, i)) * dΩ
+        end
+    end
+end
+
+# Analytic ∂F/∂t kernel, selected per cache; the counter proves the selection.
+const ANALYTIC_TS_CALLS = Ref(0)
+FerriteOperators.provides_analytic(::Type{<:TimeSourceDiffusionCache{true}}, ::FerriteOperators.TimeSensitivityKind) = true
+function FerriteOperators.assemble_cell!(req::TimeSensitivityRequest, cache::TimeSourceDiffusionCache{true}, args)
+    ANALYTIC_TS_CALLS[] += 1
+    (; cv) = cache
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        for i in 1:getnbasefunctions(cv)
+            req.g[i] -= shape_value(cv, qp, i) * dΩ
+        end
+    end
+end
+
+# Any context works for a stationary sweep; ∂F/∂t only reads the time.
+stationary_ctx(t) = TimeIntegrationContext(t, 1.0, 1.0)
 
 # Shared condensed-viscoelasticity fixture: single hex, vector displacement
 # plus hidden per-QP εᵛ, slots (:u, :uprev).
@@ -103,11 +156,25 @@ end
         @test g ≈ B' * λ rtol = 1e-12
     end
 
-    @testset "time sensitivity (bare-time parameter)" begin
-        t = 0.9
+    @testset "time sensitivity seeds through the context" begin
+        # The element reads `evaluation_time(args.ctx)`, so ∂F/∂t is the
+        # source vector −b — and the AD sweep must find it there.
+        top = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
         g = zeros(n)
-        time_sensitivity!(g, op, u, t)
+        time_sensitivity!(g, top, (u = u,), nothing, stationary_ctx(0.9))
         @test g ≈ -b rtol = 1e-12
+
+        # the FD method differences primal evaluations at perturbed contexts
+        gfd = zeros(n)
+        time_sensitivity!(gfd, top, (u = u,), nothing, stationary_ctx(0.9); method = FiniteDifferenceSensitivity())
+        @test gfd ≈ g rtol = 1e-6
+    end
+
+    @testset "time sensitivity without a context is loud" begin
+        top = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
+        @test_throws ArgumentError time_sensitivity!(zeros(n), top, (u = u,), nothing, nothing)
+        @test_throws ArgumentError time_sensitivity!(zeros(n), top, (u = u,), nothing, nothing;
+                                                     method = FiniteDifferenceSensitivity())
     end
 
     @testset "fused J+r via AD fallback" begin
@@ -131,8 +198,10 @@ end
         Bs = zeros(n, 1); update_parameter_jacobian!(Bs, op, u, p)
         Bp = zeros(n, 1); update_parameter_jacobian!(Bp, pop, u, p)
         @test Bs ≈ Bp rtol = 1e-13
-        gs = zeros(n); time_sensitivity!(gs, op, u, 0.9)
-        gp = zeros(n); time_sensitivity!(gp, pop, u, 0.9)
+        tops = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
+        topp = setup_operator(pstrategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
+        gs = zeros(n); time_sensitivity!(gs, tops, (u = u,), nothing, stationary_ctx(0.9))
+        gp = zeros(n); time_sensitivity!(gp, topp, (u = u,), nothing, stationary_ctx(0.9))
         @test gs ≈ gp rtol = 1e-13
         # VJP accumulates in parameter space: coloring gives no isolation, so
         # the scatter must go atomic (and warn once) — results must still match.
@@ -160,7 +229,7 @@ end
         vu = zeros(unknown_size(vop))
         @test_throws ArgumentError update_parameter_jacobian!(zeros(residual_size(vop), 1), vop, vu, 1.0)
         @test_throws ArgumentError parameter_vjp!(zeros(1), vop, zeros(residual_size(vop)), vu, 1.0)
-        @test_throws ArgumentError time_sensitivity!(zeros(residual_size(vop)), vop, vu, 0.5)
+        @test_throws ArgumentError time_sensitivity!(zeros(residual_size(vop)), vop, (u = vu,), 1.0, stationary_ctx(0.5))
     end
 
     @testset "undeclared slots error loudly" begin
@@ -171,33 +240,19 @@ end
         ucopy = copy(u)
         update_parameter_jacobian!(zeros(n, 1), op, u, p)
         parameter_vjp!(zeros(1), op, ones(n), u, p)
-        time_sensitivity!(zeros(n), op, u, 0.9)
+        top = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
+        time_sensitivity!(zeros(n), top, (u = u,), nothing, stationary_ctx(0.9))
         @test u == ucopy
     end
 end
 
 # --- Sensitivity admissibility refinements and method selection ---
 
-# Analytic sensitivity kernels win per cache: prove selection via a counter.
-const ANALYTIC_TS_CALLS = Ref(0)
-FerriteOperators.provides_analytic(::Type{<:SourceDiffusionCache}, ::FerriteOperators.TimeSensitivityKind) = true
-function FerriteOperators.assemble_cell!(req::TimeSensitivityRequest, cache::SourceDiffusionCache, args::KernelArgs)
-    ANALYTIC_TS_CALLS[] += 1
-    # ∂F/∂t with p ≡ t (bare-time): ∂/∂t of −t·∫v = −∫v dΩ
-    (; cv) = cache
-    for qp in 1:getnquadpoints(cv)
-        dΩ = getdetJdV(cv, qp)
-        for i in 1:getnbasefunctions(cv)
-            req.g[i] -= shape_value(cv, qp, i) * dΩ
-        end
-    end
-end
-
 # Condensed admissibility: analytic parameter kernel on the viscoelastic cache
 # (trivially zero — the material is parameter-independent), and an
 # insensitivity declaration for the VJP kind.
 FerriteOperators.provides_analytic(::Type{<:FerriteOperators.SimpleCondensedLinearViscoelasticityCache}, ::FerriteOperators.ParameterJacobianKind) = true
-FerriteOperators.assemble_cell!(req::ParameterJacobianRequest, ::FerriteOperators.SimpleCondensedLinearViscoelasticityCache, args::KernelArgs) = nothing
+FerriteOperators.assemble_cell!(req::ParameterJacobianRequest, ::FerriteOperators.SimpleCondensedLinearViscoelasticityCache, args) = nothing
 FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperators.SimpleCondensedLinearViscoelasticityCache}, ::FerriteOperators.ParameterVJPKind) = true
 
 @testset "Sensitivity admissibility and methods" begin
@@ -209,26 +264,29 @@ FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperators.SimpleCond
     n   = ndofs(dh)
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
+    aop = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u, true), dh)
+    dop = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
     u = sin.(0.3 .* (1:n))
+    ctx = stationary_ctx(0.9)
 
-    @testset "analytic time kernel is selected and agrees with AD-by-construction" begin
+    @testset "analytic time kernel is selected and agrees with the AD fallback" begin
         ANALYTIC_TS_CALLS[] = 0
         g_analytic = zeros(n)
-        time_sensitivity!(g_analytic, op, u, 0.9)
+        time_sensitivity!(g_analytic, aop, (u = u,), nothing, ctx)
         @test ANALYTIC_TS_CALLS[] == getncells(grid)
-        # −b, independently derived from residual structure
-        r0 = zeros(n); evaluate!(op, r0, u, 0.0)
-        r1 = zeros(n); evaluate!(op, r1, u, 1.0)
-        @test g_analytic ≈ -(r0 .- r1) rtol = 1e-12
+        # the same element without the analytic kernel, differentiated
+        g_ad = zeros(n)
+        time_sensitivity!(g_ad, dop, (u = u,), nothing, ctx)
+        @test g_analytic ≈ g_ad rtol = 1e-12
     end
 
     @testset "FD method agrees with the derivative (and bypasses kernels)" begin
         ANALYTIC_TS_CALLS[] = 0
         g_fd = zeros(n)
-        time_sensitivity!(g_fd, op, u, 0.9; method = FiniteDifferenceSensitivity())
+        time_sensitivity!(g_fd, aop, (u = u,), nothing, ctx; method = FiniteDifferenceSensitivity())
         @test ANALYTIC_TS_CALLS[] == 0     # operator-level differencing, kernels untouched
         g_ref = zeros(n)
-        time_sensitivity!(g_ref, op, u, 0.9)
+        time_sensitivity!(g_ref, aop, (u = u,), nothing, ctx)
         @test g_fd ≈ g_ref rtol = 1e-6
     end
 
@@ -251,13 +309,13 @@ FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperators.SimpleCond
 
         # time sensitivity via AD is still rejected (no analytic kernel, no
         # declaration for that kind) …
-        @test_throws ArgumentError time_sensitivity!(zeros(residual_size(vop)), vop, (u = vu, uprev = vuprev), 0.5, vctx)
+        @test_throws ArgumentError time_sensitivity!(zeros(residual_size(vop)), vop, (u = vu, uprev = vuprev), 1.0, vctx)
         # … but FD is admissible: primal evaluations on a protected copy.
         vu_before = copy(vu)
         g = zeros(residual_size(vop))
-        time_sensitivity!(g, vop, (u = vu, uprev = vuprev), 0.5, vctx; method = FiniteDifferenceSensitivity())
+        time_sensitivity!(g, vop, (u = vu, uprev = vuprev), 1.0, vctx; method = FiniteDifferenceSensitivity())
         @test vu == vu_before                       # trial write-back never leaked
-        @test norm(g) < 1e-8                        # no explicit t-dependence via p
+        @test norm(g) < 1e-8                        # the residual reads γ̃, not the evaluation time
     end
 end
 
@@ -362,7 +420,7 @@ end
 # the kernel: legal while the kind is undeclared (checked lazily at the entry
 # points), loud once declared at setup.
 struct BogusClaimCache <: FerriteOperators.AbstractVolumetricElementCache end
-FerriteOperators.assemble_cell!(::ResidualRequest, ::BogusClaimCache, ::KernelArgs) = nothing
+FerriteOperators.assemble_cell!(::ResidualRequest, ::BogusClaimCache, args) = nothing
 FerriteOperators.reinit_values!(::BogusClaimCache, cell) = nothing
 FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianKind) = true
 
@@ -402,6 +460,42 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
         # kinds made admissible above (analytic kernel / insensitivity) pass setup
         vop2 = setup_visco_operator(strategy, qrc; requests = (ParameterJacobianKind, ParameterVJPKind))
         @test vop2.engine.requests == (ParameterJacobianKind, ParameterVJPKind)
+    end
+end
+
+# --- The kernel-args channel protocol at setup ---
+
+# Two caches differing only in how open their residual kernel's args parameter
+# is, plus an args family unrelated to `KernelArgs` that carries the same
+# channels.
+struct LooseArgsCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.assemble_cell!(::ResidualRequest, ::LooseArgsCache, args) = nothing
+FerriteOperators.reinit_values!(::LooseArgsCache, cell) = nothing
+
+struct PinnedArgsCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.assemble_cell!(::ResidualRequest, ::PinnedArgsCache, args::KernelArgs) = nothing
+FerriteOperators.reinit_values!(::PinnedArgsCache, cell) = nothing
+
+struct ForeignArgs{S, C, P, Sc, Cx}
+    states::S
+    cell::C
+    p::P
+    scratch::Sc
+    ctx::Cx
+end
+
+@testset "Kernel-args channel protocol" begin
+    @testset "validation queries the operator family's own args type" begin
+        @test isnothing(FerriteOperators.validate_element_cache(LooseArgsCache()))
+        @test isnothing(FerriteOperators.validate_element_cache(LooseArgsCache(), (), ForeignArgs))
+        # the pinned kernel does not exist as far as another args family is concerned
+        @test_throws ArgumentError FerriteOperators.validate_element_cache(
+            PinnedArgsCache(), (), ForeignArgs)
+    end
+
+    @testset "pinned kernels earn an advisory warning, loose ones do not" begin
+        @test_logs FerriteOperators.validate_element_cache(LooseArgsCache())
+        @test_logs (:warn, r"pins its residual kernel") FerriteOperators.validate_element_cache(PinnedArgsCache())
     end
 end
 
@@ -449,20 +543,24 @@ end
         close!(dh)
         n = ndofs(dh)
         op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
+        # ctx-seeded ∂F/∂t: the context rebuild per cell must stay on the stack
+        top = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
         u = sin.(0.3 .* (1:n)); p = 1.7
+        ctx = stationary_ctx(0.9)
         v = cos.(0.11 .* (1:n)); λ = cos.(0.7 .* (1:n))
         Jv = zeros(n); g = zeros(n); r = zeros(n)
+        states = (u = u,)
         for _ in 1:2   # warmup: compilation + lazy parameter-buffer sizing
             state_jvp!(Jv, op, v, u, p)
             state_vjp!(g, op, λ, u, p)
-            time_sensitivity!(g, op, u, 0.9)
+            time_sensitivity!(g, top, states, nothing, ctx)
             update_linearization!(op, r, u, p)
         end
         # A per-cell allocation regression shows up as ≳10 KiB on 12 cells
         # (measured: 0 B for the sweeps, ~400 B assembler setup for fused J+r).
         @test @allocated(state_jvp!(Jv, op, v, u, p)) == 0
         @test @allocated(state_vjp!(g, op, λ, u, p)) == 0
-        @test @allocated(time_sensitivity!(g, op, u, 0.9)) == 0
+        @test @allocated(time_sensitivity!(g, top, states, nothing, ctx)) == 0
         @test @allocated(update_linearization!(op, r, u, p)) < 1024
     end
 end

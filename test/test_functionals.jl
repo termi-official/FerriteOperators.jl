@@ -21,7 +21,7 @@ end
 FerriteOperators.duplicate_for_device(device, c::FunctionalTestCache) =
     FunctionalTestCache(FerriteOperators.duplicate_for_device(device, c.cv))
 FerriteOperators.reinit_values!(c::FunctionalTestCache, cell) = reinit!(c.cv, cell)
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::FunctionalTestCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::FunctionalTestCache, args)
     (; cv) = cache
     uₑ = args.states.u
     for qp in 1:getnquadpoints(cv)
@@ -32,7 +32,7 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::Functional
         end
     end
 end
-function FerriteOperators.evaluate_cell_functional(::FunctionalKind{:energy}, cache::FunctionalTestCache, args::KernelArgs)
+function FerriteOperators.evaluate_cell_functional(::FunctionalKind{:energy}, cache::FunctionalTestCache, args)
     (; cv) = cache
     uₑ = args.states.u
     Φ = 0.0
@@ -42,7 +42,7 @@ function FerriteOperators.evaluate_cell_functional(::FunctionalKind{:energy}, ca
     end
     return Φ
 end
-function FerriteOperators.evaluate_cell_functional(::FunctionalKind{:gradient_volume}, cache::FunctionalTestCache, args::KernelArgs)
+function FerriteOperators.evaluate_cell_functional(::FunctionalKind{:gradient_volume}, cache::FunctionalTestCache, args)
     (; cv) = cache
     uₑ = args.states.u
     g = zero(Vec{2, Float64})

@@ -102,7 +102,7 @@ FerriteOperators.duplicate_for_device(device, c::MyCache) =
 
 FerriteOperators.reinit_values!(c::MyCache, cell) = reinit!(c.cv, cell)
 
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args)
     (; cv) = cache
     uₑ = args.states.u
     for qp in 1:getnquadpoints(cv)
@@ -118,7 +118,7 @@ optimization:
 
 ```julia
 FerriteOperators.provides_analytic(::Type{<:MyCache}, ::FerriteOperators.JacobianKind) = true
-function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args)
     # ... accumulate into req.K ...
 end
 ```
@@ -126,24 +126,43 @@ end
 The residual kernel must be eltype-generic in `eltype(args.states.*)`,
 `eltype(args.p)`, and the context time — that is the entire AD contract.
 Kernels never write global state; the geometry cache in `args.cell` is
-read-only.
+read-only. The `args` parameter stays **unannotated**: kernels select on the
+`(request, cache)` pair alone, and an open parameter lets the element serve
+any operator family's args type (setup warns about a concrete annotation).
 
-### KernelArgs
+### The kernel-args channel protocol
+
+`args` is any object carrying the channels below; [`KernelArgs`](@ref) is what
+this package's operators build, not the contract.
 
 - `args.states` — NamedTuple of element-local state buffers, one per slot
   declared at setup (`setup_operator(...; slots = (:u, :uprev))`). Slots are
   gathered through the element-overridable `load_element_unknowns!`, so
   condensed elements receive their full `[ū; q]` local layout for every slot.
+- `args.cell` — the geometry cache of the current item, read-only.
 - `args.p` — the user parameter bag, produced by the overridable
   [`query_cell_parameters`](@ref) (facets get their own
-  [`query_facet_parameters`](@ref) per facet).
-- `args.ctx` — the [`TimeIntegrationContext`](@ref) `(t, Δt, γ̃)`, or
-  `nothing` for stationary problems. `γ̃` is the *normalized* local stage
-  interval of the element-local internal-variable problem — see its
-  docstring for the exact contract and for why it is **not** a rate slope.
+  [`query_facet_parameters`](@ref) per facet). Configuration only: time lives
+  in `ctx`, history in slots.
 - `args.scratch` — per-worker scratch declared by the solver
   (`setup_operator(...; scratch = (name = () -> ...,))`) and/or the element
   (`declare_scratch(cache)`).
+- `args.ctx` — the per-sweep solver scalars, i.e. the
+  [`TimeIntegrationContext`](@ref) `(t, Δt, γ̃)` read through
+  `evaluation_time(args.ctx)` and `args.ctx.γ̃`, or `nothing` for stationary
+  problems. `γ̃` is the *normalized* local stage interval of the
+  element-local internal-variable problem — see its docstring for the exact
+  contract and for why it is **not** a rate slope.
+
+Per-slot metadata is reserved protocol vocabulary: a future args family may
+carry a per-slot property, and `KernelArgs` carries none.
+
+An operator family may build its own args type; it then implements the three
+rebuild seams the framework re-seeds channels through —
+`FerriteOperators.with_states`, `with_parameters`, and `with_context` — as
+plain methods on that type. There is no abstract fallback: a family missing a
+seam gets a `MethodError` on the sweep that needs it, never a silently
+unseeded derivative.
 
 ### Condensed elements (internal variables)
 
@@ -202,11 +221,10 @@ being materialized by the solver: an [`AffineRate`](@ref) source gives the
 slot the cell-local value `slope · (u − anchor)`, e.g.
 `update_linearization!(op, r, (u = u, du = AffineRate(1/Δt, uprev)), p, ctx)`
 for backward Euler. The `:u` slot must precede the reconstructed one. Kernels
-read the values through `args.states.du` and the linearization through
-[`slot_slope`](@ref) — the slope is slot metadata, so a condensed corrector
-that needs `∂v/∂u` inside its local tangent stays scheme-agnostic. The
-assembled Jacobian is ∂F/∂u at frozen slot values; the chain-rule term
-through the reconstruction is contributed by the solver's per-slot weights.
+read the reconstructed values through `args.states.du` and nothing else, so an
+element stays scheme-agnostic. The assembled Jacobian is ∂F/∂u at frozen slot
+values; the chain-rule term through the reconstruction is contributed by the
+solver's per-slot weights.
 
 ### Components and stage operators
 
@@ -251,7 +269,7 @@ per eigenvalue of `A⁻¹`.
 ### Functionals
 
 ```julia
-FerriteOperators.evaluate_cell_functional(::FunctionalKind{:energy}, cache::MyCache, args::KernelArgs) =
+FerriteOperators.evaluate_cell_functional(::FunctionalKind{:energy}, cache::MyCache, args) =
     # return this cell's ∫ contribution (a Number or a Tensors tensor)
 
 Φ = evaluate_functional(op, FunctionalKind(:energy), states, p, ctx)
@@ -267,14 +285,20 @@ fixed worker count). Volumetric contributions only.
 ```julia
 update_parameter_jacobian!(B, op, states, p, ctx)   # ∂F/∂θ, dense
 parameter_vjp!(g, op, λ, states, p, ctx)            # (∂F/∂θ)ᵀλ, matrix-free
-time_sensitivity!(g, op, states, t, ctx)            # ∂F/∂t
-time_sensitivity!(g, op, u, t; method = FiniteDifferenceSensitivity())
+time_sensitivity!(g, op, states, p, ctx)            # ∂F/∂t at evaluation_time(ctx)
+time_sensitivity!(g, op, states, p, ctx; method = FiniteDifferenceSensitivity())
 ```
 
 θ is the flat view defined by [`parameter_vector`](@ref) /
 [`rebuild_parameters`](@ref). Per cache, analytic sensitivity kernels win;
 otherwise ForwardDiff differentiates the residual kernel. Sensitivity sweeps
 **never** write back into the caller's state.
+
+∂F/∂t seeds through the context channel: the AD sweep hands the kernel a
+context whose evaluation time is Dual-valued, and the finite-difference method
+evaluates the primal residual at contexts with perturbed times. An element
+therefore reads time as `evaluation_time(args.ctx)`, and `time_sensitivity!`
+requires a context — passing `nothing` is an `ArgumentError`.
 
 Admissibility with internal state: AD through an element-local solve is wrong
 in principle, so a cache with [`has_internal_state`](@ref) is admissible for
@@ -288,7 +312,7 @@ bypasses analytic sensitivity kernels).
 ### Verifying derivative implementations
 
 ```julia
-res = check_derivatives(op, states, p, ctx; t = tₙ)
+res = check_derivatives(op, states, p, ctx)
 res.passed                      # conjunction of all non-skipped checks
 res.checks.jacobian.err         # per-check relative error / skip reason
 ```
@@ -296,7 +320,8 @@ res.checks.jacobian.err         # per-check relative error / skip reason
 [`check_derivatives`](@ref) cross-checks every derivative path — the
 assembled Jacobian, fused-vs-split residual, parameter Jacobian/VJP, state
 JVP/VJP, time sensitivity — against central finite differences of the
-operator's own residual, through the public entry points. A wrong analytic
+operator's own residual, through the public entry points. The time check runs
+only with a context and is recorded as a skip without one. A wrong analytic
 kernel fails its check against the FD referee; inadmissible or unsupported
 checks are skipped with the reason recorded. The parameter checks respect
 the differentiable/static split: only the entries exposed by

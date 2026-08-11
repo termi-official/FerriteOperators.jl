@@ -24,7 +24,7 @@ FerriteOperators.duplicate_for_device(device, c::StageDiffusionCache) =
     StageDiffusionCache(FerriteOperators.duplicate_for_device(device, c.cv))
 FerriteOperators.reinit_values!(c::StageDiffusionCache, cell) = reinit!(c.cv, cell)
 
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::StageDiffusionCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::StageDiffusionCache, args)
     (; cv) = cache
     uₑ, duₑ = args.states.u, args.states.du
     for qp in 1:getnquadpoints(cv)
@@ -52,9 +52,9 @@ FerriteOperators.setup_element_cache(m::BlanketClaimIntegrator, sdh::SubDofHandl
 FerriteOperators.duplicate_for_device(device, c::BlanketClaimCache) =
     BlanketClaimCache(FerriteOperators.duplicate_for_device(device, c.inner))
 FerriteOperators.reinit_values!(c::BlanketClaimCache, cell) = reinit_values!(c.inner, cell)
-FerriteOperators.assemble_cell!(req::ResidualRequest, c::BlanketClaimCache, args::KernelArgs) =
+FerriteOperators.assemble_cell!(req::ResidualRequest, c::BlanketClaimCache, args) =
     assemble_cell!(req, c.inner, args)
-function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::BlanketClaimCache, args::KernelArgs)
+function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::BlanketClaimCache, args)
     (; cv) = c.inner
     for qp in 1:getnquadpoints(cv), i in 1:getnbasefunctions(cv), j in 1:getnbasefunctions(cv)
         req.K[i, j] += (shape_gradient(cv, qp, i) ⋅ shape_gradient(cv, qp, j)) * getdetJdV(cv, qp)

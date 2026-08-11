@@ -32,7 +32,7 @@ end
 FerriteOperators.duplicate_for_device(device, c::NeumannTestCache) =
     NeumannTestCache(c.t̄, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
 FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::NeumannTestCache) = idx ∈ c.facetset
-function FerriteOperators.assemble_facet!(req::ResidualRequest, c::NeumannTestCache, args::KernelArgs, lfi::Int)
+function FerriteOperators.assemble_facet!(req::ResidualRequest, c::NeumannTestCache, args, lfi::Int)
     reinit!(c.fv, args.cell, lfi)
     for qp in 1:getnquadpoints(c.fv)
         dΓ = getdetJdV(c.fv, qp)
