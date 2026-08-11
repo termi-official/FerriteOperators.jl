@@ -188,7 +188,7 @@ op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev))
 
 # canonical states/ctx forms; u-vector conveniences exist for stationary use
 update_linearization!(op, residual, (u = u, uprev = uprev), p, TimeIntegrationContext(t, Δt, γ̃))
-residual!(op, residual, (u = u,), p, nothing)
+evaluate!(op, residual, (u = u,), p, nothing)
 mul!(y, op.J, v)
 ```
 

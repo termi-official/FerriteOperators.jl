@@ -71,12 +71,12 @@ end
     end
 
     # r(u, p) = K u − p b  ⇒  b = r(u, 0) − r(u, 1)
-    r0 = zeros(n); residual!(op, r0, u, 0.0)
-    r1 = zeros(n); residual!(op, r1, u, 1.0)
+    r0 = zeros(n); evaluate!(op, r0, u, 0.0)
+    r1 = zeros(n); evaluate!(op, r1, u, 1.0)
     b = r0 .- r1
 
     @testset "residual structure" begin
-        rp = zeros(n); residual!(op, rp, u, p)
+        rp = zeros(n); evaluate!(op, rp, u, p)
         @test rp ≈ r0 .- p .* b rtol = 1e-13
     end
 
@@ -87,8 +87,8 @@ end
 
         # finite-difference cross-check
         h = 1e-6
-        rplus = zeros(n); residual!(op, rplus, u, p + h)
-        rminus = zeros(n); residual!(op, rminus, u, p - h)
+        rplus = zeros(n); evaluate!(op, rplus, u, p + h)
+        rminus = zeros(n); evaluate!(op, rminus, u, p - h)
         @test vec(B) ≈ (rplus .- rminus) ./ 2h rtol = 1e-6
 
         @test_throws DimensionMismatch update_parameter_jacobian!(zeros(n, 2), op, u, p)
@@ -115,13 +115,13 @@ end
         # the AD-fused JacobianResidualKind branch (J and primal r in one sweep).
         r_fused = zeros(n)
         update_linearization!(op, r_fused, u, p)
-        r_ref = zeros(n); residual!(op, r_ref, u, p)
+        r_ref = zeros(n); evaluate!(op, r_ref, u, p)
         @test r_fused ≈ r_ref rtol = 1e-13
 
         v = cos.(0.11 .* (1:n))
         h = 1e-6
-        rplus = zeros(n); residual!(op, rplus, u .+ h .* v, p)
-        rminus = zeros(n); residual!(op, rminus, u .- h .* v, p)
+        rplus = zeros(n); evaluate!(op, rplus, u .+ h .* v, p)
+        rminus = zeros(n); evaluate!(op, rminus, u .- h .* v, p)
         @test op.J * v ≈ (rplus .- rminus) ./ 2h rtol = 1e-6
     end
 
@@ -150,7 +150,7 @@ end
             dh.subdofhandlers[1] => FerriteOperators.SimpleBilinearDiffusionIntegrator(1.3, qrc, :u),
         ))
         dop = setup_operator(strategy, ndi, dh)
-        r = zeros(n); residual!(dop, r, u, nothing)
+        r = zeros(n); evaluate!(dop, r, u, nothing)
         update_linearization!(dop, u, nothing)
         @test r ≈ dop.J * u rtol = 1e-12
     end
@@ -217,8 +217,8 @@ FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperators.SimpleCond
         time_sensitivity!(g_analytic, op, u, 0.9)
         @test ANALYTIC_TS_CALLS[] == getncells(grid)
         # −b, independently derived from residual structure
-        r0 = zeros(n); residual!(op, r0, u, 0.0)
-        r1 = zeros(n); residual!(op, r1, u, 1.0)
+        r0 = zeros(n); evaluate!(op, r0, u, 0.0)
+        r1 = zeros(n); evaluate!(op, r1, u, 1.0)
         @test g_analytic ≈ -(r0 .- r1) rtol = 1e-12
     end
 
@@ -345,14 +345,14 @@ end
     update_linearization!(op, u, 0.0)
     v = cos.(0.11 .* (1:n))
     h = 1e-6
-    rplus = zeros(n); residual!(op, rplus, u .+ h .* v, 0.0)
-    rminus = zeros(n); residual!(op, rminus, u .- h .* v, 0.0)
+    rplus = zeros(n); evaluate!(op, rplus, u .+ h .* v, 0.0)
+    rminus = zeros(n); evaluate!(op, rminus, u .- h .* v, 0.0)
     @test op.J * v ≈ (rplus .- rminus) ./ 2h rtol = 1e-5
 
     # fused J+r path must agree with the split calls
     r_fused = zeros(n)
     update_linearization!(op, r_fused, u, 0.0)
-    r_split = zeros(n); residual!(op, r_split, u, 0.0)
+    r_split = zeros(n); evaluate!(op, r_split, u, 0.0)
     @test r_fused ≈ r_split rtol = 1e-14
 end
 

@@ -92,7 +92,7 @@ export query_element_quadrature_data, store_quadrature_data!
 export VTKQuadratureGrid, VTKQuadratureFile, write_quadrature_data
 export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, process_query!
 
-export setup_operator, update_operator!, update_linearization!, residual!
+export setup_operator, update_operator!, update_linearization!, evaluate!
 export assemble_slot_jacobian!
 export allocate_components, share_pattern, combine!
 export StageBlockOperator, assemble_stages!

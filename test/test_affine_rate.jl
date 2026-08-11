@@ -63,26 +63,26 @@ end
 
     @testset "Backward Euler equivalence" begin
         r = zeros(n)
-        residual!(op, r, (u = u, du = AffineRate(1 / Δt, uprev)), nothing, ctx)
+        evaluate!(op, r, (u = u, du = AffineRate(1 / Δt, uprev)), nothing, ctx)
         @test r ≈ Mop.A * (u .- uprev) ./ Δt .+ Kop.A * u rtol = 1e-12
     end
 
     @testset "slot_slope inside the kernel" begin
         RECORDED_SLOPES[] = nothing
-        residual!(op, zeros(n), (u = u, du = AffineRate(1 / Δt, uprev)), nothing, ctx)
+        evaluate!(op, zeros(n), (u = u, du = AffineRate(1 / Δt, uprev)), nothing, ctx)
         @test RECORDED_SLOPES[] == (1 / Δt, nothing)
 
         # A plain vector source carries no reconstruction linearization.
         RECORDED_SLOPES[] = nothing
-        residual!(op, zeros(n), (u = u, du = uprev), nothing, ctx)
+        evaluate!(op, zeros(n), (u = u, du = uprev), nothing, ctx)
         @test RECORDED_SLOPES[] == (nothing, nothing)
     end
 
     @testset "AffineRate without a preceding :u slot" begin
-        @test_throws ArgumentError residual!(
+        @test_throws ArgumentError evaluate!(
             op, zeros(n), (du = AffineRate(1 / Δt, uprev), u = u), nothing, ctx)
         opdu = setup_operator(strategy, TransientDiffusionIntegrator(qrc, :u), dh; slots = (:du,))
-        @test_throws ArgumentError residual!(
+        @test_throws ArgumentError evaluate!(
             opdu, zeros(n), (du = AffineRate(1 / Δt, uprev),), nothing, ctx)
     end
 

@@ -21,10 +21,10 @@ update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, s
     assemble_into!(JacobianResidualKind(), (op.J, residual), op, states, p, ctx)
 update_linearization!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
     update_linearization!(op, residual, (u = u,), p, nothing)
-residual!(op::LinearizedFerriteOperator, residual::AbstractVector, states::NamedTuple, p, ctx) =
+evaluate!(op::LinearizedFerriteOperator, residual::AbstractVector, states::NamedTuple, p, ctx) =
     assemble_into!(ResidualKind(), (residual,), op, states, p, ctx)
-residual!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
-    residual!(op, residual, (u = u,), p, nothing)
+evaluate!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
+    evaluate!(op, residual, (u = u,), p, nothing)
 
 """
     assemble_slot_jacobian!(J, op, kind::JacobianKind, states, p, ctx)
@@ -213,9 +213,9 @@ function _time_sensitivity!(method::FiniteDifferenceSensitivity, g, op, states, 
     h  = method.h * max(one(t), abs(t))
     uw = copy(states.u)
     statesw = merge(states, (u = uw,))
-    rp = similar(g); residual!(op, rp, statesw, t + h, ctx)
+    rp = similar(g); evaluate!(op, rp, statesw, t + h, ctx)
     copyto!(uw, states.u)
-    rm = similar(g); residual!(op, rm, statesw, t - h, ctx)
+    rm = similar(g); evaluate!(op, rm, statesw, t - h, ctx)
     g .= (rp .- rm) ./ (2h)
     return g
 end
@@ -228,7 +228,7 @@ Apply the (scaled) action of the linearization of the contained nonlinear operat
 """
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector) = mul!(out, op.J, in)
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.J, in, α, β)
-(op::LinearizedFerriteOperator)(residual, u, p) = residual!(op, residual, u, p)
+(op::LinearizedFerriteOperator)(residual, u, p) = evaluate!(op, residual, u, p)
 Base.eltype(op::LinearizedFerriteOperator) = eltype(op.J)
 Base.size(op::LinearizedFerriteOperator) = size(op.J)
 Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)

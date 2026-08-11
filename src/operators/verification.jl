@@ -55,9 +55,9 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
     # Central FD of the residual along the field-dof direction v.
     function fd_dir!(out, v, pfd)
         uw .= ubase; view(uw, 1:nres) .+= hs .* v
-        residual!(op, rp, statesw, pfd, ctx)
+        evaluate!(op, rp, statesw, pfd, ctx)
         uw .= ubase; view(uw, 1:nres) .-= hs .* v
-        residual!(op, rm, statesw, pfd, ctx)
+        evaluate!(op, rm, statesw, pfd, ctx)
         out .= (rp .- rm) ./ 2hs
         return out
     end
@@ -81,7 +81,7 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
     fused_residual = _run_check() do
         uw .= ubase
         r_split = zeros(nres)
-        residual!(op, r_split, statesw, p, ctx)
+        evaluate!(op, r_split, statesw, p, ctx)
         _check_entry(isapprox(r_fused, r_split; rtol, atol), _relerr(r_fused, r_split))
     end
 
@@ -97,9 +97,9 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
         hθ = h * max(1.0, maximum(abs, θ; init = 0.0))
         for j in 1:nθ
             θj = copy(θ); θj[j] += hθ
-            uw .= ubase; residual!(op, rp, statesw, rebuild_parameters(p, θj), ctx)
+            uw .= ubase; evaluate!(op, rp, statesw, rebuild_parameters(p, θj), ctx)
             θj[j] -= 2hθ
-            uw .= ubase; residual!(op, rm, statesw, rebuild_parameters(p, θj), ctx)
+            uw .= ubase; evaluate!(op, rm, statesw, rebuild_parameters(p, θj), ctx)
             Bfd[:, j] .= (rp .- rm) ./ 2hθ
         end
         _check_entry(isapprox(B, Bfd; rtol, atol), _relerr(B, Bfd))

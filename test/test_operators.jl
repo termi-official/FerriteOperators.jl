@@ -159,7 +159,7 @@ using TimerOutputs
             # entry point must reproduce its action.
             ub = sin.(0.4 .* (1:ndofs(dh)))
             rb = zeros(ndofs(dh))
-            residual!(bilinop_base, rb, ub, 0.0)
+            evaluate!(bilinop_base, rb, ub, 0.0)
             @test rb ≈ bilinop_base.A * ub rtol = 1e-13
 
             @testset "Strategy $strategy" for strategy in (
