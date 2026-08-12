@@ -9,7 +9,7 @@ Fields:
 - `offsets`: `offsets[cellid]` is the 1-based start index in `data` for cell `cellid`
 - `npoints`: `npoints[cellid]` is the number of quadrature points for cell `cellid`
 
-Use [`setup_qvector`](@ref) to build a `QVector` from a [`DofHandler`](@ref) or an
+Use [`setup_qvector`](@ref) to build a `QVector` from a `Ferrite.DofHandler` or an
 assembled operator. Use [`get_range_for_cell`](@ref) to obtain a mutable view into
 the slice owned by a particular cell.
 """

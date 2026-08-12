@@ -26,23 +26,21 @@ end
 The assembly machinery shared by all operators: the execution strategy, the
 per-subdomain caches (workspaces + partitions), the dof handler the operator
 assembles against, the engine-scoped internal-variable handler, and the
-setup-time declarations — slot names, request kinds (kind types; declared
-sensitivity kinds are validated eagerly at setup, undeclared ones on first
-use), and the kernel-args type this engine builds (queried through
-[`kernel_args_type`](@ref) wherever element methods are looked up). Operators
-are payload (matrices/vectors) plus an engine plus their integrator.
+scheme protocol carrying the setup-time declarations
+([`AbstractSchemeProtocol`](@ref) — slot names, request kinds, scratch, and
+the kernel-args type queried through [`kernel_args_type`](@ref) wherever
+element methods are looked up). Operators are payload (matrices/vectors) plus
+an engine plus their integrator.
 """
 @concrete struct AssemblyEngine
     strategy
     subdomain_caches
     dh
     ivh         # shared by all subdomains
-    slots       # slot names declared at setup
-    requests    # request kind types declared at setup
-    args_type   # concrete kernel-args type handed to element kernels
+    protocol    # the setup-time declarations
 end
 
-kernel_args_type(engine::AssemblyEngine) = engine.args_type
+kernel_args_type(engine::AssemblyEngine) = declared_args_type(engine.protocol)
 
 function execute_on_subdomains!(task, strategy, subdomain_caches)
     for (subdomain_id, sc) in enumerate(subdomain_caches)

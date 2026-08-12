@@ -61,6 +61,40 @@ function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::BlanketCla
     end
 end
 FerriteOperators.provides_analytic(::Type{<:BlanketClaimCache}, ::JacobianKind) = true
+# … and the same overclaim for the weighted kind, which has no kernel at all.
+FerriteOperators.provides_analytic(::Type{<:BlanketClaimCache}, ::WeightedJacobianKind) = true
+
+# The hand-fused scheme matrix W = w_du·M + w_u·K: an analytic provider of the
+# WEIGHTED kind (no single-slot Jacobian computes a combination), reading its
+# scalars from the request payload. Serves `(u, du)` weights.
+struct FusedWIntegrator <: AbstractNonlinearIntegrator
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+end
+struct FusedWCache{C <: StageDiffusionCache} <: AbstractVolumetricElementCache
+    inner::C
+end
+FerriteOperators.setup_element_cache(m::FusedWIntegrator, sdh::SubDofHandler) =
+    FusedWCache(FerriteOperators.setup_element_cache(StageDiffusionIntegrator(m.qrc, m.field_name), sdh))
+FerriteOperators.duplicate_for_device(device, c::FusedWCache) =
+    FusedWCache(FerriteOperators.duplicate_for_device(device, c.inner))
+FerriteOperators.reinit_values!(c::FusedWCache, cell) = reinit_values!(c.inner, cell)
+FerriteOperators.assemble_cell!(req::ResidualRequest, c::FusedWCache, args) =
+    assemble_cell!(req, c.inner, args)
+FerriteOperators.provides_analytic(::Type{<:FusedWCache}, ::WeightedJacobianKind) = true
+const ANALYTIC_W_CALLS = Ref(0)
+function FerriteOperators.assemble_cell!(req::WeightedJacobianRequest, c::FusedWCache, args)
+    ANALYTIC_W_CALLS[] += 1
+    (; cv) = c.inner
+    wu, wdu = req.weights.u, req.weights.du
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        for i in 1:getnbasefunctions(cv), j in 1:getnbasefunctions(cv)
+            req.K[i, j] += (wu * (shape_gradient(cv, qp, i) ⋅ shape_gradient(cv, qp, j)) +
+                            wdu * shape_value(cv, qp, i) * shape_value(cv, qp, j)) * dΩ
+        end
+    end
+end
 
 @testset "Components and stage blocks" begin
     grid = generate_grid(Quadrilateral, (3, 2))
@@ -188,6 +222,94 @@ FerriteOperators.provides_analytic(::Type{<:BlanketClaimCache}, ::JacobianKind) 
         @test_throws DimensionMismatch mul!(zeros(n), sbop, x)
         @test_throws DimensionMismatch assemble_stages!(sbop, op, sts[1:1], nothing, ctxs)
         @test_throws DimensionMismatch StageBlockOperator(op, A, [0.5], Δt)
+    end
+
+    @testset "weighted Jacobians" begin
+        γ       = 0.5
+        weights = (u = 1.0, du = 1 / (γ * Δt))
+        states  = (u = u, du = du)
+        uprev   = sin.(0.17 .* (1:n))
+        # The SDIRK/backward-Euler Newton matrix, monolithically known.
+        ref     = Matrix(Kop.A) .+ (1 / (γ * Δt)) .* Matrix(Mop.A)
+
+        W = share_pattern(op.J)
+        assemble_weighted_jacobian!(W, op, weights, states, nothing, ctx)   # fused, AD-seeded
+        @test Matrix(W) ≈ ref rtol = 1e-12
+
+        Wc = share_pattern(op.J)
+        FerriteOperators._weighted_jacobian_composed!(
+            Wc, op, FerriteOperators.WeightedJacobianKind(weights), states, nothing, ctx)
+        @test Wc.nzval ≈ W.nzval rtol = 1e-12
+
+        @testset "dense finite-difference reference" begin
+            h = 1e-6
+            Wfd = zeros(n, n)
+            for j in 1:n
+                e = zeros(n); e[j] = 1.0
+                for (slot, w) in pairs(weights)
+                    sp = merge(states, NamedTuple{(slot,)}((states[slot] .+ h .* e,)))
+                    sm = merge(states, NamedTuple{(slot,)}((states[slot] .- h .* e,)))
+                    rp = zeros(n); evaluate!(op, rp, sp, nothing, ctx)
+                    rm = zeros(n); evaluate!(op, rm, sm, nothing, ctx)
+                    @views Wfd[:, j] .+= w .* (rp .- rm) ./ 2h
+                end
+            end
+            @test Matrix(W) ≈ Wfd rtol = 1e-6
+        end
+
+        fop = setup_operator(strategy, FusedWIntegrator(qrc, :u), dh; slots = (:u, :du))
+        @testset "an analytic weighted kernel is selected and agrees" begin
+            fcache = first(fop.engine.subdomain_caches).domain.element
+            @test FerriteOperators.provides_analytic(typeof(fcache), WeightedJacobianKind(weights))
+            ANALYTIC_W_CALLS[] = 0
+            Wa = share_pattern(fop.J)
+            assemble_weighted_jacobian!(Wa, fop, weights, states, nothing, ctx)
+            @test ANALYTIC_W_CALLS[] == getncells(grid)
+            @test Matrix(Wa) ≈ ref rtol = 1e-12
+            # the same operator composed from per-slot AD sweeps, same weights
+            Wac = share_pattern(fop.J)
+            FerriteOperators._weighted_jacobian_composed!(
+                Wac, fop, FerriteOperators.WeightedJacobianKind(weights), states, nothing, ctx)
+            @test Wac.nzval ≈ Wa.nzval rtol = 1e-12
+        end
+
+        @testset "complex weights compose into a complex target" begin
+            λ  = 3.6378342527444957 + 3.0805293910256707im
+            cw = (du = 1.0 + 0.0im, u = Δt * λ)
+            Wx = share_pattern(op.J, ComplexF64)
+            assemble_weighted_jacobian!(Wx, op, cw, states, nothing, ctx)
+            @test eltype(Wx) == ComplexF64
+            @test Matrix(Wx) ≈ Matrix(Mop.A) .+ (Δt * λ) .* Matrix(Kop.A) rtol = 1e-12
+            # the fused sweep refuses them instead of truncating to the real matrix
+            @test_throws ArgumentError FerriteOperators._weighted_jacobian_fused!(
+                share_pattern(op.J), op, FerriteOperators.WeightedJacobianKind(cw), states, nothing, ctx)
+        end
+
+        @testset "AffineRate slots: the AD route rejects, the analytic route serves" begin
+            rate_states = (u = u, du = AffineRate(1 / Δt, uprev))
+            @test_throws ArgumentError assemble_weighted_jacobian!(W, op, weights, rate_states, nothing, ctx)
+            Wr = share_pattern(fop.J)
+            assemble_weighted_jacobian!(Wr, fop, weights, rate_states, nothing, ctx)
+            @test Matrix(Wr) ≈ ref rtol = 1e-12
+        end
+
+        @testset "a weighted claim without the kernel is loud" begin
+            @test_throws ArgumentError setup_operator(strategy, BlanketClaimIntegrator(qrc, :u), dh;
+                                                      slots = (:u, :du), requests = (WeightedJacobianKind,))
+            bop = setup_operator(strategy, BlanketClaimIntegrator(qrc, :u), dh; slots = (:u, :du))
+            @test_throws ArgumentError assemble_weighted_jacobian!(share_pattern(op.J), bop, weights, states, nothing, ctx)
+            # a slot the sweep does not carry cannot be weighted either
+            @test_throws ArgumentError assemble_weighted_jacobian!(W, op, (u = 1.0, v = 2.0), states, nothing, ctx)
+            @test_throws ArgumentError WeightedJacobianKind((;))
+        end
+
+        @testset "the fused sweep does not allocate per cell" begin
+            for _ in 1:2   # warmup: compilation + lazy Dual-buffer sizing
+                assemble_weighted_jacobian!(W, op, weights, states, nothing, ctx)
+            end
+            # measured: 432 B of assembler setup, independent of the cell count
+            @test @allocated(assemble_weighted_jacobian!(W, op, weights, states, nothing, ctx)) < 1024
+        end
     end
 
     @testset "transformed Radau stage matrix" begin

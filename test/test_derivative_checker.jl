@@ -99,16 +99,75 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::TimedCheck
     end
 end
 
+# Transient diffusion, r(u, u̇) = ∫ (u̇ v + ∇u⋅∇v) dΩ, with a hand-fused scheme
+# matrix as its analytic weighted kernel. `w_scale` detunes that kernel exactly
+# as `jac_scale` detunes the Jacobian above (exact for scale = 1).
+struct WeightedCheckerIntegrator <: AbstractNonlinearIntegrator
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+    w_scale::Float64
+end
+struct WeightedCheckerCache{CV <: CellValues} <: AbstractVolumetricElementCache
+    cv::CV
+    w_scale::Float64
+end
+function FerriteOperators.setup_element_cache(m::WeightedCheckerIntegrator, sdh::SubDofHandler)
+    qr     = getquadraturerule(m.qrc, sdh)
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return WeightedCheckerCache(CellValues(qr, ip, ip_geo), m.w_scale)
+end
+FerriteOperators.duplicate_for_device(device, c::WeightedCheckerCache) =
+    WeightedCheckerCache(FerriteOperators.duplicate_for_device(device, c.cv), c.w_scale)
+FerriteOperators.reinit_values!(c::WeightedCheckerCache, cell) = reinit!(c.cv, cell)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::WeightedCheckerCache, args)
+    (; cv) = cache
+    uₑ, duₑ = args.states.u, args.states.du
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        u̇  = function_value(cv, qp, duₑ)
+        ∇u = function_gradient(cv, qp, uₑ)
+        for i in 1:getnbasefunctions(cv)
+            req.r[i] += (u̇ * shape_value(cv, qp, i) + ∇u ⋅ shape_gradient(cv, qp, i)) * dΩ
+        end
+    end
+end
+FerriteOperators.provides_analytic(::Type{<:WeightedCheckerCache}, ::WeightedJacobianKind) = true
+function FerriteOperators.assemble_cell!(req::WeightedJacobianRequest, cache::WeightedCheckerCache, args)
+    (; cv, w_scale) = cache
+    wu, wdu = req.weights.u, req.weights.du
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        for i in 1:getnbasefunctions(cv), j in 1:getnbasefunctions(cv)
+            req.K[i, j] += w_scale * (wu * (shape_gradient(cv, qp, i) ⋅ shape_gradient(cv, qp, j)) +
+                                      wdu * shape_value(cv, qp, i) * shape_value(cv, qp, j)) * dΩ
+        end
+    end
+end
+
+function setup_weighted_checker_operator(w_scale)
+    grid = generate_grid(Quadrilateral, (4, 3))
+    dh   = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    op = setup_operator(strategy, WeightedCheckerIntegrator(QuadratureRuleCollection(2), :u, w_scale), dh;
+                        slots = (:u, :du))
+    return op, dh
+end
+
 @testset "Derivative checker" begin
     @testset "correct analytic Jacobian and AD sensitivities pass" begin
         op, dh = setup_checker_operator(1.0)
         u = sin.(0.3 .* (1:ndofs(dh)))
         res = check_derivatives(op, u, 1.7)
         @test res.passed
-        # every check but the time sensitivity, which needs a context
+        # every check but the ones needing a context resp. weights
         @test res.checks.time_sensitivity.skipped !== nothing
         @test occursin("seed through ctx", res.checks.time_sensitivity.skipped)
-        @test all(c.skipped === nothing for (name, c) in pairs(res.checks) if name !== :time_sensitivity)
+        @test occursin("no `weights` given", res.checks.weighted_jacobian.skipped)
+        @test all(c.skipped === nothing for (name, c) in pairs(res.checks)
+                  if name ∉ (:time_sensitivity, :weighted_jacobian, :weighted_jacobian_routes))
         @test res.checks.jacobian.err < 1e-7
         @test res.checks.parameter_jacobian.err < 1e-7
     end
@@ -135,6 +194,54 @@ end
         @test !res.checks.jacobian.passed
         # the residual-derived paths are untouched by the broken Jacobian kernel
         @test res.checks.parameter_jacobian.passed
+        @test res.checks.state_jvp.passed
+    end
+
+    @testset "weighted Jacobian: fused vs composed vs FD" begin
+        Δt = 0.25
+        ctx = TimeIntegrationContext(1.0, Δt, Δt)
+        weights = (u = 1.0, du = 1 / (0.5 * Δt))
+
+        op, dh = setup_weighted_checker_operator(1.0)
+        n = ndofs(dh)
+        states = (u = sin.(0.3 .* (1:n)), du = cos.(0.2 .* (1:n)))
+
+        res = check_derivatives(op, states, nothing, ctx; weights)
+        @test res.passed
+        @test res.checks.weighted_jacobian.skipped === nothing
+        @test res.checks.weighted_jacobian.err < 1e-6
+        @test res.checks.weighted_jacobian_routes.skipped === nothing
+        @test res.checks.weighted_jacobian_routes.err < 1e-10
+
+        # without weights there is nothing to check
+        skipped = check_derivatives(op, states, nothing, ctx)
+        @test occursin("no `weights` given", skipped.checks.weighted_jacobian.skipped)
+        @test skipped.checks.weighted_jacobian_routes.skipped !== nothing
+
+        # complex weights never reach the real finite-difference referee
+        cplx = check_derivatives(op, states, nothing, ctx; weights = (u = 1.0 + 0im, du = 2.0 + 0im))
+        @test occursin("complex weights", cplx.checks.weighted_jacobian.skipped)
+
+        # a reconstructed slot cannot be perturbed independently
+        rate = check_derivatives(op, (u = states.u, du = AffineRate(1 / Δt, states.u)), nothing, ctx; weights)
+        @test occursin("reconstructed source", rate.checks.weighted_jacobian.skipped)
+    end
+
+    @testset "wrong analytic weighted kernel is detected" begin
+        Δt = 0.25
+        ctx = TimeIntegrationContext(1.0, Δt, Δt)
+        weights = (u = 1.0, du = 1 / (0.5 * Δt))
+        op, dh = setup_weighted_checker_operator(1.01)
+        n = ndofs(dh)
+        states = (u = sin.(0.3 .* (1:n)), du = cos.(0.2 .* (1:n)))
+
+        res = check_derivatives(op, states, nothing, ctx; weights)
+        @test !res.passed
+        @test !res.checks.weighted_jacobian.passed
+        # the composed route derives from the residual, so the routes disagree too
+        @test !res.checks.weighted_jacobian_routes.passed
+        # the residual-derived paths are untouched by the broken weighted kernel
+        @test res.checks.jacobian.passed
         @test res.checks.state_jvp.passed
     end
 

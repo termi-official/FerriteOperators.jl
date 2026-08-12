@@ -601,15 +601,13 @@ _zero_element_buffer!(kind, iws) = fill!(_element_buffer(kind, iws), 0.0)
 end
 
 # The `nothing` payload is the element's ordinary cell kernel (AD fallback
-# included); a real payload goes to the analytic term kernel.
-@inline run_patch_term!(kind::PatchMatrixKind, ::Nothing, iws, statesₑ, pₑ, ctx) =
-    v2_cell_kernel!(JacobianKind(), iws.element, iws, statesₑ, pₑ, ctx)
-@inline run_patch_term!(kind::PatchVectorKind, ::Nothing, iws, statesₑ, pₑ, ctx) =
-    v2_cell_kernel!(ResidualKind(), iws.element, iws, statesₑ, pₑ, ctx)
-@inline run_patch_term!(kind::PatchMatrixKind, data, iws, statesₑ, pₑ, ctx) =
-    assemble_patch_cell!(JacobianRequest{:u}(iws.Ke), iws.element, _v2_args(iws, statesₑ, pₑ, ctx), data)
-@inline run_patch_term!(kind::PatchVectorKind, data, iws, statesₑ, pₑ, ctx) =
-    assemble_patch_cell!(ResidualRequest(iws.re), iws.element, _v2_args(iws, statesₑ, pₑ, ctx), data)
+# included); a real payload goes to the analytic term kernel. Both reach the
+# element through the same kind → request association as the cell driver.
+@inline run_patch_term!(kind::PatchAssemblyKind, ::Nothing, iws, statesₑ, pₑ, ctx) =
+    v2_cell_kernel!(patch_element_kind(kind), iws.element, iws, statesₑ, pₑ, ctx)
+@inline run_patch_term!(kind::PatchAssemblyKind, data, iws, statesₑ, pₑ, ctx) =
+    assemble_patch_cell!(materialize_request(patch_element_kind(kind), iws), iws.element,
+                         _v2_args(iws, statesₑ, pₑ, ctx), data)
 
 """
     assemble_patches!(kind, op, provider::PatchItems, states, p, ctx = nothing)

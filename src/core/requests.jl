@@ -75,6 +75,24 @@ struct JacobianResidualRequest{M <: AbstractMatrix, V <: AbstractVector} <: Abst
     r::V
 end
 
+"""
+    WeightedJacobianRequest(K, weights)
+
+Accumulate the weighted Jacobian `Σₛ wₛ ∂F/∂s` into `K`, over the slots named
+by `weights` and at frozen values of every other slot. `weights` is the
+caller's per-slot `NamedTuple` — the scheme's chain-rule scalars ride as
+request payload, so a fused kernel and the composed per-slot fallback draw
+from one source (see [`WeightedJacobianKind`](@ref)).
+
+A hand-fused scheme matrix (SDIRK/backward Euler `W = M/(γΔt) + K`) is an
+analytic provider of THIS request, not of [`JacobianRequest`](@ref): it
+computes the combination internally, which no single-slot Jacobian does.
+"""
+struct WeightedJacobianRequest{M <: AbstractMatrix, W <: NamedTuple} <: AbstractAssemblyRequest
+    K::M
+    weights::W
+end
+
 "Accumulate the dense local parameter Jacobian ∂Fₑ/∂θ into `B` (ndofsₑ × nθ)."
 struct ParameterJacobianRequest{M <: AbstractMatrix} <: AbstractAssemblyRequest
     B::M
@@ -304,20 +322,23 @@ function validate_element_cache(cache, declared_requests::Tuple = (), ::Type{A} 
         "reinitializes element values once per cell and sweep through this hook; " *
         "kernels are pure evaluation and must not rely on reinit inside them."))
     _warn_pinned_kernel_args(T, A)
-    for (kind, ReqT) in _primal_validatable_kinds()
-        _assert_trait_backed(T, kind, ReqT, A)
+    for kind in _primal_validatable_kinds()
+        _assert_trait_backed(T, kind, A)
     end
-    for (kind, ReqT) in _sensitivity_validatable_kinds()
+    for kind in _sensitivity_validatable_kinds()
         any(D -> kind isa D, declared_requests) || continue
-        _assert_trait_backed(T, kind, ReqT, A)
+        _assert_trait_backed(T, kind, A)
         # Declaring moves the admissibility failure from first use to setup.
         # Time sensitivities are exempt: their FD escape is chosen per call.
-        kind isa TimeSensitivityKind || assert_sensitivity_admissible(T, kind)
+        # Weighted Jacobians are exempt for the same reason: their participating
+        # slots and their fused-vs-composed route are call-time knowledge.
+        kind isa Union{TimeSensitivityKind, WeightedJacobianKind} || assert_sensitivity_admissible(T, kind)
     end
     return nothing
 end
 
-function _assert_trait_backed(T, kind, ReqT, ::Type{A} = KernelArgs) where {A}
+function _assert_trait_backed(T, kind, ::Type{A} = KernelArgs) where {A}
+    ReqT = request_type(kind)
     if provides_analytic(T, kind) && !hasmethod(assemble_cell!, Tuple{ReqT, T, A})
         throw(ArgumentError(
             "$(T) declares `provides_analytic` for $(typeof(kind)) but implements no " *
@@ -345,19 +366,18 @@ function _warn_pinned_kernel_args(::Type{T}, ::Type{A}) where {T, A}
     return nothing
 end
 
-# Kind instances paired with the request types their analytic kernels take.
-# Payload-carrying kinds get placeholder payloads — only the type matters for
-# the trait query.
-_primal_validatable_kinds() = (
-    (JacobianKind{:u}(), JacobianRequest{:u}),
-    (JacobianResidualKind(), JacobianResidualRequest),
-)
+# The kinds whose trait ↔ kernel consistency is checked at setup; the request
+# each analytic kernel takes comes from [`request_type`](@ref), the single
+# kind → request association. Payload-carrying kinds get placeholder payloads —
+# only the type matters for the trait query.
+_primal_validatable_kinds() = (JacobianKind{:u}(), JacobianResidualKind())
 _sensitivity_validatable_kinds() = (
-    (ParameterJacobianKind(), ParameterJacobianRequest),
-    (ParameterVJPKind(nothing), ParameterVJPRequest),
-    (TimeSensitivityKind(), TimeSensitivityRequest),
-    (StateJVPKind(nothing), StateJVPRequest),
-    (StateVJPKind(nothing), StateVJPRequest),
+    ParameterJacobianKind(),
+    ParameterVJPKind(nothing),
+    TimeSensitivityKind(),
+    StateJVPKind(nothing),
+    StateVJPKind(nothing),
+    WeightedJacobianKind((u = 1.0,)),
 )
 
 # AD-from-residual through an element-local solve is wrong in principle

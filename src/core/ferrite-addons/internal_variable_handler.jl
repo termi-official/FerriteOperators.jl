@@ -1,5 +1,17 @@
-# This is the easiest solution for now.
-# It is assumed that the element knows how many dofs per quadrature point are there locally.
+"""
+    InternalVariableHandler(offsets, base_offset, ndofs)
+
+Layout of the condensed internal-variable block appended to the solution
+vector, `u = [ū; q]`. The element declares how many internal dofs it owns per
+cell (`get_number_of_internal_dofs_per_element`) and the handler turns that
+into per-cell ranges through [`internal_variable_offset`](@ref) /
+[`internal_variable_range`](@ref), both addressing the solution vector rather
+than the block.
+
+Internal dofs stay out of the `Ferrite.DofHandler` deliberately: their count
+varies per quadrature point and per material, which a field-based numbering
+would have to pad.
+"""
 @concrete mutable struct InternalVariableHandler <: AbstractDofHandler
     # `ncells+1` offsets relative to the start of the internal variable block, with
     # `internal_variable_offsets[1] == 0`, such that cell `cid` owns the relative entries
@@ -10,8 +22,22 @@
     ndofs <: Integer
 end
 Ferrite.ndofs(lvh::InternalVariableHandler) = lvh.ndofs
-# Both are absolute, i.e. they address the solution vector and not the internal variable block.
+
+"""
+    internal_variable_offset(ivh, cellid) -> Int
+
+Index in the solution vector immediately before cell `cellid`'s internal
+variables — absolute, i.e. it already includes the field dofs preceding the
+internal block.
+"""
 internal_variable_offset(lvh::InternalVariableHandler, cellid::Int) = lvh.base_offset + lvh.internal_variable_offsets[cellid]
+
+"""
+    internal_variable_range(ivh, cellid) -> UnitRange{Int}
+
+Range of cell `cellid`'s internal variables in the solution vector, absolute
+like [`internal_variable_offset`](@ref).
+"""
 internal_variable_range(lvh::InternalVariableHandler, cellid::Int)  = (internal_variable_offset(lvh, cellid)+1):(lvh.base_offset + lvh.internal_variable_offsets[cellid+1])
 Ferrite.close!(lvh::InternalVariableHandler) = nothing
 

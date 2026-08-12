@@ -24,7 +24,8 @@ _check_entry(passed, err) = (passed = passed, err = err, skipped = nothing)
 
 """
     check_derivatives(op, states, p, ctx = nothing; h = cbrt(eps(Float64)),
-                      rtol = 1e-5, atol = 1e-8, nprobes = 3) -> (passed, checks)
+                      rtol = 1e-5, atol = 1e-8, nprobes = 3,
+                      weights = nothing) -> (passed, checks)
 
 Cross-check the operator's derivative paths against central finite differences
 of its own residual, through the same entry points solvers use — a wrong
@@ -36,6 +37,16 @@ given — the time sensitivity (default method against
 [`FiniteDifferenceSensitivity`](@ref); the evaluation time comes from the
 context, which is where ∂F/∂t seeds).
 
+Passing `weights` (a per-slot NamedTuple, e.g. `(u = 1.0, du = 1/(γ*Δt))`)
+adds the two weighted-Jacobian checks: `weighted_jacobian` probes the fused
+`Σₛ wₛ ∂F/∂s` against per-slot finite differences of the residual, and
+`weighted_jacobian_routes` requires the fused and composed routes of
+[`assemble_weighted_jacobian!`](@ref) to agree — the caller cannot tell which
+route a given operator takes, so the two must be interchangeable. Both are
+skipped with the reason recorded when no weights are given, when the weights
+are complex (the FD referee is real), or when a participating slot carries an
+[`AffineRate`](@ref) source (nothing to difference against).
+
 `checks` holds one `(passed, err, skipped)` entry per check; inadmissible or
 unsupported checks are skipped with the reason recorded, and `passed` is the
 conjunction of all non-skipped checks. The caller's vectors are never
@@ -45,7 +56,8 @@ solves, so the check validates the consistent condensed tangent.
 """
 function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
         h::Float64 = cbrt(eps(Float64)),
-        rtol::Float64 = 1e-5, atol::Float64 = 1e-8, nprobes::Int = 3)
+        rtol::Float64 = 1e-5, atol::Float64 = 1e-8, nprobes::Int = 3,
+        weights::Union{Nothing, NamedTuple} = nothing)
     nres  = residual_size(op)
     ubase = copy(states.u)
     uw    = copy(states.u)
@@ -155,9 +167,78 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
         _check_entry(isapprox(g, gfd; rtol, atol), _relerr(g, gfd))
     end
 
+    # The weighted routes assemble into two members of one pattern group, so
+    # the fused-vs-composed comparison is a plain `nzval` comparison.
+    Wf = Ref{Any}(nothing)
+    weighted_jacobian = _run_check() do
+        skip = _weighted_check_skip(weights, states)
+        skip === nothing || return (passed = true, err = NaN, skipped = skip)
+        kind = WeightedJacobianKind(weights)
+        _fused_weighted_route(op, kind) || return (passed = true, err = NaN, skipped =
+            "this operator's element caches route the weighted Jacobian to the composed path only")
+        slots = keys(weights)
+        # Writable copies of every participating slot; `:u` reuses the copy the
+        # checker already protects the caller's state with.
+        wbase = NamedTuple{slots}(map(s -> s === :u ? ubase : copy(states[s]), slots))
+        wwork = NamedTuple{slots}(map(s -> s === :u ? uw : copy(states[s]), slots))
+        statesq = merge(statesw, wwork)
+        reset!() = foreach(i -> wwork[i] .= wbase[i], 1:length(slots))
+
+        W = allocate_components(op, (:fused,)).fused
+        reset!()
+        _weighted_jacobian_fused!(W, op, kind, statesq, p, ctx)
+        Wf[] = W
+
+        Wv = zeros(nres); fd = zeros(nres); fdw = zeros(nres)
+        err = 0.0; ok = true
+        for k in 1:nprobes
+            v = _probe_vector(nres, 23 + k)
+            fill!(fdw, 0.0)
+            for (i, s) in enumerate(slots)
+                hi = h * max(1.0, maximum(abs, view(wbase[i], 1:nres)))
+                reset!(); view(wwork[i], 1:nres) .+= hi .* v
+                evaluate!(op, rp, statesq, p, ctx)
+                reset!(); view(wwork[i], 1:nres) .-= hi .* v
+                evaluate!(op, rm, statesq, p, ctx)
+                @. fd = (rp - rm) / 2hi
+                @. fdw += weights[i] * fd
+            end
+            reset!()
+            mul!(Wv, W, v)
+            ok &= isapprox(Wv, fdw; rtol, atol)
+            err = max(err, _relerr(Wv, fdw))
+        end
+        _check_entry(ok, err)
+    end
+
+    weighted_jacobian_routes = _run_check() do
+        Wfused = Wf[]
+        Wfused === nothing && return (passed = true, err = NaN,
+            skipped = "fused weighted Jacobian unavailable as reference")
+        Wc = share_pattern(Wfused)
+        uw .= ubase
+        _weighted_jacobian_composed!(Wc, op, WeightedJacobianKind(weights), statesw, p, ctx)
+        _check_entry(isapprox(Wfused.nzval, Wc.nzval; rtol, atol), _relerr(Wfused.nzval, Wc.nzval))
+    end
+
     checks = (; jacobian, fused_residual, parameter_jacobian, parameter_vjp,
-                state_jvp, state_vjp, time_sensitivity)
+                state_jvp, state_vjp, time_sensitivity,
+                weighted_jacobian, weighted_jacobian_routes)
     return (passed = all(c.skipped !== nothing || c.passed for c in values(checks)), checks = checks)
+end
+
+# Reasons the weighted checks have nothing to compare against.
+function _weighted_check_skip(weights, states)
+    weights === nothing && return "no `weights` given — pass e.g. `weights = (u = 1.0, du = 1/(γ*Δt))` " *
+        "to check the weighted Jacobian"
+    all(w -> w isa Real, values(weights)) || return "complex weights assemble through the composed " *
+        "route only, and the finite-difference referee is real"
+    for s in keys(weights)
+        haskey(states, s) || return "states carry no `:$s` slot"
+        states[s] isa AbstractVector || return "slot `:$s` carries a reconstructed source, " *
+            "which the finite-difference referee cannot perturb independently"
+    end
+    return nothing
 end
 
 check_derivatives(op, u::AbstractVector, p; kwargs...) =

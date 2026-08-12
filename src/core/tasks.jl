@@ -34,6 +34,51 @@ struct JacobianKind{slot} end
 JacobianKind() = JacobianKind{:u}()
 
 """
+    WeightedJacobianKind(weights::NamedTuple)
+    WeightedJacobianKind{slots}(weights)
+
+Assembly of the weighted Jacobian `W = Σₛ wₛ ∂F/∂s` in ONE sweep, over the
+slots `weights` names and at frozen values of every other slot — the matrix a
+scheme actually solves with (`W = M/(γΔt) + K` for SDIRK/backward Euler,
+`M/(βΔt²) + γ/(βΔt) C + K` for Newmark). The slot set is the type parameter
+`slots`; the weights themselves are runtime payload and eltype-generic.
+
+Weights are REQUEST payload: the kernel reads them from
+[`WeightedJacobianRequest`](@ref), and the composed fallback folds the very
+same NamedTuple with [`combine!`](@ref), so the two routes cannot disagree
+about the scheme's scalars. Solvers issue the kind through
+[`assemble_weighted_jacobian!`](@ref), which selects the route.
+
+An element opts into the fused route with
+
+    provides_analytic(::Type{<:MyCache}, ::WeightedJacobianKind) = true
+    assemble_cell!(req::WeightedJacobianRequest, cache::MyCache, args) = # reads req.weights
+
+Without it the sweep derives `W` from the residual kernel by seeding every
+participating slot with its weight-scaled Duals — real weights only, since the
+element matrix and the Dual machinery are real. Complex weights (transformed
+Radau) go through the composed route.
+
+!!! note "AffineRate participation"
+    The AD route freezes [`AffineRate`](@ref) slots at gather time, so a
+    reconstructed slot cannot participate in it and the sweep rejects one — the
+    same rule as [`JacobianKind`](@ref). An ANALYTIC weighted kernel is exempt:
+    it forms the combination internally, which is what a multilevel-Newton
+    element with a rate-coupled local problem needs (its condensed tangent
+    `−(∂L/∂q)⁻¹(∂L/∂ε + slope·∂L/∂ε̇)` carries the slope inside the local
+    inverse and cannot be recovered by weighting separated partials).
+"""
+struct WeightedJacobianKind{slots, W <: NamedTuple}
+    weights::W
+end
+function WeightedJacobianKind(weights::NamedTuple{slots}) where {slots}
+    isempty(slots) && throw(ArgumentError(
+        "A `WeightedJacobianKind` needs at least one weighted slot, got empty weights."))
+    return WeightedJacobianKind{slots, typeof(weights)}(weights)
+end
+WeightedJacobianKind{slots}(weights::NamedTuple{slots}) where {slots} = WeightedJacobianKind(weights)
+
+"""
     FunctionalKind{tag}
     FunctionalKind(tag::Symbol)
 
@@ -45,11 +90,96 @@ evaluate through [`evaluate_functional`](@ref).
 struct FunctionalKind{tag} end
 FunctionalKind(tag::Symbol) = FunctionalKind{tag}()
 
-const MatrixAssemblyKind  = Union{JacobianResidualKind, JacobianKind, BilinearKind}
+const MatrixAssemblyKind  = Union{JacobianResidualKind, JacobianKind, WeightedJacobianKind, BilinearKind}
 const VectorAssemblyKind  = Union{JacobianResidualKind, ResidualKind, LinearKind}
-const UnknownDependentKind = Union{JacobianResidualKind, JacobianKind, ResidualKind}
-const PrimalKind = Union{JacobianResidualKind, JacobianKind, ResidualKind, BilinearKind, LinearKind}
+const UnknownDependentKind = Union{JacobianResidualKind, JacobianKind, WeightedJacobianKind, ResidualKind}
+const PrimalKind = Union{JacobianResidualKind, JacobianKind, WeightedJacobianKind, ResidualKind, BilinearKind, LinearKind}
 const SensitivityKind = Union{ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind}
+
+"""
+    DerivativeSweepKind
+
+The kinds whose sweeps can seed ForwardDiff Duals through the residual kernel,
+i.e. the ones served by the per-worker derivative family
+([`ADWorkspace`](@ref)). Jacobian kinds belong here through their AD fallback,
+even when an element serves them analytically.
+"""
+const DerivativeSweepKind = Union{JacobianKind, JacobianResidualKind, WeightedJacobianKind, SensitivityKind}
+
+"""
+    sweep_state(ws, kind)
+
+The per-worker member serving `kind`'s sweep family. The workspace is a fixed
+CORE (geometry cache, element caches, slot buffers, scratch, `Ke`/`re`) plus
+kind-family members that exist only when the operator's declarations call for
+them: derivative kinds read the [`ADWorkspace`](@ref), functional kinds the
+reduction accumulator. Families a sweep needs but does not have are
+materialized once per sweep by [`materialize_sweep_state!`](@ref).
+"""
+function sweep_state(ws, kind::DerivativeSweepKind)
+    ad = ws.ad
+    ad === nothing && throw(ArgumentError(
+        "This operator carries no derivative sweep family: neither its protocol's declared " *
+        "kinds nor its integrator family's mandatory kinds differentiate. Declare the kind at " *
+        "setup — `setup_operator(...; requests = ($(nameof(typeof(kind))),))` or a protocol " *
+        "whose `declared_kinds` names it."))
+    return ad
+end
+sweep_state(ws, ::FunctionalKind) = ws.functional
+
+"""
+    materialize_sweep_state!(engine, kind)
+
+Build the sweep-state families a sweep of `kind` needs on every worker that
+lacks them — once per sweep, before the item loop. Families selected by the
+operator's declarations are already in place and this is a no-op.
+"""
+materialize_sweep_state!(engine, kind) = nothing
+function materialize_sweep_state!(engine, ::FunctionalKind)
+    for sc in engine.subdomain_caches, ws in sc.device_cache
+        ws.functional === nothing && (ws.functional = FunctionalAccumulator(nothing))
+    end
+    return nothing
+end
+
+# Which per-worker families a declared kind set calls for. Kinds arrive as
+# their UnionAll bases, so the family test is a subtype test.
+needs_derivative_family(kinds) = any(K -> K <: DerivativeSweepKind, kinds)
+needs_functional_family(kinds) = any(K -> K <: FunctionalKind, kinds)
+
+"""
+    request_type(kind) -> Type
+    materialize_request(kind, ws) -> AbstractAssemblyRequest
+
+The single kind → request association. `request_type` is the pure form used
+wherever a kernel method is looked up (the setup-time trait ↔ kernel checks);
+`materialize_request` is the executing form, binding the workspace buffers a
+sweep of `kind` accumulates into. Drivers — cell, facet, patch — and the
+validation tables all go through these two, so a new kind enters the framework
+by adding one pair of methods here.
+
+Buffers are zeroed by the driver before the request is materialized, not here.
+"""
+function request_type end
+
+request_type(::ResidualKind)                     = ResidualRequest
+request_type(::LinearKind)                       = ResidualRequest
+request_type(::JacobianKind{slot}) where {slot}  = JacobianRequest{slot}
+request_type(::BilinearKind)                     = JacobianRequest{:u}
+request_type(::JacobianResidualKind)             = JacobianResidualRequest
+request_type(::WeightedJacobianKind)             = WeightedJacobianRequest
+request_type(::ParameterJacobianKind)            = ParameterJacobianRequest
+request_type(::ParameterVJPKind)                 = ParameterVJPRequest
+request_type(::TimeSensitivityKind)              = TimeSensitivityRequest
+request_type(::StateJVPKind)                     = StateJVPRequest
+request_type(::StateVJPKind)                     = StateVJPRequest
+
+materialize_request(::ResidualKind, ws)                    = ResidualRequest(ws.re)
+materialize_request(::LinearKind, ws)                      = ResidualRequest(ws.re)
+materialize_request(::JacobianKind{slot}, ws) where {slot} = JacobianRequest{slot}(ws.Ke)
+materialize_request(::BilinearKind, ws)                    = JacobianRequest{:u}(ws.Ke)
+materialize_request(::JacobianResidualKind, ws)            = JacobianResidualRequest(ws.Ke, ws.re)
+materialize_request(kind::WeightedJacobianKind, ws)        = WeightedJacobianRequest(ws.Ke, kind.weights)
 
 """
     AssemblyTask(kind, inner_assembler, states, p, ctx)
@@ -73,9 +203,10 @@ execute_single_task!(task::AssemblyTask, ws::AssemblyWorkspace) = execute_kind!(
 
 # Loud once-per-sweep check instead of a raw NamedTuple field error per cell.
 function _check_declared_slots(engine, states::NamedTuple{names}) where {names}
-    issubset(names, engine.slots) || throw(ArgumentError(
-        "States pass slots $names but the operator declared slots $(engine.slots). " *
-        "Declare every slot at setup: `setup_operator(...; slots = $(Tuple(union(engine.slots, names))))`."))
+    slots = declared_slots(engine.protocol)
+    issubset(names, slots) || throw(ArgumentError(
+        "States pass slots $names but the operator declared slots $(slots). " *
+        "Declare every slot at setup: `setup_operator(...; slots = $(Tuple(union(slots, names))))`."))
     return nothing
 end
 
@@ -139,44 +270,54 @@ function boundary_kernel!(kind::PrimalKind, cache::AbstractSurfaceElementCache, 
     for lfi in 1:nfacets(ws.cell)
         if is_facet_in_cache(FacetIndex(cellid(ws.cell), lfi), ws.cell, cache)
             pᵦ = query_facet_parameters(cache, ws.cell, lfi, task.p)
-            facet_request!(kind, cache, ws, _v2_args(ws, statesₑ, pᵦ, task.ctx), lfi)
+            assemble_facet!(materialize_request(kind, ws), cache,
+                            _v2_args(ws, statesₑ, pᵦ, task.ctx), lfi)
         end
     end
 end
-facet_request!(::ResidualKind,         cache, ws, args, lfi) = assemble_facet!(ResidualRequest(ws.re), cache, args, lfi)
-facet_request!(::JacobianKind{slot},   cache, ws, args, lfi) where {slot} = assemble_facet!(JacobianRequest{slot}(ws.Ke), cache, args, lfi)
-facet_request!(::JacobianResidualKind, cache, ws, args, lfi) = assemble_facet!(JacobianResidualRequest(ws.Ke, ws.re), cache, args, lfi)
-facet_request!(::BilinearKind,         cache, ws, args, lfi) = assemble_facet!(JacobianRequest{:u}(ws.Ke), cache, args, lfi)
-facet_request!(::LinearKind,           cache, ws, args, lfi) = assemble_facet!(ResidualRequest(ws.re), cache, args, lfi)
 
-function v2_cell_kernel!(::ResidualKind, cache, ws, statesₑ, pₑ, ctx)
-    assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx))
+# Facet contributions have no AD fallback in any sweep — a surface cache serves
+# the sweep's request analytically or not at all. For a weighted sweep that
+# means the WEIGHTED facet kernel: per-slot facet kernels are not composed
+# behind the driver's back.
+function v2_cell_kernel!(kind::ResidualKind, cache, ws, statesₑ, pₑ, ctx)
+    assemble_cell!(materialize_request(kind, ws), cache, _v2_args(ws, statesₑ, pₑ, ctx))
 end
 function v2_cell_kernel!(kind::JacobianKind{slot}, cache, ws, statesₑ, pₑ, ctx) where {slot}
     args = _v2_args(ws, statesₑ, pₑ, ctx)
     if provides_analytic(typeof(cache), kind)
-        assemble_cell!(JacobianRequest{slot}(ws.Ke), cache, args)
+        assemble_cell!(materialize_request(kind, ws), cache, args)
     else
         ad_state_jacobian!(ws.Ke, ws, args, Val(slot))
+    end
+end
+function v2_cell_kernel!(kind::WeightedJacobianKind, cache, ws, statesₑ, pₑ, ctx)
+    args = _v2_args(ws, statesₑ, pₑ, ctx)
+    if provides_analytic(typeof(cache), kind)
+        assemble_cell!(materialize_request(kind, ws), cache, args)
+    else
+        ad_weighted_jacobian!(ws.Ke, ws, args, kind.weights)
     end
 end
 function v2_cell_kernel!(kind::JacobianResidualKind, cache, ws, statesₑ, pₑ, ctx)
     args = _v2_args(ws, statesₑ, pₑ, ctx)
     if provides_analytic(typeof(cache), kind)
-        assemble_cell!(JacobianResidualRequest(ws.Ke, ws.re), cache, args)
+        assemble_cell!(materialize_request(kind, ws), cache, args)
     elseif provides_analytic(typeof(cache), JacobianKind())
-        assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, args)
-        assemble_cell!(ResidualRequest(ws.re), cache, args)
+        # No fused kernel, but both split kernels exist: two of the table's
+        # other kinds, issued back to back over the same buffers.
+        assemble_cell!(materialize_request(JacobianKind(), ws), cache, args)
+        assemble_cell!(materialize_request(ResidualKind(), ws), cache, args)
     else
         ad_state_jacobian!(ws.Ke, ws, args)   # also leaves the primal residual in ws.re
     end
 end
 # State-independent forms have no residual kernel to differentiate; the
 # analytic kernel is mandatory for v2 elements used in these operators.
-v2_cell_kernel!(::BilinearKind, cache, ws, statesₑ, pₑ, ctx) =
-    assemble_cell!(JacobianRequest{:u}(ws.Ke), cache, _v2_args(ws, statesₑ, pₑ, ctx))
-v2_cell_kernel!(::LinearKind, cache, ws, statesₑ, pₑ, ctx) =
-    assemble_cell!(ResidualRequest(ws.re), cache, _v2_args(ws, statesₑ, pₑ, ctx))
+v2_cell_kernel!(kind::BilinearKind, cache, ws, statesₑ, pₑ, ctx) =
+    assemble_cell!(materialize_request(kind, ws), cache, _v2_args(ws, statesₑ, pₑ, ctx))
+v2_cell_kernel!(kind::LinearKind, cache, ws, statesₑ, pₑ, ctx) =
+    assemble_cell!(materialize_request(kind, ws), cache, _v2_args(ws, statesₑ, pₑ, ctx))
 
 # Sensitivity sweeps: gather the trial state, never write anything back into
 # `u`, and route through analytic kernels or AD-from-residual. Local outputs
@@ -197,7 +338,7 @@ _gather_residual_dofs!(dest, src, cell) = dest .= @view src[celldofs(cell)]
 
 function sensitivity_kernel!(kind::ParameterJacobianKind, task, ws, args)
     cache = ws.element
-    Bₑ = parameter_sweep_buffers!(ws.ad, length(parameter_vector(task.p))).Bₑ
+    Bₑ = parameter_sweep_buffers!(sweep_state(ws, kind), length(parameter_vector(task.p))).Bₑ
     if provides_analytic(typeof(cache), kind)
         fill!(Bₑ, zero(eltype(Bₑ)))
         assemble_cell!(ParameterJacobianRequest(Bₑ), cache, args)
@@ -209,8 +350,9 @@ end
 
 function sensitivity_kernel!(kind::ParameterVJPKind, task, ws, args)
     cache = ws.element
-    λₑ = _gather_residual_dofs!(ws.ad.λₑ, kind.λ, ws.cell)
-    gₑ = parameter_sweep_buffers!(ws.ad, length(parameter_vector(task.p))).gθ
+    ad = sweep_state(ws, kind)
+    λₑ = _gather_residual_dofs!(ad.λₑ, kind.λ, ws.cell)
+    gₑ = parameter_sweep_buffers!(ad, length(parameter_vector(task.p))).gθ
     if provides_analytic(typeof(cache), kind)
         fill!(gₑ, zero(eltype(gₑ)))
         assemble_cell!(ParameterVJPRequest(gₑ, λₑ), cache, args)
@@ -222,9 +364,10 @@ end
 
 function sensitivity_kernel!(kind::StateJVPKind, task, ws, args)
     cache = ws.element
-    vₑ = ws.ad.vₑ
+    ad = sweep_state(ws, kind)
+    vₑ = ad.vₑ
     load_element_unknowns!(vₑ, kind.v, ws.cell, ws.ivh, cache)
-    Jvₑ = ws.ad.Jvₑ
+    Jvₑ = ad.Jvₑ
     if provides_analytic(typeof(cache), kind)
         fill!(Jvₑ, zero(eltype(Jvₑ)))
         assemble_cell!(StateJVPRequest(Jvₑ, vₑ), cache, args)
@@ -236,8 +379,9 @@ end
 
 function sensitivity_kernel!(kind::StateVJPKind, task, ws, args)
     cache = ws.element
-    λₑ = _gather_residual_dofs!(ws.ad.λₑ, kind.λ, ws.cell)
-    gₑ = ws.ad.gu
+    ad = sweep_state(ws, kind)
+    λₑ = _gather_residual_dofs!(ad.λₑ, kind.λ, ws.cell)
+    gₑ = ad.gu
     if provides_analytic(typeof(cache), kind)
         fill!(gₑ, zero(eltype(gₑ)))
         assemble_cell!(StateVJPRequest(gₑ, λₑ), cache, args)
@@ -255,7 +399,7 @@ function execute_kind!(kind::FunctionalKind, task, ws)
     statesₑ = load_slots!(ws, task.states)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     val = evaluate_cell_functional(kind, ws.element, _v2_args(ws, statesₑ, pₑ, task.ctx))
-    _accumulate_functional!(ws.functional, val)
+    _accumulate_functional!(sweep_state(ws, kind), val)
 end
 _accumulate_functional!(acc, ::Nothing) = nothing
 function _accumulate_functional!(acc, val)
@@ -265,7 +409,7 @@ end
 
 function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, args)
     cache = ws.element
-    gₑ = ws.ad.gₜ
+    gₑ = sweep_state(ws, kind).gₜ
     if provides_analytic(typeof(cache), kind)
         fill!(gₑ, zero(eltype(gₑ)))
         assemble_cell!(TimeSensitivityRequest(gₑ), cache, args)
@@ -276,9 +420,10 @@ function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, args)
 end
 
 
-scatter_local!(::JacobianResidualKind, assembler, ws)              = assemble!(assembler, ws.cell, ws.Ke, ws.re)
-scatter_local!(::Union{JacobianKind, BilinearKind}, assembler, ws) = assemble!(assembler, ws.cell, ws.Ke)
-scatter_local!(::Union{ResidualKind, LinearKind}, assembler, ws)   = assemble!(assembler, ws.cell, ws.re)
+scatter_local!(::JacobianResidualKind, assembler, ws)            = assemble!(assembler, ws.cell, ws.Ke, ws.re)
+scatter_local!(::Union{JacobianKind, WeightedJacobianKind, BilinearKind}, assembler, ws) =
+    assemble!(assembler, ws.cell, ws.Ke)
+scatter_local!(::Union{ResidualKind, LinearKind}, assembler, ws) = assemble!(assembler, ws.cell, ws.re)
 
 # A Jacobian sweep differentiates the buffer of ONE slot, so that slot must be
 # present and must carry a plain vector source. `AffineRate` slots are formed
@@ -300,8 +445,36 @@ function _check_differentiated_slot(kind::JacobianKind{slot}, engine, states::Na
     # already covered by the setup-time validation.
     if slot !== :u
         for sc in engine.subdomain_caches
-            _assert_trait_backed(typeof(sc.domain.element), kind, JacobianRequest{slot}, kernel_args_type(engine))
+            _assert_trait_backed(typeof(sc.domain.element), kind, kernel_args_type(engine))
         end
+    end
+    return nothing
+end
+
+# A weighted sweep differentiates SEVERAL slots at once, so every participating
+# slot must be present. Under the AD route the same `AffineRate` rejection as
+# for `JacobianKind` applies; an analytic weighted kernel is exempt because it
+# forms the combination itself (the MLN/Newmark design intent). The exemption
+# is engine-wide: one cache falling back to AD makes the whole sweep AD-seeded.
+function _check_differentiated_slot(kind::WeightedJacobianKind{slots}, engine, states::NamedTuple{names}) where {slots, names}
+    all(w -> w isa Real, values(kind.weights)) || throw(ArgumentError(
+        "A weighted Jacobian sweep accumulates into the operator's real element matrix and " *
+        "seeds real ForwardDiff Duals, so its weights must be real, got $(kind.weights). " *
+        "Assemble the per-slot components and fold them with a complex `combine!` instead — " *
+        "`assemble_weighted_jacobian!` routes complex weights there automatically."))
+    fused_analytic = all(sc -> provides_analytic(typeof(sc.domain.element), kind), engine.subdomain_caches)
+    for slot in slots
+        slot in names || throw(ArgumentError(
+            "A `WeightedJacobianKind{$slots}` sweep weights ∂F/∂:$slot, which the states " *
+            "$names do not carry."))
+        (!fused_analytic && states[slot] isa AffineRate) && throw(ArgumentError(
+            "Slot `:$slot` carries an `AffineRate` source, which is reconstructed at gather " *
+            "time and frozen under AD, so it cannot participate in an AD-seeded weighted " *
+            "sweep. Provide an analytic `WeightedJacobianRequest` kernel (which is exempt, " *
+            "since it forms the combination itself), or pass plain vector sources."))
+    end
+    for sc in engine.subdomain_caches
+        _assert_trait_backed(typeof(sc.domain.element), kind, kernel_args_type(engine))
     end
     return nothing
 end
@@ -311,6 +484,7 @@ end
 # own pre-built assembler to `run_sweep!`; everything dof-scattered goes
 # through `assemble_into!`, which builds the assembler from the global targets.
 function run_sweep!(kind, assembler, op, states::NamedTuple, p, ctx)
+    materialize_sweep_state!(op.engine, kind)
     _check_declared_slots(op.engine, states)
     _check_rate_slots(states)
     _check_differentiated_slot(kind, op.engine, states)
@@ -332,6 +506,7 @@ Contributions accumulate per worker and reduce in a fixed order — results
 are deterministic for a fixed worker count. Volumetric contributions only.
 """
 function evaluate_functional(op, kind::FunctionalKind, states::NamedTuple, p, ctx = nothing)
+    materialize_sweep_state!(op.engine, kind)
     for sc in op.engine.subdomain_caches, ws in sc.device_cache
         ws.functional.value = nothing
     end

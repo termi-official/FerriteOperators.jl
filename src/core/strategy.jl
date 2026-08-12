@@ -38,7 +38,23 @@ scheduling provides race freedom without atomics (required for eltypes
 without atomic support, and for run-to-run reproducibility).
 """
 abstract type AbstractSchedulingPolicy end
+"""
+    SequentialScheduling()
+
+Race freedom by atomic scatter: every worker assembles into the same global
+target and the assembler resolves collisions atomically. Requires an eltype
+with atomic support.
+"""
 struct SequentialScheduling <: AbstractSchedulingPolicy end
+
+"""
+    ColoredScheduling(alg = ColoringAlgorithm.WorkStream)
+
+Race freedom by coloring: the partition is a sequence of colors, and no two
+items of one color share a dof, so the scatter needs no atomics. Required for
+eltypes without atomic support, and what makes a run reproducible
+element-by-element.
+"""
 struct ColoredScheduling{Alg} <: AbstractSchedulingPolicy
     alg::Alg
 end
@@ -91,25 +107,36 @@ New device backends must allocate and manage workspaces of a concrete subtype.
 """
 abstract type AbstractWorkspace end
 
+# Reduction slot for one worker's functional partial; `nothing` = no
+# contribution this sweep. Untyped: the value type belongs to the kind.
+mutable struct FunctionalAccumulator
+    value::Any
+end
+
 """
     AssemblyWorkspace
 
-Per-worker workspace for square operator assembly (bilinear, nonlinear, linear).
-Holds pre-allocated element-local buffers and caches that are reused across cells.
+Per-worker workspace for square operator assembly (bilinear, nonlinear, linear):
+a fixed CORE of pre-allocated element-local buffers and caches reused across
+cells, plus the kind-family members the operator's declarations call for (see
+[`sweep_state`](@ref)).
 
-Fields:
+Core fields:
 - `Ke`: element stiffness matrix
 - `slot_buffers`: NamedTuple of element-local state buffers, one per declared slot
 - `re`: element residual vector
-- `cell`: geometry cache ([`CellCache`](@ref))
+- `cell`: geometry cache (`Ferrite.CellCache`)
 - `ivh`: internal variable handler
 - `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
 - `boundary_element`: surface cache walked by the facet driver
 - `scratch`/`scratch_decls`: per-worker scratch instances and their constructors
-- `ad`: per-worker derivative-sweep buffers and ForwardDiff configs ([`ADWorkspace`](@ref))
-- `functional`: per-worker reduction slot for functional sweeps
+
+Sweep-state families, `nothing` when no declared or mandatory kind needs them:
+- `ad`: derivative-sweep buffers and ForwardDiff configs ([`ADWorkspace`](@ref))
+- `functional`: reduction slot for functional sweeps, materialized on demand by
+  [`materialize_sweep_state!`](@ref)
 """
-@concrete struct AssemblyWorkspace <: AbstractWorkspace
+@concrete mutable struct AssemblyWorkspace <: AbstractWorkspace
     Ke
     slot_buffers   # NamedTuple of element-local state buffers keyed by slot name
     re
@@ -119,14 +146,8 @@ Fields:
     boundary_element
     scratch        # per-worker scratch instances: solver-declared ∪ element-declared
     scratch_decls  # the nullary constructors, kept for per-worker re-instantiation
-    ad             # per-worker derivative-sweep buffers + ForwardDiff configs
-    functional     # per-worker reduction slot for functional sweeps
-end
-
-# Reduction slot for one worker's functional partial; `nothing` = no
-# contribution this sweep. Untyped: the value type belongs to the kind.
-mutable struct FunctionalAccumulator
-    value::Any
+    ad             # derivative family: ADWorkspace, or `nothing`
+    functional::Union{Nothing, FunctionalAccumulator}   # functional family, lazily materialized
 end
 
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
@@ -138,19 +159,28 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
         ws.cell.dh,
         duplicate_for_device(device, ws.ivh),
         keys(ws.slot_buffers),
-        ws.scratch_decls,
+        ws.scratch_decls;
+        derivative_family = ws.ad !== nothing,
+        functional_family = ws.functional !== nothing,
     )
 end
 
 """
-    create_assembly_workspace(element, boundary_element, sdh, ivh, slots)
+    create_assembly_workspace(element, boundary_element, sdh, ivh, slots, scratch_decls;
+                              derivative_family = true, functional_family = true)
 
 Create a single [`AssemblyWorkspace`](@ref) with freshly allocated
 element-local buffers, one state buffer per declared slot name. Slot buffers
 are sized by `allocate_element_unknown_vector`, so condensed elements get
 their full `[ū; q]`-sized local vectors for every slot.
+
+The two flags select which sweep-state families are built; the engine derives
+them from the protocol's declared kinds and the integrator family's mandatory
+kinds, so an operator that never differentiates carries no ForwardDiff
+machinery at all.
 """
-function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,), scratch_decls::NamedTuple = (;)) where {N}
+function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,), scratch_decls::NamedTuple = (;);
+        derivative_family::Bool = true, functional_family::Bool = true) where {N}
     slot_buffers = NamedTuple{slots}(ntuple(_ -> allocate_element_unknown_vector(element, sdh), N))
     return AssemblyWorkspace(
         allocate_element_matrix(element, sdh),
@@ -162,8 +192,8 @@ function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::N
         boundary_element,
         map(f -> f(), scratch_decls),
         scratch_decls,
-        create_ad_workspace(element, sdh),
-        FunctionalAccumulator(nothing),
+        derivative_family ? create_ad_workspace(element, sdh) : nothing,
+        functional_family ? FunctionalAccumulator(nothing) : nothing,
     )
 end
 

@@ -10,6 +10,10 @@
 #   preallocated ForwardDiff configs. The parameter sweeps build their
 #   configs per call: their seed dimension nθ is call-time knowledge, and a
 #   cached config would be abstractly typed across nθ changes.
+#
+# These helpers are the derivative family's internals and read `ws.ad`
+# directly; the family's presence is the operator's setup-time guarantee (see
+# `sweep_state` and `mandatory_kinds`).
 
 "Tag for the package-owned ForwardDiff configs, so per-worker configs outlive the per-cell closures."
 struct FerriteOperatorsADTag end
@@ -37,6 +41,8 @@ buffers). Element-sized members are eager; parameter-sized members (`θ`,
     grad_cfg  # state-VJP GradientConfig over the unknown buffer
     u_dual    # single-partial Dual unknown buffer for the JVP direction
     re_dual   # Dual residual buffer for the state-VJP closure
+    wseed     # zeroed unknown-sized seed point of the weighted-Jacobian sweep
+    wdual     # Dual slot buffers of the weighted sweep, grown to the slot count on first use
 end
 
 function create_ad_workspace(element, sdh)
@@ -53,11 +59,27 @@ function create_ad_workspace(element, sdh)
     grad_cfg  = ForwardDiff.GradientConfig(nothing, vₑ, chunk, tag)
     u_dual    = similar(vₑ, ForwardDiff.Dual{typeof(tag), T, 1})
     re_dual   = similar(Jvₑ, eltype(grad_cfg.duals))
+    wseed     = zero(vₑ)
+    wdual     = Vector{Vector{eltype(jac_cfg.duals[2])}}()
     return ADWorkspace(
         Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0), Vector{T}(),
         λₑ, vₑ, Jvₑ, gu, gₜ,
-        jac_cfg, deriv_cfg, grad_cfg, u_dual, re_dual,
+        jac_cfg, deriv_cfg, grad_cfg, u_dual, re_dual, wseed, wdual,
     )
+end
+
+"""
+    weighted_seed_buffers!(ad::ADWorkspace, nslots) -> Vector of Dual buffers
+
+Grow the weighted sweep's Dual slot buffers to `nslots` entries, one per
+participating slot. Sized once per worker on the first sweep of a given slot
+count; the Dual type is fixed by the sweep's ∂F/∂u configuration.
+"""
+function weighted_seed_buffers!(ad::ADWorkspace, nslots::Int)
+    while length(ad.wdual) < nslots
+        push!(ad.wdual, similar(ad.wseed, eltype(ad.jac_cfg.duals[2])))
+    end
+    return ad.wdual
 end
 
 """
@@ -92,6 +114,28 @@ function ad_state_jacobian!(K, ws, args, ::Val{slot} = Val(:u)) where {slot}
     f! = (r, x) -> evaluate_cell_residual!(
         r, ws.element, with_states(args, merge(args.states, NamedTuple{(slot,)}((x,)))))
     ForwardDiff.jacobian!(K, f!, ws.re, args.states[slot], ws.ad.jac_cfg, Val{false}())
+    return K
+end
+
+# Σₛ wₛ ∂F/∂s in ONE sweep: the seed variable `x` is the weighted variation
+# itself, so every participating slot enters as `sₑ + wₛ·x` and the derivative
+# w.r.t. `x` at `x = 0` is exactly the weighted combination — with the same
+# seed dimension, config, and chunking as a single-slot ∂F/∂s sweep. Slots
+# outside `weights` (including `AffineRate` reconstructions) stay at their
+# primal value, matching the frozen-slot contract of `JacobianKind`.
+function ad_weighted_jacobian!(K, ws, args, weights::NamedTuple{slots}) where {slots}
+    bufs  = weighted_seed_buffers!(ws.ad, length(slots))
+    prim  = NamedTuple{slots}(args.states)
+    duals = NamedTuple{slots}(ntuple(i -> bufs[i], Val(length(slots))))
+    # The Dual-carrying args are built once per cell; the differentiated
+    # closure only refreshes the buffers behind them.
+    dargs = with_states(args, merge(args.states, duals))
+    cache = ws.element
+    f! = (r, x) -> begin
+        map((buf, sₑ, w) -> (@. buf = sₑ + w * x), duals, prim, weights)
+        evaluate_cell_residual!(r, cache, dargs)
+    end
+    ForwardDiff.jacobian!(K, f!, ws.re, ws.ad.wseed, ws.ad.jac_cfg, Val{false}())
     return K
 end
 

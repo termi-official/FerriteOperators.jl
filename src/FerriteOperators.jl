@@ -93,7 +93,9 @@ export VTKQuadratureGrid, VTKQuadratureFile, write_quadrature_data
 export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, process_query!
 
 export setup_operator, update_operator!, update_linearization!, evaluate!
-export assemble_slot_jacobian!
+export AbstractSchemeProtocol, DefaultProtocol
+export declared_slots, declared_kinds, declared_scratch, declared_args_type, mandatory_kinds
+export assemble_slot_jacobian!, assemble_weighted_jacobian!
 export allocate_components, share_pattern, combine!
 export StageBlockOperator, assemble_stages!
 export update_parameter_jacobian!, parameter_vjp!, time_sensitivity!
@@ -104,8 +106,9 @@ export parameter_vector, rebuild_parameters
 export TimeIntegrationContext, evaluation_time, KernelArgs, assemble_cell!
 export AffineRate
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
+export WeightedJacobianRequest
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
-export ResidualKind, JacobianKind, JacobianResidualKind
+export ResidualKind, JacobianKind, JacobianResidualKind, WeightedJacobianKind
 export ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind
 export FunctionalKind, evaluate_functional, evaluate_cell_functional
 export PatchItems, patch_dofs, patch_ndofs, patch_cells, patch_cell_groups, assemble_patch_matrices!

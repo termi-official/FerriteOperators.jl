@@ -1,3 +1,118 @@
+####################################
+## Scheme protocols — the setup-time declarations
+####################################
+
+"""
+    AbstractSchemeProtocol
+
+A typed, DECLARATIONS-ONLY description of what a scheme asks of an operator,
+passed positionally: `setup_operator(strategy, problem, dh, protocol)`.
+
+A protocol declares exactly what setup consumes: [`declared_slots`](@ref) (the
+state slot names sweeps may carry), [`declared_kinds`](@ref) (the request
+kinds the operator will be asked to compute), [`declared_scratch`](@ref)
+(per-worker scratch constructors), and [`declared_args_type`](@ref) (the
+kernel-args type the engine builds). Those declarations size the per-worker
+slot buffers, select which sweep-state families are built
+([`sweep_state`](@ref)), and drive the setup-time trait ↔ kernel and
+internal-state admissibility checks.
+
+Protocols carry NO coefficients — γ, tableaus, and weights are per-evaluation
+solver data, not declarations — and nothing term-shaped: no per-term contexts,
+no domain algebra, no weight symbolism. Term-shaped data belongs to
+integrators; anything needing its own context or sink is its own sweep.
+
+Declaring is a hint, not a capability restriction: an operator always builds
+what its own family issues ([`mandatory_kinds`](@ref)), so an undeclared kind
+stays usable and a declaration only ever adds eager machinery and eager
+checks.
+"""
+abstract type AbstractSchemeProtocol end
+
+"""
+    declared_slots(protocol) -> NTuple{N, Symbol}
+
+The state slot names sweeps of this protocol may carry; the engine allocates
+one per-worker slot buffer per name. Slot type tags are reserved vocabulary —
+names are the whole declaration today.
+"""
+function declared_slots end
+
+"""
+    declared_kinds(protocol) -> Tuple of request-kind types
+
+The request kinds this protocol declares, as their UnionAll bases
+(`JacobianKind`, `ParameterVJPKind`, …). Declared kinds run their trait ↔
+kernel and admissibility checks at setup instead of on first use, and select
+the per-worker sweep-state families built eagerly.
+"""
+function declared_kinds end
+
+"""
+    declared_scratch(protocol) -> NamedTuple of nullary constructors
+
+Solver-side scratch declaration, merged with the element-side
+[`declare_scratch`](@ref) into `args.scratch`. The two are separate hooks:
+`declare_scratch` is asked of element CACHES, `declared_scratch` of PROTOCOLS.
+"""
+function declared_scratch end
+
+"""
+    declared_args_type(protocol) -> Type
+
+The concrete kernel-args type the engine hands to element kernels; setup-time
+method lookups query against it (see [`kernel_args_type`](@ref)).
+"""
+function declared_args_type end
+
+# The element-side hook has an `Any` fallback returning `(;)`, so a protocol
+# passed to it would be silently ignored.
+declare_scratch(::AbstractSchemeProtocol) = throw(ArgumentError(
+    "`declare_scratch` is the ELEMENT-side scratch hook. A protocol declares its scratch " *
+    "through `declared_scratch`."))
+
+"""
+    DefaultProtocol(; slots = (:u,), requests = (), scratch = (;), args_type = KernelArgs)
+
+The protocol the keyword form of [`setup_operator`](@ref) lowers to — its
+constructor arguments ARE those keywords, so
+`setup_operator(strategy, integrator, dh; slots, requests, scratch, args_type)`
+and `setup_operator(strategy, integrator, dh, DefaultProtocol(; …))` build the
+same operator. Declares no context type and no slot tags: the default world is
+`integrator + dh`, and a scheme that needs more declares its own protocol.
+"""
+struct DefaultProtocol{slots, A, K <: Tuple, S <: NamedTuple} <: AbstractSchemeProtocol
+    kinds::K       # a tuple of request-kind TYPES cannot ride in a type parameter
+    scratch::S
+end
+function DefaultProtocol(; slots = (:u,), requests::Tuple = (), scratch::NamedTuple = (;), args_type::Type = KernelArgs)
+    kinds = map(_kind_type, requests)
+    return DefaultProtocol{Tuple(slots), args_type, typeof(kinds), typeof(scratch)}(kinds, scratch)
+end
+
+# Kind types or instances normalize to their UnionAll base, so a payload type
+# parameter (`ParameterVJPKind{Vector{Float64}}`) never makes a declaration
+# silently miss its validation entry or its sweep-state family.
+_kind_type(r) = Base.typename(r isa Type ? r : typeof(r)).wrapper
+
+declared_slots(::DefaultProtocol{slots}) where {slots} = slots
+declared_args_type(::DefaultProtocol{slots, A}) where {slots, A} = A
+declared_kinds(protocol::DefaultProtocol) = protocol.kinds
+declared_scratch(protocol::DefaultProtocol) = protocol.scratch
+
+"""
+    mandatory_kinds(integrator) -> Tuple of request-kind types
+
+The kinds an operator of this integrator's family ALWAYS issues, independent
+of the protocol. Unioned with [`declared_kinds`](@ref) when the engine selects
+per-worker sweep-state families, which is what keeps a declaration additive:
+the family's own kinds are served whether or not a protocol names them. The
+default is the nonlinear set, so an unknown integrator type is served
+conservatively.
+"""
+mandatory_kinds(integrator) = (JacobianResidualKind, JacobianKind, ResidualKind)
+mandatory_kinds(::AbstractBilinearIntegrator) = (BilinearKind, ResidualKind)
+mandatory_kinds(::AbstractLinearIntegrator) = (LinearKind, ResidualKind)
 
 create_system_matrix(strategy, dh) = allocate_matrix(matrix_type(strategy), dh)
 create_system_vector(strategy, dh) = allocate_vector(vector_type(strategy), dh)
@@ -28,67 +143,86 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
     return InternalVariableHandler(nothing, 0, 0)
 end
 
-function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh; slots::NTuple{<:Any, Symbol}, scratch::NamedTuple)
+function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh;
+        slots::NTuple{<:Any, Symbol}, scratch::NamedTuple, derivative_family::Bool, functional_family::Bool)
     device = strategy.device
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
-        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots, merge(declare_scratch(element_cache), scratch))
+        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots,
+                                       merge(declare_scratch(element_cache), scratch);
+                                       derivative_family, functional_family)
         dc = setup_device_instances(device, ws, n)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
     end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
 end
 
 """
-    setup_engine(strategy, integrator, dh; slots = (:u,), scratch = (;), requests = (),
-                 args_type = KernelArgs)
+    setup_engine(strategy, integrator, dh, protocol::AbstractSchemeProtocol)
 
-Build the [`AssemblyEngine`](@ref) shared by all operator kinds. `requests`
-declares the sensitivity request kinds the operator will be asked to compute
-(kind types or instances, e.g. `requests = (ParameterVJPKind,)`): declared
-kinds run their trait ↔ kernel and internal-state admissibility checks
-eagerly at setup instead of on first use. Undeclared kinds remain usable —
-the declaration is a hint, not a capability restriction.
-
-`args_type` is the concrete kernel-args type the engine hands to element
-kernels; setup-time method lookups query against it.
+Build the [`AssemblyEngine`](@ref) shared by all operator kinds from the
+protocol's declarations: slot names size the per-worker slot buffers, declared
+kinds run their trait ↔ kernel and internal-state admissibility checks eagerly
+(instead of on first use) and — unioned with the integrator family's
+[`mandatory_kinds`](@ref) — select which per-worker sweep-state families are
+built, and the declared args type is what setup-time method lookups query
+against.
 """
-function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler; slots = (:u,), scratch::NamedTuple = (;), requests::Tuple = (), args_type::Type = KernelArgs)
-    # Normalize declared kinds (types or instances) to their UnionAll base so
-    # payload type parameters (`ParameterVJPKind{Vector{Float64}}`) never make
-    # a declaration silently miss its validation entry.
-    requests          = map(r -> Base.typename(r isa Type ? r : typeof(r)).wrapper, requests)
+function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
+    requests          = declared_kinds(protocol)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     element_caches    = setup_elements(integrator, dh)
-    foreach(cache -> validate_element_cache(cache, requests, args_type), element_caches)
+    foreach(cache -> validate_element_cache(cache, requests, declared_args_type(protocol)), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
     ivh               = setup_internal_variable_handler(integrator, element_caches, dh)
-    subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh; slots, scratch)
-    return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, slots, requests, args_type)
+    kinds             = (requests..., mandatory_kinds(integrator)...)
+    subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
+                                               slots = declared_slots(protocol),
+                                               scratch = declared_scratch(protocol),
+                                               derivative_family = needs_derivative_family(kinds),
+                                               functional_family = needs_functional_family(kinds))
+    return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, protocol)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler; kwargs...)
-    engine = setup_engine(strategy, integrator, dh; kwargs...)
+"""
+    setup_operator(strategy, problem, dh, protocol::AbstractSchemeProtocol)
+    setup_operator(strategy, problem, dh; slots = (:u,), requests = (), scratch = (;), args_type = KernelArgs)
+
+Build the operator for `problem` (an integrator) over `dh`. The positional
+form takes the scheme's declarations as a protocol
+([`AbstractSchemeProtocol`](@ref)); the keyword form is sugar whose keywords
+are the [`DefaultProtocol`](@ref) constructor arguments, and it lowers to the
+positional form here.
+
+Transfer and patch operators keep their own constructors
+([`setup_transfer_operator`](@ref), [`assemble_patches!`](@ref)).
+"""
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
+    engine = setup_engine(strategy, integrator, dh, protocol)
     A      = create_system_matrix(engine.strategy, dh)
     return BilinearFerriteOperator(A, engine, integrator)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler; kwargs...)
-    engine = setup_engine(strategy, integrator, dh; kwargs...)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
+    engine = setup_engine(strategy, integrator, dh, protocol)
     J      = create_system_matrix(engine.strategy, dh)
     return LinearizedFerriteOperator(J, engine, integrator)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler; kwargs...)
-    engine = setup_engine(strategy, integrator, dh; kwargs...)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
+    engine = setup_engine(strategy, integrator, dh, protocol)
     b      = create_system_vector(engine.strategy, dh)
     return LinearFerriteOperator(b, engine, integrator)
 end
 
+setup_operator(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler;
+        slots = (:u,), requests::Tuple = (), scratch::NamedTuple = (;), args_type::Type = KernelArgs) =
+    setup_operator(strategy, integrator, dh, DefaultProtocol(; slots, requests, scratch, args_type))
+
 """
     init_transfer_sparsity_pattern(dh_row::DofHandler, dh_col::DofHandler)
 
-Build a [`SparsityPattern`](@ref) of size `(ndofs(dh_row) × ndofs(dh_col))` covering all
+Build a `Ferrite.SparsityPattern` of size `(ndofs(dh_row) × ndofs(dh_col))` covering all
 DoF pairs `(rdof, cdof)` that share a cell.  Both DofHandlers must live on the same grid
 and have the same number of subdomains.
 """
@@ -163,7 +297,7 @@ end
 """
     init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)
 
-Build a [`SparsityPattern`](@ref) of size `(ndofs(dh_fine) × ndofs(dh_coarse))` for a
+Build a `Ferrite.SparsityPattern` of size `(ndofs(dh_fine) × ndofs(dh_coarse))` for a
 nested-grid transfer operator.  The sparsity is determined by the `fine2coarse` mapping:
 a (rdof, cdof) entry is added whenever `rdof` belongs to fine cell `i` and `cdof` belongs
 to its parent coarse cell `fine2coarse[i]`.

@@ -1,5 +1,5 @@
 """
-    LinearizedFerriteOperator(J, caches)
+    LinearizedFerriteOperator(J, engine, integrator)
 
 A model for a function with its fully assembled linearization. Entry points
 route request kinds through the shared assembly engine; element kernels are
@@ -9,7 +9,13 @@ the request-typed `assemble_cell!`/`assemble_facet!` methods.
     J
     engine
     integrator
+    slot_components   # lazily built per-slot matrices of the composed weighted route
 end
+# `slot_components` is operator-owned scratch, not payload: it holds one matrix
+# per slot ever combined through `assemble_weighted_jacobian!`, each sharing
+# `J`'s sparsity pattern, so a repeated evaluation allocates nothing.
+LinearizedFerriteOperator(J, engine, integrator) =
+    LinearizedFerriteOperator(J, engine, integrator, Dict{Symbol, typeof(J)}())
 
 # Interface. The states/ctx forms are canonical; the u-vector forms are
 # conveniences for stationary problems (states = (u = u,), no context).
@@ -38,6 +44,75 @@ in particular a member of a component bag from
 """
 assemble_slot_jacobian!(J::AbstractMatrix, op::LinearizedFerriteOperator, kind::JacobianKind, states::NamedTuple, p, ctx) =
     assemble_into!(kind, (J,), op, states, p, ctx)
+
+"""
+    assemble_weighted_jacobian!(W, op, weights::NamedTuple, states, p, ctx)
+
+Assemble the weighted Jacobian `W = Σₛ weights[s] · ∂F/∂s` — the matrix a
+scheme solves with — over the slots `weights` names, at frozen values of every
+other slot. `weights` are the solver's chain-rule scalars
+(`(u = 1.0, du = 1/(γΔt))` for SDIRK/backward Euler).
+
+Two routes produce the same matrix from the same weights, and which one runs
+is a capability of the operator's element caches, not a caller choice:
+
+- **fused** — one sweep of [`WeightedJacobianKind`](@ref): the element's
+  analytic `WeightedJacobianRequest` kernel where declared, otherwise the
+  residual kernel with every participating slot seeded by its weight-scaled
+  Duals.
+- **composed** — one [`assemble_slot_jacobian!`](@ref) sweep per slot into
+  operator-held components sharing `W`'s pattern, folded by [`combine!`](@ref)
+  with the very same `weights`.
+
+The composed route runs for complex weights (the element matrix and the Dual
+machinery are real — this is what transformed Radau needs) and for caches whose
+condensed internal state makes the AD-seeded fused route inadmissible; there
+the per-slot sweeps apply their own guards, so the weighted kind is servable
+exactly when every participating [`JacobianKind`](@ref) is. Both routes agree
+to round-off, which [`check_derivatives`](@ref) verifies.
+
+`W` must share the operator's sparsity pattern — use `op.J`, a member of
+[`allocate_components`](@ref), or [`share_pattern`](@ref) (with `ComplexF64`
+for a complex combination).
+"""
+function assemble_weighted_jacobian!(W::AbstractMatrix, op::LinearizedFerriteOperator, weights::NamedTuple, states::NamedTuple, p, ctx)
+    kind = WeightedJacobianKind(weights)
+    return _fused_weighted_route(op, kind) ?
+        _weighted_jacobian_fused!(W, op, kind, states, p, ctx) :
+        _weighted_jacobian_composed!(W, op, kind, states, p, ctx)
+end
+
+# The fused sweep needs real weights, and needs every cache to either serve the
+# kind analytically or be safe to differentiate: AD through an element-local
+# solve is wrong in principle, and the fused sweep seeds ALL participating
+# slots at once, so a condensed cache without the analytic weighted kernel has
+# no admissible fused route (`assert_sensitivity_admissible`'s rule, applied to
+# this kind).
+function _fused_weighted_route(op, kind::WeightedJacobianKind)
+    all(w -> w isa Real, values(kind.weights)) || return false
+    return all(op.engine.subdomain_caches) do sc
+        T = typeof(sc.domain.element)
+        provides_analytic(T, kind) || !has_internal_state(T) || internal_state_insensitive(T, kind)
+    end
+end
+
+_weighted_jacobian_fused!(W, op, kind::WeightedJacobianKind, states, p, ctx) =
+    assemble_into!(kind, (W,), op, states, p, ctx)
+
+function _weighted_jacobian_composed!(W, op, kind::WeightedJacobianKind{slots}, states, p, ctx) where {slots}
+    comps = _slot_component_bag!(op, slots)
+    ntuple(i -> assemble_slot_jacobian!(comps[i], op, JacobianKind{slots[i]}(), states, p, ctx), Val(length(slots)))
+    combine!(W, comps, kind.weights)
+    return W
+end
+
+function _slot_component_bag!(op::LinearizedFerriteOperator, slots::NTuple{N, Symbol}) where {N}
+    store = op.slot_components
+    for slot in slots
+        haskey(store, slot) || (store[slot] = share_pattern(op.J))
+    end
+    return NamedTuple{slots}(ntuple(i -> store[slots[i]], Val(N)))
+end
 
 # Call-time admissibility over all subdomain caches; the same per-cache check
 # runs at setup for kinds declared via `setup_operator(...; requests)` — see

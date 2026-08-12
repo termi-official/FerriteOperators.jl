@@ -1,10 +1,10 @@
 # Migrating from 0.3.x to the v2 interface
 
 This guide maps every removed or changed 0.3.x API to its v2 replacement.
-Breaking changes were deliberately clustered into this one transition — there
-are no deprecation shims; old signatures are gone, and (important!) some old
-element methods would be **silently never called** rather than erroring, so
-grep for the patterns marked ⚠ below.
+Breaking changes are clustered into this one transition — there are no
+deprecation shims; old signatures are gone, and (important!) some old element
+methods are **silently never called** rather than erroring, so grep for the
+patterns marked ⚠ below.
 
 ## Quick map
 
@@ -15,8 +15,7 @@ grep for the patterns marked ⚠ below.
 | `assemble_element_gto1!(…, uₑprev, …, p, t, Δt)` | kernel reads `args.states.uprev`, `args.ctx` |
 | `GenericFirstOrderTimeParameters(p, t, Δt, uprev)` | `slots = (:u, :uprev)` at setup + `TimeIntegrationContext(t, Δt, γ̃)` |
 | `AbstractGenericFirstOrderTime*ElementCache` | plain `AbstractVolumetricElementCache`/`AbstractSurfaceElementCache` |
-| bare `t` as the parameter object (`evaluate!(op, r, u, t)`, `time_sensitivity!(g, op, u, t)`) | `p` is user parameters; time rides in `ctx`: `time_sensitivity!(g, op, states, p, ctx)` |
-| `check_derivatives(op, states, p, ctx; t = tₙ)` | `check_derivatives(op, states, p, ctx)` — the time check reads `evaluation_time(ctx)` |
+| bare `t` as the parameter object (`evaluate!(op, r, u, t)`) | `p` is user parameters; time rides in `ctx` and is read as `evaluation_time(args.ctx)` |
 | `query_element_parameters(cache, cell, ivh, p)` | `query_cell_parameters(cache, cell, p)` (no `ivh`) |
 | — (volumetric `pₑ` reused on facets) | `query_facet_parameters(cache, cell, lfi, p)` per facet |
 | `query_element_unknown_buffer(cache, ue)` | removed — slot buffers are workspace-owned |
@@ -24,14 +23,15 @@ grep for the patterns marked ⚠ below.
 | `ElementAssemblyOperatorStrategy` | `AssemblyStrategy{<:ElementAssemblyData}` |
 | `op.dh`, `op.strategy`, `op.subdomain_caches` | `op.engine.dh`, `op.engine.strategy`, `op.engine.subdomain_caches` |
 | `op.J` / `op.A` / `op.b`, `residual_size`, `unknown_size` | unchanged |
+| `residual!(op, r, u, p)` | `evaluate!(op, r, u, p)` |
 | `setup_quadrature_operator` / `FerriteQuadratureOperator` | any operator works: `evaluate_quadrature!(q, op, u, p, f)` |
-| silent `setup_element_cache` fallback | missing method now **throws at setup** |
+| silent `setup_element_cache` fallback | missing method **throws at setup** |
 | `reinit!` inside every cell-kernel body | engine calls `reinit_values!(cache, cell, kind)` once per cell and sweep |
 | `Ferrite.getnquadpoints`/`reinit!` via `.cv`/`.fv` field fallback | define `Ferrite.getnquadpoints` and `reinit_values!` explicitly on your cache |
 
 Constructor *calls* like `SequentialAssemblyStrategy(device)` still work — the
-names survive as convenience constructors. Only **dispatch on them as types**
-breaks.
+names are convenience constructors for the common strategy compositions. Only
+**dispatch on them as types** breaks.
 
 ## Element kernels
 
@@ -45,10 +45,10 @@ function assemble_element!(Kₑ, rₑ, uₑ, cell, cache::MyCache, p) ... end
 function assemble_element!(Kₑ, uₑ, cell, cache::MyCache, p) ... end
 function assemble_element!(rₑ, uₑ, cell, cache::MyCache, p) ... end
 
-# v2 — reinit moves out of the kernel into the per-cache hook …
+# v2 — reinit lives in the per-cache hook …
 FerriteOperators.reinit_values!(c::MyCache, cell) = reinit!(c.cv, cell)
 
-# … plus one mandatory residual kernel (pure evaluation, no reinit) …
+# … one mandatory residual kernel (pure evaluation, no reinit) …
 function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args)
     uₑ = args.states.u
     pₑ = args.p
@@ -67,18 +67,19 @@ Requirements on the residual kernel: eltype-generic in `eltype(args.states.*)`,
 `eltype(args.p)` and the context time (the AD contract); never write global
 state; treat `args.cell` as read-only; no reinit inside cell kernels — the
 engine calls `reinit_values!` once per cell and sweep (elements carrying
-several values objects can specialize the kind-dispatched form to
-reinitialize only what a request needs). Facet kernels still reinit their
-`FacetValues` per facet themselves.
+several values objects specialize the kind-dispatched form to reinitialize
+only what a request needs). Facet kernels reinitialize their `FacetValues` per
+facet themselves.
 
 **Leave the `args` parameter unannotated.** Kernels select on the
 `(request, cache)` pair; the third argument is a *channel protocol*
 (`args.states`, `args.cell`, `args.p`, `args.scratch`, `args.ctx`) with no
-supertype. `KernelArgs` is the type this package's
-operators build — annotating `args::KernelArgs` pins the element to that one
-family and makes it unusable to an operator family building its own args type.
-`setup_operator` emits an advisory warning per element cache whose residual
-kernel carries a concrete args annotation.
+supertype, plus the three rebuild seams `with_states`, `with_parameters` and
+`with_context` that derivative sweeps re-seed channels through. `KernelArgs`
+is the type this package's operators build — annotating `args::KernelArgs`
+pins the element to that one family and makes it unusable to an operator
+family building its own args type. `setup_operator` emits an advisory warning
+per element cache whose residual kernel carries a concrete args annotation.
 
 ## Time protocols (GTO1, Newmark)
 
@@ -99,9 +100,8 @@ update_linearization!(op, r, (u = u, uprev = uprev), p, TimeIntegrationContext(t
 **Time reaches elements through `ctx`, and only through `ctx`.** `p` is the
 user parameter bag: passing a bare `t` as the parameter object, or hiding `t`
 inside `p`, is not a supported convention — every wrapper would then need an
-unwrapping rule, and the framework itself must see `t` to seed ∂F/∂t. An
-element reads the evaluation time as `evaluation_time(args.ctx)`; a kernel
-that reads it from `args.p` gets no time sensitivity at all.
+unwrapping rule, and the framework itself must see `t` to seed ∂F/∂t. A kernel
+that reads its time from `args.p` gets no time sensitivity at all.
 
 `γ̃` is the *normalized local stage interval* of the element-local
 internal-variable problem (`q = q_ref + γ̃·g` is the normalization; the element
@@ -125,7 +125,9 @@ update_linearization!(op, r,
 
 A kernel reads slot *values* and nothing else — the reconstruction is a
 solver-side statement about where those values came from. Do not carry
-reconstruction slopes in `p`, and do not put them into `ctx`.
+reconstruction slopes in `p`, and do not put them into `ctx`; a scheme scalar
+that must reach a kernel rides as request payload (see weighted Jacobians
+below).
 
 The `:u` slot must be declared and must precede any reconstructed slot in the
 states NamedTuple — the sweep throws otherwise. The assembled Jacobian is
@@ -135,13 +137,14 @@ its per-slot weights.
 
 Condensed elements: declare `FerriteOperators.has_internal_state(::Type{<:MyCache}) = true`.
 The previous state arrives through your chosen slot; the local solve scales by
-`args.ctx.γ̃`; the trial result is written into the element-local `u` buffer
-(the framework propagates it — the condensation contract is unchanged).
+`args.ctx.γ̃`; the trial result is written into the element-local `u` buffer,
+and the framework propagates it — that per-evaluation write-back is the
+condensation contract.
 
 ## Facets ⚠
 
-The framework owns the facet loop now. `is_facet_in_cache` is unchanged;
-kernels become request-typed and facet parameters are queried per facet:
+The framework owns the facet loop. `is_facet_in_cache` is unchanged; kernels
+become request-typed and facet parameters are queried per facet:
 
 ```julia
 # 0.3.x
@@ -172,8 +175,12 @@ f(s::ElementAssemblyStrategy)               f(s::AssemblyStrategy{ElementAssembl
 
 Or dispatch on a single axis: `s.form`, `s.scheduling`, `s.device`. Operators
 are payload + engine + integrator; anything that read `op.dh`/`op.strategy`/
-`op.subdomain_caches` now reads `op.engine.*`. `getJ(op) = op.J` style
-accessors keep working.
+`op.subdomain_caches` reads `op.engine.*`. `getJ(op) = op.J` style accessors
+keep working.
+
+The engine's setup-time declarations live on its scheme protocol:
+`declared_slots`, `declared_kinds` and `declared_args_type` of
+`op.engine.protocol`.
 
 ## Solver-owned scratch
 
@@ -189,6 +196,13 @@ op = setup_operator(strategy, integrator, dh;
 
 ## New capabilities worth adopting during the port
 
+- **Scheme protocols**: `setup_operator(strategy, integrator, dh, protocol)` is
+  the positional form for scheme operators; the keyword form is sugar whose
+  keywords are `DefaultProtocol`'s constructor arguments, so
+  `setup_operator(strategy, integrator, dh; slots, requests, scratch, args_type)`
+  keeps working verbatim. Declarations move admissibility failures from first
+  use to `setup_operator`, and select which per-worker sweep-state families
+  exist — a bilinear or linear operator carries no AD machinery.
 - **Sensitivities**: `update_parameter_jacobian!(B, op, states, p, ctx)`,
   `parameter_vjp!(g, op, λ, states, p, ctx)`,
   `time_sensitivity!(g, op, states, p, ctx)` (AD by default, analytic kernels
@@ -197,10 +211,7 @@ op = setup_operator(strategy, integrator, dh;
   kernel a Dual-timed context and the FD method perturbs the context time — so
   `time_sensitivity!` takes the same `(states, p, ctx)` triple as every other
   entry point, reads `t` from `evaluation_time(ctx)`, and throws when `ctx` is
-  `nothing`. Likewise `check_derivatives(op, states, p, ctx)` runs its time
-  check only with a context and records a skip without one. Declare the kinds
-  you will use at setup (`requests = (ParameterVJPKind, …)`) to move
-  admissibility failures from first use to `setup_operator`.
+  `nothing`.
 - **Matrix-free state actions**: `state_jvp!` (`J·v` without a matrix),
   `state_vjp!` (`Jᵀλ` — the adjoint action).
 - **Components and stage operators**: `allocate_components` +
@@ -209,9 +220,16 @@ op = setup_operator(strategy, integrator, dh;
   sparsity pattern, weights applied by the solver, complex targets supported
   (transformed Radau). `StageBlockOperator`/`assemble_stages!` carry the same
   components into fully implicit Runge-Kutta.
+- **Weighted Jacobians**: `assemble_weighted_jacobian!(W, op, weights, states, p, ctx)`
+  is the scheme matrix `Σₛ wₛ ∂F/∂s` in one call. A hand-fused `W` kernel
+  (`M/(γΔt) + K`) ports as an analytic provider of `WeightedJacobianKind`
+  reading `req.weights` — NOT as a `JacobianRequest{:u}` kernel, which the
+  Jacobian checks legitimately reject against the AD referee.
 - **Derivative verification**: `check_derivatives(op, states, p, ctx)`
   cross-checks every analytic kernel and AD path against finite differences
-  of the operator's own residual — run it once per ported element.
+  of the operator's own residual — run it once per ported element. Its time
+  check runs only with a context, its weighted-Jacobian checks only with
+  `weights = (…)`; the rest are skipped with the reason recorded.
 - **Functionals**: `evaluate_functional(op, FunctionalKind(:energy), states, p, ctx)`
   reduces per-cell contributions returned by `evaluate_cell_functional`
   kernels — global scalars/tensors without hand-rolled loops.
@@ -236,5 +254,6 @@ op = setup_operator(strategy, integrator, dh;
 7. Drop `::KernelArgs` annotations from kernel signatures (setup warns about
    the ones you miss), and move every kernel that read time out of `p` onto
    `evaluation_time(args.ctx)`.
-8. Run your suite; every port failure except facets is a loud
+8. Rename `residual!` call sites to `evaluate!`.
+9. Run your suite; every port failure except facets is a loud
    `MethodError`/`ArgumentError` at setup or first assembly.

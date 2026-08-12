@@ -91,9 +91,23 @@ abstract type AbstractSurfaceElementCache end
 """
     assemble_facet!(req, cache, args, local_facet_index::Int)
 
-The v2 facet kernel entry point.
+The volumetric-kernel analogue for facets: accumulate this facet's
+contribution to `req`'s buffers. Facet kernels reinitialize their own
+`FacetValues` for `local_facet_index`, and have no automatic-differentiation
+fallback — a surface cache serves the sweep's request analytically or not at
+all.
 """
 function assemble_facet! end
+
+"""
+    is_facet_in_cache(facet::FacetIndex, cell, cache) -> Bool
+
+Gate of the framework's facet driver: `true` iff `cache` contributes on
+`facet`. The driver walks every facet of every cell and calls
+[`assemble_facet!`](@ref) only where this returns `true`, so a surface cache
+states its facet set here instead of re-deriving it per kernel call.
+"""
+function is_facet_in_cache end
 
 """
     Utility to execute noop assembly.

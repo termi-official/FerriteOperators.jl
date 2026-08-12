@@ -57,7 +57,7 @@ struct SimpleBilinearMassIntegrator <: AbstractBilinearIntegrator
 end
 
 """
-The cache associated with [`BilinearMassIntegrator`](@ref) to assemble element Mass matrices.
+The cache associated with [`SimpleBilinearMassIntegrator`](@ref) to assemble element Mass matrices.
 """
 struct SimpleBilinearMassElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
     ρ::Float64

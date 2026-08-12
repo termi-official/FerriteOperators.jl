@@ -6,6 +6,17 @@ generic fan-out serves every request type. The composite is analytic for a
 kind iff every inner cache is; otherwise the whole composite falls back to AD
 over the fused residual (one Dual sweep, one geometry pass for the fused
 Jacobian).
+
+Scope: same-(context, sink) multiphysics on ONE domain — the inners share the
+sweep's context, its request buffers, and its scatter target. Terms evaluated
+at different contexts (generalized-α's two times) or scattered into different
+targets (term-split operators, IMEX row blocks) are SEPARATE SWEEPS over
+separate integrators, not inners of one composite.
+
+Within that scope two limitations stand: the fan-out reuses the outer kernel
+args, so a per-inner [`query_cell_parameters`](@ref) override is bypassed, and
+analytic-vs-AD routing is all-or-nothing (one non-analytic inner puts the
+whole composite on the fused-residual AD path).
 """
 struct CompositeVolumetricElementCache{CacheTupleType <: Tuple} <: AbstractVolumetricElementCache
     inner_caches::CacheTupleType
@@ -75,6 +86,9 @@ This cache allows to combine multiple elements over the same surface. The
 boundary driver gates on the composite (`is_facet_in_cache` = any inner covers
 the facet); the fan-out re-gates per inner cache, since inner caches may cover
 different facet sets.
+
+Same scope as [`CompositeVolumetricElementCache`](@ref): one domain, one
+context, one sink.
 """
 struct CompositeSurfaceElementCache{CacheTupleType <: Tuple} <: AbstractSurfaceElementCache
     inner_caches::CacheTupleType

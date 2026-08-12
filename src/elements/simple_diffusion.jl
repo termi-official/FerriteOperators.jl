@@ -12,7 +12,7 @@ struct SimpleBilinearDiffusionIntegrator <: AbstractBilinearIntegrator
 end
 
 """
-The cache associated with [`BilinearDiffusionIntegrator`](@ref) to assemble element diffusion matrices.
+The cache associated with [`SimpleBilinearDiffusionIntegrator`](@ref) to assemble element diffusion matrices.
 """
 struct SimpleBilinearDiffusionElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
     D::Float64

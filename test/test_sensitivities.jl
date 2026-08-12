@@ -443,7 +443,7 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
         # instances normalize to their UnionAll kind type
         op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh;
                             requests = (ParameterVJPKind(zeros(n)), TimeSensitivityKind))
-        @test op.engine.requests == (ParameterVJPKind, TimeSensitivityKind)
+        @test declared_kinds(op.engine.protocol) == (ParameterVJPKind, TimeSensitivityKind)
         u = sin.(0.3 .* (1:n))
         λ = ones(n)
         g = zeros(1); parameter_vjp!(g, op, λ, u, 1.7)
@@ -456,10 +456,10 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
         @test_throws ArgumentError setup_visco_operator(strategy, qrc; requests = (StateVJPKind,))
         # time sensitivities stay declarable: the FD escape is a call-time choice
         vop = setup_visco_operator(strategy, qrc; requests = (TimeSensitivityKind,))
-        @test vop.engine.requests == (TimeSensitivityKind,)
+        @test declared_kinds(vop.engine.protocol) == (TimeSensitivityKind,)
         # kinds made admissible above (analytic kernel / insensitivity) pass setup
         vop2 = setup_visco_operator(strategy, qrc; requests = (ParameterJacobianKind, ParameterVJPKind))
-        @test vop2.engine.requests == (ParameterJacobianKind, ParameterVJPKind)
+        @test declared_kinds(vop2.engine.protocol) == (ParameterJacobianKind, ParameterVJPKind)
     end
 end
 
