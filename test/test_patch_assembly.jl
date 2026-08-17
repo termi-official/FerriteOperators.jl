@@ -1,5 +1,6 @@
 using FerriteOperators
 using FerriteOperatorsExampleElements
+using LinearAlgebra
 using SparseArrays
 using Test
 
@@ -83,6 +84,68 @@ function reference_patch_vector(provider, i, cache, dh, terms)
         end
     end
     return v
+end
+
+# Per-column term payload of a local BVP with several right-hand sides:
+# L_j(v) = ∫ v gⱼ(x) dΩ with a gⱼ that genuinely differs per column, so no
+# column is a rescaling of another.
+struct ColumnSource
+    j::Int
+end
+function FerriteOperators.assemble_patch_cell!(
+        req::ResidualRequest, cache::FerriteOperatorsExampleElements.SimpleBilinearDiffusionElementCache,
+        args, data::ColumnSource
+    )
+    cv = cache.cellvalues
+    coords = getcoordinates(args.cell)
+    for qp in 1:getnquadpoints(cv)
+        x = spatial_coordinate(cv, qp, coords)
+        g = sin(data.j * x[1]) + 0.5 * cos(data.j * x[2])
+        for i in 1:getnbasefunctions(cv)
+            req.r[i] += g * shape_value(cv, qp, i) * getdetJdV(cv, qp)
+        end
+    end
+    return nothing
+end
+
+# The downstream shape this slice exists for: per patch assemble the local
+# matrix, factorize it once (retained in the item-state slot), then solve and
+# emit one column per right-hand side. Public seams only.
+const PATCH_BVP_TERMS = (PatchTerm(WholePatch()),)
+const PatchLU = typeof(lu(Matrix{Float64}(I, 2, 2)))
+
+function solve_patch_columns!(sink, facts, pws, pid, states, p, ncols)
+    provider = patch_provider(pws)
+    n = patch_ndofs(provider, pid)
+    free = patch_free_dofs(provider, pid)
+    if !has_item_state(facts, pid)
+        K = zeros(n, n)
+        assemble_patch_target!(K, PATCH_BVP_TERMS, pws, states, p)
+        set_item_state!(facts, pid, lu(K[free, free]))
+    end
+    F = item_state(facts, pid)
+    rows = patch_dofs(provider, pid)[free]
+    rhs = zeros(n)
+    for j in 1:ncols
+        fill!(rhs, 0.0)
+        assemble_patch_target!(rhs, (PatchTerm(WholePatch(), ColumnSource(j)),), pws, states, p)
+        emit_patch_column!(sink, rows, (pid - 1) * ncols + j, F \ rhs[free])
+    end
+    return sink
+end
+
+# The same local BVP by direct kernel invocation, reusing the reference
+# assembly above.
+function reference_patch_columns!(sink, provider, pid, cache, dh, u, p, ncols)
+    free = patch_free_dofs(provider, pid)
+    K = reference_patch_matrix(provider, pid, cache, dh, u, p)
+    F = lu(K[free, free])
+    rows = patch_dofs(provider, pid)[free]
+    for j in 1:ncols
+        rhs = reference_patch_vector(provider, pid, cache, dh, (PatchTerm(WholePatch(), ColumnSource(j)),))
+        emit_patch_column!(sink, rows, (pid - 1) * ncols + j, F \ rhs[free])
+    end
+    return sink
 end
 
 @testset "Patch assembly" begin
@@ -313,5 +376,135 @@ end
         set_item_state!(st, 1, [3.0])
         invalidate_item_states!(st)
         @test !any(has_item_state(st, i) for i in 1:3)
+    end
+
+    @testset "chunk helper" begin
+        @test patch_chunks(provider, 1) == [1:3]
+        @test patch_chunks(provider, 2) == [1:1, 2:3]
+        @test patch_chunks(provider, 3) == [1:1, 2:2, 3:3]
+        # more chunks than items drops the empty ones rather than returning them
+        @test patch_chunks(provider, 7) == [1:1, 2:2, 3:3]
+        @test reduce(vcat, patch_chunks(provider, 2)) == 1:npatches(provider)
+        @test_throws ArgumentError patch_chunks(provider, 0)
+        # coloring has no meaning without item adjacency, and says so
+        @test_throws ArgumentError FerriteOperators.compute_partition(ColoredScheduling(), provider)
+    end
+
+    @testset "per-patch callback: local BVP with several right-hand sides" begin
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.7, qrc, :u), dh)
+        cache = op.engine.subdomain_caches[1].domain.element
+        u = zeros(ndofs(dh))
+        ncols = 4
+
+        # the Neumann patch matrix is singular; pinning one dof per patch is the
+        # caller's job, exactly as the partition contract states
+        prov = PatchItems(sdh, cellsets)
+        for i in 1:npatches(prov)
+            augment_prescribed_dofs!(prov, i, [1])
+        end
+
+        sink = PatchTripletSink()
+        facts = PatchItemStates{PatchLU}(npatches(prov))
+        foreach_patch(op, prov, (u = u,), nothing) do pws, pid
+            @test current_patch(pws) == pid
+            @test patch_provider(pws) === prov
+            solve_patch_columns!(sink, facts, pws, pid, (u = u,), nothing, ncols)
+        end
+
+        ref = PatchTripletSink()
+        for pid in 1:npatches(prov)
+            reference_patch_columns!(ref, prov, pid, cache, dh, u, nothing, ncols)
+        end
+        @test sink.I == ref.I
+        @test sink.J == ref.J
+        @test sink.V ≈ ref.V rtol = 1e-12
+        @test all(has_item_state(facts, i) for i in 1:npatches(prov))
+
+        @testset "multi-column emission" begin
+            W = sparse(sink, ndofs(dh), npatches(prov) * ncols)
+            @test size(W) == (ndofs(dh), npatches(prov) * ncols)
+            nfree = sum(pid -> length(patch_free_dofs(prov, pid)), 1:npatches(prov))
+            @test length(sink.V) == ncols * nfree
+            for pid in 1:npatches(prov)
+                rows = patch_dofs(prov, pid)[patch_free_dofs(prov, pid)]
+                cols = [Vector(W[:, (pid - 1) * ncols + j]) for j in 1:ncols]
+                for c in cols
+                    @test Set(findall(!iszero, c)) ⊆ Set(rows)
+                    @test !iszero(c)
+                end
+                # the per-column term data really differs: no column of a patch
+                # is a multiple of another
+                for j in 1:ncols, k in (j + 1):ncols
+                    @test abs(dot(cols[j], cols[k])) < (1 - 1.0e-6) * norm(cols[j]) * norm(cols[k])
+                end
+            end
+        end
+
+        @testset "chunked parallel sweep reproduces the sequential stream" begin
+            # Test code playing the downstream role: contiguous chunks, one
+            # workspace and one collector per worker, chunk-order merge. Only
+            # public seams are used.
+            chunks = patch_chunks(prov, 2)          # [1:1, 2:3]: a short and a long chunk
+            sinks = [PatchTripletSink() for _ in chunks]
+            wss = [patch_workspace(op, prov) for _ in chunks]
+            parfacts = PatchItemStates{PatchLU}(npatches(prov))
+            @sync for c in eachindex(chunks)
+                Threads.@spawn begin
+                    ws = wss[c]
+                    for pid in chunks[c]
+                        Ferrite.reinit!(ws, pid)
+                        solve_patch_columns!(sinks[c], parfacts, ws, pid, (u = u,), nothing, ncols)
+                    end
+                end
+            end
+            merged = PatchTripletSink()
+            for s in sinks
+                append!(merged, s)
+            end
+            # `==` on floats is deliberate here: bit-identity of the triplet
+            # stream IS the property under test, not approximate agreement.
+            @test merged.I == sink.I
+            @test merged.J == sink.J
+            @test merged.V == sink.V
+
+            # one workspace per worker, and duplication is the other route to one
+            dup = FerriteOperators.duplicate_for_device(SequentialCPUDevice(), wss[1])
+            @test dup !== wss[1]
+            @test patch_provider(dup) === prov
+            dsink = PatchTripletSink()
+            Ferrite.reinit!(dup, 1)
+            solve_patch_columns!(dsink, PatchItemStates{PatchLU}(npatches(prov)),
+                dup, 1, (u = u,), nothing, ncols)
+            @test dsink.V == sinks[1].V          # chunk 1 is exactly patch 1
+        end
+    end
+
+    @testset "item-indexed sink extent is validated at the sweep" begin
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        terms = (PatchTerm(WholePatch(), WeightedSource(1.0)),)
+        @test npatches(provider) == 3
+        @test_throws ArgumentError assemble_patches!(
+            PatchVectorKind(terms, PatchTripletSink([1, 2])), op, provider, (;), nothing)
+        @test_throws ArgumentError assemble_patches!(
+            PatchVectorKind(terms, PatchTripletSink()), op, provider, (;), nothing)
+        # the matching map goes through
+        sink = PatchTripletSink([1, 1, 2])
+        @test assemble_patches!(PatchVectorKind(terms, sink), op, provider, (;), nothing) === sink
+    end
+
+    @testset "assemble_patch_target! accumulates and rejects unusable targets" begin
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        u = zeros(ndofs(dh))
+        pws = patch_workspace(op, provider)
+        Ferrite.reinit!(pws, 1)
+        n = patch_ndofs(provider, 1)
+        K = zeros(n, n)
+        assemble_patch_target!(K, PATCH_BVP_TERMS, pws, (u = u,), nothing)
+        once = copy(K)
+        assemble_patch_target!(K, PATCH_BVP_TERMS, pws, (u = u,), nothing)
+        @test K ≈ 2 .* once rtol = 1e-14
+        @test !iszero(once)
+        @test_throws ArgumentError assemble_patch_target!(
+            "not a target", PATCH_BVP_TERMS, pws, (u = u,), nothing)
     end
 end

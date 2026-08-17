@@ -108,11 +108,14 @@ export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
 export ResidualKind, JacobianKind, JacobianResidualKind, WeightedJacobianKind
 export ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind
 export FunctionalKind, evaluate_functional, evaluate_cell_functional
-export PatchItems, patch_dofs, patch_ndofs, patch_cells, patch_cell_groups, assemble_patch_matrices!
+export PatchItems, npatches, patch_dofs, patch_ndofs, patch_cells, patch_cell_groups, assemble_patch_matrices!
 export patch_free_dofs, patch_prescribed_dofs, augment_prescribed_dofs!, patch_vertices, patch_vertex_dofs
 export WholePatch, CellGroup, PatchTerm, patch_term_active, any_patch_term_active
 export whole_patch_terms, assemble_patch_cell!
-export PatchMatrixKind, PatchVectorKind, assemble_patches!
+export PatchMatrixKind, PatchVectorKind, PatchCallbackKind, assemble_patches!, foreach_patch
+export PatchAssemblyWorkspace, patch_workspace, current_patch, patch_provider
+export assemble_patch_target!, patch_chunks
+export AbstractPatchSink, patch_target, patch_scatter, patch_emit!
 export PatchLocalSink, PatchAssemblerSink, PatchGlobalVectorSink, PatchTripletSink, emit_patch_column!
 export PatchItemStates, item_state, set_item_state!, has_item_state, invalidate_item_state!, invalidate_item_states!
 export provides_analytic
