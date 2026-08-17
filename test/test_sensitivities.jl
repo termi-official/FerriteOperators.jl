@@ -5,6 +5,8 @@ import LinearAlgebra: mul!, dot, norm
 using SparseArrays
 using Polyester
 
+include(joinpath(@__DIR__, "fixture_elements.jl"))
+
 # A v2-native nonlinear element: r(u, p) = ∫ ∇v⋅∇u dΩ − ∫ p v dΩ.
 # The scalar source p is the differentiable parameter. Only the residual
 # kernel exists — every derivative is exercised through the AD fallback.
@@ -90,18 +92,6 @@ end
 
 # Any context works for a stationary sweep; ∂F/∂t only reads the time.
 stationary_ctx(t) = TimeIntegrationContext(t, 1.0, 1.0)
-
-# Shared condensed-viscoelasticity fixture: single hex, vector displacement
-# plus hidden per-QP εᵛ, slots (:u, :uprev).
-function setup_visco_operator(strategy, qrc; kwargs...)
-    vgrid = generate_grid(Hexahedron, (1, 1, 1))
-    vdh = DofHandler(vgrid)
-    add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
-    close!(vdh)
-    vint = SimpleCondensedLinearViscoelasticity(
-        MaxwellParameters(), qrc, :u, :εᵛ)
-    return setup_operator(strategy, vint, vdh; slots = (:u, :uprev), kwargs...)
-end
 
 @testset "Sensitivities" begin
     grid = generate_grid(Quadrilateral, (4, 3))
@@ -214,8 +204,8 @@ end
     end
 
     @testset "bilinear element inside a nonlinear operator" begin
-        # Regression for the trait-consistency finding: a v2 bilinear element
-        # must carry a residual kernel so it composes into nonlinear operators.
+        # A bilinear element must carry a residual kernel so it composes into
+        # nonlinear operators.
         addcellset!(grid, "all_cells", x -> true)
         ndi = NonlinearMultiDomainIntegrator(Dict(
             "all_cells" => SimpleBilinearDiffusionIntegrator(1.3, qrc, :u),
@@ -227,7 +217,7 @@ end
     end
 
     @testset "condensed operators are rejected loudly" begin
-        vop = setup_visco_operator(strategy, qrc)
+        vop = visco_testbed(strategy, qrc).op
         vu = zeros(unknown_size(vop))
         @test_throws ArgumentError update_parameter_jacobian!(zeros(residual_size(vop), 1), vop, vu, 1.0)
         @test_throws ArgumentError parameter_vjp!(zeros(1), vop, zeros(residual_size(vop)), vu, 1.0)
@@ -293,7 +283,7 @@ FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperatorsExampleElem
     end
 
     @testset "condensed: analytic parameter kernel is admissible" begin
-        vop = setup_visco_operator(strategy, qrc)
+        vop = visco_testbed(strategy, qrc).op
         vu = 1e-4 .* sin.(0.2 .* (1:unknown_size(vop)))
         vuprev = zeros(unknown_size(vop))
         vctx = TimeIntegrationContext(0.0, 0.1, 0.1)
@@ -319,20 +309,6 @@ FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperatorsExampleElem
         @test vu == vu_before                       # trial write-back never leaked
         @test norm(g) < 1e-8                        # the residual reads γ̃, not the evaluation time
     end
-end
-
-struct NeoHookeanState
-    E::Float64
-    ν::Float64
-end
-function (mat::NeoHookeanState)(F)
-    (; E, ν) = mat
-    μ = E / (2(1 + ν))
-    λ = (E * ν) / ((1 + ν) * (1 - 2ν))
-    C = tdot(F)
-    Ic = tr(C)
-    J = sqrt(det(C))
-    return μ / 2 * (Ic - 3 - 2 * log(J)) + λ / 2 * (J - 1)^2
 end
 
 @testset "State JVP/VJP actions" begin
@@ -368,7 +344,7 @@ end
         hdh = DofHandler(hgrid)
         add!(hdh, :u, Lagrange{RefHexahedron, 1}()^3)
         close!(hdh)
-        hint = SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
+        hint = SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
         hop = setup_operator(strategy, hint, hdh)
         hn = ndofs(hdh)
         hu = 0.05 .* sin.(0.3 .* (1:hn))
@@ -396,7 +372,7 @@ end
     n    = ndofs(dh)
 
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-    integrator = SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
+    integrator = SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
     op = setup_operator(strategy, integrator, dh)
 
     u = 0.05 .* sin.(0.3 .* (1:n))
@@ -455,49 +431,17 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
 
     @testset "declared inadmissible kinds fail at setup, not first use" begin
         # condensed state, no analytic StateVJP kernel, no insensitivity declaration
-        @test_throws ArgumentError setup_visco_operator(strategy, qrc; requests = (StateVJPKind,))
+        @test_throws ArgumentError visco_testbed(strategy, qrc; requests = (StateVJPKind,))
         # time sensitivities stay declarable: the FD escape is a call-time choice
-        vop = setup_visco_operator(strategy, qrc; requests = (TimeSensitivityKind,))
+        vop = visco_testbed(strategy, qrc; requests = (TimeSensitivityKind,)).op
         @test get_declared_kinds(vop.engine.protocol) == (TimeSensitivityKind,)
         # kinds made admissible above (analytic kernel / insensitivity) pass setup
-        vop2 = setup_visco_operator(strategy, qrc; requests = (ParameterJacobianKind, ParameterVJPKind))
+        vop2 = visco_testbed(strategy, qrc; requests = (ParameterJacobianKind, ParameterVJPKind)).op
         @test get_declared_kinds(vop2.engine.protocol) == (ParameterJacobianKind, ParameterVJPKind)
     end
 end
 
 # --- The boundary limitation of sensitivity sweeps ---
-
-# The volumetric element of `SourceDiffusionIntegrator` plus a real constant
-# Neumann term, so an operator can carry a non-empty boundary cache.
-struct BoundarySourceIntegrator <: AbstractNonlinearIntegrator
-    qrc::QuadratureRuleCollection
-    field_name::Symbol
-    facetset::Set{FacetIndex}
-end
-struct BoundarySourceCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
-    fv::FV
-    facetset::Set{FacetIndex}
-end
-FerriteOperators.setup_element_cache(m::BoundarySourceIntegrator, sdh::SubDofHandler) =
-    FerriteOperators.setup_element_cache(SourceDiffusionIntegrator(m.qrc, m.field_name), sdh)
-function FerriteOperators.setup_boundary_cache(m::BoundarySourceIntegrator, sdh::SubDofHandler)
-    fqr    = FacetQuadratureRule{RefQuadrilateral}(2)
-    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
-    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
-    return BoundarySourceCache(FacetValues(fqr, ip, ip_geo), m.facetset)
-end
-FerriteOperators.duplicate_for_device(device, c::BoundarySourceCache) =
-    BoundarySourceCache(FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
-FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::BoundarySourceCache) = idx ∈ c.facetset
-function FerriteOperators.assemble_facet!(req::ResidualRequest, c::BoundarySourceCache, args, lfi::Int)
-    reinit!(c.fv, args.cell, lfi)
-    for qp in 1:getnquadpoints(c.fv)
-        dΓ = getdetJdV(c.fv, qp)
-        for i in 1:getnbasefunctions(c.fv)
-            req.r[i] -= shape_value(c.fv, qp, i) * dΓ
-        end
-    end
-end
 
 @testset "Boundary terms are not differentiated" begin
     grid = generate_grid(Quadrilateral, (2, 2))
@@ -505,7 +449,10 @@ end
     qrc = QuadratureRuleCollection(2)
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     right = Set(getfacetset(grid, "right"))
-    bnd() = BoundarySourceIntegrator(qrc, :u, right)
+    # The volumetric element of `SourceDiffusionIntegrator` plus a real constant
+    # Neumann term, so an operator can carry a non-empty boundary cache.
+    bnd() = NonlinearNeumannProbe(-1.0, :u, right;
+                                  volumetric = SourceDiffusionIntegrator(qrc, :u))
 
     # The combination is what warns: a declared sensitivity kind whose sweep
     # runs the volumetric kernel only, over an operator that has boundary terms.
@@ -597,7 +544,7 @@ end
         dh = DofHandler(grid)
         add!(dh, :u, Lagrange{RefHexahedron, 1}()^3)
         close!(dh)
-        hint = SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
+        hint = SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
         hop = setup_operator(strategy, hint, dh)
         hn = ndofs(dh)
         hu = 0.05 .* sin.(0.3 .* (1:hn))

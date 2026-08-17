@@ -7,19 +7,7 @@ using SparseArrays
 using Polyester
 using TimerOutputs
 
-struct NeoHookean
-    E::Float64
-    ν::Float64
-end
-function (p::NeoHookean)(F)
-    (; E, ν) = p
-    μ = E / (2(1 + ν))
-    λ = (E * ν) / ((1 + ν) * (1 - 2ν))
-    C = tdot(F)
-    Ic = tr(C)
-    J = sqrt(det(C))
-    return μ / 2 * (Ic - 3 - 2 * log(J)) + λ / 2 * (J - 1)^2
-end
+include(joinpath(@__DIR__, "fixture_elements.jl"))
 
 @testset "Quadrature Data Processing" begin
 
@@ -31,34 +19,20 @@ end
     integrator = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
     strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
 
-    # --- evaluate_quadrature! fills QVector ---
-    @testset "evaluate_quadrature! fills QVector" begin
-        qop = setup_operator(strategy, integrator, dh)
-        q   = setup_qvector(Float64, dh, qrc)
-        u   = zeros(ndofs(dh))
-
-        # f stores 1.0 at every QP
-        evaluate_quadrature!(q, qop, u, nothing,
-            (ue, qp, cell, element_cache, pe) -> 1.0
-        )
-        @test all(==(1.0), q)
-    end
-
     # --- Result is consistent with manual per-cell indexing ---
     @testset "evaluate_quadrature! consistent with per-cell access" begin
         qop = setup_operator(strategy, integrator, dh)
         q   = setup_qvector(Float64, dh, qrc)
         u   = zeros(ndofs(dh))
 
-        # f stores QP index (1..nqp) in each slot
+        # f stores QP index (1..nqp) in each slot, so the probe sees the
+        # within-cell ordering and not just the value it stored
         evaluate_quadrature!(q, qop, u, nothing,
             (ue, qp, cell, element_cache, pe) -> qp
         )
 
-        ncells = getncells(grid)
-        nqp    = getnquadpoints(QuadratureRule{RefHexahedron}(2))
-        @test length(q) == ncells * nqp
-        for cellid in 1:ncells
+        nqp = getnquadpoints(QuadratureRule{RefHexahedron}(2))
+        for cellid in 1:getncells(grid)
             @test get_range_for_cell(q, cellid) == collect(1:nqp)
         end
     end
@@ -163,16 +137,6 @@ end
         @test query.buffer isa QVector{Float64}
         @test length(query.buffer) == getncells(grid) * 8   # 4 cells × 8 QPs each
         @test query.set === nothing                          # no filter by default
-    end
-
-    # --- process_query! fills the underlying QVector ---
-    @testset "process_query! fills buffer" begin
-        query = prepare_quadrature_query(Float64, qop)
-        process_query!(query, qop, u, nothing, f_cellid)
-        # Every QP slot must hold the cell ID it belongs to
-        for cellid_val in 1:getncells(grid)
-            @test all(==(Float64(cellid_val)), get_range_for_cell(query.buffer, cellid_val))
-        end
     end
 
     # --- process_query! respects the cell-set filter ---

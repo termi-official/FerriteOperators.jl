@@ -1,6 +1,6 @@
-# Migrating from 0.3.x to the v2 interface
+# Migrating from 0.3.x to 0.4
 
-This guide maps every removed or changed 0.3.x API to its v2 replacement.
+This guide maps every removed or changed 0.3.x API to its 0.4 replacement.
 Breaking changes are clustered into this one transition — there are no
 deprecation shims; old signatures are gone, and (important!) some old element
 methods are **silently never called** rather than erroring, so grep for the
@@ -8,7 +8,7 @@ patterns marked ⚠ below.
 
 ## Quick map
 
-| 0.3.x | v2 |
+| 0.3.x | 0.4 |
 |---|---|
 | `assemble_element!(Kₑ, [rₑ,] [uₑ,] cell, cache, t)` (5 arities) | `assemble_cell!(req, cache, args)` — request-typed |
 | `assemble_facet!(Kₑ, …, cell, lfi, cache, t)` ⚠ | `assemble_facet!(req, cache, args, lfi)` |
@@ -66,10 +66,9 @@ on one reaches it as `FerriteOperatorsExampleElements.Simple…ElementCache`.
 `NonlinearCompositeIntegrator`, `BilinearCompositeIntegrator` and
 `LinearCompositeIntegrator` build the composite caches, which previously had to
 be assembled by hand. One behavioural change reaches existing hand-built
-composites: an inner cache's `query_cell_parameters` / `query_facet_parameters`
-override was documented as bypassed and is now honoured — each inner receives
-its own parameter view. An inner that relied on seeing the outer view must take
-that view from its own query.
+composites: an inner cache's query override is honoured; each inner receives
+its own parameter view. An inner that relied on seeing the outer view must
+take that view from its own query.
 
 ## Multi-domain routing
 
@@ -104,7 +103,7 @@ function assemble_element!(Kₑ, rₑ, uₑ, cell, cache::MyCache, p) ... end
 function assemble_element!(Kₑ, uₑ, cell, cache::MyCache, p) ... end
 function assemble_element!(rₑ, uₑ, cell, cache::MyCache, p) ... end
 
-# v2 — reinit lives in the per-cache hook …
+# 0.4 — reinit lives in the per-cache hook …
 FerriteOperators.reinit_values!(c::MyCache, cell) = reinit!(c.cv, cell)
 
 # … one mandatory residual kernel (pure evaluation, no reinit) …
@@ -150,7 +149,7 @@ a context; elements read values.
 update_linearization!(op, r, u, GenericFirstOrderTimeParameters(p, t, Δt, uprev))
 # element: assemble_element_gto1!(Kₑ, rₑ, uₑ, uₑprev, cell, cache, p, t, Δt)
 
-# v2
+# 0.4
 op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev))
 update_linearization!(op, r, (u = u, uprev = uprev), p, TimeIntegrationContext(t, Δt, γ̃))
 # element: uₑprev = args.states.uprev;  t = evaluation_time(args.ctx);  γ̃ = args.ctx.γ̃
@@ -209,7 +208,7 @@ become request-typed and facet parameters are queried per facet:
 # 0.3.x
 function assemble_facet!(rₑ, uₑ, cell, lfi, cache::MyFacetCache, p) ... end
 
-# v2
+# 0.4
 function FerriteOperators.assemble_facet!(req::ResidualRequest, cache::MyFacetCache, args, lfi::Int)
     reinit!(cache.fv, args.cell, lfi)
     # accumulate into req.r; args.p came from query_facet_parameters(cache, cell, lfi, p)
@@ -225,7 +224,7 @@ least one boundary integral under a test with an analytic reference (see
 ## Strategies and operators
 
 ```julia
-# 0.3.x type dispatch                       # v2
+# 0.3.x type dispatch                       # 0.4
 f(s::SequentialAssemblyStrategy)            f(s::AssemblyStrategy{<:FullAssembly, SequentialScheduling})
 f(s::PerColorAssemblyStrategy)              f(s::AssemblyStrategy{<:FullAssembly, <:ColoredScheduling})
 f(s::ElementAssemblyStrategy)               f(s::AssemblyStrategy{ElementAssembly})   # pre-setup

@@ -803,10 +803,10 @@ end
 # included); a real payload goes to the analytic term kernel. Both reach the
 # element through the same kind → request association as the cell driver.
 @inline run_patch_term!(ekind, ::Nothing, iws, statesₑ, pₑ, ctx) =
-    v2_cell_kernel!(ekind, iws.element, iws, statesₑ, pₑ, ctx)
+    cell_kernel!(ekind, iws.element, iws, statesₑ, pₑ, ctx)
 @inline run_patch_term!(ekind, data, iws, statesₑ, pₑ, ctx) =
     assemble_patch_cell!(materialize_request(ekind, iws), iws.element,
-                         _v2_args(iws, statesₑ, pₑ, ctx), data)
+                         _kernel_args(iws, statesₑ, pₑ, ctx), data)
 
 # --- the drivers -----------------------------------------------------------
 

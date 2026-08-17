@@ -55,8 +55,7 @@ function assemble_transfer_element!(Pₑ::AbstractMatrix, cell, element_cache::M
     end
 
     # In-place Cholesky on the SPD mass matrix.  cholesky! overwrites the upper triangle of
-    # Mₑbuf with the Cholesky factor and returns a lightweight wrapper (no large allocation),
-    # unlike qr() which copies the matrix and allocates O(n²) for the reflectors.
+    # Mₑbuf with the Cholesky factor and returns a lightweight wrapper (no large allocation).
     C = cholesky!(Symmetric(Mₑbuf))
     ldiv!(Pₑ, C, Pₑbuf)
 end

@@ -1,5 +1,5 @@
 ####################################
-## Assembly requests (element interface v2)
+## Assembly requests (element interface)
 ####################################
 
 """
@@ -216,7 +216,7 @@ with_context(args::KernelArgs, ctx) =
 """
     assemble_cell!(req::AbstractAssemblyRequest, cache, args)
 
-The v2 volumetric kernel entry point. Elements must at least provide the
+The volumetric kernel entry point. Elements must at least provide the
 [`ResidualRequest`](@ref) method (validated at setup); every other request falls back to automatic
 differentiation of the residual kernel unless [`provides_analytic`](@ref)
 declares an analytic method.
@@ -261,7 +261,7 @@ query_facet_parameters(cache, cell, local_facet_index, p) = unwrap_parameters(p)
 """
     provides_analytic(::Type{CacheType}, kind) -> Bool
 
-`true` iff the v2 element cache implements `assemble_cell!` analytically for
+`true` iff the element cache implements `assemble_cell!` analytically for
 the given request *kind* singleton (`JacobianKind()`, `ParameterJacobianKind()`,
 …). Everything except the mandatory residual defaults to `false`, i.e.
 AD-from-residual.
@@ -290,7 +290,7 @@ kernel_args_type(engine) = KernelArgs
 """
     validate_element_cache(cache, declared_requests = (), ArgsType = KernelArgs)
 
-Setup-time consistency check for v2 element caches: a cache that opts into the
+Setup-time consistency check for element caches: a cache that opts into the
 request protocol must implement the mandatory [`ResidualRequest`](@ref)
 kernel, and every request kind the [`provides_analytic`](@ref) trait claims
 must have a matching kernel method. Runs once per subdomain at
@@ -417,12 +417,12 @@ end
 _primal_validatable_kinds() = (JacobianKind{:u}(), JacobianResidualKind())
 
 # AD-from-residual through an element-local solve is wrong in principle
-# (implicit function; see references/implicit-ad-plasti.jl), so the rejection
-# is PER CACHE and PER KIND: a cache with internal state is admissible when
-# the requested kind is served analytically (the author carries dq/∂seed,
-# like the consistent tangent), or when the author asserts the local
-# equations are insensitive to the seeded quantity (`dq/∂seed ≡ 0`, making
-# plain AD exact). Only the would-be AD fallback is rejected.
+# (implicit function theorem: the local solve hides dq/∂seed from plain AD),
+# so the rejection is PER CACHE and PER KIND: a cache with internal state is
+# admissible when the requested kind is served analytically (the author
+# carries dq/∂seed, like the consistent tangent), or when the author asserts
+# the local equations are insensitive to the seeded quantity (`dq/∂seed ≡ 0`,
+# making plain AD exact). Only the would-be AD fallback is rejected.
 function assert_sensitivity_admissible(T::Type, kind)
     if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
         throw(ArgumentError(
@@ -465,13 +465,12 @@ internal_state_insensitive(::Type, kind) = false
 Element-side scratch declaration: each entry is instantiated once per worker
 and reaches kernels via `args.scratch`. Solvers declare their own entries via
 `setup_operator(...; scratch = (name = () -> ...,))`; both land merged in the
-workspace. This replaces smuggling solver state through model trees or
-parameter bags.
+workspace.
 """
 declare_scratch(cache) = (;)
 
 ####################################
-## Reserved item shapes (contract space only — see the plan §2.1b)
+## Reserved item shapes (contract space only)
 ####################################
 
 """
@@ -481,9 +480,9 @@ RESERVED: the N-participant argument bundle for interface/pair items (DG
 facet pairs as the `N = 2` case, contact pairs, non-local one-to-many
 couplings with an indexed collection of secondary sides). Each participant
 carries its own states/geometry/restriction; `p`, `scratch`, and
-per-participant contexts ride alongside. Implemented with the phase-4
-interface work — the name and shape are reserved now so nothing forecloses
-them.
+per-participant contexts ride alongside. Not implemented: the name and shape
+are reserved so an interface item family can adopt them without a breaking
+rename.
 """
 abstract type InterfaceKernelArgs end
 

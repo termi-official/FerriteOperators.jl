@@ -1,5 +1,5 @@
 @doc raw"""
-    SimplLinearIntegrator{CoefficientType}
+    SimpleLinearIntegrator
 
 Represents the integrand of the linear form ``b(v) = f v(x) dx`` for a given constant ``f`` and ``v`` from the test function space.
 """
@@ -29,8 +29,8 @@ function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofH
     return SimpleLinearElementCache(element_model.f, CellValues(qr, ip, ip_geo))
 end
 
-# v2 request protocol. The load form is state-independent: the residual kernel
-# reads nothing from `args.states`.
+# The load form is state-independent: the residual kernel reads nothing from
+# `args.states`.
 function assemble_cell!(req::ResidualRequest, cache::SimpleLinearElementCache, args)
     (; cellvalues, f) = cache
     for qp in 1:getnquadpoints(cellvalues)
@@ -44,9 +44,9 @@ end
 duplicate_for_device(device, cache::SimpleLinearElementCache) = SimpleLinearElementCache(cache.f, duplicate_for_device(device, cache.cellvalues))
 
 @doc raw"""
-    SimpleBilinearMassIntegrator{CoefficientType}
+    SimpleBilinearMassIntegrator
 
-Represents the integrand of the bilinear form ``a(u,v) = -\int v(x) \cdot D u(x) dx`` for a given Mass value ``D`` and ``u,v`` from the same function space.
+Represents the integrand of the bilinear form ``a(u,v) = \int v(x) \cdot D u(x) dx`` for a given Mass value ``D`` and ``u,v`` from the same function space.
 """
 struct SimpleBilinearMassIntegrator <: AbstractBilinearIntegrator
     # This is specific to our model
@@ -81,8 +81,8 @@ function setup_element_cache(element_model::SimpleBilinearMassIntegrator, sdh::S
     return SimpleBilinearMassElementCache(element_model.ρ, CellValues(qr, ip, ip_geo))
 end
 
-# v2 request protocol. The bilinear form induces a linear operator, so its
-# residual is the element matrix acting on the element vector.
+# The bilinear form induces a linear operator, so its residual is the element
+# matrix acting on the element vector.
 provides_analytic(::Type{<:SimpleBilinearMassElementCache}, ::JacobianKind) = true
 function assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearMassElementCache, args)
     (; cellvalues, ρ) = cache

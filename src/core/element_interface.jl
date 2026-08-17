@@ -1,7 +1,7 @@
 """
 Supertype for all caches to integrate over volumes.
 
-The v2 contract: elements implement request-typed kernels
+The contract: elements implement request-typed kernels
 
     assemble_cell!(req, cache, args)
 
@@ -85,7 +85,7 @@ end
 """
 Supertype for all caches to integrate over surfaces.
 
-The v2 contract: facet kernels are request-typed,
+The contract: facet kernels are request-typed,
 
     assemble_facet!(req, cache, args, local_facet_index::Int)
 
@@ -140,7 +140,7 @@ setup_boundary_cache(integrator, sdh) = EmptySurfaceElementCache()
 Supertype for all caches to integrate over interfaces (facet pairs).
 
 Reserved for the DG work: interface kernels are request-typed over a
-two-sided argument bundle (see the plan's `InterfaceKernelArgs`); the
+two-sided argument bundle (see [`InterfaceKernelArgs`](@ref)); the
 one-to-many generalization for non-local coupling reserves its own shape.
 Concrete interface caches and their setup hook land with that work.
 """

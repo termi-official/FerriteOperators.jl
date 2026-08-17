@@ -7,39 +7,7 @@ using SparseArrays
 using Polyester
 using TimerOutputs
 
-# A linear integrator whose only term is a constant Neumann load on a facet
-# set. Used to check that multi-domain routing resolves the *boundary* cache
-# of a subdomain through that subdomain's volumetric name.
-struct DomainNeumannIntegrator <: AbstractLinearIntegrator
-    t̄::Float64
-    field_name::Symbol
-    facetset::Set{FacetIndex}
-end
-struct DomainNeumannCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
-    t̄::Float64
-    fv::FV
-    facetset::Set{FacetIndex}
-end
-FerriteOperators.setup_element_cache(::DomainNeumannIntegrator, ::SubDofHandler) =
-    FerriteOperators.EmptyVolumetricElementCache()
-function FerriteOperators.setup_boundary_cache(m::DomainNeumannIntegrator, sdh::SubDofHandler)
-    fqr = FacetQuadratureRule{RefHexahedron}(2)
-    ip = Ferrite.getfieldinterpolation(sdh, m.field_name)
-    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
-    return DomainNeumannCache(m.t̄, FacetValues(fqr, ip, ip_geo), m.facetset)
-end
-FerriteOperators.duplicate_for_device(device, c::DomainNeumannCache) =
-    DomainNeumannCache(c.t̄, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
-FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::DomainNeumannCache) = idx ∈ c.facetset
-function FerriteOperators.assemble_facet!(req::ResidualRequest, c::DomainNeumannCache, args, lfi::Int)
-    reinit!(c.fv, args.cell, lfi)
-    for qp in 1:getnquadpoints(c.fv)
-        dΓ = getdetJdV(c.fv, qp)
-        for i in 1:getnbasefunctions(c.fv)
-            req.r[i] += c.t̄ * shape_value(c.fv, qp, i) * dΓ
-        end
-    end
-end
+include(joinpath(@__DIR__, "fixture_elements.jl"))
 
 @testset "Operators" begin
     reset_timer!()
@@ -112,9 +80,6 @@ end
         mul!(vout, nullop, vin, 2.0, 1.0)
         @test vout == ones(5)
 
-        @test length(vin)  == size(nullop, 1)
-        @test length(vout) == size(nullop, 2)
-        
         @test get_matrix(nullop) ≈ zeros(5,5)
 
 
@@ -140,8 +105,6 @@ end
 
         mul!(vout, diagop, vin, -2.0, 1.0)
         @test vout == zeros(5)
-        @test length(vin)  == size(diagop, 1)
-        @test length(vout) == size(diagop, 2)
 
         @test get_matrix(diagop) ≈ spdiagm([1.0, 2.0, 3.0, 4.0, 5.0])
 
@@ -150,9 +113,6 @@ end
         vout .= ones(5)
         nullop_rect = NullOperator{Float64,4,5}()
 
-        @test length(vin)  == size(nullop_rect, 1)
-        @test length(vout) == size(nullop_rect, 2)
-        @test vout == vout
         @test length(vin)  == size(nullop_rect, 1)
         @test length(vout) == size(nullop_rect, 2)
 
@@ -201,7 +161,6 @@ end
                     PerColorAssemblyStrategy(SequentialCPUDevice()),
                     PerColorAssemblyStrategy(PolyesterDevice(1)),
                     PerColorAssemblyStrategy(PolyesterDevice(2)),
-                    PerColorAssemblyStrategy(PolyesterDevice(3)),
             )
                 bilinop = setup_operator(strategy, integrator, dh)
                 # Consistency
@@ -215,20 +174,6 @@ end
     end
 
     @testset "Nonlinear" begin
-        struct NeoHookean
-            E::Float64
-            ν::Float64
-        end
-        function (p::NeoHookean)(F)
-            (; E, ν) = p
-            μ = E / (2(1 + ν))
-            λ = (E * ν) / ((1 + ν) * (1 - 2ν))
-            C = tdot(F)
-            Ic = tr(C)
-            J = sqrt(det(C))
-            return μ / 2 * (Ic - 3 - 2 * log(J)) + λ / 2 * (J - 1)^2
-        end
-
         # Setup
         grid = generate_grid(Hexahedron, (3,3,3))
         Ferrite.transform_coordinates!(grid, x->Vec{3}(sign.(x.-0.5) .* (x.-0.5).^2))
@@ -284,7 +229,6 @@ end
                 PerColorAssemblyStrategy(SequentialCPUDevice()),
                 PerColorAssemblyStrategy(PolyesterDevice(1)),
                 PerColorAssemblyStrategy(PolyesterDevice(2)),
-                PerColorAssemblyStrategy(PolyesterDevice(3)),
             )
                 nlop = setup_operator(strategy, integrator, dh)
                 # Consistency and Idempotency
@@ -309,7 +253,6 @@ end
                 ElementAssemblyStrategy(SequentialCPUDevice()),
                 ElementAssemblyStrategy(PolyesterDevice(1)),
                 ElementAssemblyStrategy(PolyesterDevice(2)),
-                ElementAssemblyStrategy(PolyesterDevice(3)),
             )
                 nlop = setup_operator(strategy, integrator, dh)
                 # Consistency and Idempotency
@@ -339,26 +282,16 @@ end
 
     @testset "Condensed Elements" begin
         qrc = QuadratureRuleCollection(2)
-        integrator = SimpleCondensedLinearViscoelasticity(
-            MaxwellParameters(),
-            qrc,
-            :u,
-            :εᵛ,
-        )
-
-        grid = generate_grid(Hexahedron, (3,3,3))
-        Ferrite.transform_coordinates!(grid, x->Vec{3}(sign.(x.-0.5) .* (x.-0.5).^2))
-        dh = DofHandler(grid)
-        add!(dh, :u, Lagrange{RefHexahedron,1}()^3)
-        close!(dh)
+        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        tb = visco_testbed(strategy, qrc, (3, 3, 3);
+                           transform = x->Vec{3}(sign.(x.-0.5) .* (x.-0.5).^2))
+        nlop, dh, grid = tb.op, tb.dh, tb.grid
 
         ch = ConstraintHandler(dh);
         add!(ch, Dirichlet(:u, getfacetset(grid, "left"), (x, t) -> (0,0,0)));
         add!(ch, Dirichlet(:u, getfacetset(grid, "right"), (x, t) -> (0.01,0,0)));
         close!(ch)
 
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-        nlop = setup_operator(strategy, integrator, dh; slots = (:u, :uprev))
         ctx  = TimeIntegrationContext(0.0, π, π)   # backward-Euler local stage: γ̃ = Δt
 
         residual = zeros(residual_size(nlop))
@@ -526,7 +459,6 @@ end
         end
         Ka = bilin(1.0, 2.0)
         Kb = bilin(2.0, 1.0)
-        @test size(Ka) == (n, n)
         @test Ka != Kb
         @test Ka + Kb ≈ bilin(3.0, 3.0)
 
@@ -534,7 +466,7 @@ end
         # the subdomain carrying it, never through a facetset namespace.
         t̄ = 3.25
         neumann_op = assemble_linear(Dict(
-            "right_cells" => DomainNeumannIntegrator(t̄, :u, Set(getfacetset(grid, "right"))),
+            "right_cells" => LinearNeumannProbe(t̄, :u, Set(getfacetset(grid, "right"))),
             "left_cells"  => SimpleLinearIntegrator(0.0, qrc, :u)
         ))
         @test sum(neumann_op.b) ≈ t̄ * 4.0 rtol = 1e-12

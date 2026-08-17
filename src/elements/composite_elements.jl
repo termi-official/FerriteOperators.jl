@@ -209,8 +209,8 @@ is_facet_in_cache(idx::FacetIndex, cell, composite::CompositeSurfaceElementCache
     return false
 end
 
-# Interface composition is reserved for the DG work (phase 4) and will follow
-# the same request fan-out pattern as cells and facets.
+# Interface composition is not implemented; DG support will follow the same
+# request fan-out pattern as cells and facets.
 
 ####################################
 ## Composition of element caches

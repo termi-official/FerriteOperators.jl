@@ -4,19 +4,7 @@ using LinearAlgebra
 using SparseArrays
 using Test
 
-struct NeoHookeanPatchTest
-    E::Float64
-    ν::Float64
-end
-function (mat::NeoHookeanPatchTest)(F)
-    (; E, ν) = mat
-    μ = E / (2(1 + ν))
-    λ = (E * ν) / ((1 + ν) * (1 - 2ν))
-    C = tdot(F)
-    Ic = tr(C)
-    J = sqrt(det(C))
-    return μ / 2 * (Ic - 3 - 2 * log(J)) + λ / 2 * (J - 1)^2
-end
+include(joinpath(@__DIR__, "fixture_elements.jl"))
 
 # References are assembled by direct kernel invocation over the same cells and
 # dof maps — the test validates the patch loop and scatter mechanics.
@@ -108,9 +96,9 @@ function FerriteOperators.assemble_patch_cell!(
     return nothing
 end
 
-# The downstream shape this slice exists for: per patch assemble the local
-# matrix, factorize it once (retained in the item-state slot), then solve and
-# emit one column per right-hand side. Public seams only.
+# The downstream shape these seams serve: per patch assemble the local matrix,
+# factorize it once (retained in the item-state slot), then solve and emit one
+# column per right-hand side.
 const PATCH_BVP_TERMS = (PatchTerm(WholePatch()),)
 const PatchLU = typeof(lu(Matrix{Float64}(I, 2, 2)))
 
@@ -173,7 +161,7 @@ end
         u = zeros(ndofs(dh))
         dest = [zeros(patch_ndofs(provider, i), patch_ndofs(provider, i)) for i in 1:3]
         assemble_patch_matrices!(dest, op, provider, u, nothing)
-        cache = op.engine.subdomain_caches[1].domain.element
+        cache = first_element_cache(op)
         for i in 1:3
             KPref = reference_patch_matrix(provider, i, cache, dh, u, nothing)
             @test dest[i] ≈ KPref rtol = 1e-14
@@ -186,13 +174,13 @@ end
         hdh = DofHandler(hgrid)
         add!(hdh, :u, Lagrange{RefHexahedron, 1}()^3)
         close!(hdh)
-        hint = SimpleHyperelasticityIntegrator(NeoHookeanPatchTest(10.0, 0.3), qrc, :u)
+        hint = SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
         hop = setup_operator(strategy, hint, hdh)
         hu = 0.05 .* sin.(0.3 .* (1:ndofs(hdh)))
         hprovider = PatchItems(hdh.subdofhandlers[1], [[1, 2, 3, 4], [5, 6]])
         dest = [zeros(patch_ndofs(hprovider, i), patch_ndofs(hprovider, i)) for i in 1:2]
         assemble_patch_matrices!(dest, hop, hprovider, hu, 0.0)
-        cache = hop.engine.subdomain_caches[1].domain.element
+        cache = first_element_cache(hop)
         for i in 1:2
             KPref = reference_patch_matrix(hprovider, i, cache, hdh, hu, 0.0)
             @test dest[i] ≈ KPref rtol = 1e-13
@@ -219,7 +207,7 @@ end
 
     @testset "term tuples with per-term domain restrictions" begin
         op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
-        cache = op.engine.subdomain_caches[1].domain.element
+        cache = first_element_cache(op)
         # cells 1,2 carry group 1; cells 5,6 carry group 2
         prov = PatchItems(sdh, [[1, 2, 5, 6]]; groups = [[1, 1, 2, 2]])
         terms = (PatchTerm(WholePatch(), WeightedSource(1.0)), PatchTerm(CellGroup(2), WeightedSource(10.0)))
@@ -251,7 +239,7 @@ end
 
     @testset "sinks" begin
         op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
-        cache = op.engine.subdomain_caches[1].domain.element
+        cache = first_element_cache(op)
         terms = (PatchTerm(WholePatch(), WeightedSource(2.0)),)
         local_dest = [zeros(patch_ndofs(provider, i)) for i in 1:3]
         assemble_patches!(PatchVectorKind(terms, PatchLocalSink(local_dest)), op, provider, (;), nothing)
@@ -399,7 +387,7 @@ end
 
     @testset "per-patch callback: local BVP with several right-hand sides" begin
         op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.7, qrc, :u), dh)
-        cache = op.engine.subdomain_caches[1].domain.element
+        cache = first_element_cache(op)
         u = zeros(ndofs(dh))
         ncols = 4
 

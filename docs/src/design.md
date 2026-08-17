@@ -176,7 +176,7 @@ gather, cell and facet kernels, condensed write-back, scatter),
 [`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to
 `sensitivity_kernel!`), and [`functional_cell_sweep`](@ref) (slot gather, no
 write-back, RETURN what the kernel hook gives). A kind riding
-`primal_cell_sweep!` without its own `v2_cell_kernel!` method gets the plain
+`primal_cell_sweep!` without its own `cell_kernel!` method gets the plain
 analytic route.
 
 Declarations carry kind *types*, normalized to their `UnionAll` base, while

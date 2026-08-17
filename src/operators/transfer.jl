@@ -10,7 +10,7 @@
 ##
 ## Usage sketch (p-multigrid prolongator):
 ##
-##   integrator = ProlongatorIntegrator(QuadratureRuleCollection(3))
+##   integrator = MassProlongatorIntegrator(QuadratureRuleCollection(3), :u)
 ##   strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
 ##   op         = setup_transfer_operator(strategy, integrator, fine_dh, coarse_dh)
 ##   update_operator!(op, nothing)

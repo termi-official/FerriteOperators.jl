@@ -9,13 +9,11 @@ FerriteOperators = "27d9367a-5072-424e-9c5f-fe582399bac3"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Tensors = "48a634ad-e948-5137-8d70-aa71f2a747f4"
 
-[sources]
-FerriteOperators = {path = "../.."}
-
 [compat]
 Ferrite = "1.6"
 FerriteOperators = "0.4"
 LinearAlgebra = "1.10.0"
+Pkg = "1.10"
 StaticArrays = "1.9.13"
 Tensors = "1.17"
 Test = "1.10"
@@ -23,7 +21,8 @@ julia = "1.10"
 
 [extras]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["LinearAlgebra", "Test"]
+test = ["LinearAlgebra", "Pkg", "Test"]

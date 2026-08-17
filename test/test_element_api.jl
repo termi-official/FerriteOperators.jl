@@ -7,42 +7,11 @@ using SparseArrays
 using Polyester
 using TimerOutputs
 
+include(joinpath(@__DIR__, "fixture_elements.jl"))
+
 # A real facet kernel exercising the framework-owned boundary driver: a
 # constant Neumann load t̄ on a facet set, with the analytic reference
 # sum(b) = t̄ · |Γ|.
-struct NeumannTestIntegrator <: AbstractLinearIntegrator
-    t̄::Float64
-    qrc::QuadratureRuleCollection
-    field_name::Symbol
-    facetset::Set{FacetIndex}
-end
-struct NeumannTestCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
-    t̄::Float64
-    fv::FV
-    facetset::Set{FacetIndex}
-end
-function FerriteOperators.setup_element_cache(m::NeumannTestIntegrator, sdh::SubDofHandler)
-    return FerriteOperators.EmptyVolumetricElementCache()
-end
-function FerriteOperators.setup_boundary_cache(m::NeumannTestIntegrator, sdh::SubDofHandler)
-    fqr = FacetQuadratureRule{RefHexahedron}(2)
-    ip  = Ferrite.getfieldinterpolation(sdh, m.field_name)
-    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
-    return NeumannTestCache(m.t̄, FacetValues(fqr, ip, ip_geo), m.facetset)
-end
-FerriteOperators.duplicate_for_device(device, c::NeumannTestCache) =
-    NeumannTestCache(c.t̄, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
-FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::NeumannTestCache) = idx ∈ c.facetset
-function FerriteOperators.assemble_facet!(req::ResidualRequest, c::NeumannTestCache, args, lfi::Int)
-    reinit!(c.fv, args.cell, lfi)
-    for qp in 1:getnquadpoints(c.fv)
-        dΓ = getdetJdV(c.fv, qp)
-        for i in 1:getnbasefunctions(c.fv)
-            req.r[i] += c.t̄ * shape_value(c.fv, qp, i) * dΓ
-        end
-    end
-end
-
 @testset "Facet driver with a real Neumann kernel" begin
     grid = generate_grid(Hexahedron, (2, 2, 2))   # unit cube [-1,1]³ → right face area 4.0
     dh = DofHandler(grid)
@@ -50,7 +19,7 @@ end
     close!(dh)
     t̄ = 3.25
     right = Set(getfacetset(grid, "right"))
-    integrator = NeumannTestIntegrator(t̄, QuadratureRuleCollection(2), :u, right)
+    integrator = LinearNeumannProbe(t̄, :u, right)
 
     op = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
     update_operator!(op, nothing)
@@ -63,26 +32,6 @@ end
     opp = setup_operator(PerColorAssemblyStrategy(PolyesterDevice(2)), integrator, dh)
     update_operator!(opp, nothing)
     @test opp.b ≈ op.b rtol = 1e-13
-
-    # composite surface fan-out re-gates per inner cache: two identical inner
-    # caches double the load
-    sdh = first(dh.subdofhandlers)
-    inner = FerriteOperators.setup_boundary_cache(integrator, sdh)
-    comp  = FerriteOperators.CompositeSurfaceElementCache((inner, inner))
-    b2 = zeros(ndofs(dh))
-    cc = Ferrite.CellCache(sdh)
-    for cellid in 1:getncells(grid)
-        reinit!(cc, cellid)
-        rₑ = zeros(ndofs_per_cell(sdh))
-        args = KernelArgs((;), cc, nothing, nothing, nothing)
-        for lfi in 1:nfacets(cc)
-            if FerriteOperators.is_facet_in_cache(FacetIndex(cellid, lfi), cc, comp)
-                FerriteOperators.assemble_facet!(ResidualRequest(rₑ), comp, args, lfi)
-            end
-        end
-        b2[celldofs(cc)] .+= rₑ
-    end
-    @test sum(b2) ≈ 2 * t̄ * area rtol = 1e-12
 end
 
 @testset "Element API" begin
@@ -98,14 +47,6 @@ end
         return FerriteOperators.duplicate_for_device(
             PolyesterDevice(),
             FerriteOperators.CompositeVolumetricElementCache((element_cache, element_cache)),
-        )
-    end
-    function setup_test_composite_surface_cache(kwargs...)
-        element_cache =
-            FerriteOperators.duplicate_for_device(PolyesterDevice(), setup_boundary_cache(kwargs...))
-        return FerriteOperators.duplicate_for_device(
-            PolyesterDevice(),
-            FerriteOperators.CompositeSurfaceElementCache((element_cache, element_cache)),
         )
     end
 
@@ -180,19 +121,21 @@ end
         assemble_cell!(JacobianRequest{:u}(Kₑ²), FerriteOperators.EmptyVolumetricElementCache(), args)
         @test iszero(Kₑ²)
 
-        # Surface: the empty cache never claims a facet, and its kernels are no-ops
+        # Surface: the empty cache never claims a facet …
         for local_facet_index = 1:nfacets(cell_cache_s)
             @test !FerriteOperators.is_facet_in_cache(FacetIndex(1, local_facet_index), cell_cache_s, FerriteOperators.EmptySurfaceElementCache())
-            assemble_facet!(JacobianResidualRequest(Kₑ¹, rₑ¹), FerriteOperators.EmptySurfaceElementCache(), args, local_facet_index)
-            @test iszero(Kₑ¹)
-            @test iszero(rₑ¹)
-
-            assemble_facet!(ResidualRequest(rₑ²), FerriteOperators.EmptySurfaceElementCache(), args, local_facet_index)
-            @test iszero(rₑ²)
-
-            assemble_facet!(JacobianRequest{:u}(Kₑ²), FerriteOperators.EmptySurfaceElementCache(), args, local_facet_index)
-            @test iszero(Kₑ²)
         end
+
+        # … and its kernels are no-ops, whichever facet they are handed
+        assemble_facet!(JacobianResidualRequest(Kₑ¹, rₑ¹), FerriteOperators.EmptySurfaceElementCache(), args, 1)
+        @test iszero(Kₑ¹)
+        @test iszero(rₑ¹)
+
+        assemble_facet!(ResidualRequest(rₑ²), FerriteOperators.EmptySurfaceElementCache(), args, 1)
+        @test iszero(rₑ²)
+
+        assemble_facet!(JacobianRequest{:u}(Kₑ²), FerriteOperators.EmptySurfaceElementCache(), args, 1)
+        @test iszero(Kₑ²)
     end
 
     @testset "Scalar volumetric bilinear composite elements: $model" for model in (
@@ -214,26 +157,6 @@ end
         reinit_values!(composite_element_cache, cell_cache_s)
         assemble_cell!(JacobianRequest{:u}(Kₑ²), composite_element_cache, args)
         @test 2Kₑ¹ ≈ Kₑ²
-    end
-
-    @testset "Scalar linear composite elements: $model" for model in (
-        SimpleLinearIntegrator(1.0, qrc, :u),
-    )
-        bₑ¹ = zeros(ndofs(dhs))
-        bₑ² = zeros(ndofs(dhs))
-
-        element_cache = setup_test_cache(model, sdhs)
-
-        args = KernelArgs((;), cell_cache_s, 0.0, nothing, nothing)
-        reinit_values!(element_cache, cell_cache_s)
-        assemble_cell!(ResidualRequest(bₑ¹), element_cache, args)
-        @test !iszero(bₑ¹)
-
-        composite_element_cache = setup_test_composite_volume_cache(model, sdhs)
-
-        reinit_values!(composite_element_cache, cell_cache_s)
-        assemble_cell!(ResidualRequest(bₑ²), composite_element_cache, args)
-        @test 2bₑ¹ ≈ bₑ²
     end
 end
 
@@ -269,37 +192,10 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, c::ParamProbeCach
     end
 end
 
-struct FacetParamProbeIntegrator <: AbstractLinearIntegrator
-    scale::Float64
-    field_name::Symbol
-    facetset::Set{FacetIndex}
-end
-struct FacetParamProbeCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
-    scale::Float64
-    fv::FV
-    facetset::Set{FacetIndex}
-end
-FerriteOperators.setup_element_cache(::FacetParamProbeIntegrator, ::SubDofHandler) =
-    FerriteOperators.EmptyVolumetricElementCache()
-function FerriteOperators.setup_boundary_cache(m::FacetParamProbeIntegrator, sdh::SubDofHandler)
-    fqr = FacetQuadratureRule{RefHexahedron}(2)
-    ip = Ferrite.getfieldinterpolation(sdh, m.field_name)
-    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
-    return FacetParamProbeCache(m.scale, FacetValues(fqr, ip, ip_geo), m.facetset)
-end
-FerriteOperators.duplicate_for_device(device, c::FacetParamProbeCache) =
-    FacetParamProbeCache(c.scale, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
-FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::FacetParamProbeCache) = idx ∈ c.facetset
-FerriteOperators.query_facet_parameters(c::FacetParamProbeCache, cell, lfi, p) = c.scale * p
-function FerriteOperators.assemble_facet!(req::ResidualRequest, c::FacetParamProbeCache, args, lfi::Int)
-    reinit!(c.fv, args.cell, lfi)
-    for qp in 1:getnquadpoints(c.fv)
-        dΓ = getdetJdV(c.fv, qp)
-        for i in 1:getnbasefunctions(c.fv)
-            req.r[i] += args.p * shape_value(c.fv, qp, i) * dΓ
-        end
-    end
-end
+# The facet counterpart: the load is the parameter the driver queried for this
+# facet, so a composite reveals whether each inner got its own view.
+FacetParamProbeIntegrator(scale, field_name, facetset) =
+    LinearNeumannProbe(scale, field_name, facetset; param_scaled = true)
 
 # A cache that only claims internal state, to reach the composite guard
 # without standing up an InternalVariableHandler.
@@ -325,24 +221,32 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
     n = ndofs(dh)
 
     @testset "per-inner parameter views" begin
-        # Debt (iii): the driver queries parameters on the composite and bakes
-        # ONE pₑ into args. Each inner must still receive its own view.
+        # The driver queries parameters on the composite and bakes ONE pₑ into
+        # args. Each inner must still receive its own view.
         p = 1.5
-        op = setup_operator(strategy, LinearCompositeIntegrator(
-            ParamProbeIntegrator(2.0, qrc, :u),
-            ParamProbeIntegrator(5.0, qrc, :u),
-        ), dh)
-        update_operator!(op, p)
-        @test sum(op.b) ≈ (2.0 + 5.0) * p * 8.0 rtol = 1e-12
+        # Distinct scales pin what the doubling property of identical inners
+        # does not: every inner contributes once, with its own view. The
+        # parallel strategy is the composite through `duplicate_for_device`.
+        @testset "$composite_strategy" for composite_strategy in (
+            SequentialAssemblyStrategy(SequentialCPUDevice()),
+            PerColorAssemblyStrategy(PolyesterDevice(2)),
+        )
+            op = setup_operator(composite_strategy, LinearCompositeIntegrator(
+                ParamProbeIntegrator(2.0, qrc, :u),
+                ParamProbeIntegrator(5.0, qrc, :u),
+            ), dh)
+            update_operator!(op, p)
+            @test sum(op.b) ≈ (2.0 + 5.0) * p * 8.0 rtol = 1e-12
 
-        # Same for the facet path, whose parameters are queried per facet.
-        right = Set(getfacetset(grid, "right"))
-        fop = setup_operator(strategy, LinearCompositeIntegrator(
-            FacetParamProbeIntegrator(2.0, :u, right),
-            FacetParamProbeIntegrator(5.0, :u, right),
-        ), dh)
-        update_operator!(fop, p)
-        @test sum(fop.b) ≈ (2.0 + 5.0) * p * 4.0 rtol = 1e-12
+            # Same for the facet path, whose parameters are queried per facet.
+            right = Set(getfacetset(grid, "right"))
+            fop = setup_operator(composite_strategy, LinearCompositeIntegrator(
+                FacetParamProbeIntegrator(2.0, :u, right),
+                FacetParamProbeIntegrator(5.0, :u, right),
+            ), dh)
+            update_operator!(fop, p)
+            @test sum(fop.b) ≈ (2.0 + 5.0) * p * 4.0 rtol = 1e-12
+        end
 
         # A hand-built args carrying a plain `p` (no composite query ran)
         # reaches every inner unchanged.

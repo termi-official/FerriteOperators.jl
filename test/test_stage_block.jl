@@ -5,37 +5,16 @@ using LinearAlgebra
 using SparseArrays
 using SparseArrays: getcolptr
 
+include(joinpath(@__DIR__, "fixture_elements.jl"))
+
 # Transient diffusion, r(u, u̇) = ∫ (u̇ v + ∇u⋅∇v) dΩ — the ∂F/∂du block is the
 # mass matrix and the ∂F/∂u block the stiffness matrix, both known in closed
 # form from the bundled bilinear integrators.
-struct StageDiffusionIntegrator <: AbstractNonlinearIntegrator
-    qrc::QuadratureRuleCollection
-    field_name::Symbol
-end
-struct StageDiffusionCache{CV <: CellValues} <: AbstractVolumetricElementCache
-    cv::CV
-end
-function FerriteOperators.setup_element_cache(m::StageDiffusionIntegrator, sdh::SubDofHandler)
-    qr     = getquadraturerule(m.qrc, sdh)
-    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
-    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
-    return StageDiffusionCache(CellValues(qr, ip, ip_geo))
-end
-FerriteOperators.duplicate_for_device(device, c::StageDiffusionCache) =
-    StageDiffusionCache(FerriteOperators.duplicate_for_device(device, c.cv))
-FerriteOperators.reinit_values!(c::StageDiffusionCache, cell) = reinit!(c.cv, cell)
+const StageDiffusionCache = CVCache{:stage}
+StageDiffusionIntegrator(qrc, field_name) = CVIntegrator{:stage}(qrc, field_name)
 
 function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::StageDiffusionCache, args)
-    (; cv) = cache
-    uₑ, duₑ = args.states.u, args.states.du
-    for qp in 1:getnquadpoints(cv)
-        dΩ = getdetJdV(cv, qp)
-        u̇  = function_value(cv, qp, duₑ)
-        ∇u = function_gradient(cv, qp, uₑ)
-        for i in 1:getnbasefunctions(cv)
-            req.r[i] += (u̇ * shape_value(cv, qp, i) + ∇u ⋅ shape_gradient(cv, qp, i)) * dΩ
-        end
-    end
+    transient_diffusion_residual!(req.r, cache, args)
 end
 
 # Same physics, but the analytic-Jacobian declaration is written against the
@@ -86,15 +65,7 @@ FerriteOperators.provides_analytic(::Type{<:FusedWCache}, ::WeightedJacobianKind
 const ANALYTIC_W_CALLS = Ref(0)
 function FerriteOperators.assemble_cell!(req::WeightedJacobianRequest, c::FusedWCache, args)
     ANALYTIC_W_CALLS[] += 1
-    (; cv) = c.inner
-    wu, wdu = req.weights.u, req.weights.du
-    for qp in 1:getnquadpoints(cv)
-        dΩ = getdetJdV(cv, qp)
-        for i in 1:getnbasefunctions(cv), j in 1:getnbasefunctions(cv)
-            req.K[i, j] += (wu * (shape_gradient(cv, qp, i) ⋅ shape_gradient(cv, qp, j)) +
-                            wdu * shape_value(cv, qp, i) * shape_value(cv, qp, j)) * dΩ
-        end
-    end
+    analytic_weighted_jacobian!(req.K, c.inner.cv, req.weights)
 end
 
 @testset "Components and stage blocks" begin

@@ -1,3 +1,16 @@
+# FerriteOperators is unregistered and lives one level up in this repo. A
+# [sources] section would wire it in by path, but Pkg only understands
+# [sources] from Julia 1.11 on while this package's compat floor is 1.10 — so
+# the unresolvable path dep is dev'ed into the active test environment before
+# anything loads.
+import Pkg
+let specs = Pkg.PackageSpec[]
+    resolvable(name, uuid) = Base.locate_package(Base.PkgId(Base.UUID(uuid), name)) !== nothing
+    resolvable("FerriteOperators", "27d9367a-5072-424e-9c5f-fe582399bac3") ||
+        push!(specs, Pkg.PackageSpec(path = joinpath(@__DIR__, "..", "..", "..")))
+    isempty(specs) || Pkg.develop(specs)
+end
+
 using FerriteOperators
 using FerriteOperatorsExampleElements
 using LinearAlgebra: norm

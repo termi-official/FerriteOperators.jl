@@ -70,8 +70,8 @@ ColoredScheduling() = ColoredScheduling(ColoringAlgorithm.WorkStream)
 An assembly strategy is the composition of three orthogonal axes: the operator
 form ([`AbstractAssemblyForm`](@ref) — what is produced), the scheduling
 policy ([`AbstractSchedulingPolicy`](@ref) — how parallel work is made safe),
-and the device (where it runs). The historical strategy names remain as
-convenience constructors for the common compositions.
+and the device (where it runs). The named constructors below build the
+common compositions.
 """
 struct AssemblyStrategy{F <: AbstractAssemblyForm, S <: AbstractSchedulingPolicy, D} <: AbstractAssemblyStrategy
     form::F

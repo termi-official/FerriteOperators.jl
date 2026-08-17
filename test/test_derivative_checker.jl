@@ -2,6 +2,8 @@ using FerriteOperators
 using FerriteOperatorsExampleElements
 using Test
 
+include(joinpath(@__DIR__, "fixture_elements.jl"))
+
 # Diffusion with a scalar source; the analytic Jacobian kernel can be scaled
 # to emulate a WRONG analytic implementation (exact for scale = 1).
 struct CheckerDiffusionIntegrator <: AbstractNonlinearIntegrator
@@ -101,49 +103,19 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::TimedCheck
 end
 
 # Transient diffusion, r(u, u̇) = ∫ (u̇ v + ∇u⋅∇v) dΩ, with a hand-fused scheme
-# matrix as its analytic weighted kernel. `w_scale` detunes that kernel exactly
-# as `jac_scale` detunes the Jacobian above (exact for scale = 1).
-struct WeightedCheckerIntegrator <: AbstractNonlinearIntegrator
-    qrc::QuadratureRuleCollection
-    field_name::Symbol
-    w_scale::Float64
-end
-struct WeightedCheckerCache{CV <: CellValues} <: AbstractVolumetricElementCache
-    cv::CV
-    w_scale::Float64
-end
-function FerriteOperators.setup_element_cache(m::WeightedCheckerIntegrator, sdh::SubDofHandler)
-    qr     = getquadraturerule(m.qrc, sdh)
-    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
-    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
-    return WeightedCheckerCache(CellValues(qr, ip, ip_geo), m.w_scale)
-end
-FerriteOperators.duplicate_for_device(device, c::WeightedCheckerCache) =
-    WeightedCheckerCache(FerriteOperators.duplicate_for_device(device, c.cv), c.w_scale)
-FerriteOperators.reinit_values!(c::WeightedCheckerCache, cell) = reinit!(c.cv, cell)
+# matrix as its analytic weighted kernel. The cache's `params` is a `w_scale`
+# that detunes that kernel exactly as `jac_scale` detunes the Jacobian above
+# (exact for scale = 1).
+const WeightedCheckerCache = CVCache{:weighted_checker}
+WeightedCheckerIntegrator(qrc, field_name, w_scale) =
+    CVIntegrator{:weighted_checker}(qrc, field_name, w_scale)
+
 function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::WeightedCheckerCache, args)
-    (; cv) = cache
-    uₑ, duₑ = args.states.u, args.states.du
-    for qp in 1:getnquadpoints(cv)
-        dΩ = getdetJdV(cv, qp)
-        u̇  = function_value(cv, qp, duₑ)
-        ∇u = function_gradient(cv, qp, uₑ)
-        for i in 1:getnbasefunctions(cv)
-            req.r[i] += (u̇ * shape_value(cv, qp, i) + ∇u ⋅ shape_gradient(cv, qp, i)) * dΩ
-        end
-    end
+    transient_diffusion_residual!(req.r, cache, args)
 end
 FerriteOperators.provides_analytic(::Type{<:WeightedCheckerCache}, ::WeightedJacobianKind) = true
 function FerriteOperators.assemble_cell!(req::WeightedJacobianRequest, cache::WeightedCheckerCache, args)
-    (; cv, w_scale) = cache
-    wu, wdu = req.weights.u, req.weights.du
-    for qp in 1:getnquadpoints(cv)
-        dΩ = getdetJdV(cv, qp)
-        for i in 1:getnbasefunctions(cv), j in 1:getnbasefunctions(cv)
-            req.K[i, j] += w_scale * (wu * (shape_gradient(cv, qp, i) ⋅ shape_gradient(cv, qp, j)) +
-                                      wdu * shape_value(cv, qp, i) * shape_value(cv, qp, j)) * dΩ
-        end
-    end
+    analytic_weighted_jacobian!(req.K, cache.cv, req.weights, cache.params)
 end
 
 function setup_weighted_checker_operator(w_scale)
@@ -266,14 +238,8 @@ end
     end
 
     @testset "condensed operator: consistent tangent vs FD, inadmissible kinds skipped" begin
-        vgrid = generate_grid(Hexahedron, (1, 1, 1))
-        vdh = DofHandler(vgrid)
-        add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
-        close!(vdh)
-        vint = SimpleCondensedLinearViscoelasticity(
-            MaxwellParameters(), QuadratureRuleCollection(2), :u, :εᵛ)
         strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-        vop = setup_operator(strategy, vint, vdh; slots = (:u, :uprev))
+        vop = visco_testbed(strategy, QuadratureRuleCollection(2)).op
         vu = 1e-3 .* sin.(0.2 .* (1:unknown_size(vop)))
         vstates = (u = vu, uprev = zeros(unknown_size(vop)))
         vctx = TimeIntegrationContext(0.0, 0.1, 0.1)

@@ -1,7 +1,7 @@
 @doc raw"""
-    SimpleBilinearDiffusionIntegrator{CoefficientType}
+    SimpleBilinearDiffusionIntegrator
 
-Represents the integrand of the bilinear form ``a(u,v) = -\int \nabla v(x) \cdot D \nabla u(x) dx`` for a given diffusion value ``D`` and ``u,v`` from the same function space.
+Represents the integrand of the bilinear form ``a(u,v) = \int \nabla v(x) \cdot D \nabla u(x) dx`` for a given diffusion value ``D`` and ``u,v`` from the same function space.
 """
 struct SimpleBilinearDiffusionIntegrator <: AbstractBilinearIntegrator
     # This is specific to our model

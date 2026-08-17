@@ -1,7 +1,7 @@
 """
 Example elements for [FerriteOperators](https://github.com/termi-official/FerriteOperators.jl).
 
-The elements here are minimal, readable implementations of the v2 element
+The elements here are minimal, readable implementations of the element
 contract — one per feature the contract exposes: a bilinear form
 ([`SimpleBilinearDiffusionIntegrator`](@ref), [`SimpleBilinearMassIntegrator`](@ref)),
 a linear form ([`SimpleLinearIntegrator`](@ref)), a nonlinear element with

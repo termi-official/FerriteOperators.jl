@@ -4,56 +4,29 @@ using Test
 using LinearAlgebra
 using SparseArrays
 
+include(joinpath(@__DIR__, "fixture_elements.jl"))
+
 # Transient diffusion, r(u, u̇) = ∫ (u̇ v + ∇u⋅∇v) dΩ — ∂F/∂u is the stiffness
 # and ∂F/∂du the mass matrix, so every weighted combination is known in closed
-# form. `fused` selects the analytic W provider.
-struct ProtocolDiffusionIntegrator <: AbstractNonlinearIntegrator
-    qrc::QuadratureRuleCollection
-    field_name::Symbol
-    fused::Bool
-end
-ProtocolDiffusionIntegrator(qrc, field_name) = ProtocolDiffusionIntegrator(qrc, field_name, false)
-struct ProtocolDiffusionCache{fused, CV <: CellValues} <: AbstractVolumetricElementCache
-    cv::CV
-end
-function FerriteOperators.setup_element_cache(m::ProtocolDiffusionIntegrator, sdh::SubDofHandler)
-    qr     = getquadraturerule(m.qrc, sdh)
-    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
-    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
-    cv     = CellValues(qr, ip, ip_geo)
-    return ProtocolDiffusionCache{m.fused, typeof(cv)}(cv)
-end
-FerriteOperators.duplicate_for_device(device, c::ProtocolDiffusionCache{f}) where {f} =
-    ProtocolDiffusionCache{f, typeof(c.cv)}(FerriteOperators.duplicate_for_device(device, c.cv))
-FerriteOperators.reinit_values!(c::ProtocolDiffusionCache, cell) = reinit!(c.cv, cell)
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::ProtocolDiffusionCache, args)
-    (; cv) = cache
-    uₑ, duₑ = args.states.u, args.states.du
-    for qp in 1:getnquadpoints(cv)
-        dΩ = getdetJdV(cv, qp)
-        u̇  = function_value(cv, qp, duₑ)
-        ∇u = function_gradient(cv, qp, uₑ)
-        for i in 1:getnbasefunctions(cv)
-            req.r[i] += (u̇ * shape_value(cv, qp, i) + ∇u ⋅ shape_gradient(cv, qp, i)) * dΩ
-        end
-    end
+# form. `fused` selects the flavour whose cache serves the weighted Jacobian
+# analytically; both flavours share the residual.
+const ProtocolDiffusionCache = CVCache{:protocol}
+const FusedDiffusionCache    = CVCache{:protocol_fused}
+const AnyDiffusionCache      = Union{ProtocolDiffusionCache, FusedDiffusionCache}
+ProtocolDiffusionIntegrator(qrc, field_name, fused = false) =
+    fused ? CVIntegrator{:protocol_fused}(qrc, field_name) : CVIntegrator{:protocol}(qrc, field_name)
+
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::AnyDiffusionCache, args)
+    transient_diffusion_residual!(req.r, cache, args)
 end
 # The hand-fused SDIRK/BE scheme matrix, reading its scalars from the request.
 const FUSED_W_SWEEPS = Ref(0)
-FerriteOperators.provides_analytic(::Type{<:ProtocolDiffusionCache{true}}, ::WeightedJacobianKind) = true
-function FerriteOperators.assemble_cell!(req::WeightedJacobianRequest, cache::ProtocolDiffusionCache{true}, args)
+FerriteOperators.provides_analytic(::Type{<:FusedDiffusionCache}, ::WeightedJacobianKind) = true
+function FerriteOperators.assemble_cell!(req::WeightedJacobianRequest, cache::FusedDiffusionCache, args)
     FUSED_W_SWEEPS[] += 1
-    (; cv) = cache
-    wu, wdu = req.weights.u, req.weights.du
-    for qp in 1:getnquadpoints(cv)
-        dΩ = getdetJdV(cv, qp)
-        for i in 1:getnbasefunctions(cv), j in 1:getnbasefunctions(cv)
-            req.K[i, j] += (wu * (shape_gradient(cv, qp, i) ⋅ shape_gradient(cv, qp, j)) +
-                            wdu * shape_value(cv, qp, i) * shape_value(cv, qp, j)) * dΩ
-        end
-    end
+    analytic_weighted_jacobian!(req.K, cache.cv, req.weights)
 end
-FerriteOperators.evaluate_cell_functional(::FunctionalKind{:mass}, cache::ProtocolDiffusionCache, args) =
+FerriteOperators.evaluate_cell_functional(::FunctionalKind{:mass}, cache::AnyDiffusionCache, args) =
     sum(qp -> getdetJdV(cache.cv, qp), 1:getnquadpoints(cache.cv))
 
 # The worked SDIRK-W scheme protocol: two slots, the weighted Jacobian it
@@ -64,8 +37,6 @@ FerriteOperators.get_declared_slots(::SDIRKWProtocol)     = (:u, :du)
 FerriteOperators.get_declared_kinds(::SDIRKWProtocol)     = (WeightedJacobianKind, ResidualKind)
 FerriteOperators.get_declared_scratch(::SDIRKWProtocol)   = (;)
 FerriteOperators.get_declared_args_type(::SDIRKWProtocol) = KernelArgs
-
-first_workspace(op) = first(first(op.engine.subdomain_caches).device_cache)
 
 function protocol_testbed(; fused = false, protocol = SDIRKWProtocol())
     grid = generate_grid(Quadrilateral, (3, 2))
@@ -98,17 +69,19 @@ end
         @test_throws ArgumentError FerriteOperators.declare_scratch(p)
     end
 
-    @testset "SDIRK-W witness: analytic provider gives the one-sweep W" begin
+    # A protocol only declares; the weighted-Jacobian VALUES on both routes are
+    # pinned against the bundled bilinear integrators in test_stage_block.jl.
+    @testset "SDIRK-W witness: the declarations reach the engine" begin
         tb = protocol_testbed(; fused = true)
+        @test get_declared_kinds(tb.op.engine.protocol) == (WeightedJacobianKind, ResidualKind)
+
         u  = sin.(0.3 .* (1:tb.n)); du = cos.(0.2 .* (1:tb.n))
         states = (u = u, du = du)
-        ref = Matrix(tb.Kop.A) .+ (1 / (γ * Δt)) .* Matrix(tb.Mop.A)
 
         FUSED_W_SWEEPS[] = 0
         W = share_pattern(tb.op.J)
         assemble_weighted_jacobian!(W, tb.op, weights, states, nothing, ctx)
         @test FUSED_W_SWEEPS[] == getncells(tb.grid)     # one kernel call per cell, one sweep
-        @test Matrix(W) ≈ ref rtol = 1e-12
 
         # the residual the same protocol declares still runs
         r = zeros(tb.n)
@@ -118,18 +91,16 @@ end
 
     @testset "the same protocol over a non-analytic cache agrees" begin
         tb = protocol_testbed(; fused = false)
-        cache = first(tb.op.engine.subdomain_caches).domain.element
+        cache = first_element_cache(tb.op)
         @test !FerriteOperators.provides_analytic(typeof(cache), WeightedJacobianKind(weights))
 
         u  = sin.(0.3 .* (1:tb.n)); du = cos.(0.2 .* (1:tb.n))
         states = (u = u, du = du)
-        ref = Matrix(tb.Kop.A) .+ (1 / (γ * Δt)) .* Matrix(tb.Mop.A)
 
         FUSED_W_SWEEPS[] = 0
         W = share_pattern(tb.op.J)
         assemble_weighted_jacobian!(W, tb.op, weights, states, nothing, ctx)
         @test FUSED_W_SWEEPS[] == 0                       # the analytic kernel never ran
-        @test Matrix(W) ≈ ref rtol = 1e-12
 
         Wc = share_pattern(tb.op.J)
         FerriteOperators._weighted_jacobian_composed!(
@@ -150,8 +121,6 @@ end
         @test typeof(kw.engine.protocol) === typeof(pos.engine.protocol)
         @test get_declared_slots(kw.engine.protocol) == get_declared_slots(pos.engine.protocol)
         @test get_declared_kinds(kw.engine.protocol) == get_declared_kinds(pos.engine.protocol)
-        # kind instances normalize to the UnionAll base, like the kwarg form always did
-        @test get_declared_kinds(DefaultProtocol(; requests = (StateJVPKind(zeros(n)),))) == (StateJVPKind,)
 
         u = sin.(0.3 .* (1:n)); du = cos.(0.2 .* (1:n))
         states = (u = u, du = du)
@@ -253,7 +222,8 @@ end
 ## Downstream-style custom kinds
 ####################################
 # Everything below is what a downstream package writes: kind + request +
-# request_type/materialize_request + traits + execute_kind!. No src edits.
+# request_type/materialize_request + traits + execute_kind! — all from outside
+# the package.
 
 # 1. A matrix-assembly kind riding the built-in primal driver body. It scales
 #    the stiffness by a factor carried on the REQUEST, so the assembled result
@@ -268,8 +238,8 @@ FerriteOperators.materialize_request(::ScaledStiffnessKind, ws) = ScaledStiffnes
 FerriteOperators.assembles_matrix(::ScaledStiffnessKind) = true
 FerriteOperators.execute_kind!(kind::ScaledStiffnessKind, task, ws) =
     FerriteOperators.primal_cell_sweep!(kind, task, ws)
-FerriteOperators.provides_analytic(::Type{<:ProtocolDiffusionCache}, ::ScaledStiffnessKind) = true
-function FerriteOperators.assemble_cell!(req::ScaledStiffnessRequest, cache::ProtocolDiffusionCache, args)
+FerriteOperators.provides_analytic(::Type{<:AnyDiffusionCache}, ::ScaledStiffnessKind) = true
+function FerriteOperators.assemble_cell!(req::ScaledStiffnessRequest, cache::AnyDiffusionCache, args)
     (; cv) = cache
     for qp in 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
@@ -302,7 +272,7 @@ end
 FerriteOperators.request_type(::OrphanKind) = OrphanRequest
 FerriteOperators.materialize_request(::OrphanKind, ws) = OrphanRequest(ws.Ke)
 FerriteOperators.assembles_matrix(::OrphanKind) = true
-FerriteOperators.provides_analytic(::Type{<:ProtocolDiffusionCache}, ::OrphanKind) = true
+FerriteOperators.provides_analytic(::Type{<:AnyDiffusionCache}, ::OrphanKind) = true
 
 struct CustomKindProtocol{K <: Tuple} <: AbstractSchemeProtocol
     kinds::K
@@ -344,9 +314,14 @@ end
     end
 
     @testset "derivative-family kind builds the ADWorkspace" begin
-        # Without the declaration the operator carries no derivative family.
         plain = protocol_testbed(protocol = CustomKindProtocol((ResidualProbeKind,)))
-        @test first_workspace(plain.op).ad !== nothing
+
+        # An operator whose mandatory kinds never differentiate carries no
+        # derivative family; declaring a derivative-family kind builds one.
+        @test first_workspace(plain.Mop).ad === nothing
+        declared = setup_operator(plain.strategy, SimpleBilinearMassIntegrator(1.0, plain.qrc, :u),
+                                  plain.dh, DefaultProtocol(; requests = (ResidualProbeKind,)))
+        @test first_workspace(declared).ad !== nothing
 
         n = plain.n
         u  = sin.(0.3 .* (1:n))

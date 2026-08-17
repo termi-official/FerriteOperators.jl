@@ -33,7 +33,7 @@ import Ferrite: nnodes_per_cell, cellnodes!, getcoordinates!
 
 include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or GPUs)
 include("core/strategy.jl")  # Utilities to control the assembly strategy
-include("core/requests.jl")           # Assembly requests: the element interface v2 contract
+include("core/requests.jl")           # Assembly requests: the element kernel contract
 include("core/element_interface.jl")  # Cache supertypes + the empty caches
 include("core/ad.jl")                 # ForwardDiff fallbacks deriving requests from residual kernels
 include("core/tasks.jl")              # Contains the basic task system

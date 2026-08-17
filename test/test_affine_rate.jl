@@ -3,36 +3,15 @@ using FerriteOperatorsExampleElements
 using Test
 using SparseArrays
 
+include(joinpath(@__DIR__, "fixture_elements.jl"))
+
 # Transient diffusion element: r(u, u̇) = ∫ (u̇ v + ∇u⋅∇v) dΩ. It reads the
 # rate through a slot and never encodes a time-integration scheme.
-struct TransientDiffusionIntegrator <: AbstractNonlinearIntegrator
-    qrc::QuadratureRuleCollection
-    field_name::Symbol
-end
-struct TransientDiffusionCache{CV <: CellValues} <: AbstractVolumetricElementCache
-    cv::CV
-end
-function FerriteOperators.setup_element_cache(m::TransientDiffusionIntegrator, sdh::SubDofHandler)
-    qr     = getquadraturerule(m.qrc, sdh)
-    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
-    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
-    return TransientDiffusionCache(CellValues(qr, ip, ip_geo))
-end
-FerriteOperators.duplicate_for_device(device, c::TransientDiffusionCache) =
-    TransientDiffusionCache(FerriteOperators.duplicate_for_device(device, c.cv))
-FerriteOperators.reinit_values!(c::TransientDiffusionCache, cell) = reinit!(c.cv, cell)
+const TransientDiffusionCache = CVCache{:affine_rate}
+TransientDiffusionIntegrator(qrc, field_name) = CVIntegrator{:affine_rate}(qrc, field_name)
 
 function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::TransientDiffusionCache, args)
-    (; cv) = cache
-    uₑ, duₑ = args.states.u, args.states.du
-    for qp in 1:getnquadpoints(cv)
-        dΩ = getdetJdV(cv, qp)
-        u̇  = function_value(cv, qp, duₑ)
-        ∇u = function_gradient(cv, qp, uₑ)
-        for i in 1:getnbasefunctions(cv)
-            req.r[i] += (u̇ * shape_value(cv, qp, i) + ∇u ⋅ shape_gradient(cv, qp, i)) * dΩ
-        end
-    end
+    transient_diffusion_residual!(req.r, cache, args)
 end
 
 @testset "AffineRate slots" begin

@@ -25,7 +25,7 @@ makedocs(;
         "Assembly engine API reference" => "engine-api.md",
         "Patch items" => "patches.md",
         "The layer contract" => "design.md",
-        "Migration to v2" => "migration.md",
+        "Migration to 0.4" => "migration.md",
     ],
 )
 

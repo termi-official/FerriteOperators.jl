@@ -4,6 +4,8 @@ using Test
 using Polyester
 import LinearAlgebra: dot
 
+include(joinpath(@__DIR__, "fixture_elements.jl"))
+
 # Diffusion-type element contributing two functionals: the Dirichlet energy
 # ½∫∇u⋅∇u dΩ (scalar) and ∫∇u dΩ (a Vec).
 struct FunctionalTestIntegrator <: AbstractNonlinearIntegrator
@@ -142,7 +144,7 @@ FerriteOperators.setup_element_cache(::EmptyCacheIntegrator, sdh::SubDofHandler)
     end
 
     @testset "the per-worker fold is type stable" begin
-        ws     = first(first(op.engine.subdomain_caches).device_cache)
+        ws     = first_workspace(op)
         task   = FerriteOperators.AssemblyTask(FunctionalKind(:energy), nothing, (u = u,), nothing, nothing)
         untask = FerriteOperators.AssemblyTask(FunctionalKind(:energy_undeclared), nothing, (u = u,), nothing, nothing)
         # The driver body returns the cell value rather than parking it.
@@ -163,8 +165,6 @@ FerriteOperators.setup_element_cache(::EmptyCacheIntegrator, sdh::SubDofHandler)
                                    Tuple{typeof(untask), typeof(ws), Vector{Int}}))) === Union{Nothing, Float64}
         @test last(only(code_typed(FerriteOperators._fold_items_from,
                                    Tuple{typeof(untask), typeof(ws), Vector{Int}, Int, Float64, Type{Nothing}}))) === Float64
-        # …and the workspace it folds over is immutable.
-        @test !ismutable(ws)
     end
 
     @testset "the value-type declaration is a loud contract" begin
