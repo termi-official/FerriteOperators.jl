@@ -73,5 +73,7 @@ jobs:
         run: |
           using Documenter: DocMeta, doctest
           using FerriteOperators
+          using FerriteOperatorsExampleElements
           DocMeta.setdocmeta!(FerriteOperators, :DocTestSetup, :(using FerriteOperators); recursive=true)
-          doctest(FerriteOperators)
+          DocMeta.setdocmeta!(FerriteOperatorsExampleElements, :DocTestSetup, :(using FerriteOperators, FerriteOperatorsExampleElements); recursive=true)
+          doctest(abspath("docs/src"), [FerriteOperators, FerriteOperatorsExampleElements])
