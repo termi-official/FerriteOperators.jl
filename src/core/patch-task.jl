@@ -563,6 +563,13 @@ positions it on a patch, [`current_patch`](@ref) reports where it stands, and
 Build one per worker with [`patch_workspace`](@ref), or copy an existing one
 with `duplicate_for_device`. Independent workspaces share only the provider,
 which patch sweeps read and never write.
+
+`current` is a `Ref{Int}` because a patch item is resolved through the
+provider rather than carried into the kernel, so the driver has to park the
+index somewhere between `reinit!` and the kernels. That makes it a CPU-scoped
+positioning mechanism: patch sweeps are sequential CPU only
+([`assemble_patches!`](@ref), [`foreach_patch`](@ref)), and a device without
+host-side references needs a different way to say which patch a worker is on.
 """
 @concrete struct PatchAssemblyWorkspace <: AbstractWorkspace
     provider
@@ -700,6 +707,20 @@ _check_sink(::PatchMatrixKind, ::Union{PatchLocalSink, PatchAssemblerSink}) = no
 _check_sink(::PatchVectorKind, ::Union{PatchLocalSink, PatchGlobalVectorSink, PatchTripletSink}) = nothing
 _check_sink(kind, sink) = throw(ArgumentError("$(typeof(sink).name.name) is not a valid sink for $(typeof(kind).name.name)"))
 
+# The request dimension also has to reach the sink's per-item dest: a
+# `PatchMatrixKind` over a vector-valued dest would scatter element matrices
+# through the vector scatter and produce garbage instead of failing. One check
+# per sweep, on the first dest.
+_check_sink_dimension(kind, sink) = nothing
+function _check_sink_dimension(kind::PatchAssemblyKind, sink::Union{PatchLocalSink, PatchAssemblerSink})
+    isempty(sink.dest) && return nothing
+    wants_matrix = kind isa PatchMatrixKind
+    (first(sink.dest) isa AbstractMatrix) == wants_matrix || throw(ArgumentError(
+            "$(typeof(kind).name.name) assembles a patch-local $(wants_matrix ? "matrix" : "vector"), " *
+            "but the sink's dest holds $(typeof(first(sink.dest))). Match the dest to the kind's dimension."))
+    return nothing
+end
+
 # A sink indexed by item must span the provider. Fail at the sweep, not with a
 # BoundsError on whichever patch first runs past the end.
 _check_sink_extent(::AbstractPatchSink, provider) = nothing
@@ -821,6 +842,7 @@ solve, item state) is the caller's — see [`patch_free_dofs`](@ref) and
 function assemble_patches!(kind::PatchAssemblyKind, op, provider::PatchItems, states::NamedTuple, p, ctx = nothing)
     _check_declared_slots(op.engine, states)
     _check_sink(kind, kind.sink)
+    _check_sink_dimension(kind, kind.sink)
     _check_sink_extent(kind.sink, provider)
     op.engine.strategy.device isa SequentialCPUDevice || throw(
         ArgumentError(

@@ -307,6 +307,13 @@ end
                 PatchMatrixKind(terms, PatchGlobalVectorSink(g)), op, provider, (;), nothing)
             @test_throws ArgumentError assemble_patches!(
                 PatchVectorKind(terms, PatchAssemblerSink([spzeros(1, 1)])), op, provider, (;), nothing)
+
+            # …and the dest's dimension has to match the kind's, one direction each
+            @test_throws ArgumentError assemble_patches!(
+                PatchMatrixKind(terms, PatchLocalSink(local_dest)), op, provider, (u = zeros(ndofs(dh)),), nothing)
+            square = [zeros(patch_ndofs(provider, i), patch_ndofs(provider, i)) for i in 1:3]
+            @test_throws ArgumentError assemble_patches!(
+                PatchVectorKind(terms, PatchLocalSink(square)), op, provider, (;), nothing)
         end
     end
 

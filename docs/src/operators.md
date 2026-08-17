@@ -57,13 +57,22 @@ first use — an inadmissible adjoint fails when the operator is built, not
 mid-solve. And they select which per-worker *sweep-state families* are built:
 a workspace is a fixed core (geometry cache, element caches, slot buffers,
 scratch, element matrix/residual) plus the families its declarations call for,
-so a bilinear or linear operator carries no ForwardDiff machinery at all.
+so a bilinear or linear operator carries no ForwardDiff machinery at all. The
+workspace is immutable — every field is bound at `setup_operator`, and a sweep
+works by filling the buffers those fields point at.
+
+Declaring a [`FunctionalKind`](@ref) builds **nothing**, which is the feature
+rather than an omission: a functional sweep's kernel returns the cell's
+contribution and the sweep folds the returned values, so it has no per-worker
+state to allocate and nothing to reset between evaluations. What such a kind
+does declare is its reduction's value type, on the kind rather than on the
+protocol — [`FerriteOperators.functional_value_type`](@ref), required under a
+parallel device and described with the kernel hook in
+[Writing elements](@ref Functionals).
 
 Declaring stays a hint, never a capability restriction: an operator always
-builds what its own integrator family issues ([`mandatory_kinds`](@ref)), and
-a family a sweep needs but does not have is materialized once per sweep
-([`sweep_state`](@ref)). Undeclared kinds run their checks at the call-time
-entry points.
+builds what its own integrator family issues ([`mandatory_kinds`](@ref)).
+Undeclared kinds run their checks at the call-time entry points.
 
 ## Slots and rate reconstruction
 
@@ -252,32 +261,3 @@ variants — have their own constructors
 and their own integrators ([`MassProlongatorIntegrator`](@ref),
 [`NestedMassProlongatorIntegrator`](@ref)). They assemble sequentially on the
 CPU into a rectangular sparse matrix.
-
-## Operator API reference
-
-```@autodocs
-Modules = [FerriteOperators]
-Pages = [
-    "core/tasks.jl",
-    "core/strategy.jl",
-    "core/device.jl",
-    "core/ad.jl",
-    "core/iterators.jl",
-    "core/qvector.jl",
-    "core/quadrature-task.jl",
-    "core/ferrite-addons/collections.jl",
-    "core/ferrite-addons/internal_variable_handler.jl",
-    "operators/general.jl",
-    "operators/setup.jl",
-    "operators/nonlinear.jl",
-    "operators/bilinear.jl",
-    "operators/linear.jl",
-    "operators/components.jl",
-    "operators/stage_block.jl",
-    "operators/verification.jl",
-    "operators/matrix_free.jl",
-    "operators/transfer.jl",
-    "postprocessing/quadrature-grid.jl",
-    "postprocessing/quadrature-query.jl",
-]
-```

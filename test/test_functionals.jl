@@ -53,6 +53,34 @@ function FerriteOperators.evaluate_cell_functional(::FunctionalKind{:gradient_vo
     return g
 end
 
+# Declared reduction value types: required under a parallel device, and what
+# makes the fold typed from `zero(T)` on either device.
+FerriteOperators.functional_value_type(::FunctionalKind{:energy}) = Float64
+FerriteOperators.functional_value_type(::FunctionalKind{:gradient_volume}) = Vec{2, Float64}
+
+# The same two integrands under undeclared tags, so the scan path stays covered
+# and can be compared against the typed one.
+FerriteOperators.evaluate_cell_functional(::FunctionalKind{:energy_undeclared}, cache::FunctionalTestCache, args) =
+    FerriteOperators.evaluate_cell_functional(FunctionalKind(:energy), cache, args)
+FerriteOperators.evaluate_cell_functional(::FunctionalKind{:gradient_undeclared}, cache::FunctionalTestCache, args) =
+    FerriteOperators.evaluate_cell_functional(FunctionalKind(:gradient_volume), cache, args)
+
+# A declaration disagreeing with its kernel.
+FerriteOperators.functional_value_type(::FunctionalKind{:mistyped}) = Float64
+FerriteOperators.evaluate_cell_functional(::FunctionalKind{:mistyped}, cache::FunctionalTestCache, args) =
+    zero(Vec{2, Float64})
+
+# Kernels that run on every cell of a non-empty domain and contribute nothing:
+# an empty sum, which only the declared tag can answer.
+FerriteOperators.functional_value_type(::FunctionalKind{:quiet}) = Float64
+FerriteOperators.evaluate_cell_functional(::FunctionalKind{:quiet}, cache::FunctionalTestCache, args) = nothing
+FerriteOperators.evaluate_cell_functional(::FunctionalKind{:quiet_undeclared}, cache::FunctionalTestCache, args) = nothing
+
+# An integrator whose subdomains cannot contribute at all.
+struct EmptyCacheIntegrator <: AbstractNonlinearIntegrator end
+FerriteOperators.setup_element_cache(::EmptyCacheIntegrator, sdh::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+
 @testset "Functional value requests" begin
     grid = generate_grid(Quadrilateral, (4, 3))
     dh   = DofHandler(grid)
@@ -100,10 +128,79 @@ end
         @test gs ≈ gp rtol = 1e-12
     end
 
-    @testset "repeated evaluation resets the accumulators" begin
+    @testset "repeated evaluation carries nothing over" begin
         Φ1 = evaluate_functional(op, FunctionalKind(:energy), u, nothing)
         Φ2 = evaluate_functional(op, FunctionalKind(:energy), u, nothing)
         @test Φ1 == Φ2
+    end
+
+    @testset "declared value type reproduces the scan path" begin
+        @test evaluate_functional(op, FunctionalKind(:energy), u, nothing) ===
+              evaluate_functional(op, FunctionalKind(:energy_undeclared), u, nothing)
+        @test evaluate_functional(op, FunctionalKind(:gradient_volume), u, nothing) ===
+              evaluate_functional(op, FunctionalKind(:gradient_undeclared), u, nothing)
+    end
+
+    @testset "the per-worker fold is type stable" begin
+        ws     = first(first(op.engine.subdomain_caches).device_cache)
+        task   = FerriteOperators.AssemblyTask(FunctionalKind(:energy), nothing, (u = u,), nothing, nothing)
+        untask = FerriteOperators.AssemblyTask(FunctionalKind(:energy_undeclared), nothing, (u = u,), nothing, nothing)
+        # The driver body returns the cell value rather than parking it.
+        @test last(only(code_typed(FerriteOperators.functional_cell_sweep,
+                                   Tuple{FunctionalKind{:energy}, typeof(task), typeof(ws)}))) === Float64
+        # Declared: the fold is Float64-typed from the seed, no `Nothing` in the
+        # return, and the seed itself is the concretely typed additive identity.
+        @test last(only(code_typed(FerriteOperators.fold_items,
+                                   Tuple{typeof(task), typeof(ws), Vector{Int}}))) === Float64
+        @test FerriteOperators.initial_partial(FunctionalKind(:energy)) === 0.0
+        @test FerriteOperators.initial_partial(FunctionalKind(:gradient_volume)) === zero(Vec{2, Float64})
+        # …so the parallel route's partials array is concretely typed.
+        @test typeof(zeros(FerriteOperators.functional_value_type(FunctionalKind(:gradient_volume)), 3)) ===
+              Vector{Vec{2, Float64}}
+        # Undeclared: the first value fixes the accumulator, so the loop doing
+        # the work still carries a concrete Float64 and dispatches nothing per cell.
+        @test last(only(code_typed(FerriteOperators.fold_items,
+                                   Tuple{typeof(untask), typeof(ws), Vector{Int}}))) === Union{Nothing, Float64}
+        @test last(only(code_typed(FerriteOperators._fold_items_from,
+                                   Tuple{typeof(untask), typeof(ws), Vector{Int}, Int, Float64, Type{Nothing}}))) === Float64
+        # …and the workspace it folds over is immutable.
+        @test !ismutable(ws)
+    end
+
+    @testset "the value-type declaration is a loud contract" begin
+        # A kernel disagreeing with the declaration fails by name.
+        @test_throws ArgumentError evaluate_functional(op, FunctionalKind(:mistyped), u, nothing)
+        # An undeclared kind cannot run in parallel: the partials are allocated
+        # before the batch, so the type must be known up front.
+        pop = setup_operator(PerColorAssemblyStrategy(PolyesterDevice(2)), FunctionalTestIntegrator(qrc, :u), dh)
+        @test_throws ArgumentError evaluate_functional(pop, FunctionalKind(:energy_undeclared), u, nothing)
+        # …while the declared one does.
+        @test evaluate_functional(pop, FunctionalKind(:energy), u, nothing) isa Float64
+    end
+
+    @testset "structural emptiness fails before any cell runs" begin
+        # No items to reduce over — the same error whether or not the kind
+        # declares a value type, because neither can integrate over nothing.
+        sc = first(op.engine.subdomain_caches)
+        empty_partition = (engine = FerriteOperators.AssemblyEngine(
+            op.engine.strategy,
+            [FerriteOperators.SubdomainCache(sc.domain, sc.device_cache, (Int[],))],
+            op.engine.dh, op.engine.ivh, op.engine.protocol),)
+        @test_throws ArgumentError evaluate_functional(empty_partition, FunctionalKind(:energy), u, nothing)
+        @test_throws ArgumentError evaluate_functional(empty_partition, FunctionalKind(:energy_undeclared), u, nothing)
+
+        # Items exist but no subdomain can contribute: a type-level verdict.
+        eop = setup_operator(strategy, EmptyCacheIntegrator(), dh)
+        @test_throws ArgumentError evaluate_functional(eop, FunctionalKind(:energy), u, nothing)
+        @test_throws ArgumentError evaluate_functional(eop, FunctionalKind(:energy_undeclared), u, nothing)
+    end
+
+    @testset "an all-quiet sweep is an empty sum" begin
+        # The domain and the caches are fine; the kernels simply contribute
+        # nothing. Declared, that is the additive identity…
+        @test evaluate_functional(op, FunctionalKind(:quiet), u, nothing) === 0.0
+        # …undeclared, there is no type to take the identity of.
+        @test_throws ArgumentError evaluate_functional(op, FunctionalKind(:quiet_undeclared), u, nothing)
     end
 
     @testset "missing kernel and undeclared slots fail loudly" begin

@@ -144,14 +144,14 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
 end
 
 function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh;
-        slots::NTuple{<:Any, Symbol}, scratch::NamedTuple, derivative_family::Bool, functional_family::Bool)
+        slots::NTuple{<:Any, Symbol}, scratch::NamedTuple, derivative_family::Bool)
     device = strategy.device
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
         ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots,
                                        merge(declare_scratch(element_cache), scratch);
-                                       derivative_family, functional_family)
+                                       derivative_family)
         dc = setup_device_instances(device, ws, n)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
     end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
@@ -179,8 +179,7 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
                                                slots = declared_slots(protocol),
                                                scratch = declared_scratch(protocol),
-                                               derivative_family = needs_derivative_family(kinds),
-                                               functional_family = needs_functional_family(kinds))
+                                               derivative_family = needs_derivative_family(kinds))
     return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, protocol)
 end
 

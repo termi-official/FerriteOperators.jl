@@ -7,8 +7,10 @@
 #   REGARDLESS of the operator form (an EA operator's residual sweep into a
 #   plain global vector still races);
 # - element-private targets (EA per-element storage) never need atomics;
-# - parameter-space accumulators (VJP columns, future functional reductions)
-#   are never color-isolated — every parallel device needs atomics there.
+# - parameter-space accumulators (VJP columns) are never color-isolated —
+#   every parallel device needs atomics there.
+# Value-returning sweeps have no scatter target at all: they fold per worker
+# and reduce host-side, so they never enter this decision.
 dof_scatter_needs_atomic(strategy::AssemblyStrategy) =
     !(strategy.device isa SequentialCPUDevice) && !(strategy.scheduling isa ColoredScheduling)
 parameter_scatter_needs_atomic(strategy::AssemblyStrategy) =

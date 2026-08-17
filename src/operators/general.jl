@@ -51,6 +51,26 @@ execute_on_subdomains!(task, engine::AssemblyEngine) =
     execute_on_subdomains!(task, engine.strategy, engine.subdomain_caches)
 
 """
+    reduce_on_subdomains(task, engine) -> value
+
+The value-returning counterpart of `execute_on_subdomains!`: run
+`task` over every subdomain and reduce the per-subdomain partials in subdomain
+order. Within a subdomain [`reduce_on_device`](@ref) reduces the per-worker
+partials in worker order, so the whole reduction order is fixed by the
+partition and the result is deterministic for a fixed worker count.
+"""
+function reduce_on_subdomains(task, strategy, subdomain_caches)
+    total = initial_partial(task.kind)
+    for (subdomain_id, sc) in enumerate(subdomain_caches)
+        partial = @timeit_debug "reduce subdomain $subdomain_id" reduce_on_device(task, strategy.device, sc.device_cache, sc.partition)
+        total = _reduce_partials(total, partial)
+    end
+    return total
+end
+reduce_on_subdomains(task, engine::AssemblyEngine) =
+    reduce_on_subdomains(task, engine.strategy, engine.subdomain_caches)
+
+"""
     AbstractNonlinearOperator
 
 Models of a nonlinear function F(u)v, where v is a test function.

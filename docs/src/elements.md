@@ -220,6 +220,8 @@ production and a checked, cell-exact rejection under
 FerriteOperators.evaluate_cell_functional(::FunctionalKind{:energy}, cache::MyCache, args) =
     # return this cell's ∫ contribution (a Number or a Tensors tensor)
 
+FerriteOperators.functional_value_type(::FunctionalKind{:energy}) = Float64
+
 Φ = evaluate_functional(op, FunctionalKind(:energy), states, p, ctx)
 ```
 
@@ -227,6 +229,30 @@ Global reductions (energies for line searches, dissipation, quantities of
 interest) are request kinds whose kernels *return* their cell contribution;
 the engine sums per worker and reduces in a fixed order, so results are
 deterministic for a fixed worker count. Volumetric contributions only.
+
+[`FerriteOperators.functional_value_type`](@ref) declares the type the
+reduction accumulates in. It is **required under a parallel device** — the
+per-worker partials are one typed array allocated before the batch runs, so an
+undeclared kind evaluated on a `PolyesterDevice` is an `ArgumentError` naming
+the trait. Sequentially it is optional: without it the first contributing cell
+fixes the accumulator's type.
+
+With the declaration each worker's fold starts at `zero(T)` — the reduction's
+additive identity, so a worker that sees no contribution adds nothing — and a
+kernel returning some other type fails loudly instead of widening the
+accumulator.
+
+Two kinds of "nothing came back" are kept apart, and the difference decides
+whether you get a value or an error:
+
+| situation | when it is decided | result |
+|---|---|---|
+| the operator's partitions carry no items, or every subdomain's cache is an `EmptyVolumetricElementCache` | **structural**, checked before any cell runs | `ArgumentError` — misconfiguration, whatever the kind declares |
+| the sweep runs and every kernel returns `nothing` | **data-dependent** | `zero(T)` when the value type is declared; `ArgumentError` when it is not |
+
+The second row is the consistency rule: an all-quiet sweep is an empty sum, and
+an empty sum only has a value once its type is known. Declaring
+`functional_value_type` is what makes it well-defined.
 
 ## Unit-testing a kernel
 

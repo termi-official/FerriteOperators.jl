@@ -165,14 +165,11 @@ end
         tb = protocol_testbed()
         qrc = QuadratureRuleCollection(2)
 
-        # bilinear and linear operators never differentiate and never reduce
+        # bilinear and linear operators never differentiate
         bws = first_workspace(tb.Mop)
         @test bws.ad === nothing
-        @test bws.functional === nothing
         lop = setup_operator(tb.strategy, SimpleLinearIntegrator(1.0, qrc, :u), tb.dh)
-        lws = first_workspace(lop)
-        @test lws.ad === nothing
-        @test lws.functional === nothing
+        @test first_workspace(lop).ad === nothing
 
         # the nonlinear family always differentiates, declared or not
         @test first_workspace(tb.op).ad !== nothing
@@ -180,6 +177,14 @@ end
 
         # a bilinear operator asked to differentiate says so instead of failing obscurely
         @test_throws ArgumentError FerriteOperators.sweep_state(bws, StateJVPKind(nothing))
+        # a functional kind returns its value, so it has no per-worker state to read
+        @test_throws ArgumentError FerriteOperators.sweep_state(bws, FunctionalKind(:mass))
+    end
+
+    @testset "workspaces are immutable" begin
+        tb = protocol_testbed()
+        @test !ismutable(first_workspace(tb.op))
+        @test !ismutable(first_workspace(tb.Mop))
     end
 
     @testset "undeclared kinds stay usable" begin
@@ -193,16 +198,19 @@ end
         state_jvp!(Jv, tb.op, v, states, nothing, ctx)
         @test Jv ≈ tb.Kop.A * v rtol = 1e-10
 
-        # the functional family is materialized by the sweep that needs it
-        ws = first_workspace(tb.op)
-        @test ws.functional === nothing
+        # a functional sweep reads no state, so an undeclared one just runs
+        @test !(FunctionalKind in declared_kinds(tb.op.engine.protocol))
         area = evaluate_functional(tb.op, FunctionalKind(:mass), states, nothing, ctx)
-        @test ws.functional !== nothing
         @test area ≈ 4.0 rtol = 1e-12          # the [-1,1]² reference grid
-        # …and a declaring protocol has it from the start
+
+        # …and declaring it builds nothing: the declaring operator answers the
+        # same, and a bilinear one still carries no sweep-state family at all.
         fop = setup_operator(tb.strategy, ProtocolDiffusionIntegrator(tb.qrc, :u), tb.dh,
                              DefaultProtocol(; slots = (:u, :du), requests = (FunctionalKind,)))
-        @test first_workspace(fop).functional !== nothing
+        @test evaluate_functional(fop, FunctionalKind(:mass), states, nothing, ctx) == area
+        bfop = setup_operator(tb.strategy, SimpleBilinearMassIntegrator(1.0, tb.qrc, :u), tb.dh,
+                              DefaultProtocol(; requests = (FunctionalKind,)))
+        @test first_workspace(bfop).ad === nothing
     end
 
     @testset "two operators from one protocol evaluate concurrently" begin

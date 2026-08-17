@@ -21,6 +21,8 @@ makedocs(;
         "Element API reference" => "element-api.md",
         "Example elements" => "example-elements.md",
         "Operators and entry points" => "operators.md",
+        "Operator API reference" => "operator-api.md",
+        "Assembly engine API reference" => "engine-api.md",
         "Patch items" => "patches.md",
         "The layer contract" => "design.md",
         "Migration to v2" => "migration.md",

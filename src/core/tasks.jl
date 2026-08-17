@@ -90,6 +90,30 @@ evaluate through [`evaluate_functional`](@ref).
 struct FunctionalKind{tag} end
 FunctionalKind(tag::Symbol) = FunctionalKind{tag}()
 
+"""
+    functional_value_type(kind) -> Type
+
+The type a value-returning sweep of `kind` reduces to, or `Nothing` when the
+kind does not declare one. Queried on the INSTANCE, because every consumer is
+a running sweep holding the kind it was issued with.
+
+Declaring the type is what makes a worker's fold typed from the start: the
+accumulator is seeded with `zero(T)` instead of with the first item that
+contributes, so the partials are a concretely typed array and a kernel
+returning something other than `T` fails loudly instead of widening the
+reduction. It is REQUIRED under a parallel device, whose per-worker partials
+are allocated before the batch runs; the sequential fold can still infer the
+type from the first contribution.
+
+    FerriteOperators.functional_value_type(::FunctionalKind{:energy}) = Float64
+    FerriteOperators.functional_value_type(::FunctionalKind{:gradient_volume}) = Vec{2, Float64}
+
+There is exactly one root method, so an overload is always strictly more
+specific and cannot create an ambiguity. Return a literal — the fold's
+accumulator type folds out of it.
+"""
+functional_value_type(kind) = Nothing
+
 const MatrixAssemblyKind  = Union{JacobianResidualKind, JacobianKind, WeightedJacobianKind, BilinearKind}
 const VectorAssemblyKind  = Union{JacobianResidualKind, ResidualKind, LinearKind}
 const UnknownDependentKind = Union{JacobianResidualKind, JacobianKind, WeightedJacobianKind, ResidualKind}
@@ -135,9 +159,12 @@ assembles_matrix(kind) = kind isa MatrixAssemblyKind
     DerivativeFamily
     FunctionalFamily
 
-The per-worker sweep-state families. `DerivativeFamily` is the
-[`ADWorkspace`](@ref), `FunctionalFamily` the reduction accumulator, and
-`NoFamily` marks a sweep that reads only the workspace core.
+The per-worker sweep-state families, which double as the driver-shape routing.
+`DerivativeFamily` is the [`ADWorkspace`](@ref) and `NoFamily` marks a sweep
+that reads only the workspace core; both scatter their result through an
+assembler. `FunctionalFamily` selects the VALUE-RETURNING driver instead: its
+kernel returns the item's contribution and the sweep reduces the returned
+values, so it needs — and builds — no per-worker state at all.
 """
 struct NoFamily end
 @doc (@doc NoFamily) struct DerivativeFamily end
@@ -156,8 +183,10 @@ Declaring a family is what makes it exist: `setup_operator(...; requests =
     FerriteOperators.sweep_family(::Type{<:MyKind}) = FerriteOperators.DerivativeFamily()
 
 gives `MyKind` an [`ADWorkspace`](@ref) at setup and lets [`sweep_state`](@ref)
-resolve. The default derives the answer from the built-in unions and folds to a
-constant.
+resolve. `FunctionalFamily()` is the one answer that builds NOTHING: it routes
+the kind to the value-returning driver ([`run_reduction`](@ref)), which reads
+no per-worker state. The default derives the answer from the built-in unions
+and folds to a constant.
 """
 sweep_family(::Type{K}) where {K} =
     K <: DerivativeSweepKind ? DerivativeFamily() :
@@ -169,9 +198,9 @@ sweep_family(::Type{K}) where {K} =
 The per-worker member serving `kind`'s sweep family. The workspace is a fixed
 CORE (geometry cache, element caches, slot buffers, scratch, `Ke`/`re`) plus
 kind-family members that exist only when the operator's declarations call for
-them: derivative kinds read the [`ADWorkspace`](@ref), functional kinds the
-reduction accumulator. Families a sweep needs but does not have are
-materialized once per sweep by [`materialize_sweep_state!`](@ref).
+them: derivative kinds read the [`ADWorkspace`](@ref). The other two families
+have no member to read — a `NoFamily` kind works out of the core, and a
+`FunctionalFamily` kind returns its value rather than parking it anywhere.
 """
 sweep_state(ws, kind) = sweep_state(ws, kind, sweep_family(typeof(kind)))
 function sweep_state(ws, kind, ::DerivativeFamily)
@@ -183,31 +212,17 @@ function sweep_state(ws, kind, ::DerivativeFamily)
         "whose `declared_kinds` names it."))
     return ad
 end
-sweep_state(ws, kind, ::FunctionalFamily) = ws.functional
+sweep_state(ws, kind, ::FunctionalFamily) = throw(ArgumentError(
+    "$(nameof(typeof(kind))) rides the value-returning driver: its kernel RETURNS the item's " *
+    "contribution and the sweep reduces the returned values, so there is no per-worker state " *
+    "to read."))
 sweep_state(ws, kind, ::NoFamily) = throw(ArgumentError(
     "$(nameof(typeof(kind))) declares no sweep-state family, so it has no per-worker state " *
     "to read. Declare one with `sweep_family(::Type{<:$(nameof(typeof(kind)))})`."))
 
-"""
-    materialize_sweep_state!(engine, kind)
-
-Build the sweep-state families a sweep of `kind` needs on every worker that
-lacks them — once per sweep, before the item loop. Families selected by the
-operator's declarations are already in place and this is a no-op.
-"""
-materialize_sweep_state!(engine, kind) = materialize_sweep_state!(engine, kind, sweep_family(typeof(kind)))
-materialize_sweep_state!(engine, kind, ::Union{NoFamily, DerivativeFamily}) = nothing
-function materialize_sweep_state!(engine, kind, ::FunctionalFamily)
-    for sc in engine.subdomain_caches, ws in sc.device_cache
-        ws.functional === nothing && (ws.functional = FunctionalAccumulator(nothing))
-    end
-    return nothing
-end
-
 # Which per-worker families a declared kind set calls for. Kinds arrive as
 # their UnionAll bases, which [`sweep_family`](@ref) is queried on directly.
 needs_derivative_family(kinds) = any(K -> sweep_family(K) isa DerivativeFamily, kinds)
-needs_functional_family(kinds) = any(K -> sweep_family(K) isa FunctionalFamily, kinds)
 
 """
     request_type(kind) -> Type
@@ -495,20 +510,26 @@ function sensitivity_kernel!(kind::StateVJPKind, task, ws, args)
     assemble!(task.inner_assembler, ws.cell, gₑ)
 end
 
-# Functional sweeps: the kernel RETURNS the cell contribution; it accumulates
-# into the per-worker slot and reduces at the entry point. `nothing` means "no
-# contribution" (empty caches).
-function execute_kind!(kind::FunctionalKind, task, ws)
+execute_kind!(kind::FunctionalKind, task, ws) = functional_cell_sweep(kind, task, ws)
+
+"""
+    functional_cell_sweep(kind, task, ws) -> value
+
+The built-in VALUE-RETURNING driver body, reusable by a downstream kind's own
+`execute_kind!`. Reinitializes the element's values, gathers the state slots
+without writing anything back, and returns what
+[`evaluate_cell_functional`](@ref) gives for the cell — `nothing` for a cell
+that contributes nothing.
+
+Unlike [`primal_cell_sweep!`](@ref) and [`sensitivity_cell_sweep!`](@ref) this
+body writes no result into the workspace and scatters nothing; the sweep
+reduces what it returns ([`run_reduction`](@ref)).
+"""
+function functional_cell_sweep(kind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
     statesₑ = load_slots!(ws, task.states)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
-    val = evaluate_cell_functional(kind, ws.element, _v2_args(ws, statesₑ, pₑ, task.ctx))
-    _accumulate_functional!(sweep_state(ws, kind), val)
-end
-_accumulate_functional!(acc, ::Nothing) = nothing
-function _accumulate_functional!(acc, val)
-    acc.value = acc.value === nothing ? val : acc.value + val
-    return nothing
+    return evaluate_cell_functional(kind, ws.element, _v2_args(ws, statesₑ, pₑ, task.ctx))
 end
 
 function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, args)
@@ -602,7 +623,6 @@ end
 # own pre-built assembler to `run_sweep!`; everything dof-scattered goes
 # through `assemble_into!`, which builds the assembler from the global targets.
 function run_sweep!(kind, assembler, op, states::NamedTuple, p, ctx)
-    materialize_sweep_state!(op.engine, kind)
     _check_declared_slots(op.engine, states)
     _check_rate_slots(states)
     _check_differentiated_slot(kind, op.engine, states)
@@ -614,26 +634,80 @@ assemble_into!(kind, out::Tuple, op, states::NamedTuple, p, ctx) =
     run_sweep!(kind, start_assemble(op.engine.strategy, out...), op, states, p, ctx)
 
 """
+    run_reduction(kind, op, states::NamedTuple, p, ctx) -> value
+
+The value-returning counterpart of `run_sweep!`: the same per-sweep
+validation, but the sweep hands its result back as a value instead of
+scattering it, and no workspace state is read or written. `nothing` means no
+item contributed.
+
+Which shape a kind runs in is [`sweep_family`](@ref): only a
+`FunctionalFamily` kind is value-returning, so this is the entry point a
+downstream scalar or tensor kind reaches once it declares that family and
+gives `execute_kind!` a body returning the item's contribution
+([`functional_cell_sweep`](@ref) is the built-in one).
+"""
+run_reduction(kind, op, states::NamedTuple, p, ctx) =
+    run_reduction(sweep_family(typeof(kind)), kind, op, states, p, ctx)
+
+function run_reduction(::FunctionalFamily, kind, op, states::NamedTuple, p, ctx)
+    _check_declared_slots(op.engine, states)
+    _check_rate_slots(states)
+    _check_reduction_domain(kind, op.engine)
+    return reduce_on_subdomains(AssemblyTask(kind, nothing, states, p, ctx), op.engine)
+end
+
+# A reduction has two STRUCTURAL preconditions, both misconfiguration and both
+# decidable before any item runs: there have to be items to reduce over, and
+# some subdomain has to be able to contribute at all. Deciding them here is
+# what separates them from the data-dependent case — a sweep whose kernels all
+# answer `nothing` over a non-empty, non-empty-cached domain is a legitimate
+# empty sum, not a misconfiguration. Both checks are O(subdomains): partition
+# lengths and the cache TYPE, never cell data.
+function _check_reduction_domain(kind, engine)
+    caches = engine.subdomain_caches
+    sum(sc -> sum(length, sc.partition; init = 0), caches; init = 0) == 0 && throw(ArgumentError(
+        "$(nameof(typeof(kind))) reduces over an empty item set: the operator's " *
+        "$(length(caches)) subdomain partition(s) carry no items between them, so there is " *
+        "nothing to integrate over."))
+    all(sc -> sc.domain.element isa EmptyVolumetricElementCache, caches) && throw(ArgumentError(
+        "No subdomain can contribute to $(nameof(typeof(kind))): every subdomain's element " *
+        "cache is an `EmptyVolumetricElementCache`, which returns no contribution by " *
+        "construction. Set the operator up with an integrator whose caches implement " *
+        "`evaluate_cell_functional`."))
+    return nothing
+end
+
+run_reduction(family, kind, op, states::NamedTuple, p, ctx) = throw(ArgumentError(
+    "$(nameof(typeof(kind))) declares $(nameof(typeof(family))), whose sweeps fill the " *
+    "workspace buffers and scatter through an assembler — there is no value to return. " *
+    "A value-returning kind declares " *
+    "`sweep_family(::Type{<:$(nameof(typeof(kind)))}) = FunctionalFamily()`."))
+
+"""
     evaluate_functional(op, kind::FunctionalKind, states, p, ctx = nothing)
     evaluate_functional(op, kind::FunctionalKind, u::AbstractVector, p)
 
 Evaluate the functional named by `kind` over the operator's domain: the sum
 of the per-cell contributions returned by
 [`evaluate_cell_functional`](@ref) (a `Number` or a Tensors tensor).
-Contributions accumulate per worker and reduce in a fixed order — results
-are deterministic for a fixed worker count. Volumetric contributions only.
+Contributions fold per worker in item order and the per-worker partials reduce
+in a fixed order — results are deterministic for a fixed worker count. Nothing
+is written into the operator, so an operator declaring no functional kind
+serves one just as well. Volumetric contributions only.
+
+Two failure modes are kept apart. STRUCTURAL emptiness — no items in the
+operator's partitions, or no subdomain whose element cache can contribute — is
+a misconfiguration and is an `ArgumentError` raised before any cell runs,
+whatever the kind declares. A sweep that runs and whose kernels all answer
+`nothing` is the DATA-DEPENDENT case: an empty sum, which a kind declaring
+[`functional_value_type`](@ref) answers with `zero(T)` and an undeclared kind
+cannot answer at all (there is no `T` to take the identity of) and reports as
+an `ArgumentError`. Declaring the value type is what makes an all-quiet sweep
+well-defined.
 """
 function evaluate_functional(op, kind::FunctionalKind, states::NamedTuple, p, ctx = nothing)
-    materialize_sweep_state!(op.engine, kind)
-    for sc in op.engine.subdomain_caches, ws in sc.device_cache
-        ws.functional.value = nothing
-    end
-    run_sweep!(kind, nothing, op, states, p, ctx)
-    total = nothing
-    for sc in op.engine.subdomain_caches, ws in sc.device_cache
-        v = ws.functional.value
-        v === nothing || (total = total === nothing ? v : total + v)
-    end
+    total = run_reduction(kind, op, states, p, ctx)
     total === nothing && throw(ArgumentError(
         "No element contributed to $(typeof(kind)). Implement " *
         "`evaluate_cell_functional` for the operator's element caches."))

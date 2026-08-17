@@ -129,6 +129,41 @@ FerriteOperators.execute_kind!(kind::MyKind, task, ws) =
     FerriteOperators.primal_cell_sweep!(kind, task, ws)
 ```
 
+A kind computing a global scalar or tensor rather than something scattered
+declares `FunctionalFamily()` instead, which routes it to the
+**value-returning** driver: the per-item kernel *returns* its contribution and
+the sweep folds the returned values, so there is no request type, no
+assembler, and no workspace state at either end.
+
+```julia
+struct MyFunctionalKind end
+FerriteOperators.sweep_family(::Type{<:MyFunctionalKind}) = FerriteOperators.FunctionalFamily()
+FerriteOperators.has_cell_request(::Type{<:MyFunctionalKind}) = false
+FerriteOperators.execute_kind!(kind::MyFunctionalKind, task, ws) =
+    FerriteOperators.functional_cell_sweep(kind, task, ws)
+
+# The type the reduction accumulates in. Optional on a sequential device, where
+# the first contributing item fixes it; REQUIRED on a parallel one, whose
+# per-worker partials are allocated before the batch runs.
+FerriteOperators.functional_value_type(::MyFunctionalKind) = Float64
+
+# the kernel hook the provided body calls
+function FerriteOperators.evaluate_cell_functional(::MyFunctionalKind, cache::MyCache, args)
+    # ... return this cell's contribution, or `nothing` for none ...
+end
+
+value = FerriteOperators.run_reduction(MyFunctionalKind(), op, states, p, ctx)
+```
+
+Declaring the value type seeds every worker's fold with `zero(T)`, so a worker
+that sees no contribution hands back the reduction's additive identity rather
+than a "nothing yet" marker, and a kernel returning some other type is an
+`ArgumentError` naming the declaration instead of a silently widened
+accumulator.
+
+[`FunctionalKind`](@ref) is exactly this with a tag, and
+[`evaluate_functional`](@ref) is its entry point.
+
 Elements then serve it like any built-in kind — `provides_analytic(::Type{<:MyCache}, ::MyKind) = true`
 plus an `assemble_cell!(req::MyRequest, cache::MyCache, args)` method — and the
 operator issues it through `assemble_into!(MyKind(), (A,), op, states, p, ctx)`.
@@ -136,11 +171,13 @@ Declaring it (`setup_operator(...; requests = (MyKind,))`, or a protocol whose
 `declared_kinds` names it) selects its sweep-state family and runs its
 setup-time trait ↔ kernel validation.
 
-Two provided bodies exist: [`primal_cell_sweep!`](@ref) (buffer zeroing, slot
-gather, cell and facet kernels, condensed write-back, scatter) and
+Three provided bodies exist: [`primal_cell_sweep!`](@ref) (buffer zeroing, slot
+gather, cell and facet kernels, condensed write-back, scatter),
 [`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to
-`sensitivity_kernel!`). A kind riding `primal_cell_sweep!` without its own
-`v2_cell_kernel!` method gets the plain analytic route.
+`sensitivity_kernel!`), and [`functional_cell_sweep`](@ref) (slot gather, no
+write-back, RETURN what the kernel hook gives). A kind riding
+`primal_cell_sweep!` without its own `v2_cell_kernel!` method gets the plain
+analytic route.
 
 Declarations carry kind *types*, normalized to their `UnionAll` base, while
 sweeps carry instances. Two hooks bridge that for validation:
@@ -152,11 +189,11 @@ the default `K()` cannot construct one — and [`has_cell_request`](@ref) is
 internal-state admissibility rule at setup.
 
 **New per-worker state** — [`sweep_state`](@ref) is the accessor for a
-workspace's kind-family members, and [`materialize_sweep_state!`](@ref) builds
-the families a sweep needs on every worker, once per sweep. A workspace is a
-fixed core plus these families; which ones exist eagerly follows from the
-protocol's declarations, routed through [`sweep_family`](@ref). Membership in
-the existing families is open; adding a new family *type* is not.
+workspace's kind-family members. A workspace is a fixed core plus those
+members, all of them bound at construction from the protocol's declarations
+routed through [`sweep_family`](@ref); the workspace itself is immutable, so a
+sweep fills buffers and never rebinds a field. Membership in the existing
+families is open; adding a new family *type* is not.
 
 **New operator families** — [`mandatory_kinds`](@ref) states the kinds an
 integrator family always issues regardless of what a protocol declares, which
