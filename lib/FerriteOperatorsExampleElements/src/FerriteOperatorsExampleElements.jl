@@ -1,0 +1,48 @@
+"""
+Example elements for [FerriteOperators](https://github.com/termi-official/FerriteOperators.jl).
+
+The elements here are minimal, readable implementations of the v2 element
+contract — one per feature the contract exposes: a bilinear form
+([`SimpleBilinearDiffusionIntegrator`](@ref), [`SimpleBilinearMassIntegrator`](@ref)),
+a linear form ([`SimpleLinearIntegrator`](@ref)), a nonlinear element with
+analytic tangent ([`SimpleHyperelasticityIntegrator`](@ref)) and a condensed
+element with per-quadrature-point internal state
+([`SimpleCondensedLinearViscoelasticity`](@ref)).
+
+They are meant to be read, copied and used as test fixtures. They are not
+tuned for production use and carry no stability guarantee beyond the element
+contract they demonstrate.
+"""
+module FerriteOperatorsExampleElements
+
+using FerriteOperators
+using Ferrite
+using Tensors
+using StaticArrays
+
+import Ferrite: getnquadpoints
+
+import FerriteOperators: AbstractBilinearIntegrator, AbstractLinearIntegrator,
+    AbstractCondensedNonlinearIntegrator, AbstractNonlinearIntegrator,
+    AbstractVolumetricElementCache
+import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!,
+    provides_analytic, has_internal_state, duplicate_for_device,
+    geometric_subdomain_interpolation, get_number_of_internal_dofs_per_element,
+    load_element_unknowns!, store_condensed_element_unknowns!,
+    allocate_element_unknown_vector, internal_variable_offset
+
+include("simple_diffusion.jl")             # Bilinear form + its induced residual
+include("simple_mass.jl")                  # Linear form and mass bilinear form
+include("simple_hyperelasticity.jl")       # Nonlinear element with analytic tangent
+include("simple_linear_viscoelasticity.jl") # Condensed element with internal state
+
+# The integrators are the public handle; the caches they set up are internal,
+# reachable as `FerriteOperatorsExampleElements.Simple…ElementCache`.
+export SimpleBilinearDiffusionIntegrator
+export SimpleLinearIntegrator
+export SimpleBilinearMassIntegrator
+export SimpleHyperelasticityIntegrator
+export SimpleCondensedLinearViscoelasticity
+export MaxwellParameters
+
+end

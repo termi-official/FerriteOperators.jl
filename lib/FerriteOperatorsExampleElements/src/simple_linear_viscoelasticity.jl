@@ -1,3 +1,8 @@
+"""
+Material parameters of the standard linear solid used by
+[`SimpleCondensedLinearViscoelasticity`](@ref): the two spring moduli `E₀`,
+`E₁`, the shear modulus `μ`, the dashpot viscosity `η₁` and Poisson's ratio `ν`.
+"""
 @kwdef struct MaxwellParameters
     E₀::Float64 = 70e3
     E₁::Float64 = 20e3
@@ -23,6 +28,11 @@ struct SimpleCondensedLinearViscoelasticity <: AbstractCondensedNonlinearIntegra
     viscosity_name::Symbol
 end
 
+"""
+The cache associated with [`SimpleCondensedLinearViscoelasticity`](@ref). It
+carries the element-local dof ranges of the displacement and of the condensed
+viscous strain, and declares [`has_internal_state`](@ref).
+"""
 struct SimpleCondensedLinearViscoelasticityCache{CV <: CellValues} <: AbstractVolumetricElementCache
     material_parameters::MaxwellParameters
     displacement_range::UnitRange{Int}

@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 using SparseArrays
 using Test
 
@@ -47,7 +48,7 @@ struct WeightedSource
     w::Float64
 end
 function FerriteOperators.assemble_patch_cell!(
-        req::ResidualRequest, cache::FerriteOperators.SimpleBilinearDiffusionElementCache,
+        req::ResidualRequest, cache::FerriteOperatorsExampleElements.SimpleBilinearDiffusionElementCache,
         args, data::WeightedSource
     )
     cv = cache.cellvalues
@@ -105,7 +106,7 @@ end
     end
 
     @testset "bilinear diffusion patches match direct kernel references" begin
-        op = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.3, qrc, :u), dh)
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.3, qrc, :u), dh)
         u = zeros(ndofs(dh))
         dest = [zeros(patch_ndofs(provider, i), patch_ndofs(provider, i)) for i in 1:3]
         assemble_patch_matrices!(dest, op, provider, u, nothing)
@@ -122,7 +123,7 @@ end
         hdh = DofHandler(hgrid)
         add!(hdh, :u, Lagrange{RefHexahedron, 1}()^3)
         close!(hdh)
-        hint = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookeanPatchTest(10.0, 0.3), qrc, :u)
+        hint = SimpleHyperelasticityIntegrator(NeoHookeanPatchTest(10.0, 0.3), qrc, :u)
         hop = setup_operator(strategy, hint, hdh)
         hu = 0.05 .* sin.(0.3 .* (1:ndofs(hdh)))
         hprovider = PatchItems(hdh.subdofhandlers[1], [[1, 2, 3, 4], [5, 6]])
@@ -140,7 +141,7 @@ end
     end
 
     @testset "guards" begin
-        op = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
         u = zeros(ndofs(dh))
         @test_throws DimensionMismatch assemble_patch_matrices!([zeros(1, 1)], op, provider, u, nothing)
         odh = DofHandler(generate_grid(Quadrilateral, (2, 2)))
@@ -154,7 +155,7 @@ end
     end
 
     @testset "term tuples with per-term domain restrictions" begin
-        op = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
         cache = op.engine.subdomain_caches[1].domain.element
         # cells 1,2 carry group 1; cells 5,6 carry group 2
         prov = PatchItems(sdh, [[1, 2, 5, 6]]; groups = [[1, 1, 2, 2]])
@@ -186,7 +187,7 @@ end
     end
 
     @testset "sinks" begin
-        op = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
         cache = op.engine.subdomain_caches[1].domain.element
         terms = (PatchTerm(WholePatch(), WeightedSource(2.0)),)
         local_dest = [zeros(patch_ndofs(provider, i)) for i in 1:3]

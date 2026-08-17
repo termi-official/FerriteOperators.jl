@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 using Test
 
 # Diffusion with a scalar source; the analytic Jacobian kernel can be scaled
@@ -269,8 +270,8 @@ end
         vdh = DofHandler(vgrid)
         add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
         close!(vdh)
-        vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
-            FerriteOperators.MaxwellParameters(), QuadratureRuleCollection(2), :u, :εᵛ)
+        vint = SimpleCondensedLinearViscoelasticity(
+            MaxwellParameters(), QuadratureRuleCollection(2), :u, :εᵛ)
         strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
         vop = setup_operator(strategy, vint, vdh; slots = (:u, :uprev))
         vu = 1e-3 .* sin.(0.2 .* (1:unknown_size(vop)))
@@ -278,7 +279,7 @@ end
         vctx = TimeIntegrationContext(0.0, 0.1, 0.1)
 
         vu_before = copy(vu)
-        res = check_derivatives(vop, vstates, FerriteOperators.MaxwellParameters(), vctx)
+        res = check_derivatives(vop, vstates, MaxwellParameters(), vctx)
         @test res.passed
         @test res.checks.jacobian.passed              # condensed tangent vs FD through local solves
         @test res.checks.jacobian.skipped === nothing

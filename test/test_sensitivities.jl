@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 using Test
 import LinearAlgebra: mul!, dot, norm
 using SparseArrays
@@ -97,8 +98,8 @@ function setup_visco_operator(strategy, qrc; kwargs...)
     vdh = DofHandler(vgrid)
     add!(vdh, :u, Lagrange{RefHexahedron, 1}()^3)
     close!(vdh)
-    vint = FerriteOperators.SimpleCondensedLinearViscoelasticity(
-        FerriteOperators.MaxwellParameters(), qrc, :u, :εᵛ)
+    vint = SimpleCondensedLinearViscoelasticity(
+        MaxwellParameters(), qrc, :u, :εᵛ)
     return setup_operator(strategy, vint, vdh; slots = (:u, :uprev), kwargs...)
 end
 
@@ -118,7 +119,7 @@ end
 
     @testset "AD Jacobian equals assembled stiffness" begin
         update_linearization!(op, u, p)
-        Kop = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        Kop = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
         update_operator!(Kop, nothing)
         @test op.J ≈ Kop.A rtol = 1e-13
     end
@@ -215,8 +216,9 @@ end
     @testset "bilinear element inside a nonlinear operator" begin
         # Regression for the trait-consistency finding: a v2 bilinear element
         # must carry a residual kernel so it composes into nonlinear operators.
+        addcellset!(grid, "all_cells", x -> true)
         ndi = NonlinearMultiDomainIntegrator(Dict(
-            dh.subdofhandlers[1] => FerriteOperators.SimpleBilinearDiffusionIntegrator(1.3, qrc, :u),
+            "all_cells" => SimpleBilinearDiffusionIntegrator(1.3, qrc, :u),
         ))
         dop = setup_operator(strategy, ndi, dh)
         r = zeros(n); evaluate!(dop, r, u, nothing)
@@ -251,9 +253,9 @@ end
 # Condensed admissibility: analytic parameter kernel on the viscoelastic cache
 # (trivially zero — the material is parameter-independent), and an
 # insensitivity declaration for the VJP kind.
-FerriteOperators.provides_analytic(::Type{<:FerriteOperators.SimpleCondensedLinearViscoelasticityCache}, ::FerriteOperators.ParameterJacobianKind) = true
-FerriteOperators.assemble_cell!(req::ParameterJacobianRequest, ::FerriteOperators.SimpleCondensedLinearViscoelasticityCache, args) = nothing
-FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperators.SimpleCondensedLinearViscoelasticityCache}, ::FerriteOperators.ParameterVJPKind) = true
+FerriteOperators.provides_analytic(::Type{<:FerriteOperatorsExampleElements.SimpleCondensedLinearViscoelasticityCache}, ::FerriteOperators.ParameterJacobianKind) = true
+FerriteOperators.assemble_cell!(req::ParameterJacobianRequest, ::FerriteOperatorsExampleElements.SimpleCondensedLinearViscoelasticityCache, args) = nothing
+FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperatorsExampleElements.SimpleCondensedLinearViscoelasticityCache}, ::FerriteOperators.ParameterVJPKind) = true
 
 @testset "Sensitivity admissibility and methods" begin
     grid = generate_grid(Quadrilateral, (4, 3))
@@ -366,7 +368,7 @@ end
         hdh = DofHandler(hgrid)
         add!(hdh, :u, Lagrange{RefHexahedron, 1}()^3)
         close!(hdh)
-        hint = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
+        hint = SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
         hop = setup_operator(strategy, hint, hdh)
         hn = ndofs(hdh)
         hu = 0.05 .* sin.(0.3 .* (1:hn))
@@ -394,7 +396,7 @@ end
     n    = ndofs(dh)
 
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-    integrator = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
+    integrator = SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
     op = setup_operator(strategy, integrator, dh)
 
     u = 0.05 .* sin.(0.3 .* (1:n))
@@ -513,7 +515,7 @@ end
         op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
         u = sin.(0.3 .* (1:ndofs(dh)))
         update_linearization!(op, u, 1.7)
-        Kop = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        Kop = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
         update_operator!(Kop, nothing)
         @test op.J ≈ Kop.A rtol = 1e-13
     end
@@ -525,7 +527,7 @@ end
         dh = DofHandler(grid)
         add!(dh, :u, Lagrange{RefHexahedron, 1}()^3)
         close!(dh)
-        hint = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
+        hint = SimpleHyperelasticityIntegrator(NeoHookeanState(10.0, 0.3), qrc, :u)
         hop = setup_operator(strategy, hint, dh)
         hn = ndofs(dh)
         hu = 0.05 .* sin.(0.3 .* (1:hn))

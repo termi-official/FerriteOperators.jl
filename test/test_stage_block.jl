@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 using Test
 using LinearAlgebra
 using SparseArrays
@@ -106,8 +107,8 @@ end
 
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     op  = setup_operator(strategy, StageDiffusionIntegrator(qrc, :u), dh; slots = (:u, :du))
-    Mop = setup_operator(strategy, FerriteOperators.SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
-    Kop = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+    Mop = setup_operator(strategy, SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
+    Kop = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
     update_operator!(Mop, nothing)
     update_operator!(Kop, nothing)
 

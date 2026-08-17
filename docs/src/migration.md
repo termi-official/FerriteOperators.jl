@@ -28,10 +28,69 @@ patterns marked ⚠ below.
 | silent `setup_element_cache` fallback | missing method **throws at setup** |
 | `reinit!` inside every cell-kernel body | engine calls `reinit_values!(cache, cell, kind)` once per cell and sweep |
 | `Ferrite.getnquadpoints`/`reinit!` via `.cv`/`.fv` field fallback | define `Ferrite.getnquadpoints` and `reinit_values!` explicitly on your cache |
+| `FerriteOperators.Simple*` example elements | `FerriteOperatorsExampleElements` — a separate package under `lib/`, exporting the integrators |
+| `*MultiDomainIntegrator(Dict(sdh => integrator))` | `*MultiDomainIntegrator(Dict("cellset_name" => integrator))` — volumetric cellset names, validated at setup |
 
 Constructor *calls* like `SequentialAssemblyStrategy(device)` still work — the
 names are convenience constructors for the common strategy compositions. Only
 **dispatch on them as types** breaks.
+
+## Example elements
+
+`SimpleBilinearDiffusionIntegrator`, `SimpleLinearIntegrator`,
+`SimpleBilinearMassIntegrator`, `SimpleHyperelasticityIntegrator`,
+`SimpleCondensedLinearViscoelasticity`, their caches and `MaxwellParameters`
+are no longer part of FerriteOperators. They live in
+`FerriteOperatorsExampleElements`, which is a test-time and example-time
+dependency, not a runtime one. Code using them adds
+
+```julia
+Pkg.add(url = "https://github.com/termi-official/FerriteOperators.jl",
+        subdir = "lib/FerriteOperatorsExampleElements")
+```
+
+to the environment that needs them (typically `test/`) and replaces
+`FerriteOperators.Simple…` with `using FerriteOperatorsExampleElements` plus
+the bare name — the subpackage exports all of them.
+
+The composition machinery is *not* affected: `CompositeVolumetricElementCache`,
+`CompositeSurfaceElementCache`, the `*MultiDomainIntegrator` family and the
+transfer integrators `MassProlongatorIntegrator` /
+`NestedMassProlongatorIntegrator` remain in FerriteOperators.
+
+The `*ElementCache` types are internal to the example package. Code dispatching
+on one reaches it as `FerriteOperatorsExampleElements.Simple…ElementCache`.
+
+## Composition
+
+`NonlinearCompositeIntegrator`, `BilinearCompositeIntegrator` and
+`LinearCompositeIntegrator` build the composite caches, which previously had to
+be assembled by hand. One behavioural change reaches existing hand-built
+composites: an inner cache's `query_cell_parameters` / `query_facet_parameters`
+override was documented as bypassed and is now honoured — each inner receives
+its own parameter view. An inner that relied on seeing the outer view must take
+that view from its own query.
+
+## Multi-domain routing
+
+`NonlinearMultiDomainIntegrator`, `BilinearMultiDomainIntegrator` and
+`LinearMultiDomainIntegrator` are keyed by the **name of a volumetric cellset**
+instead of by `SubDofHandler`:
+
+```julia
+# before
+BilinearMultiDomainIntegrator(Dict(sdh_right => a, sdh_left => b))
+# now
+BilinearMultiDomainIntegrator(Dict("right_cells" => a, "left_cells" => b))
+```
+
+A name claims the subdomain whose cells lie inside its cellset, and resolves
+both the element cache and the boundary cache of that subdomain. Setup throws
+an `ArgumentError` for a subdomain claimed by no name, a subdomain claimed by
+several names, and a declared name claiming no subdomain — so a mistyped name
+fails at `setup_operator` rather than assembling nothing. The claim is read
+from each subdomain's first cell; `FerriteOperators.debug_mode` upgrades that
+sample to an exhaustive per-cell check.
 
 ## Element kernels
 

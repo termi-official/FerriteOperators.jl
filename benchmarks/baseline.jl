@@ -1,4 +1,4 @@
-using FerriteOperators, Tensors, TimerOutputs, BenchmarkTools  # Ferrite via FerriteOperators reexport
+using FerriteOperators, FerriteOperatorsExampleElements, Tensors, TimerOutputs, BenchmarkTools  # Ferrite via FerriteOperators reexport
 TimerOutputs.enable_debug_timings(FerriteOperators)
 
 struct NeoHookean
@@ -133,7 +133,7 @@ function benchmark_assembly_ferriteoperators(N = 20)
     grid = generate_grid(Hexahedron, (N, N, N), left, right)
 
     ## Material
-    integrator = FerriteOperators.SimpleHyperelasticityIntegrator(
+    integrator = SimpleHyperelasticityIntegrator(
         NeoHookean(10.0, 0.3),
         QuadratureRuleCollection(2),
         :u

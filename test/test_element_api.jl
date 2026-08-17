@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 import FerriteOperators: get_matrix
 using Test
 import LinearAlgebra: mul!
@@ -87,7 +88,6 @@ end
 @testset "Element API" begin
     import FerriteOperators: assemble_cell!, assemble_facet!
     import FerriteOperators: setup_element_cache, setup_boundary_cache
-    import FerriteOperators: SimpleBilinearMassIntegrator, SimpleBilinearDiffusionIntegrator, SimpleLinearIntegrator
     import FerriteOperators
 
     setup_test_cache(kwargs...) =
@@ -234,5 +234,204 @@ end
         reinit_values!(composite_element_cache, cell_cache_s)
         assemble_cell!(ResidualRequest(bₑ²), composite_element_cache, args)
         @test 2bₑ¹ ≈ bₑ²
+    end
+end
+
+# Probes for composition: each carries its own parameter scale, so a residual
+# assembled through a composite reveals whether every inner got its OWN
+# parameter view or the outer one was reused for all of them.
+struct ParamProbeIntegrator <: AbstractLinearIntegrator
+    scale::Float64
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+end
+struct ParamProbeCache{CV <: CellValues} <: FerriteOperators.AbstractVolumetricElementCache
+    scale::Float64
+    cv::CV
+end
+function FerriteOperators.setup_element_cache(m::ParamProbeIntegrator, sdh::SubDofHandler)
+    qr = getquadraturerule(m.qrc, sdh)
+    ip = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return ParamProbeCache(m.scale, CellValues(qr, ip, ip_geo))
+end
+Ferrite.getnquadpoints(c::ParamProbeCache) = getnquadpoints(c.cv)
+FerriteOperators.reinit_values!(c::ParamProbeCache, cell) = reinit!(c.cv, cell)
+FerriteOperators.duplicate_for_device(device, c::ParamProbeCache) =
+    ParamProbeCache(c.scale, FerriteOperators.duplicate_for_device(device, c.cv))
+FerriteOperators.query_cell_parameters(c::ParamProbeCache, cell, p) = c.scale * p
+function FerriteOperators.assemble_cell!(req::ResidualRequest, c::ParamProbeCache, args)
+    for qp in 1:getnquadpoints(c.cv)
+        dΩ = getdetJdV(c.cv, qp)
+        for i in 1:getnbasefunctions(c.cv)
+            req.r[i] += args.p * shape_value(c.cv, qp, i) * dΩ
+        end
+    end
+end
+
+struct FacetParamProbeIntegrator <: AbstractLinearIntegrator
+    scale::Float64
+    field_name::Symbol
+    facetset::Set{FacetIndex}
+end
+struct FacetParamProbeCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+    scale::Float64
+    fv::FV
+    facetset::Set{FacetIndex}
+end
+FerriteOperators.setup_element_cache(::FacetParamProbeIntegrator, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+function FerriteOperators.setup_boundary_cache(m::FacetParamProbeIntegrator, sdh::SubDofHandler)
+    fqr = FacetQuadratureRule{RefHexahedron}(2)
+    ip = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return FacetParamProbeCache(m.scale, FacetValues(fqr, ip, ip_geo), m.facetset)
+end
+FerriteOperators.duplicate_for_device(device, c::FacetParamProbeCache) =
+    FacetParamProbeCache(c.scale, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
+FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::FacetParamProbeCache) = idx ∈ c.facetset
+FerriteOperators.query_facet_parameters(c::FacetParamProbeCache, cell, lfi, p) = c.scale * p
+function FerriteOperators.assemble_facet!(req::ResidualRequest, c::FacetParamProbeCache, args, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    for qp in 1:getnquadpoints(c.fv)
+        dΓ = getdetJdV(c.fv, qp)
+        for i in 1:getnbasefunctions(c.fv)
+            req.r[i] += args.p * shape_value(c.fv, qp, i) * dΓ
+        end
+    end
+end
+
+# A cache that only claims internal state, to reach the composite guard
+# without standing up an InternalVariableHandler.
+struct StatefulProbeCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.has_internal_state(::Type{StatefulProbeCache}) = true
+FerriteOperators.assemble_cell!(::ResidualRequest, ::StatefulProbeCache, args) = nothing
+FerriteOperators.reinit_values!(::StatefulProbeCache, cell) = nothing
+Ferrite.getnquadpoints(::StatefulProbeCache) = 0
+
+@testset "Composition" begin
+    grid = generate_grid(Hexahedron, (2, 2, 2))    # [-1,1]³ → volume 8, right face area 4
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefHexahedron, 1}())
+    close!(dh)
+    sdh = first(dh.subdofhandlers)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    qrc = QuadratureRuleCollection(2)
+    n = ndofs(dh)
+
+    @testset "per-inner parameter views" begin
+        # Debt (iii): the driver queries parameters on the composite and bakes
+        # ONE pₑ into args. Each inner must still receive its own view.
+        p = 1.5
+        op = setup_operator(strategy, LinearCompositeIntegrator(
+            ParamProbeIntegrator(2.0, qrc, :u),
+            ParamProbeIntegrator(5.0, qrc, :u),
+        ), dh)
+        update_operator!(op, p)
+        @test sum(op.b) ≈ (2.0 + 5.0) * p * 8.0 rtol = 1e-12
+
+        # Same for the facet path, whose parameters are queried per facet.
+        right = Set(getfacetset(grid, "right"))
+        fop = setup_operator(strategy, LinearCompositeIntegrator(
+            FacetParamProbeIntegrator(2.0, :u, right),
+            FacetParamProbeIntegrator(5.0, :u, right),
+        ), dh)
+        update_operator!(fop, p)
+        @test sum(fop.b) ≈ (2.0 + 5.0) * p * 4.0 rtol = 1e-12
+
+        # A hand-built args carrying a plain `p` (no composite query ran)
+        # reaches every inner unchanged.
+        composite = FerriteOperators.CompositeVolumetricElementCache((
+            FerriteOperators.setup_element_cache(ParamProbeIntegrator(2.0, qrc, :u), sdh),
+            FerriteOperators.setup_element_cache(ParamProbeIntegrator(5.0, qrc, :u), sdh),
+        ))
+        cc = Ferrite.CellCache(sdh)
+        Ferrite.reinit!(cc, 1)
+        reinit_values!(composite, cc)
+        rraw = zeros(ndofs_per_cell(sdh))
+        assemble_cell!(ResidualRequest(rraw), composite, KernelArgs((;), cc, p, nothing, nothing))
+        rown = zeros(ndofs_per_cell(sdh))
+        pₑ = FerriteOperators.query_cell_parameters(composite, cc, p)
+        assemble_cell!(ResidualRequest(rown), composite, KernelArgs((;), cc, pₑ, nothing, nothing))
+        @test sum(rraw) ≈ 2 * p * 1.0 rtol = 1e-12
+        @test sum(rown) ≈ (2.0 + 5.0) * p * 1.0 rtol = 1e-12
+    end
+
+    @testset "constructor-built equals hand-built" begin
+        D = SimpleBilinearDiffusionIntegrator(1.3, qrc, :u)
+        M = SimpleBilinearMassIntegrator(0.7, qrc, :u)
+        built = FerriteOperators.setup_element_cache(BilinearCompositeIntegrator(D, M), sdh)
+        hand = FerriteOperators.CompositeVolumetricElementCache((
+            FerriteOperators.setup_element_cache(D, sdh),
+            FerriteOperators.setup_element_cache(M, sdh),
+        ))
+        cc = Ferrite.CellCache(sdh)
+        Ferrite.reinit!(cc, 1)
+        args = KernelArgs((;), cc, nothing, nothing, nothing)
+        K1 = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
+        K2 = similar(K1); fill!(K2, 0.0)
+        reinit_values!(built, cc); assemble_cell!(JacobianRequest{:u}(K1), built, args)
+        reinit_values!(hand, cc);  assemble_cell!(JacobianRequest{:u}(K2), hand, args)
+        @test K1 == K2                 # bit-level, same inputs
+        @test !iszero(K1)
+    end
+
+    @testset "collapse rules" begin
+        empty_v = FerriteOperators.EmptyVolumetricElementCache()
+        empty_s = FerriteOperators.EmptySurfaceElementCache()
+        c1 = FerriteOperators.setup_element_cache(SimpleLinearIntegrator(1.0, qrc, :u), sdh)
+        c2 = FerriteOperators.setup_element_cache(SimpleBilinearMassIntegrator(1.0, qrc, :u), sdh)
+
+        @test FerriteOperators.compose_element_caches((empty_v, empty_v)) === empty_v
+        @test FerriteOperators.compose_element_caches((empty_v, c1)) === c1
+        @test FerriteOperators.compose_element_caches((c1, c2)) isa FerriteOperators.CompositeVolumetricElementCache
+        @test length(FerriteOperators.compose_element_caches((c1, empty_v, c2)).inner_caches) == 2
+        @test FerriteOperators.compose_boundary_caches((empty_s, empty_s)) === empty_s
+
+        # The empty-boundary fast path survives composition: an integrator with
+        # no boundary term still yields the empty surface cache.
+        model = LinearCompositeIntegrator(
+            SimpleLinearIntegrator(1.0, qrc, :u),
+            SimpleLinearIntegrator(2.0, qrc, :u),
+        )
+        @test FerriteOperators.setup_boundary_cache(model, sdh) isa FerriteOperators.EmptySurfaceElementCache
+    end
+
+    @testset "quadrature agreement" begin
+        c2a = FerriteOperators.setup_element_cache(SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u), sdh)
+        c2b = FerriteOperators.setup_element_cache(SimpleBilinearMassIntegrator(1.0, QuadratureRuleCollection(2), :u), sdh)
+        c3 = FerriteOperators.setup_element_cache(SimpleLinearIntegrator(1.0, QuadratureRuleCollection(3), :u), sdh)
+        agree = FerriteOperators.CompositeVolumetricElementCache((c2a, c2b))
+        @test getnquadpoints(agree) == getnquadpoints(c2a)
+        disagree = FerriteOperators.CompositeVolumetricElementCache((c2a, c3))
+        @test_throws ArgumentError getnquadpoints(disagree)
+    end
+
+    @testset "loud rejections" begin
+        D = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+        L = SimpleLinearIntegrator(1.0, qrc, :u)
+        visco = SimpleCondensedLinearViscoelasticity(MaxwellParameters(), qrc, :u, :εᵛ)
+
+        @test_throws ArgumentError BilinearCompositeIntegrator(())
+        @test_throws ArgumentError NonlinearCompositeIntegrator(())
+        @test_throws ArgumentError LinearCompositeIntegrator(())
+        @test_throws ArgumentError BilinearCompositeIntegrator(D, L)   # linear sink in bilinear
+        @test_throws ArgumentError LinearCompositeIntegrator(L, D)     # bilinear sink in linear
+        @test_throws ArgumentError NonlinearCompositeIntegrator(D, L)  # linear sink in nonlinear
+        @test_throws ArgumentError NonlinearCompositeIntegrator(D, visco)  # condensed inner
+
+        # A bilinear inner in a nonlinear composite is legitimate.
+        @test NonlinearCompositeIntegrator(D, D) isa AbstractNonlinearIntegrator
+
+        # Nested composites are flattened at construction.
+        @test length(BilinearCompositeIntegrator(BilinearCompositeIntegrator(D, D), D).subintegrators) == 3
+
+        # A hand-built composite with a condensed inner is rejected too — the
+        # constructor is not the only way to build one.
+        hand = FerriteOperators.CompositeVolumetricElementCache((
+            StatefulProbeCache(),
+            FerriteOperators.setup_element_cache(D, sdh),
+        ))
+        @test_throws ArgumentError FerriteOperators.validate_element_cache(hand)
     end
 end

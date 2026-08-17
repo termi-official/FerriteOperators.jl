@@ -9,6 +9,11 @@ struct SimpleHyperelasticityIntegrator{EnergyType} <: AbstractNonlinearIntegrato
     field_name::Symbol
 end
 
+"""
+The cache associated with [`SimpleHyperelasticityIntegrator`](@ref). It serves
+the residual, the Jacobian and the fused Jacobian-residual analytically, all
+three from `Tensors` derivatives of the energy.
+"""
 struct SimpleHyperelasticityElementCache{EnergyType, CV <: CellValues} <: AbstractVolumetricElementCache
     ψ::EnergyType
     cv::CV

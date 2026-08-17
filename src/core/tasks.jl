@@ -107,6 +107,63 @@ even when an element serves them analytically.
 const DerivativeSweepKind = Union{JacobianKind, JacobianResidualKind, WeightedJacobianKind, SensitivityKind}
 
 """
+    assembles_matrix(kind) -> Bool
+    assembles_vector(kind) -> Bool
+    depends_on_unknowns(kind) -> Bool
+
+What a sweep of `kind` does with the workspace: which of `ws.Ke`/`ws.re` it
+zeroes and scatters, and whether it gathers the state slots (and therefore
+runs the condensed write-back). The driver bodies consult these instead of
+testing kind membership, so a downstream kind joins the built-in driver by
+declaring them.
+
+The defaults read the built-in family unions, so the answers are compile-time
+constants and the branches they guard are eliminated. An overload must return
+a literal for the same reason:
+
+    FerriteOperators.assembles_matrix(::MyKind) = true
+
+There is exactly one root method each, so an overload is always strictly more
+specific and cannot create an ambiguity.
+"""
+assembles_matrix(kind) = kind isa MatrixAssemblyKind
+@doc (@doc assembles_matrix) assembles_vector(kind) = kind isa VectorAssemblyKind
+@doc (@doc assembles_matrix) depends_on_unknowns(kind) = kind isa UnknownDependentKind
+
+"""
+    NoFamily
+    DerivativeFamily
+    FunctionalFamily
+
+The per-worker sweep-state families. `DerivativeFamily` is the
+[`ADWorkspace`](@ref), `FunctionalFamily` the reduction accumulator, and
+`NoFamily` marks a sweep that reads only the workspace core.
+"""
+struct NoFamily end
+@doc (@doc NoFamily) struct DerivativeFamily end
+@doc (@doc NoFamily) struct FunctionalFamily end
+
+"""
+    sweep_family(::Type{K}) -> family singleton
+
+The per-worker family a sweep of kind `K` reads. Queried on the TYPE, because
+declarations carry kind types (normalized to their `UnionAll` base) while
+sweeps carry instances — one overload point serves both.
+
+Declaring a family is what makes it exist: `setup_operator(...; requests =
+(MyKind,))` builds the family this returns, so
+
+    FerriteOperators.sweep_family(::Type{<:MyKind}) = FerriteOperators.DerivativeFamily()
+
+gives `MyKind` an [`ADWorkspace`](@ref) at setup and lets [`sweep_state`](@ref)
+resolve. The default derives the answer from the built-in unions and folds to a
+constant.
+"""
+sweep_family(::Type{K}) where {K} =
+    K <: DerivativeSweepKind ? DerivativeFamily() :
+    K <: FunctionalKind ? FunctionalFamily() : NoFamily()
+
+"""
     sweep_state(ws, kind)
 
 The per-worker member serving `kind`'s sweep family. The workspace is a fixed
@@ -116,7 +173,8 @@ them: derivative kinds read the [`ADWorkspace`](@ref), functional kinds the
 reduction accumulator. Families a sweep needs but does not have are
 materialized once per sweep by [`materialize_sweep_state!`](@ref).
 """
-function sweep_state(ws, kind::DerivativeSweepKind)
+sweep_state(ws, kind) = sweep_state(ws, kind, sweep_family(typeof(kind)))
+function sweep_state(ws, kind, ::DerivativeFamily)
     ad = ws.ad
     ad === nothing && throw(ArgumentError(
         "This operator carries no derivative sweep family: neither its protocol's declared " *
@@ -125,7 +183,10 @@ function sweep_state(ws, kind::DerivativeSweepKind)
         "whose `declared_kinds` names it."))
     return ad
 end
-sweep_state(ws, ::FunctionalKind) = ws.functional
+sweep_state(ws, kind, ::FunctionalFamily) = ws.functional
+sweep_state(ws, kind, ::NoFamily) = throw(ArgumentError(
+    "$(nameof(typeof(kind))) declares no sweep-state family, so it has no per-worker state " *
+    "to read. Declare one with `sweep_family(::Type{<:$(nameof(typeof(kind)))})`."))
 
 """
     materialize_sweep_state!(engine, kind)
@@ -134,8 +195,9 @@ Build the sweep-state families a sweep of `kind` needs on every worker that
 lacks them — once per sweep, before the item loop. Families selected by the
 operator's declarations are already in place and this is a no-op.
 """
-materialize_sweep_state!(engine, kind) = nothing
-function materialize_sweep_state!(engine, ::FunctionalKind)
+materialize_sweep_state!(engine, kind) = materialize_sweep_state!(engine, kind, sweep_family(typeof(kind)))
+materialize_sweep_state!(engine, kind, ::Union{NoFamily, DerivativeFamily}) = nothing
+function materialize_sweep_state!(engine, kind, ::FunctionalFamily)
     for sc in engine.subdomain_caches, ws in sc.device_cache
         ws.functional === nothing && (ws.functional = FunctionalAccumulator(nothing))
     end
@@ -143,9 +205,9 @@ function materialize_sweep_state!(engine, ::FunctionalKind)
 end
 
 # Which per-worker families a declared kind set calls for. Kinds arrive as
-# their UnionAll bases, so the family test is a subtype test.
-needs_derivative_family(kinds) = any(K -> K <: DerivativeSweepKind, kinds)
-needs_functional_family(kinds) = any(K -> K <: FunctionalKind, kinds)
+# their UnionAll bases, which [`sweep_family`](@ref) is queried on directly.
+needs_derivative_family(kinds) = any(K -> sweep_family(K) isa DerivativeFamily, kinds)
+needs_functional_family(kinds) = any(K -> sweep_family(K) isa FunctionalFamily, kinds)
 
 """
     request_type(kind) -> Type
@@ -173,6 +235,20 @@ request_type(::ParameterVJPKind)                 = ParameterVJPRequest
 request_type(::TimeSensitivityKind)              = TimeSensitivityRequest
 request_type(::StateJVPKind)                     = StateJVPRequest
 request_type(::StateVJPKind)                     = StateVJPRequest
+
+# Placeholder instances for the payload-carrying kinds: setup-time validation
+# reads only their types (see [`validation_instance`](@ref)).
+validation_instance(::Type{<:ParameterVJPKind})     = ParameterVJPKind(nothing)
+validation_instance(::Type{<:StateJVPKind})         = StateJVPKind(nothing)
+validation_instance(::Type{<:StateVJPKind})         = StateVJPKind(nothing)
+validation_instance(::Type{<:WeightedJacobianKind}) = WeightedJacobianKind((u = 1.0,))
+
+# The kinds whose AD fallback differentiates through an element's local solve.
+requires_admissibility_check(::Union{ParameterJacobianKind, ParameterVJPKind, StateJVPKind, StateVJPKind}) = true
+
+# Functional kernels return their contribution through `evaluate_cell_functional`
+# rather than filling a request, so there is no cell request to validate.
+has_cell_request(::Type{<:FunctionalKind}) = false
 
 materialize_request(::ResidualKind, ws)                    = ResidualRequest(ws.re)
 materialize_request(::LinearKind, ws)                      = ResidualRequest(ws.re)
@@ -242,12 +318,28 @@ function load_slot!(buf, src::AffineRate, ws)
     return buf
 end
 
-function execute_kind!(kind::PrimalKind, task, ws)
-    kind isa MatrixAssemblyKind && fill!(ws.Ke, 0.0)
-    kind isa VectorAssemblyKind && fill!(ws.re, 0.0)
+execute_kind!(kind::PrimalKind, task, ws) = primal_cell_sweep!(kind, task, ws)
+
+"""
+    primal_cell_sweep!(kind, task, ws)
+
+The built-in primal driver body, reusable by a downstream kind's own
+`execute_kind!`. Zeroes the buffers [`assembles_matrix`](@ref) /
+[`assembles_vector`](@ref) name, reinitializes the element's values, queries
+the cell parameters, runs the cell and facet kernels — gathering the state
+slots and running the condensed write-back iff [`depends_on_unknowns`](@ref) —
+and scatters through [`scatter_local!`](@ref).
+
+The kernel it calls is `v2_cell_kernel!(kind, …)`, whose generic method issues
+the kind's request analytically; the built-in kinds with an AD fallback
+specialize it.
+"""
+function primal_cell_sweep!(kind, task, ws)
+    assembles_matrix(kind) && fill!(ws.Ke, 0.0)
+    assembles_vector(kind) && fill!(ws.re, 0.0)
     reinit_values!(ws.element, ws.cell, kind)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
-    if kind isa UnknownDependentKind
+    if depends_on_unknowns(kind)
         statesₑ = load_slots!(ws, task.states)
         @timeit_debug "assemble element" v2_cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx)
         @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, statesₑ, task)
@@ -265,8 +357,8 @@ _v2_args(ws, statesₑ, pₑ, ctx) = KernelArgs(statesₑ, ws.cell, pₑ, ws.scr
 # The framework-owned facet driver: walk the cell's facets, gate on
 # is_facet_in_cache, query facet parameters SEPARATELY per facet, and hand the
 # kind's request over the shared local buffers to the facet kernel.
-boundary_kernel!(kind::PrimalKind, ::EmptySurfaceElementCache, ws, statesₑ, task) = nothing
-function boundary_kernel!(kind::PrimalKind, cache::AbstractSurfaceElementCache, ws, statesₑ, task)
+boundary_kernel!(kind, ::EmptySurfaceElementCache, ws, statesₑ, task) = nothing
+function boundary_kernel!(kind, cache::AbstractSurfaceElementCache, ws, statesₑ, task)
     for lfi in 1:nfacets(ws.cell)
         if is_facet_in_cache(FacetIndex(cellid(ws.cell), lfi), ws.cell, cache)
             pᵦ = query_facet_parameters(cache, ws.cell, lfi, task.p)
@@ -312,11 +404,12 @@ function v2_cell_kernel!(kind::JacobianResidualKind, cache, ws, statesₑ, pₑ,
         ad_state_jacobian!(ws.Ke, ws, args)   # also leaves the primal residual in ws.re
     end
 end
-# State-independent forms have no residual kernel to differentiate; the
-# analytic kernel is mandatory for v2 elements used in these operators.
-v2_cell_kernel!(kind::BilinearKind, cache, ws, statesₑ, pₑ, ctx) =
-    assemble_cell!(materialize_request(kind, ws), cache, _v2_args(ws, statesₑ, pₑ, ctx))
-v2_cell_kernel!(kind::LinearKind, cache, ws, statesₑ, pₑ, ctx) =
+# The plain analytic route: issue the kind's request and let the element serve
+# it. This is what the state-independent built-in forms use — they have no
+# residual kernel to differentiate, so the analytic kernel is mandatory for the
+# v2 elements used in these operators — and what a downstream kind riding
+# [`primal_cell_sweep!`](@ref) gets without writing a kernel dispatch of its own.
+v2_cell_kernel!(kind, cache, ws, statesₑ, pₑ, ctx) =
     assemble_cell!(materialize_request(kind, ws), cache, _v2_args(ws, statesₑ, pₑ, ctx))
 
 # Sensitivity sweeps: gather the trial state, never write anything back into
@@ -324,7 +417,18 @@ v2_cell_kernel!(kind::LinearKind, cache, ws, statesₑ, pₑ, ctx) =
 # live in the per-worker `ws.ad` buffers; analytic kernels ACCUMULATE into
 # their target (zeroed in that branch), the ForwardDiff fallbacks overwrite
 # it fully.
-function execute_kind!(kind::SensitivityKind, task, ws)
+execute_kind!(kind::SensitivityKind, task, ws) = sensitivity_cell_sweep!(kind, task, ws)
+
+"""
+    sensitivity_cell_sweep!(kind, task, ws)
+
+The built-in sensitivity driver body, reusable by a downstream kind's own
+`execute_kind!`. Gathers the trial state, queries the cell parameters and
+hands the kernel args to `sensitivity_kernel!(kind, task, ws, args)`, which
+the kind implements. Nothing is written back into `u`, and the local output
+lives in the kind's own sweep-state buffers.
+"""
+function sensitivity_cell_sweep!(kind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
     statesₑ = load_slots!(ws, task.states)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
@@ -420,10 +524,24 @@ function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, args)
 end
 
 
-scatter_local!(::JacobianResidualKind, assembler, ws)            = assemble!(assembler, ws.cell, ws.Ke, ws.re)
-scatter_local!(::Union{JacobianKind, WeightedJacobianKind, BilinearKind}, assembler, ws) =
-    assemble!(assembler, ws.cell, ws.Ke)
-scatter_local!(::Union{ResidualKind, LinearKind}, assembler, ws) = assemble!(assembler, ws.cell, ws.re)
+"""
+    scatter_local!(kind, assembler, ws)
+
+Hand the local buffers a sweep of `kind` filled to the assembler. Which
+buffers those are is [`assembles_matrix`](@ref)/[`assembles_vector`](@ref), so
+the three routes are selected at compile time and a downstream kind is
+scattered by the same body.
+"""
+function scatter_local!(kind, assembler, ws)
+    if assembles_matrix(kind) && assembles_vector(kind)
+        assemble!(assembler, ws.cell, ws.Ke, ws.re)
+    elseif assembles_matrix(kind)
+        assemble!(assembler, ws.cell, ws.Ke)
+    elseif assembles_vector(kind)
+        assemble!(assembler, ws.cell, ws.re)
+    end
+    return nothing
+end
 
 # A Jacobian sweep differentiates the buffer of ONE slot, so that slot must be
 # present and must carry a plain vector source. `AffineRate` slots are formed

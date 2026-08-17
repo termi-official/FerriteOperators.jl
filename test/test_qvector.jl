@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 import FerriteOperators: get_matrix
 using Test
 import LinearAlgebra: mul!
@@ -59,7 +60,7 @@ using TimerOutputs
         add!(dh, :u, Lagrange{RefHexahedron, 1}())
         close!(dh)
         qrc        = QuadratureRuleCollection(2)
-        integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+        integrator = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
         strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
         op         = setup_operator(strategy, integrator, dh)
 

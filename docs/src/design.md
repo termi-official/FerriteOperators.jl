@@ -98,19 +98,65 @@ belong to the slot that carries the reconstruction.
 The framework is extended by adding methods to a small number of generic
 functions rather than by subclassing drivers.
 
-**New request kinds** — [`request_type`](@ref) and `materialize_request` are
-the single kind → request association: `request_type` is the pure form used
-wherever a kernel method is looked up, `materialize_request` binds the
-workspace buffers a sweep accumulates into. The cell driver, the facet driver,
-the patch driver, and the setup-time validation tables all go through them, so
-a kind enters the framework by adding one pair of methods plus its membership
-in the kind unions.
+**New request kinds** — a kind is defined entirely outside this package. The
+built-in kind families are trait *defaults*, not a closed world: what a sweep
+does with the workspace is a set of overloadable predicates, so a downstream
+kind reuses the built-in driver bodies rather than reimplementing them.
+
+The complete recipe:
+
+```julia
+struct MyKind end
+struct MyRequest{M <: AbstractMatrix} <: FerriteOperators.AbstractAssemblyRequest
+    K::M
+end
+
+# 1. The kind → request association (the pure form and the executing form).
+FerriteOperators.request_type(::MyKind) = MyRequest
+FerriteOperators.materialize_request(::MyKind, ws) = MyRequest(ws.Ke)
+
+# 2. What the sweep does with the workspace. Return literals: these guard the
+#    driver's branches and must fold away.
+FerriteOperators.assembles_matrix(::MyKind) = true
+# assembles_vector / depends_on_unknowns default to `false` for a new kind.
+
+# 3. The per-worker family the sweep reads, queried on the TYPE. Declaring
+#    `DerivativeFamily()` is what builds the `ADWorkspace` at setup.
+FerriteOperators.sweep_family(::Type{<:MyKind}) = FerriteOperators.NoFamily()
+
+# 4. The driver. Reuse a provided body, or write a bespoke one.
+FerriteOperators.execute_kind!(kind::MyKind, task, ws) =
+    FerriteOperators.primal_cell_sweep!(kind, task, ws)
+```
+
+Elements then serve it like any built-in kind — `provides_analytic(::Type{<:MyCache}, ::MyKind) = true`
+plus an `assemble_cell!(req::MyRequest, cache::MyCache, args)` method — and the
+operator issues it through `assemble_into!(MyKind(), (A,), op, states, p, ctx)`.
+Declaring it (`setup_operator(...; requests = (MyKind,))`, or a protocol whose
+`declared_kinds` names it) selects its sweep-state family and runs its
+setup-time trait ↔ kernel validation.
+
+Two provided bodies exist: [`primal_cell_sweep!`](@ref) (buffer zeroing, slot
+gather, cell and facet kernels, condensed write-back, scatter) and
+[`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to
+`sensitivity_kernel!`). A kind riding `primal_cell_sweep!` without its own
+`v2_cell_kernel!` method gets the plain analytic route.
+
+Declarations carry kind *types*, normalized to their `UnionAll` base, while
+sweeps carry instances. Two hooks bridge that for validation:
+[`validation_instance`](@ref) supplies the placeholder instance traits are
+queried on — a kind whose payload is a type parameter must overload it, since
+the default `K()` cannot construct one — and [`has_cell_request`](@ref) is
+`false` for a kind reaching the element through a hook other than
+`assemble_cell!`. [`requires_admissibility_check`](@ref) opts a kind into the
+internal-state admissibility rule at setup.
 
 **New per-worker state** — [`sweep_state`](@ref) is the accessor for a
 workspace's kind-family members, and [`materialize_sweep_state!`](@ref) builds
 the families a sweep needs on every worker, once per sweep. A workspace is a
 fixed core plus these families; which ones exist eagerly follows from the
-protocol's declarations.
+protocol's declarations, routed through [`sweep_family`](@ref). Membership in
+the existing families is open; adding a new family *type* is not.
 
 **New operator families** — [`mandatory_kinds`](@ref) states the kinds an
 integrator family always issues regardless of what a protocol declares, which

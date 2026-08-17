@@ -165,15 +165,54 @@ sensitivity admissibility rules in
 
 ## Composition
 
-[`CompositeVolumetricElementCache`](@ref) combines several elements over one
-domain: the request carries the buffers, so one generic fan-out serves every
-request type. Its scope is same-(context, sink) multiphysics on one domain —
-terms evaluated at different contexts or scattered into different targets are
-separate sweeps over separate integrators.
+[`NonlinearCompositeIntegrator`](@ref) and its bilinear/linear siblings stack
+several sub-integrators over one domain into a single element:
+
+```julia
+setup_operator(strategy, BilinearCompositeIntegrator(mass, diffusion), dh)
+```
+
+The request carries the buffers, so one generic fan-out serves every request
+type, and each inner receives its own [`query_cell_parameters`](@ref) view.
+Empty caches are dropped when the composition is built, so an all-empty
+composition collapses to the empty cache and a single surviving cache is
+returned unwrapped — the engine's empty-boundary fast path survives
+composition. Composed inners must agree on their quadrature rule; a
+`getnquadpoints` query on a disagreeing composite throws.
+
+The scope bound is same-(context, sink) multiphysics on **one** domain: terms
+evaluated at different contexts or scattered into different targets are
+separate sweeps over separate integrators, and the type carries exactly one
+field so there is nowhere to smuggle a per-inner context or weight. No values
+objects are shared by construction — deliberate sharing stays an element-side
+concern.
+
+Construction is rejected loudly for an empty tuple, for a sub-integrator with
+condensed internal state (composing condensed elements is not supported), and
+for cross-sink mixes. A *bilinear* inner inside a nonlinear composite is
+legitimate; a *linear* (load) form has a different sink and never composes
+into a nonlinear or bilinear operator. Nested composites are flattened at
+construction.
+
+[`CompositeVolumetricElementCache`](@ref) and
+[`CompositeSurfaceElementCache`](@ref) are the caches these integrators build,
+and remain available for hand-built compositions.
+
+Routing and composition compose in one order — a `*MultiDomainIntegrator`
+whose values are composite integrators. A composite of routers is not
+supported.
 
 [`NonlinearMultiDomainIntegrator`](@ref) and its bilinear/linear siblings map
-subdomains to integrators, so one operator can carry different physics per
-`SubDofHandler`.
+**volumetric cellset names** to integrators, so one operator can carry
+different physics per subdomain. A name claims the subdomain whose cells lie
+in that cellset, and it resolves that subdomain's element cache *and* its
+boundary cache — facetset names take no part in routing. Resolution runs once
+per operator setup; an unclaimed subdomain, an ambiguous claim, or a declared
+name claiming nothing is an `ArgumentError` there, never a silently empty
+contribution. It samples each subdomain's first cell, so the requirement that
+a subdomain lie *entirely* within one declared cellset is an assumption in
+production and a checked, cell-exact rejection under
+[`FerriteOperators.debug_mode`](@ref).
 
 ## Functionals
 
@@ -212,18 +251,23 @@ assemble_cell!(ResidualRequest(rₑ), cache, args)
 `scratch` and `ctx` are whatever the kernel reads (`nothing` when it reads
 neither). Pass further slots as additional entries of the states NamedTuple.
 
-## Element API reference
+## Example elements
 
-```@autodocs
-Modules = [FerriteOperators]
-Pages = [
-    "core/requests.jl",
-    "core/element_interface.jl",
-    "elements/composite_elements.jl",
-    "elements/domain_elements.jl",
-    "elements/simple_diffusion.jl",
-    "elements/simple_mass.jl",
-    "elements/simple_hyperelasticity.jl",
-    "elements/simple_linear_viscoelasticity.jl",
-]
+Worked implementations of everything above live in
+`FerriteOperatorsExampleElements`, a separate package under
+`lib/FerriteOperatorsExampleElements` — one element per feature of the
+contract: a bilinear form and its induced residual, a linear form, a nonlinear
+element with analytic tangent, and a condensed element with per-quadrature-point
+internal state. They are FerriteOperators' own test fixtures and are meant to
+be read and copied. Add them to an environment with
+
+```julia
+Pkg.add(url = "https://github.com/termi-official/FerriteOperators.jl",
+        subdir = "lib/FerriteOperatorsExampleElements")
 ```
+
+Their docstrings are collected in the
+[example element reference](example-elements.md).
+
+The generic functions and types above are collected in the
+[element API reference](element-api.md).

@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 import FerriteOperators: get_matrix
 using Test
 import LinearAlgebra: mul!
@@ -27,7 +28,7 @@ end
     add!(dh, :u, Lagrange{RefHexahedron, 1}())
     close!(dh)
     qrc        = QuadratureRuleCollection(2)
-    integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+    integrator = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
     strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
 
     # --- evaluate_quadrature! fills QVector ---
@@ -89,7 +90,7 @@ end
     add!(dh, :u, Lagrange{RefHexahedron, 1}())
     close!(dh)
     qrc        = QuadratureRuleCollection(2)
-    integrator = FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
+    integrator = SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
     strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
     qop        = setup_operator(strategy, integrator, dh)
     q          = setup_qvector(Float64, dh, qrc)
@@ -150,7 +151,7 @@ end
     add!(dh, :u, Lagrange{RefHexahedron, 1}())
     close!(dh)
     qrc        = QuadratureRuleCollection(2)
-    integrator = FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+    integrator = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
     strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
     qop        = setup_operator(strategy, integrator, dh)
     u          = zeros(ndofs(dh))

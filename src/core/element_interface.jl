@@ -45,6 +45,16 @@ contribution to the functional named by `kind` — a `Number` or a Tensors
 tensor, summed across cells — or `nothing` for no contribution.
 """
 function evaluate_cell_functional end
+
+"""
+    get_number_of_internal_dofs_per_element(integrator, cache, sdh) -> AbstractVector{Int}
+
+Number of condensed internal dofs each cell of `sdh` owns, in `sdh.cellset`
+order. Queried once at setup to build the [`InternalVariableHandler`](@ref);
+there is no fallback, so only condensed elements implement it.
+"""
+function get_number_of_internal_dofs_per_element end
+
 load_element_unknowns!(uₑ, u, cell, ivh, element_cache)   = uₑ .= @view u[celldofs(cell)]
 store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache) = nothing
 

@@ -325,17 +325,61 @@ function validate_element_cache(cache, declared_requests::Tuple = (), ::Type{A} 
     for kind in _primal_validatable_kinds()
         _assert_trait_backed(T, kind, A)
     end
-    for kind in _sensitivity_validatable_kinds()
-        any(D -> kind isa D, declared_requests) || continue
+    for K in declared_requests
+        has_cell_request(K) || continue
+        kind = validation_instance(K)
         _assert_trait_backed(T, kind, A)
-        # Declaring moves the admissibility failure from first use to setup.
-        # Time sensitivities are exempt: their FD escape is chosen per call.
-        # Weighted Jacobians are exempt for the same reason: their participating
-        # slots and their fused-vs-composed route are call-time knowledge.
-        kind isa Union{TimeSensitivityKind, WeightedJacobianKind} || assert_sensitivity_admissible(T, kind)
+        requires_admissibility_check(kind) && assert_sensitivity_admissible(T, kind)
     end
     return nothing
 end
+
+"""
+    has_cell_request(::Type{K}) -> Bool
+
+Whether kind `K` materializes an [`assemble_cell!`](@ref) request, i.e. whether
+[`request_type`](@ref) answers for it. Setup validates the trait ↔ kernel
+backing of declared kinds that do.
+
+Kinds served by a different element hook declare `false`:
+[`FunctionalKind`](@ref) reaches the element through
+[`evaluate_cell_functional`](@ref) and *returns* its contribution instead of
+filling a request, so it has no request to check.
+"""
+has_cell_request(::Type{K}) where {K} = true
+
+"""
+    validation_instance(::Type{K}) -> kind instance
+
+The placeholder instance setup-time validation queries `K`'s traits on.
+Declarations carry kind TYPES normalized to their `UnionAll` base, while
+[`request_type`](@ref) and [`provides_analytic`](@ref) are queried on
+instances; this is the bridge.
+
+The default calls `K()`, which serves every kind constructible without
+payload. A kind whose payload is a type parameter overloads it with a
+placeholder — only the type is read, never the value:
+
+    FerriteOperators.validation_instance(::Type{<:MyVJPKind}) = MyVJPKind(nothing)
+
+There is no fallback that skips: a declared kind that cannot be instantiated
+raises at setup rather than silently missing its validation.
+"""
+validation_instance(::Type{K}) where {K} = K()
+
+"""
+    requires_admissibility_check(kind) -> Bool
+
+Whether declaring `kind` runs the internal-state admissibility rule
+(`assert_sensitivity_admissible`) at setup instead of on first use.
+
+True for the kinds whose AD fallback differentiates THROUGH an element's local
+solve. Time sensitivities and weighted Jacobians are exempt although they
+differentiate: their escape (finite differences, the composed route) is chosen
+per call, so setup cannot know whether the AD path will be taken. The default
+is `false`, so a downstream kind opts in.
+"""
+requires_admissibility_check(kind) = false
 
 function _assert_trait_backed(T, kind, ::Type{A} = KernelArgs) where {A}
     ReqT = request_type(kind)
@@ -371,14 +415,6 @@ end
 # kind → request association. Payload-carrying kinds get placeholder payloads —
 # only the type matters for the trait query.
 _primal_validatable_kinds() = (JacobianKind{:u}(), JacobianResidualKind())
-_sensitivity_validatable_kinds() = (
-    ParameterJacobianKind(),
-    ParameterVJPKind(nothing),
-    TimeSensitivityKind(),
-    StateJVPKind(nothing),
-    StateVJPKind(nothing),
-    WeightedJacobianKind((u = 1.0,)),
-)
 
 # AD-from-residual through an element-local solve is wrong in principle
 # (implicit function; see references/implicit-ad-plasti.jl), so the rejection

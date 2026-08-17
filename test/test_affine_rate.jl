@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 using Test
 using SparseArrays
 
@@ -46,8 +47,8 @@ end
     op = setup_operator(strategy, TransientDiffusionIntegrator(qrc, :u), dh; slots = (:u, :du))
 
     # Reference mass and stiffness from the bundled bilinear integrators.
-    Mop = setup_operator(strategy, FerriteOperators.SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
-    Kop = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+    Mop = setup_operator(strategy, SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
+    Kop = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
     update_operator!(Mop, nothing)
     update_operator!(Kop, nothing)
 

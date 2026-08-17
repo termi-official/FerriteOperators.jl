@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 using Test
 using Polyester
 import LinearAlgebra: dot
@@ -64,7 +65,7 @@ end
     u = sin.(0.3 .* (1:n))
 
     @testset "scalar energy matches ½u'Ku" begin
-        Kop = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        Kop = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
         update_operator!(Kop, nothing)
         Φ = evaluate_functional(op, FunctionalKind(:energy), u, nothing)
         @test Φ ≈ dot(u, Kop.A * u) / 2 rtol = 1e-13

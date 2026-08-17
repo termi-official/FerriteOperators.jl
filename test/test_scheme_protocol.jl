@@ -1,4 +1,5 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 using Test
 using LinearAlgebra
 using SparseArrays
@@ -74,8 +75,8 @@ function protocol_testbed(; fused = false, protocol = SDIRKWProtocol())
     qrc = QuadratureRuleCollection(2)
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     op  = setup_operator(strategy, ProtocolDiffusionIntegrator(qrc, :u, fused), dh, protocol)
-    Mop = setup_operator(strategy, FerriteOperators.SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
-    Kop = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+    Mop = setup_operator(strategy, SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
+    Kop = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
     update_operator!(Mop, nothing)
     update_operator!(Kop, nothing)
     return (; op, Mop, Kop, dh, grid, qrc, strategy, n = ndofs(dh))
@@ -168,7 +169,7 @@ end
         bws = first_workspace(tb.Mop)
         @test bws.ad === nothing
         @test bws.functional === nothing
-        lop = setup_operator(tb.strategy, FerriteOperators.SimpleLinearIntegrator(1.0, qrc, :u), tb.dh)
+        lop = setup_operator(tb.strategy, SimpleLinearIntegrator(1.0, qrc, :u), tb.dh)
         lws = first_workspace(lop)
         @test lws.ad === nothing
         @test lws.functional === nothing
@@ -237,5 +238,132 @@ end
         @test op1.J == seq[2]
         @test r2 == seq[3]
         @test op2.J == seq[4]
+    end
+end
+
+####################################
+## Downstream-style custom kinds
+####################################
+# Everything below is what a downstream package writes: kind + request +
+# request_type/materialize_request + traits + execute_kind!. No src edits.
+
+# 1. A matrix-assembly kind riding the built-in primal driver body. It scales
+#    the stiffness by a factor carried on the REQUEST, so the assembled result
+#    has a closed form against the plain stiffness operator.
+struct ScaledStiffnessKind end
+struct ScaledStiffnessRequest{M <: AbstractMatrix} <: FerriteOperators.AbstractAssemblyRequest
+    K::M
+    scale::Float64
+end
+FerriteOperators.request_type(::ScaledStiffnessKind) = ScaledStiffnessRequest
+FerriteOperators.materialize_request(::ScaledStiffnessKind, ws) = ScaledStiffnessRequest(ws.Ke, 2.5)
+FerriteOperators.assembles_matrix(::ScaledStiffnessKind) = true
+FerriteOperators.execute_kind!(kind::ScaledStiffnessKind, task, ws) =
+    FerriteOperators.primal_cell_sweep!(kind, task, ws)
+FerriteOperators.provides_analytic(::Type{<:ProtocolDiffusionCache}, ::ScaledStiffnessKind) = true
+function FerriteOperators.assemble_cell!(req::ScaledStiffnessRequest, cache::ProtocolDiffusionCache, args)
+    (; cv) = cache
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        for i in 1:getnbasefunctions(cv), j in 1:getnbasefunctions(cv)
+            req.K[i, j] += req.scale * (shape_gradient(cv, qp, i) ⋅ shape_gradient(cv, qp, j)) * dΩ
+        end
+    end
+end
+
+# 2. A derivative-family kind riding the sensitivity driver body. Declaring it
+#    must build the ADWorkspace; its kernel reads the family through
+#    `sweep_state`, which only resolves if that happened.
+struct ResidualProbeKind end
+FerriteOperators.sweep_family(::Type{<:ResidualProbeKind}) = FerriteOperators.DerivativeFamily()
+FerriteOperators.has_cell_request(::Type{<:ResidualProbeKind}) = false
+FerriteOperators.execute_kind!(kind::ResidualProbeKind, task, ws) =
+    FerriteOperators.sensitivity_cell_sweep!(kind, task, ws)
+function FerriteOperators.sensitivity_kernel!(kind::ResidualProbeKind, task, ws, args)
+    gₑ = FerriteOperators.sweep_state(ws, kind).gu     # the declared family
+    fill!(gₑ, 0.0)
+    FerriteOperators.assemble_cell!(ResidualRequest(gₑ), ws.element, args)
+    assemble!(task.inner_assembler, ws.cell, gₑ)
+end
+
+# 3. A kind claiming an analytic kernel it does not implement.
+struct OrphanKind end
+struct OrphanRequest{M <: AbstractMatrix} <: FerriteOperators.AbstractAssemblyRequest
+    K::M
+end
+FerriteOperators.request_type(::OrphanKind) = OrphanRequest
+FerriteOperators.materialize_request(::OrphanKind, ws) = OrphanRequest(ws.Ke)
+FerriteOperators.assembles_matrix(::OrphanKind) = true
+FerriteOperators.provides_analytic(::Type{<:ProtocolDiffusionCache}, ::OrphanKind) = true
+
+struct CustomKindProtocol{K <: Tuple} <: AbstractSchemeProtocol
+    kinds::K
+end
+FerriteOperators.declared_slots(::CustomKindProtocol)     = (:u, :du)
+FerriteOperators.declared_kinds(p::CustomKindProtocol)    = p.kinds
+FerriteOperators.declared_scratch(::CustomKindProtocol)   = (;)
+FerriteOperators.declared_args_type(::CustomKindProtocol) = KernelArgs
+
+@testset "Custom request kinds" begin
+    @testset "matrix kind on the primal driver body" begin
+        tb = protocol_testbed(protocol = CustomKindProtocol((ScaledStiffnessKind,)))
+        A = allocate_matrix(tb.dh)
+        FerriteOperators.assemble_into!(ScaledStiffnessKind(), (A,), tb.op, (;), nothing, nothing)
+        @test A ≈ 2.5 * tb.Kop.A rtol = 1e-13
+
+        # The declaration reached setup validation, and the sweep allocates
+        # nothing per pass beyond the assembler's own bookkeeping.
+        fill!(A.nzval, 0.0)
+        @test @allocated(FerriteOperators.assemble_into!(
+            ScaledStiffnessKind(), (A,), tb.op, (;), nothing, nothing)) < 1024
+    end
+
+    @testset "trait claimed without a kernel errors at setup" begin
+        grid = generate_grid(Quadrilateral, (3, 2))
+        dh = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
+        integrator = ProtocolDiffusionIntegrator(QuadratureRuleCollection(2), :u)
+        @test_throws ArgumentError setup_operator(
+            SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh,
+            CustomKindProtocol((OrphanKind,)))
+    end
+
+    @testset "derivative-family kind builds the ADWorkspace" begin
+        # Without the declaration the operator carries no derivative family.
+        plain = protocol_testbed(protocol = CustomKindProtocol((ResidualProbeKind,)))
+        @test first_workspace(plain.op).ad !== nothing
+
+        n = plain.n
+        u  = sin.(0.3 .* (1:n))
+        du = cos.(0.2 .* (1:n))
+        ctx = TimeIntegrationContext(1.0, 0.25, 0.25)
+        probe = zeros(n)
+        FerriteOperators.assemble_into!(ResidualProbeKind(), (probe,), plain.op,
+                                        (u = u, du = du), nothing, ctx)
+        reference = zeros(n)
+        evaluate!(plain.op, reference, (u = u, du = du), nothing, ctx)
+        @test probe ≈ reference rtol = 1e-13
+    end
+
+    @testset "kind dispatch stays constant-folded" begin
+        count_branches(ci) = count(x -> x isa Core.GotoIfNot, ci.code)
+        # Built-in path: the predicate-driven scatter collapses to one call.
+        for K in (JacobianKind{:u}, ResidualKind, JacobianResidualKind,
+                  FerriteOperators.BilinearKind, FerriteOperators.LinearKind)
+            ci = code_typed(FerriteOperators.scatter_local!, Tuple{K, Any, Any})[1][1]
+            @test count_branches(ci) == 0
+        end
+        # A downstream kind folds the same way — literal traits, no branch.
+        ci = code_typed(FerriteOperators.scatter_local!, Tuple{ScaledStiffnessKind, Any, Any})[1][1]
+        @test count_branches(ci) == 0
+        # A trait call site reduces to a single literal return, which is what
+        # lets the driver bodies drop the branches guarding it.
+        folded_body(f) = string.(code_typed(f, Tuple{})[1][1].code)
+        @test folded_body(() -> FerriteOperators.assembles_matrix(ScaledStiffnessKind())) == ["return true"]
+        @test folded_body(() -> FerriteOperators.depends_on_unknowns(ScaledStiffnessKind())) == ["return false"]
+        @test folded_body(() -> FerriteOperators.assembles_matrix(JacobianKind{:u}())) == ["return true"]
+        @test folded_body(() -> FerriteOperators.assembles_vector(ResidualKind())) == ["return true"]
+        # Family resolution folds to the singleton, so declarations are static.
+        @test FerriteOperators.sweep_family(ResidualProbeKind) === FerriteOperators.DerivativeFamily()
+        @test FerriteOperators.sweep_family(ScaledStiffnessKind) === FerriteOperators.NoFamily()
     end
 end

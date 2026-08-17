@@ -17,6 +17,7 @@ import ForwardDiff
 import Base: *, +, -, @kwdef, @propagate_inbounds
 
 import Atomix
+import Preferences
 
 import VTKBase
 import WriteVTK
@@ -57,7 +58,6 @@ abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrato
 abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
-include("elements/domain_elements.jl")        # This is the key component to couple integrators into a single operator
 
 include("operators/general.jl")         # Some general operators which might be handy
 include("operators/matrix_free.jl")     # Everything related to the fundamental decomposition
@@ -65,7 +65,9 @@ include("operators/nonlinear.jl")       # Here are all the tasks to handle the a
 include("operators/bilinear.jl")
 include("operators/linear.jl")
 include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
+include("elements/prolongators.jl")     # Transfer integrators assembling mass-based prolongators
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
+include("elements/domain_elements.jl")  # Subdomain routing; specializes setup.jl's per-DofHandler cache setup seam
 include("operators/components.jl")      # Component bags over a shared sparsity pattern + combine!
 include("operators/stage_block.jl")     # Stage-block operator for fully implicit Runge-Kutta schemes
 include("operators/verification.jl")    # check_derivatives: FD referee for analytic kernels and AD paths
@@ -75,11 +77,6 @@ include("core/patch-task.jl")           # Patch items: multi-cell work items wit
 
 include("postprocessing/quadrature-grid.jl")  # VTKQuadratureGrid — QP positions as a VTK mesh
 include("postprocessing/quadrature-query.jl") # VTKQuadratureFile + write_quadrature_data
-
-include("elements/simple_diffusion.jl")       # Example element for diffusion
-include("elements/simple_mass.jl")            # Example element for mass matrices
-include("elements/simple_hyperelasticity.jl") # Example element for hyperelasticity
-include("elements/simple_linear_viscoelasticity.jl")
 
 export QuadratureRuleCollection, InternalVariableHandler
 export internal_variable_offset, internal_variable_range
@@ -145,5 +142,6 @@ export TransferFerriteOperator, setup_transfer_operator, init_transfer_sparsity_
 export NestedTransferFerriteOperator, setup_nested_transfer_operator, init_nested_transfer_sparsity_pattern
 
 export NonlinearMultiDomainIntegrator, BilinearMultiDomainIntegrator, LinearMultiDomainIntegrator
+export NonlinearCompositeIntegrator, BilinearCompositeIntegrator, LinearCompositeIntegrator
 
 end

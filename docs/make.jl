@@ -1,10 +1,12 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 using Documenter
 
 DocMeta.setdocmeta!(FerriteOperators, :DocTestSetup, :(using FerriteOperators); recursive=true)
+DocMeta.setdocmeta!(FerriteOperatorsExampleElements, :DocTestSetup, :(using FerriteOperators, FerriteOperatorsExampleElements); recursive=true)
 
 makedocs(;
-    modules=[FerriteOperators],
+    modules=[FerriteOperators, FerriteOperatorsExampleElements],
     authors="Dennis Ogiermann <termi-official@users.noreply.github.com> and contributors",
     sitename="FerriteOperators.jl",
     format=Documenter.HTML(;
@@ -16,6 +18,8 @@ makedocs(;
     pages=[
         "Home" => "index.md",
         "Writing elements" => "elements.md",
+        "Element API reference" => "element-api.md",
+        "Example elements" => "example-elements.md",
         "Operators and entry points" => "operators.md",
         "Patch items" => "patches.md",
         "The layer contract" => "design.md",

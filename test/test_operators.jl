@@ -1,10 +1,45 @@
 using FerriteOperators
+using FerriteOperatorsExampleElements
 import FerriteOperators: get_matrix
 using Test
 import LinearAlgebra: mul!
 using SparseArrays
 using Polyester
 using TimerOutputs
+
+# A linear integrator whose only term is a constant Neumann load on a facet
+# set. Used to check that multi-domain routing resolves the *boundary* cache
+# of a subdomain through that subdomain's volumetric name.
+struct DomainNeumannIntegrator <: AbstractLinearIntegrator
+    t̄::Float64
+    field_name::Symbol
+    facetset::Set{FacetIndex}
+end
+struct DomainNeumannCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+    t̄::Float64
+    fv::FV
+    facetset::Set{FacetIndex}
+end
+FerriteOperators.setup_element_cache(::DomainNeumannIntegrator, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+function FerriteOperators.setup_boundary_cache(m::DomainNeumannIntegrator, sdh::SubDofHandler)
+    fqr = FacetQuadratureRule{RefHexahedron}(2)
+    ip = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return DomainNeumannCache(m.t̄, FacetValues(fqr, ip, ip_geo), m.facetset)
+end
+FerriteOperators.duplicate_for_device(device, c::DomainNeumannCache) =
+    DomainNeumannCache(c.t̄, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
+FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::DomainNeumannCache) = idx ∈ c.facetset
+function FerriteOperators.assemble_facet!(req::ResidualRequest, c::DomainNeumannCache, args, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    for qp in 1:getnquadpoints(c.fv)
+        dΓ = getdetJdV(c.fv, qp)
+        for i in 1:getnbasefunctions(c.fv)
+            req.r[i] += c.t̄ * shape_value(c.fv, qp, i) * dΓ
+        end
+    end
+end
 
 @testset "Operators" begin
     reset_timer!()
@@ -134,12 +169,12 @@ using TimerOutputs
         qrc = QuadratureRuleCollection{2}()
 
         for integrator in [
-            FerriteOperators.SimpleBilinearDiffusionIntegrator(
+            SimpleBilinearDiffusionIntegrator(
                 1.0,
                 QuadratureRuleCollection(2),
                 :u
             ),
-            FerriteOperators.SimpleBilinearMassIntegrator(
+            SimpleBilinearMassIntegrator(
                 1.0,
                 QuadratureRuleCollection(1),
                 :u
@@ -206,7 +241,7 @@ using TimerOutputs
         apply_analytical!(u, dh, :u, x->0.01x.^2)
 
         for integrator in [
-            FerriteOperators.SimpleHyperelasticityIntegrator(
+            SimpleHyperelasticityIntegrator(
                 NeoHookean(10.0, 0.3),
                 QuadratureRuleCollection(2),
                 :u
@@ -304,8 +339,8 @@ using TimerOutputs
 
     @testset "Condensed Elements" begin
         qrc = QuadratureRuleCollection(2)
-        integrator = FerriteOperators.SimpleCondensedLinearViscoelasticity(
-            FerriteOperators.MaxwellParameters(),
+        integrator = SimpleCondensedLinearViscoelasticity(
+            MaxwellParameters(),
             qrc,
             :u,
             :εᵛ,
@@ -386,17 +421,17 @@ using TimerOutputs
         strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
         n = ndofs(dh)
 
-        bilin_op = setup_operator(strategy, FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
+        bilin_op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
         @test size(bilin_op) == (n, n)
         @test size(bilin_op, 1) == n
         @test size(bilin_op, 2) == n
 
-        nl_op = setup_operator(strategy, FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.3), QuadratureRuleCollection(2), :u), dh)
+        nl_op = setup_operator(strategy, SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.3), QuadratureRuleCollection(2), :u), dh)
         @test size(nl_op) == (n, n)
         @test size(nl_op, 1) == n
         @test size(nl_op, 2) == n
 
-        lin_op = setup_operator(strategy, FerriteOperators.SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
+        lin_op = setup_operator(strategy, SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
         @test size(lin_op) == (n,)
     end
 
@@ -451,41 +486,177 @@ using TimerOutputs
         close!(dh)
 
         n = 5^3
+        qrc = QuadratureRuleCollection(2)
+
+        assemble_linear(subintegrators) = begin
+            op = setup_operator(strategy, LinearMultiDomainIntegrator(subintegrators), dh)
+            update_operator!(op, nothing)
+            op
+        end
 
         # Linear case
-        lin_multi = LinearMultiDomainIntegrator(Dict(
-            sdh1 => FerriteOperators.SimpleLinearIntegrator( 1.0, QuadratureRuleCollection(2), :u),
-            sdh2 => FerriteOperators.SimpleLinearIntegrator(-1.0, QuadratureRuleCollection(2), :u)
+        lin_op = assemble_linear(Dict(
+            "right_cells" => SimpleLinearIntegrator( 1.0, qrc, :u),
+            "left_cells"  => SimpleLinearIntegrator(-1.0, qrc, :u)
         ))
-        lin_op = setup_operator(strategy, lin_multi, dh)
-        update_operator!(lin_op, nothing)
         @test size(lin_op) == (n,)
 
-        # Bilinear case
-        bilin_multi = BilinearMultiDomainIntegrator(Dict(
-            sdh1 => FerriteOperators.SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u),
-            sdh2 => FerriteOperators.SimpleBilinearDiffusionIntegrator(2.0, QuadratureRuleCollection(2), :u)
+        # The name→subdomain map is the geometric one: loading only
+        # "right_cells" must leave every dof outside that subdomain untouched.
+        right_dofs = Set{Int}()
+        for cc in CellIterator(sdh1)
+            union!(right_dofs, celldofs(cc))
+        end
+        right_only = assemble_linear(Dict(
+            "right_cells" => SimpleLinearIntegrator(1.0, qrc, :u),
+            "left_cells"  => SimpleLinearIntegrator(0.0, qrc, :u)
         ))
-        bilin_op = setup_operator(strategy, bilin_multi, dh)
-        update_operator!(bilin_op, nothing)
-        @test size(bilin_op) == (n, n)
-        @test size(bilin_op, 1) == n
-        @test size(bilin_op, 2) == n
+        @test all(iszero, right_only.b[setdiff(1:n, right_dofs)])
+        @test !all(iszero, right_only.b[collect(right_dofs)])
+
+        # Routing is per-domain, so the two assignments of one integrator pair
+        # differ, and swapping them sums to the uniform assignment.
+        bilin(D_right, D_left) = begin
+            op = setup_operator(strategy, BilinearMultiDomainIntegrator(Dict(
+                "right_cells" => SimpleBilinearDiffusionIntegrator(D_right, qrc, :u),
+                "left_cells"  => SimpleBilinearDiffusionIntegrator(D_left, qrc, :u)
+            )), dh)
+            update_operator!(op, nothing)
+            op.A
+        end
+        Ka = bilin(1.0, 2.0)
+        Kb = bilin(2.0, 1.0)
+        @test size(Ka) == (n, n)
+        @test Ka != Kb
+        @test Ka + Kb ≈ bilin(3.0, 3.0)
+
+        # A weak boundary term is resolved through the *volumetric* name of
+        # the subdomain carrying it, never through a facetset namespace.
+        t̄ = 3.25
+        neumann_op = assemble_linear(Dict(
+            "right_cells" => DomainNeumannIntegrator(t̄, :u, Set(getfacetset(grid, "right"))),
+            "left_cells"  => SimpleLinearIntegrator(0.0, qrc, :u)
+        ))
+        @test sum(neumann_op.b) ≈ t̄ * 4.0 rtol = 1e-12
+
+        # Message of the ArgumentError `f` raises, so the cell-exact content of
+        # a rejection can be asserted and not just its type.
+        function rejection_message(f)
+            try
+                f()
+            catch err
+                err isa ArgumentError && return err.msg
+                rethrow()
+            end
+            error("expected an ArgumentError")
+        end
+
+        @testset "validation in both modes" begin
+            L(v) = SimpleLinearIntegrator(v, qrc, :u)
+            addcellset!(grid, "all_cells", x -> true)
+            addcellset!(grid, "one_cell", Set([1]))
+
+            # These four classes are rejected regardless of resolution mode.
+            for mode in (Val(:sample), Val(:full))
+                # a declared name that is not a cellset of the grid
+                @test_throws ArgumentError FerriteOperators.resolve_subdomain_claims(
+                    Dict("right_cells" => L(1.0), "left_cell" => L(1.0)), dh, mode)
+                # a subdomain owned by no declared name
+                @test_throws ArgumentError FerriteOperators.resolve_subdomain_claims(
+                    Dict("right_cells" => L(1.0)), dh, mode)
+                # a subdomain claimed by more than one declared name
+                @test_throws ArgumentError FerriteOperators.resolve_subdomain_claims(
+                    Dict("all_cells" => L(1.0), "right_cells" => L(1.0), "left_cells" => L(1.0)), dh, mode)
+                # a declared name claiming no subdomain (disjoint from every subdomain)
+                sub_grid = generate_grid(Hexahedron, (3, 1, 1))
+                addcellset!(sub_grid, "a", Set([1]))
+                addcellset!(sub_grid, "b", Set([2]))
+                addcellset!(sub_grid, "c", Set([3]))
+                sub_dh = DofHandler(sub_grid)
+                sa = SubDofHandler(sub_dh, getcellset(sub_grid, "a")); add!(sa, :u, Lagrange{RefHexahedron, 1}())
+                sb = SubDofHandler(sub_dh, getcellset(sub_grid, "b")); add!(sb, :u, Lagrange{RefHexahedron, 1}())
+                close!(sub_dh)
+                @test FerriteOperators.resolve_subdomain_claims(
+                    Dict("a" => L(1.0), "b" => L(1.0)), sub_dh, mode) == ["a", "b"]
+                @test_throws ArgumentError FerriteOperators.resolve_subdomain_claims(
+                    Dict("a" => L(1.0), "b" => L(1.0), "c" => L(1.0)), sub_dh, mode)
+            end
+
+            # Production sampling reads the first cell only, so a subdomain that
+            # straddles two declared cellsets resolves by that cell alone; debug
+            # mode rejects it, naming the cells at the mismatch.
+            addcellset!(grid, "right_head", Set([first(sdh1.cellset)]))
+            straddle = Dict("right_head" => L(1.0), "left_cells" => L(1.0))
+            @test FerriteOperators.resolve_subdomain_claims(straddle, dh, Val(:sample)) ==
+                ["right_head", "left_cells"]
+            straddle_msg = rejection_message(
+                () -> FerriteOperators.resolve_subdomain_claims(straddle, dh, Val(:full)))
+            @test occursin("owned by no declared name", straddle_msg)
+            @test occursin("right_head", straddle_msg)
+
+            # Debug mode rejects overlapping DECLARED cellsets at fill time,
+            # naming the exact cell, even where no subdomain is ambiguous.
+            overlap_msg = rejection_message(() -> FerriteOperators.resolve_subdomain_claims(
+                Dict("all_cells" => L(1.0), "one_cell" => L(1.0)), dh, Val(:full)))
+            @test occursin("Cell 1 lies in both", overlap_msg)
+
+            # The operator entry point routes through the compile-time mode.
+            @test_throws ArgumentError setup_operator(strategy, LinearMultiDomainIntegrator(
+                Dict("right_cells" => L(1.0))), dh)
+        end
+
+        @testset "resolution on a large grid" begin
+            n_side = 400                      # 160_000 cells
+            big_grid = generate_grid(Quadrilateral, (n_side, n_side))
+            half = n_side * n_side ÷ 2
+            addcellset!(big_grid, "lower", Set(1:half))
+            addcellset!(big_grid, "upper", Set((half + 1):(n_side * n_side)))
+            big_dh = DofHandler(big_grid)
+            lo = SubDofHandler(big_dh, getcellset(big_grid, "lower")); add!(lo, :u, Lagrange{RefQuadrilateral, 1}())
+            hi = SubDofHandler(big_dh, getcellset(big_grid, "upper")); add!(hi, :u, Lagrange{RefQuadrilateral, 1}())
+            close!(big_dh)
+            big_qrc = QuadratureRuleCollection(2)
+            subs = Dict("lower" => SimpleLinearIntegrator(1.0, big_qrc, :u),
+                        "upper" => SimpleLinearIntegrator(2.0, big_qrc, :u))
+
+            @test FerriteOperators.resolve_subdomain_claims(subs, big_dh, Val(:full)) == ["lower", "upper"]
+
+            addcellset!(big_grid, "seam", Set([half, half + 1]))
+            seam_msg = rejection_message(() -> FerriteOperators.resolve_subdomain_claims(
+                merge(subs, Dict("seam" => SimpleLinearIntegrator(0.0, big_qrc, :u))), big_dh, Val(:full)))
+            @test occursin("Cell $half lies in both", seam_msg)
+        end
+
+        # Routing outer, composition inner: a named subdomain whose term is a
+        # composite of two bilinear forms.
+        composed = setup_operator(strategy, BilinearMultiDomainIntegrator(Dict(
+            "right_cells" => BilinearCompositeIntegrator(
+                SimpleBilinearDiffusionIntegrator(1.0, qrc, :u),
+                SimpleBilinearMassIntegrator(2.0, qrc, :u)),
+            "left_cells"  => SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+        )), dh)
+        update_operator!(composed, nothing)
+        mass_only = setup_operator(strategy, BilinearMultiDomainIntegrator(Dict(
+            "right_cells" => SimpleBilinearMassIntegrator(2.0, qrc, :u),
+            "left_cells"  => SimpleBilinearMassIntegrator(0.0, qrc, :u)
+        )), dh)
+        update_operator!(mass_only, nothing)
+        @test composed.A ≈ bilin(1.0, 1.0) + mass_only.A rtol = 1e-12
 
         # Nonlinear case
-        dh = DofHandler(grid)
-        sdh1 = SubDofHandler(dh, getcellset(grid, "right_cells"))
-        add!(sdh1, :u, Lagrange{RefHexahedron, 1}()^3)
-        sdh2 = SubDofHandler(dh, getcellset(grid, "left_cells"))
-        add!(sdh2, :u, Lagrange{RefHexahedron, 1}()^3)
-        close!(dh)
+        dhv = DofHandler(grid)
+        sdhv1 = SubDofHandler(dhv, getcellset(grid, "right_cells"))
+        add!(sdhv1, :u, Lagrange{RefHexahedron, 1}()^3)
+        sdhv2 = SubDofHandler(dhv, getcellset(grid, "left_cells"))
+        add!(sdhv2, :u, Lagrange{RefHexahedron, 1}()^3)
+        close!(dhv)
         nl_multi = NonlinearMultiDomainIntegrator(Dict(
-            sdh1 => FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.30), QuadratureRuleCollection(2), :u),
-            sdh2 => FerriteOperators.SimpleHyperelasticityIntegrator(NeoHookean(180e3, 0.35), QuadratureRuleCollection(2), :u)
+            "right_cells" => SimpleHyperelasticityIntegrator(NeoHookean(210e3, 0.30), qrc, :u),
+            "left_cells"  => SimpleHyperelasticityIntegrator(NeoHookean(180e3, 0.35), qrc, :u)
         ))
-        nl_op = setup_operator(strategy, nl_multi, dh)
-        u = zeros(ndofs(dh))
-        apply_analytical!(u, dh, :u, x->0.01x.^2)
+        nl_op = setup_operator(strategy, nl_multi, dhv)
+        u = zeros(ndofs(dhv))
+        apply_analytical!(u, dhv, :u, x->0.01x.^2)
         update_linearization!(nl_op, u, nothing)
         @test size(nl_op) == (3n, 3n)
         @test size(nl_op, 1) == 3n
