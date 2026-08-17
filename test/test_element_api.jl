@@ -309,6 +309,11 @@ FerriteOperators.assemble_cell!(::ResidualRequest, ::StatefulProbeCache, args) =
 FerriteOperators.reinit_values!(::StatefulProbeCache, cell) = nothing
 Ferrite.getnquadpoints(::StatefulProbeCache) = 0
 
+# A stateless cache serving one sensitivity kind analytically, so a composite's
+# admissibility rejection has an inner it must NOT name.
+struct AnalyticProbeCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobianKind) = true
+
 @testset "Composition" begin
     grid = generate_grid(Hexahedron, (2, 2, 2))    # [-1,1]³ → volume 8, right face area 4
     dh = DofHandler(grid)
@@ -433,5 +438,23 @@ Ferrite.getnquadpoints(::StatefulProbeCache) = 0
             FerriteOperators.setup_element_cache(D, sdh),
         ))
         @test_throws ArgumentError FerriteOperators.validate_element_cache(hand)
+    end
+
+    @testset "internal state on a hand-built composite" begin
+        # `validate_element_cache` rejects stateful inners, so a composite's
+        # internal-state seams are reachable only on a cache built by hand.
+        D = FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), sdh)
+        stateless = FerriteOperators.CompositeVolumetricElementCache((AnalyticProbeCache(), D))
+        stateful  = FerriteOperators.CompositeVolumetricElementCache((StatefulProbeCache(), AnalyticProbeCache()))
+
+        @test !FerriteOperators.has_internal_state(typeof(stateless))
+        @test FerriteOperators.has_internal_state(typeof(stateful))
+
+        kind = ParameterJacobianKind()
+        @test FerriteOperators.assert_sensitivity_admissible(typeof(stateless), kind) === nothing
+
+        err = @test_throws ArgumentError FerriteOperators.assert_sensitivity_admissible(typeof(stateful), kind)
+        @test occursin("StatefulProbeCache", err.value.msg)      # names the inner lacking the kind
+        @test !occursin("AnalyticProbeCache", err.value.msg)     # and only that one
     end
 end
