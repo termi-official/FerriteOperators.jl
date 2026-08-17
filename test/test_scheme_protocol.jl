@@ -60,10 +60,10 @@ FerriteOperators.evaluate_cell_functional(::FunctionalKind{:mass}, cache::Protoc
 # solves with, and the residual. No coefficients — γ and Δt ride with the
 # evaluation, not with the declaration.
 struct SDIRKWProtocol <: AbstractSchemeProtocol end
-FerriteOperators.declared_slots(::SDIRKWProtocol)     = (:u, :du)
-FerriteOperators.declared_kinds(::SDIRKWProtocol)     = (WeightedJacobianKind, ResidualKind)
-FerriteOperators.declared_scratch(::SDIRKWProtocol)   = (;)
-FerriteOperators.declared_args_type(::SDIRKWProtocol) = KernelArgs
+FerriteOperators.get_declared_slots(::SDIRKWProtocol)     = (:u, :du)
+FerriteOperators.get_declared_kinds(::SDIRKWProtocol)     = (WeightedJacobianKind, ResidualKind)
+FerriteOperators.get_declared_scratch(::SDIRKWProtocol)   = (;)
+FerriteOperators.get_declared_args_type(::SDIRKWProtocol) = KernelArgs
 
 first_workspace(op) = first(first(op.engine.subdomain_caches).device_cache)
 
@@ -90,10 +90,10 @@ end
 
     @testset "declarations-only surface" begin
         p = SDIRKWProtocol()
-        @test declared_slots(p) == (:u, :du)
-        @test declared_kinds(p) == (WeightedJacobianKind, ResidualKind)
-        @test declared_scratch(p) == (;)
-        @test declared_args_type(p) === KernelArgs
+        @test get_declared_slots(p) == (:u, :du)
+        @test get_declared_kinds(p) == (WeightedJacobianKind, ResidualKind)
+        @test get_declared_scratch(p) == (;)
+        @test get_declared_args_type(p) === KernelArgs
         # the element-side scratch hook must not silently swallow a protocol
         @test_throws ArgumentError FerriteOperators.declare_scratch(p)
     end
@@ -148,10 +148,10 @@ end
         pos = setup_operator(strategy, integrator, dh,
                              DefaultProtocol(; slots = (:u, :du), requests = (StateJVPKind,)))
         @test typeof(kw.engine.protocol) === typeof(pos.engine.protocol)
-        @test declared_slots(kw.engine.protocol) == declared_slots(pos.engine.protocol)
-        @test declared_kinds(kw.engine.protocol) == declared_kinds(pos.engine.protocol)
+        @test get_declared_slots(kw.engine.protocol) == get_declared_slots(pos.engine.protocol)
+        @test get_declared_kinds(kw.engine.protocol) == get_declared_kinds(pos.engine.protocol)
         # kind instances normalize to the UnionAll base, like the kwarg form always did
-        @test declared_kinds(DefaultProtocol(; requests = (StateJVPKind(zeros(n)),))) == (StateJVPKind,)
+        @test get_declared_kinds(DefaultProtocol(; requests = (StateJVPKind(zeros(n)),))) == (StateJVPKind,)
 
         u = sin.(0.3 .* (1:n)); du = cos.(0.2 .* (1:n))
         states = (u = u, du = du)
@@ -193,13 +193,13 @@ end
         states = (u = u, du = du)
 
         # SDIRKWProtocol declares neither the state JVP nor a functional
-        @test !(StateJVPKind in declared_kinds(tb.op.engine.protocol))
+        @test !(StateJVPKind in get_declared_kinds(tb.op.engine.protocol))
         Jv = zeros(tb.n); v = cos.(0.11 .* (1:tb.n))
         state_jvp!(Jv, tb.op, v, states, nothing, ctx)
         @test Jv ≈ tb.Kop.A * v rtol = 1e-10
 
         # a functional sweep reads no state, so an undeclared one just runs
-        @test !(FunctionalKind in declared_kinds(tb.op.engine.protocol))
+        @test !(FunctionalKind in get_declared_kinds(tb.op.engine.protocol))
         area = evaluate_functional(tb.op, FunctionalKind(:mass), states, nothing, ctx)
         @test area ≈ 4.0 rtol = 1e-12          # the [-1,1]² reference grid
 
@@ -307,10 +307,19 @@ FerriteOperators.provides_analytic(::Type{<:ProtocolDiffusionCache}, ::OrphanKin
 struct CustomKindProtocol{K <: Tuple} <: AbstractSchemeProtocol
     kinds::K
 end
-FerriteOperators.declared_slots(::CustomKindProtocol)     = (:u, :du)
-FerriteOperators.declared_kinds(p::CustomKindProtocol)    = p.kinds
-FerriteOperators.declared_scratch(::CustomKindProtocol)   = (;)
-FerriteOperators.declared_args_type(::CustomKindProtocol) = KernelArgs
+FerriteOperators.get_declared_slots(::CustomKindProtocol)     = (:u, :du)
+FerriteOperators.get_declared_kinds(p::CustomKindProtocol)    = p.kinds
+FerriteOperators.get_declared_scratch(::CustomKindProtocol)   = (;)
+FerriteOperators.get_declared_args_type(::CustomKindProtocol) = KernelArgs
+
+# Measured inside a function: at testset scope `A` and the operator are
+# captured variables, and on Julia 1.10 the boxing of those captures is charged
+# to the call being measured rather than to the sweep.
+function scaled_stiffness_allocations(A, op)
+    FerriteOperators.assemble_into!(ScaledStiffnessKind(), (A,), op, (;), nothing, nothing)
+    return @allocated FerriteOperators.assemble_into!(
+        ScaledStiffnessKind(), (A,), op, (;), nothing, nothing)
+end
 
 @testset "Custom request kinds" begin
     @testset "matrix kind on the primal driver body" begin
@@ -322,8 +331,7 @@ FerriteOperators.declared_args_type(::CustomKindProtocol) = KernelArgs
         # The declaration reached setup validation, and the sweep allocates
         # nothing per pass beyond the assembler's own bookkeeping.
         fill!(A.nzval, 0.0)
-        @test @allocated(FerriteOperators.assemble_into!(
-            ScaledStiffnessKind(), (A,), tb.op, (;), nothing, nothing)) < 1024
+        @test scaled_stiffness_allocations(A, tb.op) < 1024
     end
 
     @testset "trait claimed without a kernel errors at setup" begin
@@ -353,7 +361,11 @@ FerriteOperators.declared_args_type(::CustomKindProtocol) = KernelArgs
     end
 
     @testset "kind dispatch stays constant-folded" begin
-        count_branches(ci) = count(x -> x isa Core.GotoIfNot, ci.code)
+        # Only branches the compiler could NOT decide count: a `GotoIfNot` whose
+        # condition is already a literal `Bool` is dead IR, which Julia ≥ 1.12
+        # deletes and 1.10 leaves behind. A trait that stopped folding would
+        # leave its condition as an SSAValue, which is still counted.
+        count_branches(ci) = count(x -> x isa Core.GotoIfNot && !(x.cond isa Bool), ci.code)
         # Built-in path: the predicate-driven scatter collapses to one call.
         for K in (JacobianKind{:u}, ResidualKind, JacobianResidualKind,
                   FerriteOperators.BilinearKind, FerriteOperators.LinearKind)

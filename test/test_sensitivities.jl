@@ -445,7 +445,7 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
         # instances normalize to their UnionAll kind type
         op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh;
                             requests = (ParameterVJPKind(zeros(n)), TimeSensitivityKind))
-        @test declared_kinds(op.engine.protocol) == (ParameterVJPKind, TimeSensitivityKind)
+        @test get_declared_kinds(op.engine.protocol) == (ParameterVJPKind, TimeSensitivityKind)
         u = sin.(0.3 .* (1:n))
         λ = ones(n)
         g = zeros(1); parameter_vjp!(g, op, λ, u, 1.7)
@@ -458,10 +458,10 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
         @test_throws ArgumentError setup_visco_operator(strategy, qrc; requests = (StateVJPKind,))
         # time sensitivities stay declarable: the FD escape is a call-time choice
         vop = setup_visco_operator(strategy, qrc; requests = (TimeSensitivityKind,))
-        @test declared_kinds(vop.engine.protocol) == (TimeSensitivityKind,)
+        @test get_declared_kinds(vop.engine.protocol) == (TimeSensitivityKind,)
         # kinds made admissible above (analytic kernel / insensitivity) pass setup
         vop2 = setup_visco_operator(strategy, qrc; requests = (ParameterJacobianKind, ParameterVJPKind))
-        @test declared_kinds(vop2.engine.protocol) == (ParameterJacobianKind, ParameterVJPKind)
+        @test get_declared_kinds(vop2.engine.protocol) == (ParameterJacobianKind, ParameterVJPKind)
     end
 end
 
@@ -553,6 +553,24 @@ end
     end
 end
 
+# `@allocated` has to be measured from inside a function. At testset scope the
+# operators and buffers are captured variables, and on Julia 1.10 the boxing of
+# those captures is charged to the call being measured — a fixed cost of the
+# measurement, unrelated to the sweep. Warmup lives here too, so what is
+# measured is a steady-state call.
+function sweep_allocations(op, top, Jv, g, r, v, λ, u, p, states, ctx)
+    for _ in 1:2   # warmup: compilation + lazy parameter-buffer sizing
+        state_jvp!(Jv, op, v, u, p)
+        state_vjp!(g, op, λ, u, p)
+        time_sensitivity!(g, top, states, nothing, ctx)
+        update_linearization!(op, r, u, p)
+    end
+    return (jvp  = @allocated(state_jvp!(Jv, op, v, u, p)),
+            vjp  = @allocated(state_vjp!(g, op, λ, u, p)),
+            time = @allocated(time_sensitivity!(g, top, states, nothing, ctx)),
+            linearization = @allocated(update_linearization!(op, r, u, p)))
+end
+
 @testset "Preallocated AD sweeps" begin
     qrc = QuadratureRuleCollection(2)
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
@@ -602,19 +620,13 @@ end
         u = sin.(0.3 .* (1:n)); p = 1.7
         ctx = stationary_ctx(0.9)
         v = cos.(0.11 .* (1:n)); λ = cos.(0.7 .* (1:n))
-        Jv = zeros(n); g = zeros(n); r = zeros(n)
         states = (u = u,)
-        for _ in 1:2   # warmup: compilation + lazy parameter-buffer sizing
-            state_jvp!(Jv, op, v, u, p)
-            state_vjp!(g, op, λ, u, p)
-            time_sensitivity!(g, top, states, nothing, ctx)
-            update_linearization!(op, r, u, p)
-        end
         # A per-cell allocation regression shows up as ≳10 KiB on 12 cells
         # (measured: 0 B for the sweeps, ~400 B assembler setup for fused J+r).
-        @test @allocated(state_jvp!(Jv, op, v, u, p)) == 0
-        @test @allocated(state_vjp!(g, op, λ, u, p)) == 0
-        @test @allocated(time_sensitivity!(g, top, states, nothing, ctx)) == 0
-        @test @allocated(update_linearization!(op, r, u, p)) < 1024
+        a = sweep_allocations(op, top, zeros(n), zeros(n), zeros(n), v, λ, u, p, states, ctx)
+        @test a.jvp == 0
+        @test a.vjp == 0
+        @test a.time == 0
+        @test a.linearization < 1024
     end
 end
