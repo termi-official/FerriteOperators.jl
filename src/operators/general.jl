@@ -40,7 +40,7 @@ an engine plus their integrator.
     protocol    # the setup-time declarations
 end
 
-kernel_args_type(engine::AssemblyEngine) = declared_args_type(engine.protocol)
+kernel_args_type(engine::AssemblyEngine) = get_declared_args_type(engine.protocol)
 
 function execute_on_subdomains!(task, strategy, subdomain_caches)
     for (subdomain_id, sc) in enumerate(subdomain_caches)

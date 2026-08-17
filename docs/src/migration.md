@@ -238,7 +238,7 @@ are payload + engine + integrator; anything that read `op.dh`/`op.strategy`/
 keep working.
 
 The engine's setup-time declarations live on its scheme protocol:
-`declared_slots`, `declared_kinds` and `declared_args_type` of
+`get_declared_slots`, `get_declared_kinds` and `get_declared_args_type` of
 `op.engine.protocol`.
 
 ## Solver-owned scratch

@@ -209,7 +209,7 @@ function sweep_state(ws, kind, ::DerivativeFamily)
         "This operator carries no derivative sweep family: neither its protocol's declared " *
         "kinds nor its integrator family's mandatory kinds differentiate. Declare the kind at " *
         "setup — `setup_operator(...; requests = ($(nameof(typeof(kind))),))` or a protocol " *
-        "whose `declared_kinds` names it."))
+        "whose `get_declared_kinds` names it."))
     return ad
 end
 sweep_state(ws, kind, ::FunctionalFamily) = throw(ArgumentError(
@@ -294,7 +294,7 @@ execute_single_task!(task::AssemblyTask, ws::AssemblyWorkspace) = execute_kind!(
 
 # Loud once-per-sweep check instead of a raw NamedTuple field error per cell.
 function _check_declared_slots(engine, states::NamedTuple{names}) where {names}
-    slots = declared_slots(engine.protocol)
+    slots = get_declared_slots(engine.protocol)
     issubset(names, slots) || throw(ArgumentError(
         "States pass slots $names but the operator declared slots $(slots). " *
         "Declare every slot at setup: `setup_operator(...; slots = $(Tuple(union(slots, names))))`."))

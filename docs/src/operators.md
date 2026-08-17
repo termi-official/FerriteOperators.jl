@@ -30,10 +30,10 @@ where it is declared:
 
 ```julia
 struct SDIRKWProtocol <: AbstractSchemeProtocol end
-FerriteOperators.declared_slots(::SDIRKWProtocol)     = (:u, :du)
-FerriteOperators.declared_kinds(::SDIRKWProtocol)     = (WeightedJacobianKind, ResidualKind)
-FerriteOperators.declared_scratch(::SDIRKWProtocol)   = (;)
-FerriteOperators.declared_args_type(::SDIRKWProtocol) = KernelArgs
+FerriteOperators.get_declared_slots(::SDIRKWProtocol)     = (:u, :du)
+FerriteOperators.get_declared_kinds(::SDIRKWProtocol)     = (WeightedJacobianKind, ResidualKind)
+FerriteOperators.get_declared_scratch(::SDIRKWProtocol)   = (;)
+FerriteOperators.get_declared_args_type(::SDIRKWProtocol) = KernelArgs
 
 op = setup_operator(strategy, integrator, dh, SDIRKWProtocol())
 ```

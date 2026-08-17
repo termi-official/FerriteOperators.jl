@@ -8,14 +8,14 @@
 A typed, DECLARATIONS-ONLY description of what a scheme asks of an operator,
 passed positionally: `setup_operator(strategy, problem, dh, protocol)`.
 
-A protocol declares exactly what setup consumes: [`declared_slots`](@ref) (the
-state slot names sweeps may carry), [`declared_kinds`](@ref) (the request
-kinds the operator will be asked to compute), [`declared_scratch`](@ref)
-(per-worker scratch constructors), and [`declared_args_type`](@ref) (the
-kernel-args type the engine builds). Those declarations size the per-worker
-slot buffers, select which sweep-state families are built
-([`sweep_state`](@ref)), and drive the setup-time trait ↔ kernel and
-internal-state admissibility checks.
+A protocol declares exactly what setup consumes: [`get_declared_slots`](@ref)
+(the state slot names sweeps may carry), [`get_declared_kinds`](@ref) (the
+request kinds the operator will be asked to compute),
+[`get_declared_scratch`](@ref) (per-worker scratch constructors), and
+[`get_declared_args_type`](@ref) (the kernel-args type the engine builds).
+Those declarations size the per-worker slot buffers, select which sweep-state
+families are built ([`sweep_state`](@ref)), and drive the setup-time trait ↔
+kernel and internal-state admissibility checks.
 
 Protocols carry NO coefficients — γ, tableaus, and weights are per-evaluation
 solver data, not declarations — and nothing term-shaped: no per-term contexts,
@@ -30,46 +30,46 @@ checks.
 abstract type AbstractSchemeProtocol end
 
 """
-    declared_slots(protocol) -> NTuple{N, Symbol}
+    get_declared_slots(protocol) -> NTuple{N, Symbol}
 
 The state slot names sweeps of this protocol may carry; the engine allocates
 one per-worker slot buffer per name. Slot type tags are reserved vocabulary —
 names are the whole declaration today.
 """
-function declared_slots end
+function get_declared_slots end
 
 """
-    declared_kinds(protocol) -> Tuple of request-kind types
+    get_declared_kinds(protocol) -> Tuple of request-kind types
 
 The request kinds this protocol declares, as their UnionAll bases
 (`JacobianKind`, `ParameterVJPKind`, …). Declared kinds run their trait ↔
 kernel and admissibility checks at setup instead of on first use, and select
 the per-worker sweep-state families built eagerly.
 """
-function declared_kinds end
+function get_declared_kinds end
 
 """
-    declared_scratch(protocol) -> NamedTuple of nullary constructors
+    get_declared_scratch(protocol) -> NamedTuple of nullary constructors
 
 Solver-side scratch declaration, merged with the element-side
 [`declare_scratch`](@ref) into `args.scratch`. The two are separate hooks:
-`declare_scratch` is asked of element CACHES, `declared_scratch` of PROTOCOLS.
+`declare_scratch` is asked of element CACHES, `get_declared_scratch` of PROTOCOLS.
 """
-function declared_scratch end
+function get_declared_scratch end
 
 """
-    declared_args_type(protocol) -> Type
+    get_declared_args_type(protocol) -> Type
 
 The concrete kernel-args type the engine hands to element kernels; setup-time
 method lookups query against it (see [`kernel_args_type`](@ref)).
 """
-function declared_args_type end
+function get_declared_args_type end
 
 # The element-side hook has an `Any` fallback returning `(;)`, so a protocol
 # passed to it would be silently ignored.
 declare_scratch(::AbstractSchemeProtocol) = throw(ArgumentError(
     "`declare_scratch` is the ELEMENT-side scratch hook. A protocol declares its scratch " *
-    "through `declared_scratch`."))
+    "through `get_declared_scratch`."))
 
 """
     DefaultProtocol(; slots = (:u,), requests = (), scratch = (;), args_type = KernelArgs)
@@ -95,16 +95,16 @@ end
 # silently miss its validation entry or its sweep-state family.
 _kind_type(r) = Base.typename(r isa Type ? r : typeof(r)).wrapper
 
-declared_slots(::DefaultProtocol{slots}) where {slots} = slots
-declared_args_type(::DefaultProtocol{slots, A}) where {slots, A} = A
-declared_kinds(protocol::DefaultProtocol) = protocol.kinds
-declared_scratch(protocol::DefaultProtocol) = protocol.scratch
+get_declared_slots(::DefaultProtocol{slots}) where {slots} = slots
+get_declared_args_type(::DefaultProtocol{slots, A}) where {slots, A} = A
+get_declared_kinds(protocol::DefaultProtocol) = protocol.kinds
+get_declared_scratch(protocol::DefaultProtocol) = protocol.scratch
 
 """
     mandatory_kinds(integrator) -> Tuple of request-kind types
 
 The kinds an operator of this integrator's family ALWAYS issues, independent
-of the protocol. Unioned with [`declared_kinds`](@ref) when the engine selects
+of the protocol. Unioned with [`get_declared_kinds`](@ref) when the engine selects
 per-worker sweep-state families, which is what keeps a declaration additive:
 the family's own kinds are served whether or not a protocol names them. The
 default is the nonlinear set, so an unknown integrator type is served
@@ -193,17 +193,17 @@ built, and the declared args type is what setup-time method lookups query
 against.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
-    requests          = declared_kinds(protocol)
+    requests          = get_declared_kinds(protocol)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     element_caches    = setup_elements(integrator, dh)
-    foreach(cache -> validate_element_cache(cache, requests, declared_args_type(protocol)), element_caches)
+    foreach(cache -> validate_element_cache(cache, requests, get_declared_args_type(protocol)), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
     ivh               = setup_internal_variable_handler(integrator, element_caches, dh)
     _warn_boundary_sensitivity(requests, boundary_caches)
     kinds             = (requests..., mandatory_kinds(integrator)...)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
-                                               slots = declared_slots(protocol),
-                                               scratch = declared_scratch(protocol),
+                                               slots = get_declared_slots(protocol),
+                                               scratch = get_declared_scratch(protocol),
                                                derivative_family = needs_derivative_family(kinds))
     return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, protocol)
 end

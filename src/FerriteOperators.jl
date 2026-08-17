@@ -91,7 +91,7 @@ export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, 
 
 export setup_operator, update_operator!, update_linearization!, evaluate!
 export AbstractSchemeProtocol, DefaultProtocol
-export declared_slots, declared_kinds, declared_scratch, declared_args_type, mandatory_kinds
+export get_declared_slots, get_declared_kinds, get_declared_scratch, get_declared_args_type, mandatory_kinds
 export assemble_slot_jacobian!, assemble_weighted_jacobian!
 export allocate_components, share_pattern, combine!
 export StageBlockOperator, assemble_stages!

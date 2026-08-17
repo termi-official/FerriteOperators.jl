@@ -168,7 +168,7 @@ Elements then serve it like any built-in kind — `provides_analytic(::Type{<:My
 plus an `assemble_cell!(req::MyRequest, cache::MyCache, args)` method — and the
 operator issues it through `assemble_into!(MyKind(), (A,), op, states, p, ctx)`.
 Declaring it (`setup_operator(...; requests = (MyKind,))`, or a protocol whose
-`declared_kinds` names it) selects its sweep-state family and runs its
+`get_declared_kinds` names it) selects its sweep-state family and runs its
 setup-time trait ↔ kernel validation.
 
 Three provided bodies exist: [`primal_cell_sweep!`](@ref) (buffer zeroing, slot
@@ -203,7 +203,7 @@ having declared nothing.
 **New args families** — an operator family building its own kernel-args type
 implements [`with_states`](@ref), [`with_parameters`](@ref) and
 [`with_context`](@ref) for it, and declares it through
-[`declared_args_type`](@ref) so setup-time method lookups query against the
+[`get_declared_args_type`](@ref) so setup-time method lookups query against the
 right type. Elements written with an unannotated `args` parameter serve every
 family unchanged.
 
