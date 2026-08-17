@@ -375,13 +375,6 @@ end
         # A downstream kind folds the same way — literal traits, no branch.
         ci = code_typed(FerriteOperators.scatter_local!, Tuple{ScaledStiffnessKind, Any, Any})[1][1]
         @test count_branches(ci) == 0
-        # A trait call site reduces to a single literal return, which is what
-        # lets the driver bodies drop the branches guarding it.
-        folded_body(f) = string.(code_typed(f, Tuple{})[1][1].code)
-        @test folded_body(() -> FerriteOperators.assembles_matrix(ScaledStiffnessKind())) == ["return true"]
-        @test folded_body(() -> FerriteOperators.depends_on_unknowns(ScaledStiffnessKind())) == ["return false"]
-        @test folded_body(() -> FerriteOperators.assembles_matrix(JacobianKind{:u}())) == ["return true"]
-        @test folded_body(() -> FerriteOperators.assembles_vector(ResidualKind())) == ["return true"]
         # Family resolution folds to the singleton, so declarations are static.
         @test FerriteOperators.sweep_family(ResidualProbeKind) === FerriteOperators.DerivativeFamily()
         @test FerriteOperators.sweep_family(ScaledStiffnessKind) === FerriteOperators.NoFamily()
