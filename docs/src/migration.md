@@ -295,6 +295,11 @@ op = setup_operator(strategy, integrator, dh;
 - Admissibility with internal state is per cache and per kind: analytic
   kernel, `internal_state_insensitive` declaration, or FD — never a silent
   wrong adjoint, never a blanket rejection.
+- **Transfer operators are an experimental surface**: `setup_transfer_operator`,
+  `setup_nested_transfer_operator` and their operator types are scheduled to be
+  folded into the unified assembly engine and may change in a minor release.
+  Port against them if you need them today — the assembled matrix and its
+  sparsity are contract — but expect the constructors to move.
 
 ## Porting checklist
 

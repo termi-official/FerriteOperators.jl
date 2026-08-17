@@ -114,6 +114,30 @@ mandatory_kinds(integrator) = (JacobianResidualKind, JacobianKind, ResidualKind)
 mandatory_kinds(::AbstractBilinearIntegrator) = (BilinearKind, ResidualKind)
 mandatory_kinds(::AbstractLinearIntegrator) = (LinearKind, ResidualKind)
 
+# A sensitivity sweep runs the VOLUMETRIC kernel only, so a boundary term that
+# depends on the seeded quantity contributes nothing to the result. That is
+# correct for the common case (parameter- and time-independent tractions) and
+# silently incomplete otherwise, which is a warning rather than an error. Once
+# per (declared kind set × boundary cache type) — the operator is what carries
+# the combination, not the individual sweep.
+function _warn_boundary_sensitivity(requests::Tuple, boundary_caches)
+    any(K -> K <: SensitivityKind, requests) || return nothing
+    surface = findfirst(c -> !(c isa EmptySurfaceElementCache), boundary_caches)
+    surface === nothing && return nothing
+    B = typeof(boundary_caches[surface])
+    kinds = join(map(nameof, filter(K -> K <: SensitivityKind, collect(requests))), ", ")
+    @warn "Sensitivity sweeps run the volumetric kernel only: boundary contributions are NOT " *
+          "included in ∂F/∂θ, ∂F/∂t, or the matrix-free state products. This operator declares " *
+          "$(kinds) and carries a `$(nameof(B))` boundary cache, so its sensitivities are " *
+          "correct only if the boundary terms are independent of the seeded quantity — θ for " *
+          "the parameter kinds, t for the time sensitivity, u for the state products. " *
+          "`check_derivatives` detects the dependent case: its finite-difference referee " *
+          "evaluates the FULL residual including boundary terms, so a failing parameter, time, " *
+          "or state-product check on this operator is the signature of this omission." _id =
+          Symbol(:boundary_sensitivity_, B, :_, hash(requests)) maxlog = 1
+    return nothing
+end
+
 create_system_matrix(strategy, dh) = allocate_matrix(matrix_type(strategy), dh)
 create_system_vector(strategy, dh) = allocate_vector(vector_type(strategy), dh)
 
@@ -175,6 +199,7 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     foreach(cache -> validate_element_cache(cache, requests, declared_args_type(protocol)), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
     ivh               = setup_internal_variable_handler(integrator, element_caches, dh)
+    _warn_boundary_sensitivity(requests, boundary_caches)
     kinds             = (requests..., mandatory_kinds(integrator)...)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
                                                slots = declared_slots(protocol),
@@ -260,6 +285,11 @@ correspond 1-to-1 (same length, same cellsets at each index).
 `integrator` must be an [`AbstractTransferIntegrator`](@ref); its
 `setup_transfer_element_cache(integrator, sdh_row, sdh_col)` method is called once per
 subdomain pair.
+
+!!! warning "Experimental surface"
+    Transfer operators are scheduled to be folded into the unified assembly
+    engine. The constructors and the operator types may change in a minor
+    release; the assembled matrix and its sparsity are not affected.
 """
 function setup_transfer_operator(
         strategy::AbstractAssemblyStrategy,
@@ -333,6 +363,11 @@ matrix of size `(ndofs(dh_fine) × ndofs(dh_coarse))`.
 
 `dh_fine` and `dh_coarse` must live on **different** grids where every fine cell is a
 child of exactly one coarse cell, as encoded by `fine2coarse` and `child_ref_coords`.
+
+!!! warning "Experimental surface"
+    Transfer operators are scheduled to be folded into the unified assembly
+    engine. The constructors and the operator types may change in a minor
+    release; the assembled matrix and its sparsity are not affected.
 """
 function setup_nested_transfer_operator(
         strategy::AbstractAssemblyStrategy,

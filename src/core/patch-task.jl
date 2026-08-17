@@ -614,7 +614,11 @@ function patch_workspace(op, provider::PatchItems)
     return _patch_workspace(provider, inner)
 end
 
-_patch_workspace(provider, inner) = PatchAssemblyWorkspace(provider, Ref(0), inner, Float64[], Int[])
+# The scratch buffer accumulates patch-local vectors out of the inner
+# workspace's element residual, so it takes that buffer's eltype rather than a
+# hardcoded one.
+_patch_workspace(provider, inner) =
+    PatchAssemblyWorkspace(provider, Ref(0), inner, eltype(inner.re)[], Int[])
 
 function _patch_subdomain(op, provider::PatchItems)
     i = findfirst(sc -> sc.domain.sdh === provider.sdh, op.engine.subdomain_caches)

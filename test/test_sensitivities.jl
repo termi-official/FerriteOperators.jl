@@ -465,6 +465,58 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
     end
 end
 
+# --- The boundary limitation of sensitivity sweeps ---
+
+# The volumetric element of `SourceDiffusionIntegrator` plus a real constant
+# Neumann term, so an operator can carry a non-empty boundary cache.
+struct BoundarySourceIntegrator <: AbstractNonlinearIntegrator
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+    facetset::Set{FacetIndex}
+end
+struct BoundarySourceCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+    fv::FV
+    facetset::Set{FacetIndex}
+end
+FerriteOperators.setup_element_cache(m::BoundarySourceIntegrator, sdh::SubDofHandler) =
+    FerriteOperators.setup_element_cache(SourceDiffusionIntegrator(m.qrc, m.field_name), sdh)
+function FerriteOperators.setup_boundary_cache(m::BoundarySourceIntegrator, sdh::SubDofHandler)
+    fqr    = FacetQuadratureRule{RefQuadrilateral}(2)
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return BoundarySourceCache(FacetValues(fqr, ip, ip_geo), m.facetset)
+end
+FerriteOperators.duplicate_for_device(device, c::BoundarySourceCache) =
+    BoundarySourceCache(FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
+FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::BoundarySourceCache) = idx ∈ c.facetset
+function FerriteOperators.assemble_facet!(req::ResidualRequest, c::BoundarySourceCache, args, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    for qp in 1:getnquadpoints(c.fv)
+        dΓ = getdetJdV(c.fv, qp)
+        for i in 1:getnbasefunctions(c.fv)
+            req.r[i] -= shape_value(c.fv, qp, i) * dΓ
+        end
+    end
+end
+
+@testset "Boundary terms are not differentiated" begin
+    grid = generate_grid(Quadrilateral, (2, 2))
+    dh = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
+    qrc = QuadratureRuleCollection(2)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    right = Set(getfacetset(grid, "right"))
+    bnd() = BoundarySourceIntegrator(qrc, :u, right)
+
+    # The combination is what warns: a declared sensitivity kind whose sweep
+    # runs the volumetric kernel only, over an operator that has boundary terms.
+    @test_logs (:warn, r"boundary contributions are NOT included") match_mode = :any setup_operator(
+        strategy, bnd(), dh; requests = (ParameterVJPKind,))
+    # Neither half warns on its own.
+    @test_logs setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh;
+                              requests = (ParameterVJPKind,))
+    @test_logs setup_operator(strategy, bnd(), dh)
+end
+
 # --- The kernel-args channel protocol at setup ---
 
 # Two caches differing only in how open their residual kernel's args parameter

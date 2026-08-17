@@ -193,6 +193,21 @@ sensitivity cost scales with them. Per cache, analytic sensitivity kernels
 win; otherwise ForwardDiff differentiates the residual kernel. Sensitivity
 sweeps **never** write back into the caller's state.
 
+!!! warning "Boundary terms are not differentiated"
+    A sensitivity sweep runs the **volumetric** kernel only. Boundary
+    contributions are omitted from `∂F/∂θ`, `∂F/∂t` and the matrix-free state
+    products, so these results are correct exactly when the boundary terms are
+    independent of the seeded quantity — θ for the parameter kinds, `t` for the
+    time sensitivity, `u` for the state products. A θ-dependent traction or a
+    time-dependent flux therefore yields a silently incomplete sensitivity.
+
+    An operator declaring a sensitivity kind while carrying a non-empty
+    boundary cache warns once at `setup_operator`, and
+    [`check_derivatives`](@ref) detects the dependent case: its
+    finite-difference referee evaluates the full residual *including* boundary
+    terms, so a failing parameter, time, or state-product check on such an
+    operator is the signature of this omission.
+
 ∂F/∂t seeds through the context channel: the AD sweep hands the kernel a
 context whose evaluation time is Dual-valued, and the finite-difference method
 evaluates the primal residual at contexts with perturbed times. An element
@@ -232,6 +247,12 @@ checks are skipped with the reason recorded. The parameter checks respect the
 differentiable/static split: only the entries exposed by
 [`parameter_vector`](@ref) are probed.
 
+The FD referee evaluates the operator's **full** residual, boundary terms
+included, while the sensitivity sweeps it is checking cover the volumetric
+kernel only. A parameter, time, or state-product check that fails on an
+operator with boundary terms is therefore the diagnostic for a boundary term
+that depends on the seeded quantity.
+
 The time check runs only with a context and is recorded as a skip without one.
 Passing `weights = (u = …, du = …)` adds the two weighted-Jacobian checks: the
 fused `Σₛ wₛ ∂F/∂s` against per-slot finite differences, and
@@ -261,3 +282,8 @@ variants — have their own constructors
 and their own integrators ([`MassProlongatorIntegrator`](@ref),
 [`NestedMassProlongatorIntegrator`](@ref)). They assemble sequentially on the
 CPU into a rectangular sparse matrix.
+
+!!! warning "Experimental surface"
+    Transfer operators are scheduled to be folded into the unified assembly
+    engine. The constructors and the operator types may change in a minor
+    release; the assembled matrix and its sparsity are not affected.

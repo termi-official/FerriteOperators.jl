@@ -118,6 +118,11 @@ Construct via [`setup_transfer_operator`](@ref) and update via [`update_operator
     mul!(out, op, x, α, β)
 
 apply the operator (matrix-vector product).
+
+!!! warning "Experimental surface"
+    Transfer operators are scheduled to be folded into the unified assembly
+    engine. The constructors and the operator types may change in a minor
+    release; the assembled matrix and its sparsity are not affected.
 """
 @concrete struct TransferFerriteOperator
     P
@@ -168,6 +173,11 @@ Transfer operator for hierarchically nested grids (geometric multigrid).  The fi
 coarse DofHandlers live on different grids connected via `fine2coarse` mappings.
 
 Construct via [`setup_nested_transfer_operator`](@ref); update via [`update_operator!`](@ref).
+
+!!! warning "Experimental surface"
+    Transfer operators are scheduled to be folded into the unified assembly
+    engine. The constructors and the operator types may change in a minor
+    release; the assembled matrix and its sparsity are not affected.
 """
 @concrete struct NestedTransferFerriteOperator
     P

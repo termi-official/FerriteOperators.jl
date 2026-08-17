@@ -47,6 +47,12 @@ skipped with the reason recorded when no weights are given, when the weights
 are complex (the FD referee is real), or when a participating slot carries an
 [`AffineRate`](@ref) source (nothing to difference against).
 
+The FD referee evaluates the operator's FULL residual, boundary terms
+included, while the sensitivity sweeps it checks run the volumetric kernel
+only. On an operator with boundary terms, a failing parameter, time, or
+state-product check is therefore the diagnostic for a boundary term that
+depends on the seeded quantity — see the sensitivity limitation.
+
 `checks` holds one `(passed, err, skipped)` entry per check; inadmissible or
 unsupported checks are skipped with the reason recorded, and `passed` is the
 conjunction of all non-skipped checks. The caller's vectors are never
