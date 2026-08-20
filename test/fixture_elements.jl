@@ -176,3 +176,22 @@ function visco_testbed(strategy, qrc, dims = (1, 1, 1); transform = nothing, kwa
     op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev), kwargs...)
     return (; op, dh, grid)
 end
+
+####################################
+## Condensed power-law relaxation testbed
+####################################
+# Scalar field on a quad grid plus a hidden per-QP internal state whose local
+# stage problem is nonlinear, slots (:u, :uprev). `material` and
+# `local_solver` are the element's configuration, both arriving through the
+# integrator.
+function relaxation_testbed(strategy, qrc, dims = (2, 2);
+                            material = NortonRelaxationParameters(),
+                            local_solver = LocalNewtonSettings(), kwargs...)
+    grid = generate_grid(Quadrilateral, dims)
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    integrator = SimpleCondensedPowerLawRelaxation(material, qrc, :u, :q; local_solver)
+    op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev), kwargs...)
+    return (; op, dh, grid)
+end

@@ -283,8 +283,10 @@ Worked implementations of everything above live in
 `FerriteOperatorsExampleElements`, a separate package under
 `lib/FerriteOperatorsExampleElements` — one element per feature of the
 contract: a bilinear form and its induced residual, a linear form, a nonlinear
-element with analytic tangent, and a condensed element with per-quadrature-point
-internal state. They are FerriteOperators' own test fixtures and are meant to
+element with analytic tangent, and condensed elements with per-quadrature-point
+internal state — one with a linear local problem, one whose local problem is
+nonlinear and communicates with the outer solver through the context and
+element-cache channels. They are FerriteOperators' own test fixtures and are meant to
 be read and copied. Add them to an environment with
 
 ```julia

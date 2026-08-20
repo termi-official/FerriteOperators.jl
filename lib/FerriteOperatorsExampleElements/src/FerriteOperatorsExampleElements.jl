@@ -5,9 +5,11 @@ The elements here are minimal, readable implementations of the element
 contract — one per feature the contract exposes: a bilinear form
 ([`SimpleBilinearDiffusionIntegrator`](@ref), [`SimpleBilinearMassIntegrator`](@ref)),
 a linear form ([`SimpleLinearIntegrator`](@ref)), a nonlinear element with
-analytic tangent ([`SimpleHyperelasticityIntegrator`](@ref)) and a condensed
+analytic tangent ([`SimpleHyperelasticityIntegrator`](@ref)), a condensed
 element with per-quadrature-point internal state
-([`SimpleCondensedLinearViscoelasticity`](@ref)).
+([`SimpleCondensedLinearViscoelasticity`](@ref)) and a condensed element whose
+local problem is nonlinear and communicates with the outer solver
+([`SimpleCondensedPowerLawRelaxation`](@ref)).
 
 They are meant to be read, copied and used as test fixtures. They are not
 tuned for production use and carry no stability guarantee beyond the element
@@ -29,12 +31,14 @@ import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!,
     provides_analytic, has_internal_state, duplicate_for_device,
     geometric_subdomain_interpolation, get_number_of_internal_dofs_per_element,
     load_element_unknowns!, store_condensed_element_unknowns!,
-    allocate_element_unknown_vector, internal_variable_offset
+    allocate_element_unknown_vector, internal_variable_offset,
+    evaluation_time, with_time
 
 include("simple_diffusion.jl")             # Bilinear form + its induced residual
 include("simple_mass.jl")                  # Linear form and mass bilinear form
 include("simple_hyperelasticity.jl")       # Nonlinear element with analytic tangent
 include("simple_linear_viscoelasticity.jl") # Condensed element with internal state
+include("simple_power_law_relaxation.jl")   # Condensed element with a nonlinear local solve
 
 # The integrators are the public handle; the caches they set up are internal,
 # reachable as `FerriteOperatorsExampleElements.Simple…ElementCache`.
@@ -44,5 +48,10 @@ export SimpleBilinearMassIntegrator
 export SimpleHyperelasticityIntegrator
 export SimpleCondensedLinearViscoelasticity
 export MaxwellParameters
+export SimpleCondensedPowerLawRelaxation
+export NortonRelaxationParameters, LocalNewtonSettings
+export InexactLocalSolveContext, local_solve_tolerance
+export LocalSolveStatistics, local_solve_statistics, reset_local_solve_statistics!
+export LocalSolveNotConvergedError
 
 end
