@@ -48,6 +48,8 @@ end
 evaluation_time(ctx::TimeIntegrationContext) = ctx.t
 "Rebuild `ctx` with the evaluation time replaced by `t̃` (Dual-typed in ∂F/∂t sweeps)."
 with_time(ctx::TimeIntegrationContext, t̃) = TimeIntegrationContext(t̃, oftype(t̃, ctx.Δt), oftype(t̃, ctx.γ̃))
+"Effective local stage interval γ̃ of the element-local internal-variable problem (see `TimeIntegrationContext`); custom/wrapper context types must forward it, same as `evaluation_time`."
+stage_scaling(ctx::TimeIntegrationContext) = ctx.γ̃
 
 """
     AbstractAssemblyRequest
@@ -301,11 +303,14 @@ assembling through the wrong path.
 ([`kernel_args_type`](@ref)); method existence is queried against it.
 
 The trait ↔ kernel check always covers the primal kinds (the operator will
-issue them). Sensitivity kinds are checked only when declared via
-`setup_operator(...; requests = (ParameterVJPKind, …))`; declared sensitivity
-kinds additionally run the internal-state admissibility check
-([`has_internal_state`](@ref)) at setup instead of on first use. Undeclared
-kinds stay usable — their checks simply run at the call-time entry points.
+issue them). Every kind [`requires_admissibility_check`](@ref) names
+additionally runs the internal-state admissibility check
+([`has_internal_state`](@ref)) here instead of on first use — unconditionally
+for the primal kinds it names, since those are always covered, and for any
+other kind only when declared via
+`setup_operator(...; requests = (ParameterVJPKind, …))`. Undeclared,
+non-primal kinds stay usable — their checks simply run at the call-time entry
+points.
 
 The check also warns (advisory, never an error) about a residual kernel that
 annotates its args parameter concretely — see [`KernelArgs`](@ref) for why
@@ -324,6 +329,7 @@ function validate_element_cache(cache, declared_requests::Tuple = (), ::Type{A} 
     _warn_pinned_kernel_args(T, A)
     for kind in _primal_validatable_kinds()
         _assert_trait_backed(T, kind, A)
+        requires_admissibility_check(kind) && assert_sensitivity_admissible(T, kind)
     end
     for K in declared_requests
         has_cell_request(K) || continue
@@ -425,13 +431,19 @@ _primal_validatable_kinds() = (JacobianKind{:u}(), JacobianResidualKind())
 # making plain AD exact). Only the would-be AD fallback is rejected.
 function assert_sensitivity_admissible(T::Type, kind)
     if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
+        # FiniteDifferenceSensitivity is a remedy only where a call-time
+        # override to it exists (time sensitivities); naming it for any other
+        # kind would point at an escape the kind does not have.
+        remedy = kind isa TimeSensitivityKind ?
+            "declare `internal_state_insensitive` if the local equations do not depend on " *
+            "the seeded quantity, or use `FiniteDifferenceSensitivity`." :
+            "declare `internal_state_insensitive` if the local equations do not depend on " *
+            "the seeded quantity."
         throw(ArgumentError(
             "$(nameof(T)) carries condensed internal state, and AD-from-residual through " *
             "its local solve would be silently wrong. Either implement the analytic " *
-            "`assemble_cell!` kernel for $(typeof(kind)) (declared via `provides_analytic`), " *
-            "declare `internal_state_insensitive` if the local equations do not depend on " *
-            "the seeded quantity, or (for time sensitivities) use " *
-            "`FiniteDifferenceSensitivity`."))
+            "`assemble_cell!` kernel for $(typeof(kind)) (declared via `provides_analytic`), or " *
+            remedy))
     end
     return nothing
 end
@@ -442,8 +454,9 @@ end
 `true` iff the element cache carries condensed per-item internal state whose
 residual contains a local solve. Governs the sensitivity admissibility check:
 AD-from-residual through a local solve is wrong in principle, so such caches
-need an analytic kernel, an [`internal_state_insensitive`](@ref) declaration,
-or a finite-difference method for the requested sensitivity.
+need an analytic kernel or an [`internal_state_insensitive`](@ref)
+declaration for the requested kind; time sensitivities alone admit a
+finite-difference method as a further escape.
 """
 has_internal_state(::Type) = false
 

@@ -54,6 +54,26 @@ An element is a scheme-agnostic integrand: it reads slot *values* and never
 encodes a time discretization. [The layer contract](design.md) states where
 each piece of information a kernel might want belongs.
 
+## Storage classes for elements with local problems
+
+A cache carries data of three different lifetimes, and `duplicate_for_device`
+treats each one differently:
+
+- **Immutable problem structure** — meshes, handlers, factorizable
+  sparsity patterns — is built once in `setup_element_cache` from data the
+  integrator carries. `duplicate_for_device` may deliberately ALIAS it across
+  workers: sharing read-only state per worker is legal and intended, not an
+  oversight.
+- **Per-worker mutable solve workspace** (a scratch buffer, a nonlinear
+  solver's iteration state) lives as ordinary cache fields and is duplicated —
+  not aliased — per worker, so concurrent workers never race on it.
+- **Per-item/per-QP state that must persist across sweeps** (a retained
+  factorization, a converged local value used as the next sweep's guess)
+  lives in an [`ItemStates`](@ref) cache field, which `duplicate_for_device`
+  deliberately aliases too: entries are indexed by item, and the cell
+  partition assigns each item to exactly one worker at a time, so the aliased
+  slots a worker touches are disjoint from every other worker's.
+
 ## Analytic kernels
 
 Analytic kernels are an opt-in, declared through a compile-time trait so no
@@ -101,8 +121,8 @@ dispatch on the args.
   ([`declare_scratch`](@ref)).
 - `args.ctx` — the per-sweep solver scalars, i.e. the
   [`TimeIntegrationContext`](@ref) `(t, Δt, γ̃)` read through
-  `evaluation_time(args.ctx)` and `args.ctx.γ̃`, or `nothing` for stationary
-  problems. `γ̃` is the *normalized* local stage interval of the
+  `evaluation_time(args.ctx)` and `stage_scaling(args.ctx)`, or `nothing` for
+  stationary problems. `γ̃` is the *normalized* local stage interval of the
   element-local internal-variable problem — see its docstring for the exact
   contract and for why it is **not** a rate slope.
 
@@ -153,7 +173,7 @@ behind the driver's back.
 Elements with per-quadrature-point internal state append their unknowns after
 the FE dofs (`u = [ū; q]`, managed by the [`InternalVariableHandler`](@ref))
 and own their local stage problem: the previous state arrives through a slot
-(e.g. `uprev`), the local solve scales by `args.ctx.γ̃`, and the trial result
+(e.g. `uprev`), the local solve scales by `stage_scaling(args.ctx)`, and the trial result
 is written into the element-local `u` buffer — the framework propagates it
 into the global trial vector. That per-evaluation write-back *is* the
 condensation contract: `q(ū)` is refreshed at every trial evaluation, line

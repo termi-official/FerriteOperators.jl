@@ -362,3 +362,56 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
         @test !occursin("AnalyticProbeCache", err.value.msg)     # and only that one
     end
 end
+
+# `has_internal_state` caches without an analytic Jacobian/JacobianResidual
+# kernel used to slip past `setup_operator`: JacobianKind/JacobianResidualKind
+# were absent from `requires_admissibility_check`, so a stateful cache with no
+# analytic kernel took the AD-from-residual fallback THROUGH its local solve
+# instead of being rejected. That fallback differentiates correctly, but the
+# driver's trial write-back only runs on the non-AD path, so the local state
+# stored afterward is stale. `StatefulProbeCache` (defined above) is exactly
+# such a cache; wiring it to an integrator reaches it through `setup_operator`.
+struct StaleQIntegrator <: AbstractNonlinearIntegrator end
+FerriteOperators.setup_element_cache(::StaleQIntegrator, ::SubDofHandler) = StatefulProbeCache()
+
+struct InsensitiveStatefulProbeCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.has_internal_state(::Type{InsensitiveStatefulProbeCache}) = true
+FerriteOperators.internal_state_insensitive(::Type{InsensitiveStatefulProbeCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
+FerriteOperators.assemble_cell!(::ResidualRequest, ::InsensitiveStatefulProbeCache, args) = nothing
+FerriteOperators.reinit_values!(::InsensitiveStatefulProbeCache, cell) = nothing
+Ferrite.getnquadpoints(::InsensitiveStatefulProbeCache) = 0
+
+struct InsensitiveStaleQIntegrator <: AbstractNonlinearIntegrator end
+FerriteOperators.setup_element_cache(::InsensitiveStaleQIntegrator, ::SubDofHandler) = InsensitiveStatefulProbeCache()
+
+struct StatelessNoAnalyticCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.assemble_cell!(::ResidualRequest, ::StatelessNoAnalyticCache, args) = nothing
+FerriteOperators.reinit_values!(::StatelessNoAnalyticCache, cell) = nothing
+Ferrite.getnquadpoints(::StatelessNoAnalyticCache) = 0
+
+struct StatelessNoAnalyticIntegrator <: AbstractNonlinearIntegrator end
+FerriteOperators.setup_element_cache(::StatelessNoAnalyticIntegrator, ::SubDofHandler) = StatelessNoAnalyticCache()
+
+@testset "Stale-q admissibility hole: JacobianKind/JacobianResidualKind" begin
+    grid = generate_grid(Hexahedron, (1, 1, 1))
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefHexahedron, 1}())
+    close!(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+    # No analytic kernel and no insensitivity declaration: rejected at setup,
+    # naming the actual remedies (never `FiniteDifferenceSensitivity` — that
+    # escape exists only for time sensitivities, not for Jacobian kinds).
+    err = @test_throws ArgumentError setup_operator(strategy, StaleQIntegrator(), dh)
+    @test occursin("StatefulProbeCache", err.value.msg)
+    @test occursin("internal_state_insensitive", err.value.msg)
+    @test occursin("provides_analytic", err.value.msg)
+    @test !occursin("FiniteDifferenceSensitivity", err.value.msg)
+
+    # `internal_state_insensitive` declared for both kinds: admissible.
+    @test setup_operator(strategy, InsensitiveStaleQIntegrator(), dh) isa FerriteOperators.LinearizedFerriteOperator
+
+    # Stateless cache without analytic kernels: the AD fallback is legitimate,
+    # this fix must not gate anything but `has_internal_state` caches.
+    @test setup_operator(strategy, StatelessNoAnalyticIntegrator(), dh) isa FerriteOperators.LinearizedFerriteOperator
+end

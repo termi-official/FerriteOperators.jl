@@ -73,6 +73,7 @@ include("operators/stage_block.jl")     # Stage-block operator for fully implici
 include("operators/verification.jl")    # check_derivatives: FD referee for analytic kernels and AD paths
 
 include("core/quadrature-task.jl")      # Task + operator for evaluating functions at quadrature points
+include("core/item_states.jl")          # ItemStates: provider-agnostic per-item persistent storage
 include("core/patch-task.jl")           # Patch items: multi-cell work items with patch-local scatter (experimental)
 
 include("postprocessing/quadrature-grid.jl")  # VTKQuadratureGrid — QP positions as a VTK mesh
@@ -100,7 +101,7 @@ export ADSensitivity, FiniteDifferenceSensitivity, has_internal_state, internal_
 export state_jvp!, state_vjp!, StateJVPRequest, StateVJPRequest
 export check_derivatives
 export parameter_vector, rebuild_parameters
-export TimeIntegrationContext, evaluation_time, KernelArgs, assemble_cell!
+export TimeIntegrationContext, evaluation_time, stage_scaling, KernelArgs, assemble_cell!
 export AffineRate
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
 export WeightedJacobianRequest
@@ -117,7 +118,7 @@ export PatchAssemblyWorkspace, patch_workspace, current_patch, patch_provider
 export assemble_patch_target!, patch_chunks
 export AbstractPatchSink, patch_target, patch_scatter, patch_emit!
 export PatchLocalSink, PatchAssemblerSink, PatchGlobalVectorSink, PatchTripletSink, emit_patch_column!
-export PatchItemStates, item_state, set_item_state!, has_item_state, invalidate_item_state!, invalidate_item_states!
+export ItemStates, item_state, set_item_state!, has_item_state, invalidate_item_state!, invalidate_item_states!
 export provides_analytic
 export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
 export reinit_values!

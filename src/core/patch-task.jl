@@ -5,8 +5,8 @@
 # Work items that are SETS of cells with a patch-local dof numbering — the
 # local-BVP layer. Cell kernels are reused unchanged; the scatter target is
 # patch-local. Solving the delivered local system is deliberately NOT part of
-# this contract: the caller owns the solve, the sinks and the item-lifetime
-# state slots below carry its inputs and results.
+# this contract: the caller owns the solve, the sinks and `ItemStates` slots
+# carry its inputs and results.
 #
 # Experimental: this surface may still change.
 
@@ -316,60 +316,6 @@ function patch_chunks(provider::PatchItems, nchunks::Int)
     end
     return chunks
 end
-
-####################################
-## Item-lifetime state
-####################################
-
-"""
-    PatchItemStates{S}(nitems)
-
-Per-item state slots of element type `S`, indexed by item. Two uses, one
-mechanism — they differ only in the caller's invalidation policy:
-
-- *item-lifetime state* that must survive across sweeps (a retained
-  factorization, a reduction snapshot),
-- the *solve→scatter payload channel* within one sweep (what a local solve
-  hands to the phase that emits its result).
-
-Freshness contract: FO never writes and never invalidates these slots. The
-caller stores with [`set_item_state!`](@ref), tests with
-[`has_item_state`](@ref), and drops stale content with
-[`invalidate_item_state!`](@ref) when whatever the slot was derived from
-changes. Slots are indexed by ITEM, so items processed by different workers
-touch disjoint slots — item lifetime is not worker lifetime, and a slot must
-never be handed to a worker-lifetime cache.
-"""
-struct PatchItemStates{S}
-    slots::Vector{S}
-    valid::Vector{Bool}
-end
-PatchItemStates{S}(nitems::Int) where {S} = PatchItemStates(Vector{S}(undef, nitems), fill(false, nitems))
-
-Base.length(st::PatchItemStates) = length(st.valid)
-
-"Is item `i`'s state slot filled and not invalidated?"
-has_item_state(st::PatchItemStates, i::Int) = st.valid[i]
-
-"""
-    item_state(st, i)
-
-Item `i`'s state. Throws when the slot is empty or was invalidated — guard
-with [`has_item_state`](@ref).
-"""
-function item_state(st::PatchItemStates, i::Int)
-    st.valid[i] || throw(ArgumentError("item $i has no valid state; check `has_item_state` first"))
-    return st.slots[i]
-end
-
-"Store `s` as item `i`'s state and mark it valid."
-set_item_state!(st::PatchItemStates, i::Int, s) = (st.slots[i] = s; st.valid[i] = true; st)
-
-"Drop item `i`'s state (the caller's invalidation trigger fired)."
-invalidate_item_state!(st::PatchItemStates, i::Int) = (st.valid[i] = false; st)
-
-"Drop every item's state."
-invalidate_item_states!(st::PatchItemStates) = (fill!(st.valid, false); st)
 
 ####################################
 ## Sinks
@@ -841,7 +787,7 @@ never written back, unlike the global sweeps.
 
 Experimental: part of the patch item family; the local BVP itself (partition,
 solve, item state) is the caller's — see [`patch_free_dofs`](@ref) and
-[`PatchItemStates`](@ref).
+[`ItemStates`](@ref).
 """
 function assemble_patches!(kind::PatchAssemblyKind, op, provider::PatchItems, states::NamedTuple, p, ctx = nothing)
     _check_declared_slots(op.engine, states)
@@ -867,7 +813,7 @@ Call `f(ws, patchid)` once per patch of `provider`, in item order, with `ws` a
 [`PatchAssemblyWorkspace`](@ref) already positioned on `patchid`. Inside `f` the
 caller owns the patch: assemble any number of targets with
 [`assemble_patch_target!`](@ref) (passing `states`, `p` and `ctx` on),
-factorize, solve, retain the factorization in a [`PatchItemStates`](@ref) slot,
+factorize, solve, retain the factorization in an [`ItemStates`](@ref) slot,
 and emit results through a sink — [`emit_patch_column!`](@ref) writes one column
 per call, so an `N`-column local basis is `N` emissions.
 

@@ -110,14 +110,9 @@ tolerance tighter than the element's own is ignored.
 local_solve_tolerance(ctx) = nothing
 local_solve_tolerance(ctx::InexactLocalSolveContext) = ctx.local_tolerance
 
-# `γ̃` reaches elements as a context FIELD — the framework's context accessors
-# are `evaluation_time`/`with_time` only — so a decorating context type has to
-# forward it explicitly.
-stage_scaling(ctx::TimeIntegrationContext) = ctx.γ̃
+# InexactLocalSolveContext decorates a TimeIntegrationContext, so it forwards
+# the stage-scaling accessor like it forwards evaluation_time.
 stage_scaling(ctx::InexactLocalSolveContext) = stage_scaling(ctx.inner)
-stage_scaling(::Nothing) = throw(ArgumentError(
-    "SimpleCondensedPowerLawRelaxation requires a TimeIntegrationContext: " *
-    "the local q stage problem scales by ctx.γ̃."))
 
 @doc raw"""
     SimpleCondensedPowerLawRelaxation

@@ -152,7 +152,7 @@ update_linearization!(op, r, u, GenericFirstOrderTimeParameters(p, t, Δt, uprev
 # 0.4
 op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev))
 update_linearization!(op, r, (u = u, uprev = uprev), p, TimeIntegrationContext(t, Δt, γ̃))
-# element: uₑprev = args.states.uprev;  t = evaluation_time(args.ctx);  γ̃ = args.ctx.γ̃
+# element: uₑprev = args.states.uprev;  t = evaluation_time(args.ctx);  γ̃ = stage_scaling(args.ctx)
 ```
 
 **Time reaches elements through `ctx`, and only through `ctx`.** `p` is the
@@ -195,7 +195,7 @@ its per-slot weights.
 
 Condensed elements: declare `FerriteOperators.has_internal_state(::Type{<:MyCache}) = true`.
 The previous state arrives through your chosen slot; the local solve scales by
-`args.ctx.γ̃`; the trial result is written into the element-local `u` buffer,
+`stage_scaling(args.ctx)`; the trial result is written into the element-local `u` buffer,
 and the framework propagates it — that per-evaluation write-back is the
 condensation contract.
 

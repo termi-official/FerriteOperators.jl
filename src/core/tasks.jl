@@ -259,7 +259,7 @@ validation_instance(::Type{<:StateVJPKind})         = StateVJPKind(nothing)
 validation_instance(::Type{<:WeightedJacobianKind}) = WeightedJacobianKind((u = 1.0,))
 
 # The kinds whose AD fallback differentiates through an element's local solve.
-requires_admissibility_check(::Union{ParameterJacobianKind, ParameterVJPKind, StateJVPKind, StateVJPKind}) = true
+requires_admissibility_check(::Union{JacobianKind, JacobianResidualKind, ParameterJacobianKind, ParameterVJPKind, StateJVPKind, StateVJPKind}) = true
 
 # Functional kernels return their contribution through `evaluate_cell_functional`
 # rather than filling a request, so there is no cell request to validate.

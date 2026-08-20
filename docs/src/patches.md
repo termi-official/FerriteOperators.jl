@@ -25,7 +25,7 @@ patch-local into global numbering.
 Solving the delivered local system is deliberately **not** part of the
 contract: the caller owns the solve. [`patch_free_dofs`](@ref) /
 [`patch_prescribed_dofs`](@ref) describe the interior/boundary split, and
-[`PatchItemStates`](@ref) is the item-lifetime storage a retained
+[`ItemStates`](@ref) is the item-lifetime storage a retained
 factorization belongs in — neither per-worker scratch nor operator-global
 frozen data. [Driving the patches yourself](@ref) is where that loop is
 written.
@@ -65,7 +65,7 @@ as often as the caller likes on that workspace.
 ```julia
 provider = PatchItems(sdh, cellsets; prescribed_facets)
 sink     = PatchTripletSink()                    # column-less: emissions name their column
-facts    = PatchItemStates{typeof(lu(zeros(1, 1)))}(npatches(provider))
+facts    = ItemStates{typeof(lu(zeros(1, 1)))}(npatches(provider))
 
 foreach_patch(op, provider, (u = u,), p) do pws, pid
     n, free = patch_ndofs(provider, pid), patch_free_dofs(provider, pid)
@@ -99,7 +99,7 @@ The pieces and their contracts:
   [`PatchTripletSink`](@ref) and names its columns itself. Duplicate
   `(row, col)` entries are summed by `sparse`, so overlapping patches
   contributing to a shared column need no coordination.
-- [`PatchItemStates`](@ref) is the retained-state slot: a factorization lives
+- [`ItemStates`](@ref) is the retained-state slot: a factorization lives
   as long as the item, and FO never writes or invalidates it. Nothing about a
   patch is stored anywhere else.
 - The solve, the boundary treatment and the column layout are the caller's.
@@ -146,7 +146,7 @@ The contract:
 - **Collectors are the caller's.** One [`PatchTripletSink`](@ref) per chunk.
   [`PatchGlobalVectorSink`](@ref) is *not* thread safe: overlapping patches hit
   the same entries of the destination with a non-atomic read-modify-write.
-- **Item state is disjoint by construction.** [`PatchItemStates`](@ref) slots
+- **Item state is disjoint by construction.** [`ItemStates`](@ref) slots
   are indexed by item, so workers processing different patches touch different
   slots. Item lifetime is not worker lifetime — a slot must never be handed to
   a worker-lifetime cache.
@@ -196,5 +196,5 @@ reference points at which the coarse interpolation is evaluated — one
 
 ```@autodocs
 Modules = [FerriteOperators]
-Pages = ["core/patch-task.jl"]
+Pages = ["core/patch-task.jl", "core/item_states.jl"]
 ```

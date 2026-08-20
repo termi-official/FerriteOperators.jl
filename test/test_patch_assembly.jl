@@ -357,7 +357,7 @@ end
     end
 
     @testset "item-lifetime state" begin
-        st = PatchItemStates{Vector{Float64}}(3)
+        st = ItemStates{Vector{Float64}}(3)
         @test length(st) == 3
         @test !has_item_state(st, 2)
         @test_throws ArgumentError item_state(st, 2)
@@ -399,7 +399,7 @@ end
         end
 
         sink = PatchTripletSink()
-        facts = PatchItemStates{PatchLU}(npatches(prov))
+        facts = ItemStates{PatchLU}(npatches(prov))
         foreach_patch(op, prov, (u = u,), nothing) do pws, pid
             @test current_patch(pws) == pid
             @test patch_provider(pws) === prov
@@ -442,7 +442,7 @@ end
             chunks = patch_chunks(prov, 2)          # [1:1, 2:3]: a short and a long chunk
             sinks = [PatchTripletSink() for _ in chunks]
             wss = [patch_workspace(op, prov) for _ in chunks]
-            parfacts = PatchItemStates{PatchLU}(npatches(prov))
+            parfacts = ItemStates{PatchLU}(npatches(prov))
             @sync for c in eachindex(chunks)
                 Threads.@spawn begin
                     ws = wss[c]
@@ -468,7 +468,7 @@ end
             @test patch_provider(dup) === prov
             dsink = PatchTripletSink()
             Ferrite.reinit!(dup, 1)
-            solve_patch_columns!(dsink, PatchItemStates{PatchLU}(npatches(prov)),
+            solve_patch_columns!(dsink, ItemStates{PatchLU}(npatches(prov)),
                 dup, 1, (u = u,), nothing, ncols)
             @test dsink.V == sinks[1].V          # chunk 1 is exactly patch 1
         end

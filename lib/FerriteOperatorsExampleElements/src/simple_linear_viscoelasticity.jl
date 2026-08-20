@@ -16,7 +16,7 @@ end
 
 Linear viscoelasticity (standard linear solid) with the viscous strain εᵛ as a
 condensed per-quadrature-point internal variable. The element owns the LOCAL
-stage problem for εᵛ (scaled by `ctx.γ̃`); the previous state arrives through
+stage problem for εᵛ (scaled by `stage_scaling(ctx)`); the previous state arrives through
 the `uprev` slot and the trial state is written back into the element-local
 `u` buffer per the condensation contract.
 """
@@ -95,8 +95,8 @@ end
 @inline function _sls_stage_scaling(ctx)
     ctx === nothing && throw(ArgumentError(
         "SimpleCondensedLinearViscoelasticity requires a TimeIntegrationContext: " *
-        "the local εᵛ stage problem scales by ctx.γ̃."))
-    return ctx.γ̃
+        "the local εᵛ stage problem scales by stage_scaling(ctx)."))
+    return stage_scaling(ctx)
 end
 
 # One concrete entry method per provided kernel (no blanket request method:
