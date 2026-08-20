@@ -247,19 +247,16 @@ end
     end
 end
 
-@testset "Condensation/corrector elections are construction-time seams" begin
+@testset "Corrector election is a construction-time seam" begin
     qrc = QuadratureRuleCollection(2)
     mat = NortonRelaxationParameters()
     vmat = MaxwellParameters()
 
     @test SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q) isa FerriteOperators.AbstractCondensedNonlinearIntegrator
-    @test_throws ArgumentError SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q; condensation = FusedWithResidual())
     @test_throws ArgumentError SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q; corrector = Recompute())
-    @test_throws ArgumentError SimpleCondensedLinearViscoelasticity(vmat, qrc, :u, :εᵛ; condensation = FusedWithResidual())
     @test_throws ArgumentError SimpleCondensedLinearViscoelasticity(vmat, qrc, :u, :εᵛ; corrector = Recompute())
 
     integ = SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q)
-    @test FerriteOperators.condensation_election(integ) isa Separate
     @test FerriteOperators.corrector_election(integ) isa Stored
 end
 

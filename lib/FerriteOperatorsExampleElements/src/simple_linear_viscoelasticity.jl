@@ -13,7 +13,7 @@ end
 
 @doc raw"""
     SimpleCondensedLinearViscoelasticity(material_parameters, qrc, displacement_name, viscosity_name;
-                                          condensation = Separate(), corrector = Stored())
+                                          corrector = Stored())
 
 Linear viscoelasticity (standard linear solid) with the viscous strain εᵛ as a
 condensed per-quadrature-point internal variable. The element owns the LOCAL
@@ -23,27 +23,23 @@ must run before any evaluation sweep. The Mandel factorization `A` of the
 local operator is retained per quadrature point and read by the `Consistent`
 kernel.
 
-`condensation`/`corrector` are construction-time seams
-([`CondensationElection`](@ref)/[`CorrectorElection`](@ref)); only their
-defaults (`Separate()`/`Stored()`) are implemented.
+`corrector` is a construction-time seam ([`CorrectorElection`](@ref)); only
+its default (`Stored()`) is implemented.
 """
-struct SimpleCondensedLinearViscoelasticity{Cond <: CondensationElection, Corr <: CorrectorElection} <: AbstractCondensedNonlinearIntegrator
+struct SimpleCondensedLinearViscoelasticity{Corr <: CorrectorElection} <: AbstractCondensedNonlinearIntegrator
     material_parameters::MaxwellParameters
     # Every integrator needs these
     qrc::QuadratureRuleCollection
     displacement_name::Symbol
     viscosity_name::Symbol
-    condensation::Cond
     corrector::Corr
 end
 function SimpleCondensedLinearViscoelasticity(material_parameters, qrc, displacement_name, viscosity_name;
-        condensation = Separate(), corrector = Stored())
-    condensation isa Separate || condensation_election_error(condensation)
+        corrector = Stored())
     corrector isa Stored || corrector_election_error(corrector)
     return SimpleCondensedLinearViscoelasticity(material_parameters, qrc, displacement_name, viscosity_name,
-                                                 condensation, corrector)
+                                                 corrector)
 end
-FerriteOperators.condensation_election(integrator::SimpleCondensedLinearViscoelasticity) = integrator.condensation
 FerriteOperators.corrector_election(integrator::SimpleCondensedLinearViscoelasticity) = integrator.corrector
 
 """

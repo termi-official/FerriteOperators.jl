@@ -34,7 +34,7 @@ matrix-free action) is a *strategy axis*, not a property of the physics.
 Elements express scheme-agnostic integrands. Operators evaluate a set of them
 at a given state, parameter bag, and per-sweep context. Solvers own the time
 discretization and compose operator evaluations into a scheme. [The layer
-contract](design.md) states that division of labour precisely.
+contract](devdocs/design.md) states that division of labour precisely.
 
 ## Quickstart
 
@@ -115,8 +115,13 @@ end
   verification, quadrature data, transfer operators.
 - [Patch items](patches.md) — multi-cell work items with patch-local scatter
   (experimental).
-- [The layer contract](design.md) — term / operator / scheme layers and their
-  ownership boundaries, the channel decision table, and the framework's
-  extension points.
 - [Migrating from 0.3.x](migration.md) — the map from the old element and
   operator API to the current one.
+
+Developer documentation:
+
+- [The layer contract](devdocs/design.md) — term / operator / scheme layers and
+  their ownership boundaries, the channel decision table, and the framework's
+  extension points.
+- [Design rationale](devdocs/rationale.md) — why the design is the way it is:
+  the decisions, the alternatives that were rejected, and what they cost.

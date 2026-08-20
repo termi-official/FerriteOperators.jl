@@ -101,7 +101,8 @@ function assert_sensitivity_admissible(::Type{CompositeVolumetricElementCache{CT
     throw(ArgumentError(
         "A composite carrying condensed internal state is inadmissible for $(typeof(kind)) " *
         "unless every inner serves that kind analytically, but $(missing_kind) do(es) not. " *
-        "AD-from-residual through the condensed inner's local solve would be silently wrong. " *
+        "AD-from-residual on the (now pure) residual kernel would compute only the frozen-q " *
+        "partial, silently missing the ∂F/∂q·dq/d· correction this kind's total needs. " *
         "Implement the analytic kernel on the listed inner(s), declare " *
         "`internal_state_insensitive` where the local equations do not depend on the seeded " *
         "quantity, or assemble the condensed element as its own operator term."))

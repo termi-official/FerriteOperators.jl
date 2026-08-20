@@ -54,8 +54,8 @@ read-only. Kernels select on the `(request, cache)` pair alone, never on
 it unannotated works exactly the same.
 
 An element is a scheme-agnostic integrand: it reads slot *values* and never
-encodes a time discretization. [The layer contract](design.md) states where
-each piece of information a kernel might want belongs.
+encodes a time discretization. [The layer contract](devdocs/design.md) states
+where each piece of information a kernel might want belongs.
 
 ## Storage classes for elements with local problems
 
@@ -76,6 +76,32 @@ treats each one differently:
   deliberately aliases too: entries are indexed by item, and the cell
   partition assigns each item to exactly one worker at a time, so the aliased
   slots a worker touches are disjoint from every other worker's.
+
+`assemble_cell!` kernels are pure evaluations at fixed internal state. A local
+nonlinear solve that EVOLVES state — anything whose result must survive to the
+next sweep or the next step — belongs in [`condense_cell!`](@ref) only, never
+inline inside a kernel.
+
+An inline local solve of a *history-free* (stateless) implicit relation stays
+legitimate inside a kernel: if its root is a pure function of the gathered
+`args` alone, it is recomputable from `args` at any later time, including from
+postprocessing ([`evaluate_quadrature!`](@ref) is the route to re-run it
+outside a sweep). Differentiating such an inline iteration by AD is then the
+kernel author's responsibility — accuracy is limited by the inner solve's own
+tolerance; the clean upgrade once that limit matters is an analytic tangent
+via the implicit function theorem, the same shape [`condense_cell!`](@ref)
+uses for a corrector.
+
+Inline STATE EVOLUTION has no error to catch it: a kernel receives `q` as an
+already-gathered slot and never writes the global solution vector, so an
+element that re-solves from committed history inside its `assemble_cell!`
+kernel has nowhere to put the new state — it silently freezes the committed
+state across steps instead of advancing it. State that must survive a step
+goes through [`condense_cell!`](@ref). State kept in a private cache field
+instead of an [`ItemStates`](@ref) store puts commit/rollback/freshness
+entirely on the element author: [`rollback_state!`](@ref)/
+[`commit_state!`](@ref) and the freshness guard in [`item_state`](@ref) cannot
+see private storage.
 
 ## Analytic kernels
 

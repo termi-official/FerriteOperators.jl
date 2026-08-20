@@ -79,6 +79,14 @@ slots participating in the local model (e.g. a rate slot under Newmark),
 chained into the corrector INSIDE the local inverse — see the design's
 Newmark/multilevel-Newton witness.
 
+This is the only hook allowed to EVOLVE a condensed element's state:
+`assemble_cell!` kernels are pure evaluations at the `q` this hook wrote and
+never write back. An inline local solve inside a kernel stays legitimate when
+it is history-free — a pure function of the gathered `args`, recomputable
+outside a sweep — but re-solving from committed history inside a kernel has
+nowhere to write the result and silently freezes that history instead of
+advancing it.
+
 There is no default; only condensed elements implement it.
 """
 function condense_cell! end
@@ -175,13 +183,10 @@ Value-returning WITH write-back — reuses [`fold_items`](@ref)/
 `FunctionalFamily` so the existing deterministic fold order and
 `_check_reduction_domain` structural checks apply as they stand.
 
-Errors loudly, naming itself, if the operator's integrator elected anything
-other than `Separate()` condensation ([`condensation_election`](@ref)) —
-`FusedWithResidual()` is a construction-time seam, not yet implemented.
+Unconditionally its own domain traversal, run before the evaluation sweeps it
+feeds.
 """
 function condense_internal!(op, weights::NamedTuple, states::NamedTuple, p, ctx)
-    election = condensation_election(op.integrator)
-    election === Separate() || condensation_election_error(election)
     _check_declared_slots(op.engine, states)
     _check_rate_slots(states)
     kind = CondensationKind(weights)
@@ -247,51 +252,36 @@ end
 ####################################
 
 """
-    CondensationElection
-    Separate <: CondensationElection
-    FusedWithResidual <: CondensationElection
-
-How [`condense_internal!`](@ref) is scheduled relative to the first
-evaluation sweep — an OPERATOR-CONSTRUCTION election
-([`condensation_election`](@ref)), never a runtime branch, so it cannot
-become the fused/composed call-time fork the operator algebra already moved
-out of. `Separate()` (default) runs condensation as its own domain traversal.
-`FusedWithResidual()` would fuse it with the first residual sweep to recover
-today's single-traversal cost (the design's §10.1 mitigation for the
-fused-analytic-Jacobian-residual user, who otherwise pays one extra item
-traversal for no local-solve saving) — a construction-time seam, not
-implemented in this slice: selecting it errors loudly, naming itself, the
-moment condensation would run.
-"""
-abstract type CondensationElection end
-@doc (@doc CondensationElection) struct Separate <: CondensationElection end
-@doc (@doc CondensationElection) struct FusedWithResidual <: CondensationElection end
-
-"""
     CorrectorElection
     Stored <: CorrectorElection
-    Recompute <: CorrectorElection
 
 Whether a condensed element's Jacobian correction is read from a stored
 per-quadrature-point corrector (`Stored()`, default) or recomputed inline on
 every Jacobian-shaped sweep ([`corrector_election`](@ref)) — an
 operator-construction election trading the corrector's memory (the design's
 §10.4 binding constraint) against re-solving, which recovers today's memory
-profile at today's time cost for large forward-only solves. `Recompute()` is
-a construction-time seam, not implemented in this slice: selecting it errors
-loudly, naming itself, at construction.
+profile at today's time cost for large forward-only solves. See
+[`Recompute`](@ref) for the other member.
 """
 abstract type CorrectorElection end
 @doc (@doc CorrectorElection) struct Stored <: CorrectorElection end
-@doc (@doc CorrectorElection) struct Recompute <: CorrectorElection end
 
 """
-    condensation_election(integrator) -> CondensationElection
+    Recompute <: CorrectorElection
 
-Default `Separate()`; a condensed integrator overrides it to report its own
-constructor-elected value.
+Recomputes a condensed element's Jacobian corrector inline on every
+Jacobian-shaped sweep instead of reading a stored one ([`corrector_election`](@ref))
+— a construction-time seam, not implemented in this slice: selecting it
+errors loudly, naming itself, at construction.
+
+Targets memory-bound ASSEMBLED sweeps, where the corrector store's memory
+(the design's §10.4 binding constraint) outweighs the cost of one extra local
+solve per assembled Jacobian. For matrix-free/action-style use — repeated
+operator actions at fixed state, e.g. a Krylov `mul!`/JVP sequence —
+recomputing the corrector on every action call is not the intended profile;
+[`Stored`](@ref) is the right election there.
 """
-condensation_election(integrator) = Separate()
+struct Recompute <: CorrectorElection end
 
 """
     corrector_election(integrator) -> CorrectorElection
@@ -302,22 +292,12 @@ constructor-elected value.
 corrector_election(integrator) = Stored()
 
 """
-    condensation_election_error(election)
-
-The loud, self-naming rejection every non-`Separate()` [`CondensationElection`](@ref)
-must raise — a condensed integrator's constructor calls this for any election
-it does not implement, so the seam exists without silently accepting a
-selection it cannot honor.
-"""
-condensation_election_error(election) = throw(ArgumentError(
-    "$(nameof(typeof(election))) condensation is not implemented yet; construct the " *
-    "integrator with `condensation = Separate()` (the default)."))
-
-"""
     corrector_election_error(election)
 
 The loud, self-naming rejection every non-`Stored()` [`CorrectorElection`](@ref)
-must raise — see [`condensation_election_error`](@ref).
+must raise — a condensed integrator's constructor calls this for any election
+it does not implement, so the seam exists without silently accepting a
+selection it cannot honor.
 """
 corrector_election_error(election) = throw(ArgumentError(
     "$(nameof(typeof(election))) correctors are not implemented yet; construct the " *

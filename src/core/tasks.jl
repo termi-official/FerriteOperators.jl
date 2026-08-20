@@ -236,13 +236,13 @@ validation_instance(::Type{<:StateJVPKind})         = StateJVPKind(nothing)
 validation_instance(::Type{<:StateVJPKind})         = StateVJPKind(nothing)
 validation_instance(::Type{<:WeightedJacobianKind}) = WeightedJacobianKind((u = 1.0,))
 
-# The kinds whose AD fallback differentiates through an element's local solve
-# — for the sensitivity kinds always (they carry no `CorrectionMode`, so they
-# are always the total). `JacobianKind`/`JacobianResidualKind` are mode-aware:
-# a `Consistent` AD fallback would silently drop the ∂F/∂q·dq/d· correction on
-# a condensed cache, so it needs the check; a `FrozenQ` AD fallback IS the
-# requested partial (the kernel it differentiates is pure at frozen `q`), so
-# it never needs it — see `CorrectionMode`.
+# The kinds whose AD fallback would silently miss a condensed cache's
+# ∂F/∂q·dq/d· correction — for the sensitivity kinds always (they carry no
+# `CorrectionMode`, so they are always the total). `JacobianKind`/
+# `JacobianResidualKind` are mode-aware: a `Consistent` AD fallback needs the
+# check for the same reason; a `FrozenQ` AD fallback IS the requested partial
+# (the kernel it differentiates is pure at frozen `q`), so it never needs it —
+# see `CorrectionMode`.
 requires_admissibility_check(::Union{ParameterJacobianKind, ParameterVJPKind, StateJVPKind, StateVJPKind}) = true
 requires_admissibility_check(::JacobianKind{slot, Consistent}) where {slot} = true
 requires_admissibility_check(::JacobianKind{slot, FrozenQ}) where {slot} = false

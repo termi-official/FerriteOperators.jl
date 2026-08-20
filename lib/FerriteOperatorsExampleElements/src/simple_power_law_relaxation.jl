@@ -71,7 +71,7 @@ stage_scaling(ctx::InexactLocalSolveContext) = stage_scaling(ctx.inner)
 @doc raw"""
     SimpleCondensedPowerLawRelaxation(material_parameters, qrc, field_name, internal_name;
                                        local_solver = LocalNewtonSettings(),
-                                       condensation = Separate(), corrector = Stored())
+                                       corrector = Stored())
 
 Diffusion of a scalar field `u` exchanging with a condensed
 per-quadrature-point internal state `q` across a power-law (Norton) dashpot:
@@ -100,28 +100,24 @@ Two channels connect the local solver to the outer one:
   * inner → outer: the [`CondensationReport`](@ref) [`condense_internal!`](@ref)
     returns.
 
-`condensation`/`corrector` are construction-time seams
-([`CondensationElection`](@ref)/[`CorrectorElection`](@ref)); only their
-defaults (`Separate()`/`Stored()`) are implemented.
+`corrector` is a construction-time seam ([`CorrectorElection`](@ref)); only
+its default (`Stored()`) is implemented.
 """
-struct SimpleCondensedPowerLawRelaxation{Cond <: CondensationElection, Corr <: CorrectorElection} <: AbstractCondensedNonlinearIntegrator
+struct SimpleCondensedPowerLawRelaxation{Corr <: CorrectorElection} <: AbstractCondensedNonlinearIntegrator
     material_parameters::NortonRelaxationParameters
     # Every integrator needs these
     qrc::QuadratureRuleCollection
     field_name::Symbol
     internal_name::Symbol
     local_solver::LocalNewtonSettings
-    condensation::Cond
     corrector::Corr
 end
 function SimpleCondensedPowerLawRelaxation(material_parameters, qrc, field_name, internal_name;
-        local_solver = LocalNewtonSettings(), condensation = Separate(), corrector = Stored())
-    condensation isa Separate || condensation_election_error(condensation)
+        local_solver = LocalNewtonSettings(), corrector = Stored())
     corrector isa Stored || corrector_election_error(corrector)
     return SimpleCondensedPowerLawRelaxation(material_parameters, qrc, field_name, internal_name,
-                                              local_solver, condensation, corrector)
+                                              local_solver, corrector)
 end
-FerriteOperators.condensation_election(integrator::SimpleCondensedPowerLawRelaxation) = integrator.condensation
 FerriteOperators.corrector_election(integrator::SimpleCondensedPowerLawRelaxation) = integrator.corrector
 
 """

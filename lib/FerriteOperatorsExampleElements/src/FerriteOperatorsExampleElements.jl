@@ -36,7 +36,6 @@ import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!,
     JacobianKind, JacobianResidualKind, JacobianRequest, JacobianResidualRequest,
     ParameterJacobianKind, ParameterJacobianRequest,
     CondensationReport, condense_cell!,
-    CondensationElection, Separate, FusedWithResidual, condensation_election, condensation_election_error,
     CorrectorElection, Stored, Recompute, corrector_election, corrector_election_error,
     ItemStates, item_state, set_item_state!, has_item_state, invalidate_item_states!
 

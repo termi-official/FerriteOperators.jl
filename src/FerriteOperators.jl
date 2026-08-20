@@ -108,7 +108,6 @@ export AffineRate, InternalSource
 export CorrectionMode, Consistent, FrozenQ
 export CondensationReport, condense_internal!, condense_cell!, CondensationKind
 export condensed_update_linearization!, rollback_state!, commit_state!, invalidate_correctors!
-export CondensationElection, Separate, FusedWithResidual, condensation_election, condensation_election_error
 export CorrectorElection, Stored, Recompute, corrector_election, corrector_election_error
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
 export WeightedJacobianRequest

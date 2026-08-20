@@ -30,6 +30,7 @@ patterns marked ⚠ below.
 | `Ferrite.getnquadpoints`/`reinit!` via `.cv`/`.fv` field fallback | define `Ferrite.getnquadpoints` and `reinit_values!` explicitly on your cache |
 | `FerriteOperators.Simple*` example elements | `FerriteOperatorsExampleElements` — a separate package under `lib/`, exporting the integrators |
 | `*MultiDomainIntegrator(Dict(sdh => integrator))` | `*MultiDomainIntegrator(Dict("cellset_name" => integrator))` — volumetric cellset names, validated at setup |
+| `CondensationElection`, `Separate`, `FusedWithResidual`, `condensation_election`, `condensation_election_error` | removed — `condense_internal!` is unconditionally its own domain traversal |
 
 Constructor *calls* like `SequentialAssemblyStrategy(device)` still work — the
 names are convenience constructors for the common strategy compositions. Only

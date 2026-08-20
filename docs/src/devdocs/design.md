@@ -73,11 +73,11 @@ is made by the *shape* of the information, not by which layer produced it.
 
 | shape | channel | notes |
 |---|---|---|
-| dof-shaped, one value per dof | a **slot** (`args.states.<name>`) | histories, rates, adjoint directions, stochastic realizations — anything the operator can gather with a dof map. Slots may be plain vectors, [`AffineRate`](@ref) reconstructions, or — for a condensed element's internal state `q` — [`InternalSource`](@ref) restrictions (see [Condensed elements](elements.md#Condensed-elements-(internal-variables))). |
+| dof-shaped, one value per dof | a **slot** (`args.states.<name>`) | histories, rates, adjoint directions, stochastic realizations — anything the operator can gather with a dof map. Slots may be plain vectors, [`AffineRate`](@ref) reconstructions, or — for a condensed element's internal state `q` — [`InternalSource`](@ref) restrictions (see [Condensed elements](../elements.md#Condensed-elements-(internal-variables))). |
 | point-shaped, one value per quadrature point | quadrature storage and the **query seams** | [`QVector`](@ref) for stored per-QP data; [`query_cell_parameters`](@ref) / [`query_facet_parameters`](@ref) for element-owned gathers, including parameter fields. |
 | a scalar of *this* sweep | **`args.ctx`** | `t`, `Δt`, `γ̃` in [`TimeIntegrationContext`](@ref). A scheme with richer per-sweep scalars passes its own context type; framework code touches contexts only through [`evaluation_time`](@ref), [`with_time`](@ref) and [`stage_scaling`](@ref). |
 | configuration, constant across the sweep | **`args.p`** | material parameters and the user's bag. Never time, never history. `p` stays opaque: [`unwrap_parameters`](@ref) is the one place a solver-side wrapper is unwrapped. |
-| per-worker mutable working memory | **element cache fields** | duplicated — not aliased — per worker by `duplicate_for_device`, see [storage classes for elements with local problems](elements.md). |
+| per-worker mutable working memory | **element cache fields** | duplicated — not aliased — per worker by `duplicate_for_device`, see [storage classes for elements with local problems](../elements.md). |
 | a scheme scalar attached to a slot | request payload | rides on the request instead of the args bundle — that is what [`WeightedJacobianKind`](@ref) does with its weights. |
 
 Two consequences worth stating explicitly.
@@ -202,7 +202,7 @@ by protocol declaration. The workspace itself is immutable, so a sweep fills
 buffers and never rebinds a field. There is no third, downstream-openable
 family: an element cache wanting its own per-worker scratch carries it as an
 ordinary cache field, duplicated per worker by its own `duplicate_for_device`
-(see [storage classes for elements with local problems](elements.md)).
+(see [storage classes for elements with local problems](../elements.md)).
 
 **New AD backends** — [`ADElementCache`](@ref)'s `backend` field is the seam:
 [`ForwardDiffAD`](@ref) is the default, and a downstream extension implements

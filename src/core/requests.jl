@@ -521,8 +521,9 @@ has_internal_state(::Type) = false
 
 Author-asserted declaration that the element-local internal-state equations
 do NOT depend on the quantity the sensitivity `kind` seeds (`∂L/∂seed ≡ 0`).
-When true, `dq/∂seed = 0` and plain AD-from-residual is exactly correct even
-through the local solve — zero seed partials propagate exactly. The framework
+When true, `dq/∂seed = 0`, so the total collapses to the frozen-q partial
+plain AD-from-residual already computes on the (now pure) residual kernel —
+there is nothing left for the ∂F/∂q·dq/∂seed correction to add. The framework
 CANNOT verify this claim; a wrong assertion produces a silently wrong
 sensitivity. Same trust model as [`provides_analytic`](@ref).
 """

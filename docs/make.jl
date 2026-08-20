@@ -19,13 +19,17 @@ makedocs(;
         "Home" => "index.md",
         "Writing elements" => "elements.md",
         "Element API reference" => "element-api.md",
+        "Provided integrators and caches" => "provided-elements.md",
         "Example elements" => "example-elements.md",
         "Operators and entry points" => "operators.md",
         "Operator API reference" => "operator-api.md",
         "Assembly engine API reference" => "engine-api.md",
         "Patch items" => "patches.md",
-        "The layer contract" => "design.md",
         "Migration to 0.4" => "migration.md",
+        "Developer documentation" => [
+            "The layer contract" => "devdocs/design.md",
+            "Design rationale" => "devdocs/rationale.md",
+        ],
     ],
 )
 
