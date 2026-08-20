@@ -464,42 +464,6 @@ end
     @test_logs setup_operator(strategy, bnd(), dh)
 end
 
-# --- The kernel-args channel protocol at setup ---
-
-# Two caches differing only in how open their residual kernel's args parameter
-# is, plus an args family unrelated to `KernelArgs` that carries the same
-# channels.
-struct LooseArgsCache <: FerriteOperators.AbstractVolumetricElementCache end
-FerriteOperators.assemble_cell!(::ResidualRequest, ::LooseArgsCache, args) = nothing
-FerriteOperators.reinit_values!(::LooseArgsCache, cell) = nothing
-
-struct PinnedArgsCache <: FerriteOperators.AbstractVolumetricElementCache end
-FerriteOperators.assemble_cell!(::ResidualRequest, ::PinnedArgsCache, args::KernelArgs) = nothing
-FerriteOperators.reinit_values!(::PinnedArgsCache, cell) = nothing
-
-struct ForeignArgs{S, C, P, Sc, Cx}
-    states::S
-    cell::C
-    p::P
-    scratch::Sc
-    ctx::Cx
-end
-
-@testset "Kernel-args channel protocol" begin
-    @testset "validation queries the operator family's own args type" begin
-        @test isnothing(FerriteOperators.validate_element_cache(LooseArgsCache()))
-        @test isnothing(FerriteOperators.validate_element_cache(LooseArgsCache(), (), ForeignArgs))
-        # the pinned kernel does not exist as far as another args family is concerned
-        @test_throws ArgumentError FerriteOperators.validate_element_cache(
-            PinnedArgsCache(), (), ForeignArgs)
-    end
-
-    @testset "pinned kernels earn an advisory warning, loose ones do not" begin
-        @test_logs FerriteOperators.validate_element_cache(LooseArgsCache())
-        @test_logs (:warn, r"pins its residual kernel") FerriteOperators.validate_element_cache(PinnedArgsCache())
-    end
-end
-
 # `@allocated` has to be measured from inside a function. At testset scope the
 # operators and buffers are captured variables, and on Julia 1.10 the boxing of
 # those captures is charged to the call being measured — a fixed cost of the

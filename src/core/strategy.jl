@@ -129,7 +129,6 @@ Core fields:
 - `ivh`: internal variable handler
 - `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
 - `boundary_element`: surface cache walked by the facet driver
-- `scratch`/`scratch_decls`: per-worker scratch instances and their constructors
 
 Sweep-state family, `nothing` when no declared or mandatory kind needs it:
 - `ad`: derivative-sweep buffers and ForwardDiff configs ([`ADWorkspace`](@ref))
@@ -142,8 +141,6 @@ Sweep-state family, `nothing` when no declared or mandatory kind needs it:
     ivh
     element
     boundary_element
-    scratch        # per-worker scratch instances: solver-declared ∪ element-declared
-    scratch_decls  # the nullary constructors, kept for per-worker re-instantiation
     ad             # derivative family: ADWorkspace, or `nothing`
 end
 
@@ -155,14 +152,13 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
         duplicate_for_device(device, ws.boundary_element),
         ws.cell.dh,
         duplicate_for_device(device, ws.ivh),
-        keys(ws.slot_buffers),
-        ws.scratch_decls;
+        keys(ws.slot_buffers);
         derivative_family = ws.ad !== nothing,
     )
 end
 
 """
-    create_assembly_workspace(element, boundary_element, sdh, ivh, slots, scratch_decls;
+    create_assembly_workspace(element, boundary_element, sdh, ivh, slots;
                               derivative_family = true)
 
 Create a single [`AssemblyWorkspace`](@ref) with freshly allocated
@@ -175,7 +171,7 @@ engine derives it from the protocol's declared kinds and the integrator
 family's mandatory kinds, so an operator that never differentiates carries no
 ForwardDiff machinery at all.
 """
-function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,), scratch_decls::NamedTuple = (;);
+function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
         derivative_family::Bool = true) where {N}
     slot_buffers = NamedTuple{slots}(ntuple(_ -> allocate_element_unknown_vector(element, sdh), N))
     return AssemblyWorkspace(
@@ -186,8 +182,6 @@ function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::N
         ivh,
         element,
         boundary_element,
-        map(f -> f(), scratch_decls),
-        scratch_decls,
         derivative_family ? create_ad_workspace(element, sdh) : nothing,
     )
 end

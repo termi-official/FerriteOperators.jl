@@ -33,10 +33,8 @@ FerriteOperators.evaluate_cell_functional(::FunctionalKind{:mass}, cache::AnyDif
 # solves with, and the residual. No coefficients — γ and Δt ride with the
 # evaluation, not with the declaration.
 struct SDIRKWProtocol <: AbstractSchemeProtocol end
-FerriteOperators.get_declared_slots(::SDIRKWProtocol)     = (:u, :du)
-FerriteOperators.get_declared_kinds(::SDIRKWProtocol)     = (WeightedJacobianKind, ResidualKind)
-FerriteOperators.get_declared_scratch(::SDIRKWProtocol)   = (;)
-FerriteOperators.get_declared_args_type(::SDIRKWProtocol) = KernelArgs
+FerriteOperators.get_declared_slots(::SDIRKWProtocol) = (:u, :du)
+FerriteOperators.get_declared_kinds(::SDIRKWProtocol) = (WeightedJacobianKind, ResidualKind)
 
 function protocol_testbed(; fused = false, protocol = SDIRKWProtocol())
     grid = generate_grid(Quadrilateral, (3, 2))
@@ -63,10 +61,6 @@ end
         p = SDIRKWProtocol()
         @test get_declared_slots(p) == (:u, :du)
         @test get_declared_kinds(p) == (WeightedJacobianKind, ResidualKind)
-        @test get_declared_scratch(p) == (;)
-        @test get_declared_args_type(p) === KernelArgs
-        # the element-side scratch hook must not silently swallow a protocol
-        @test_throws ArgumentError FerriteOperators.declare_scratch(p)
     end
 
     # A protocol only declares; the weighted-Jacobian VALUES on both routes are
@@ -277,10 +271,8 @@ FerriteOperators.provides_analytic(::Type{<:AnyDiffusionCache}, ::OrphanKind) = 
 struct CustomKindProtocol{K <: Tuple} <: AbstractSchemeProtocol
     kinds::K
 end
-FerriteOperators.get_declared_slots(::CustomKindProtocol)     = (:u, :du)
-FerriteOperators.get_declared_kinds(p::CustomKindProtocol)    = p.kinds
-FerriteOperators.get_declared_scratch(::CustomKindProtocol)   = (;)
-FerriteOperators.get_declared_args_type(::CustomKindProtocol) = KernelArgs
+FerriteOperators.get_declared_slots(::CustomKindProtocol)  = (:u, :du)
+FerriteOperators.get_declared_kinds(p::CustomKindProtocol) = p.kinds
 
 # Measured inside a function: at testset scope `A` and the operator are
 # captured variables, and on Julia 1.10 the boxing of those captures is charged

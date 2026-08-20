@@ -196,7 +196,7 @@ sweep_family(::Type{K}) where {K} =
     sweep_state(ws, kind)
 
 The per-worker member serving `kind`'s sweep family. The workspace is a fixed
-CORE (geometry cache, element caches, slot buffers, scratch, `Ke`/`re`) plus
+CORE (geometry cache, element caches, slot buffers, `Ke`/`re`) plus
 kind-family members that exist only when the operator's declarations call for
 them: derivative kinds read the [`ADWorkspace`](@ref). The other two families
 have no member to read — a `NoFamily` kind works out of the core, and a
@@ -366,8 +366,9 @@ function primal_cell_sweep!(kind, task, ws)
     scatter_local!(kind, task.inner_assembler, ws)
 end
 
-# The single KernelArgs construction seam.
-_kernel_args(ws, statesₑ, pₑ, ctx) = KernelArgs(statesₑ, ws.cell, pₑ, ws.scratch, ctx)
+# The single CellArgs/FacetArgs construction seams.
+_cell_args(ws, statesₑ, pₑ, ctx) = CellArgs(statesₑ, ws.cell, pₑ, ctx)
+_facet_args(ws, statesₑ, pₑ, ctx) = FacetArgs(statesₑ, ws.cell, pₑ, ctx)
 
 # The framework-owned facet driver: walk the cell's facets, gate on
 # is_facet_in_cache, query facet parameters SEPARATELY per facet, and hand the
@@ -378,7 +379,7 @@ function boundary_kernel!(kind, cache::AbstractSurfaceElementCache, ws, states�
         if is_facet_in_cache(FacetIndex(cellid(ws.cell), lfi), ws.cell, cache)
             pᵦ = query_facet_parameters(cache, ws.cell, lfi, task.p)
             assemble_facet!(materialize_request(kind, ws), cache,
-                            _kernel_args(ws, statesₑ, pᵦ, task.ctx), lfi)
+                            _facet_args(ws, statesₑ, pᵦ, task.ctx), lfi)
         end
     end
 end
@@ -388,10 +389,10 @@ end
 # means the WEIGHTED facet kernel: per-slot facet kernels are not composed
 # behind the driver's back.
 function cell_kernel!(kind::ResidualKind, cache, ws, statesₑ, pₑ, ctx)
-    assemble_cell!(materialize_request(kind, ws), cache, _kernel_args(ws, statesₑ, pₑ, ctx))
+    assemble_cell!(materialize_request(kind, ws), cache, _cell_args(ws, statesₑ, pₑ, ctx))
 end
 function cell_kernel!(kind::JacobianKind{slot}, cache, ws, statesₑ, pₑ, ctx) where {slot}
-    args = _kernel_args(ws, statesₑ, pₑ, ctx)
+    args = _cell_args(ws, statesₑ, pₑ, ctx)
     if provides_analytic(typeof(cache), kind)
         assemble_cell!(materialize_request(kind, ws), cache, args)
     else
@@ -399,7 +400,7 @@ function cell_kernel!(kind::JacobianKind{slot}, cache, ws, statesₑ, pₑ, ctx)
     end
 end
 function cell_kernel!(kind::WeightedJacobianKind, cache, ws, statesₑ, pₑ, ctx)
-    args = _kernel_args(ws, statesₑ, pₑ, ctx)
+    args = _cell_args(ws, statesₑ, pₑ, ctx)
     if provides_analytic(typeof(cache), kind)
         assemble_cell!(materialize_request(kind, ws), cache, args)
     else
@@ -407,7 +408,7 @@ function cell_kernel!(kind::WeightedJacobianKind, cache, ws, statesₑ, pₑ, ct
     end
 end
 function cell_kernel!(kind::JacobianResidualKind, cache, ws, statesₑ, pₑ, ctx)
-    args = _kernel_args(ws, statesₑ, pₑ, ctx)
+    args = _cell_args(ws, statesₑ, pₑ, ctx)
     if provides_analytic(typeof(cache), kind)
         assemble_cell!(materialize_request(kind, ws), cache, args)
     elseif provides_analytic(typeof(cache), JacobianKind())
@@ -425,7 +426,7 @@ end
 # elements used in these operators — and what a downstream kind riding
 # [`primal_cell_sweep!`](@ref) gets without writing a kernel dispatch of its own.
 cell_kernel!(kind, cache, ws, statesₑ, pₑ, ctx) =
-    assemble_cell!(materialize_request(kind, ws), cache, _kernel_args(ws, statesₑ, pₑ, ctx))
+    assemble_cell!(materialize_request(kind, ws), cache, _cell_args(ws, statesₑ, pₑ, ctx))
 
 # Sensitivity sweeps: gather the trial state, never write anything back into
 # `u`, and route through analytic kernels or AD-from-residual. Local outputs
@@ -447,7 +448,7 @@ function sensitivity_cell_sweep!(kind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
     statesₑ = load_slots!(ws, task.states)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
-    args = _kernel_args(ws, statesₑ, pₑ, task.ctx)
+    args = _cell_args(ws, statesₑ, pₑ, task.ctx)
     @timeit_debug "assemble sensitivity" sensitivity_kernel!(kind, task, ws, args)
 end
 
@@ -529,7 +530,7 @@ function functional_cell_sweep(kind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
     statesₑ = load_slots!(ws, task.states)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
-    return evaluate_cell_functional(kind, ws.element, _kernel_args(ws, statesₑ, pₑ, task.ctx))
+    return evaluate_cell_functional(kind, ws.element, _cell_args(ws, statesₑ, pₑ, task.ctx))
 end
 
 function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, args)
@@ -584,7 +585,7 @@ function _check_differentiated_slot(kind::JacobianKind{slot}, engine, states::Na
     # already covered by the setup-time validation.
     if slot !== :u
         for sc in engine.subdomain_caches
-            _assert_trait_backed(typeof(sc.domain.element), kind, kernel_args_type(engine))
+            _assert_trait_backed(typeof(sc.domain.element), kind)
         end
     end
     return nothing
@@ -613,7 +614,7 @@ function _check_differentiated_slot(kind::WeightedJacobianKind{slots}, engine, s
             "since it forms the combination itself), or pass plain vector sources."))
     end
     for sc in engine.subdomain_caches
-        _assert_trait_backed(typeof(sc.domain.element), kind, kernel_args_type(engine))
+        _assert_trait_backed(typeof(sc.domain.element), kind)
     end
     return nothing
 end

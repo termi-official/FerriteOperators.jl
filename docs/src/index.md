@@ -80,16 +80,16 @@ end
    `SequentialAssemblyStrategy(device)`, `PerColorAssemblyStrategy(device)`
    and `ElementAssemblyStrategy(device)` are convenience constructors for the
    common compositions.
-3. **The scheme protocol** carries the setup-time declarations — slot names,
-   request kinds, per-worker scratch, kernel-args type.
+3. **The scheme protocol** carries the setup-time declarations — slot names
+   and request kinds.
 4. **The assembly engine** ([`AssemblyEngine`](@ref)) holds the strategy, the
    per-subdomain caches (workspaces + partitions), the dof handler, and the
    protocol. Operators are a payload (matrix/vector) plus an engine plus their
    integrator.
 5. **Workspaces** hold pre-allocated per-worker data: a fixed core of local
    matrices and residuals, one state buffer per declared slot, the geometry
-   cache, the element caches and declared scratch — plus the sweep-state
-   families the declarations call for.
+   cache and the element caches — plus the sweep-state families the
+   declarations call for.
 
 All operator entry points funnel into one task body executed by a shared
 device loop:
@@ -106,8 +106,8 @@ end
 
 ## Where to read on
 
-- [Writing elements](elements.md) — request-typed kernels, the kernel-args
-  channel protocol, values reinitialization, parameter queries, analytic
+- [Writing elements](elements.md) — request-typed kernels, the cell/facet
+  argument bundle, values reinitialization, parameter queries, analytic
   opt-ins, condensed elements, functionals.
 - [Operators and entry points](operators.md) — setup and scheme protocols,
   the assembly entry points, slots and rate reconstruction, sensitivities,

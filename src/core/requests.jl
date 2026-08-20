@@ -159,61 +159,59 @@ struct AffineRate{T, V <: AbstractVector}
 end
 
 """
-    KernelArgs(states, cell, p, scratch, ctx)
+    CellArgs(states, cell, p, ctx)
 
-The in-repo realization of the **kernel-args channel protocol** — the argument
-bundle the engine hands to cell and facet kernels.
+The argument bundle a cell kernel's third parameter receives.
 
-# The channel protocol
-
-The contract between an element kernel and the object in its third argument is
-structural (a Tables.jl-style protocol), not a type hierarchy: there is no
-supertype, and kernels never dispatch on the args — selection is carried
-entirely by the `(request, cache)` pair. An args family is anything providing
-the channels a kernel reads and the rebuild seams the framework needs:
-
-| channel | semantics |
+| field | owner / lifetime |
 |---|---|
-| `args.states` | cell-local slot buffers, one per slot declared at setup (`(u = uₑ, uprev = uₑprev, …)`) |
-| `args.cell` | the geometry cache of the current item — READ-ONLY for kernels |
-| `args.p` | the element-local user parameter view from [`query_cell_parameters`](@ref) — configuration only, never time or history |
-| `args.scratch` | per-worker scratch, solver-declared ∪ element-declared ([`declare_scratch`](@ref)) |
-| `args.ctx` | per-sweep solver scalars — the [`TimeIntegrationContext`](@ref) `(t, Δt, γ̃)`, or `nothing` for stationary sweeps |
+| `states` | the engine; one cell-local slot buffer per slot declared at setup (`(u = uₑ, uprev = uₑprev, …)`), refreshed every sweep |
+| `cell` | the engine; the geometry cache of the current item — READ-ONLY for kernels |
+| `p` | the element; the cell-local parameter view from [`query_cell_parameters`](@ref) — configuration only, never time or history |
+| `ctx` | the solver; the per-sweep scalars — the [`TimeIntegrationContext`](@ref) `(t, Δt, γ̃)`, or `nothing` for stationary sweeps. This is the one open channel: a scheme with richer per-sweep scalars passes its own context type, read through [`evaluation_time`](@ref)/[`with_time`](@ref)/[`stage_scaling`](@ref) instead of field access. |
 
-Per-slot metadata is reserved protocol vocabulary: a future args family may
-carry a per-slot property, and this package's family carries none.
+Kernels select on the `(request, cache)` pair, never on `args`, so annotating
+the parameter (`args::CellArgs`) is permitted.
 
-Three rebuild seams — plain generic functions, one method per args family, no
-abstract fallback — let the framework re-seed a channel while preserving all
-others: [`with_states`](@ref) (state derivative sweeps),
-[`with_parameters`](@ref) (parameter sweeps), and [`with_context`](@ref)
-(the ∂F/∂t sweep). A family lacking a seam is a `MethodError` on the sweep
-that needs it, never a silently unseeded derivative.
+Hand-constructing an instance is the supported way to unit-test a kernel
+without an operator:
 
-Element kernels are therefore written against channel *names* with the args
-parameter left UNANNOTATED, so an element composes with any operator family's
-args type. `KernelArgs` is what this package's operators build; it is not the
-contract.
+    args = CellArgs((u = uₑ,), cell_cache, p, nothing)
+    assemble_cell!(ResidualRequest(rₑ), cache, args)
 """
-struct KernelArgs{States <: NamedTuple, Cell, P, Scratch, Ctx}
+struct CellArgs{States <: NamedTuple, Cell, P, Ctx}
     states::States
     cell::Cell
     p::P
-    scratch::Scratch
     ctx::Ctx
 end
 
-"Rebuild `args` with the slot buffers replaced — the state seeding seam."
-with_states(args::KernelArgs, states::NamedTuple) =
-    KernelArgs(states, args.cell, args.p, args.scratch, args.ctx)
+"""
+    FacetArgs(states, cell, p, ctx)
 
-"Rebuild `args` with the element-local parameter view replaced — the parameter seeding seam."
-with_parameters(args::KernelArgs, p) =
-    KernelArgs(args.states, args.cell, p, args.scratch, args.ctx)
+The argument bundle a facet kernel's third parameter receives — the same four
+fields as [`CellArgs`](@ref) (see its docstring), built by the framework's
+facet driver. `CellArgs` and `FacetArgs` share no supertype: a cell kernel and
+a facet kernel never meet at the same dispatch site.
+"""
+struct FacetArgs{States <: NamedTuple, Cell, P, Ctx}
+    states::States
+    cell::Cell
+    p::P
+    ctx::Ctx
+end
+
+"Rebuild `args` with the slot buffers replaced."
+with_states(args::CellArgs, states::NamedTuple) = CellArgs(states, args.cell, args.p, args.ctx)
+with_states(args::FacetArgs, states::NamedTuple) = FacetArgs(states, args.cell, args.p, args.ctx)
+
+"Rebuild `args` with the element-local parameter view replaced."
+with_parameters(args::CellArgs, p) = CellArgs(args.states, args.cell, p, args.ctx)
+with_parameters(args::FacetArgs, p) = FacetArgs(args.states, args.cell, p, args.ctx)
 
 "Rebuild `args` with the per-sweep context replaced — the ∂F/∂t seeding seam."
-with_context(args::KernelArgs, ctx) =
-    KernelArgs(args.states, args.cell, args.p, args.scratch, ctx)
+with_context(args::CellArgs, ctx) = CellArgs(args.states, args.cell, args.p, ctx)
+with_context(args::FacetArgs, ctx) = FacetArgs(args.states, args.cell, args.p, ctx)
 
 """
     assemble_cell!(req::AbstractAssemblyRequest, cache, args)
@@ -223,9 +221,7 @@ The volumetric kernel entry point. Elements must at least provide the
 differentiation of the residual kernel unless [`provides_analytic`](@ref)
 declares an analytic method.
 
-`args` is a kernel-args bundle satisfying the channel protocol (see
-[`KernelArgs`](@ref)) — leave the parameter unannotated so the element serves
-every operator family.
+`args` is a [`CellArgs`](@ref); annotating the parameter is permitted.
 """
 function assemble_cell! end
 
@@ -279,18 +275,7 @@ wrong. Kernel/trait consistency is validated once at operator setup
 provides_analytic(::Type, kind) = kind isa ResidualKind
 
 """
-    kernel_args_type(engine) -> Type
-
-The concrete kernel-args type an operator family builds. Setup-time method
-lookups query with this type, because `hasmethod` against an abstract or
-`Any` queried type misses concretely annotated kernel methods. Operator
-families building their own args family override it; the default is
-[`KernelArgs`](@ref).
-"""
-kernel_args_type(engine) = KernelArgs
-
-"""
-    validate_element_cache(cache, declared_requests = (), ArgsType = KernelArgs)
+    validate_element_cache(cache, declared_requests = ())
 
 Setup-time consistency check for element caches: a cache that opts into the
 request protocol must implement the mandatory [`ResidualRequest`](@ref)
@@ -298,9 +283,6 @@ kernel, and every request kind the [`provides_analytic`](@ref) trait claims
 must have a matching kernel method. Runs once per subdomain at
 `setup_operator` time — a typo'd port fails loudly here instead of silently
 assembling through the wrong path.
-
-`ArgsType` is the concrete kernel-args type the operator family will pass
-([`kernel_args_type`](@ref)); method existence is queried against it.
 
 The trait ↔ kernel check always covers the primal kinds (the operator will
 issue them). Every kind [`requires_admissibility_check`](@ref) names
@@ -311,30 +293,25 @@ other kind only when declared via
 `setup_operator(...; requests = (ParameterVJPKind, …))`. Undeclared,
 non-primal kinds stay usable — their checks simply run at the call-time entry
 points.
-
-The check also warns (advisory, never an error) about a residual kernel that
-annotates its args parameter concretely — see [`KernelArgs`](@ref) for why
-kernels leave it open.
 """
-function validate_element_cache(cache, declared_requests::Tuple = (), ::Type{A} = KernelArgs) where {A}
+function validate_element_cache(cache, declared_requests::Tuple = ())
     T = typeof(cache)
-    hasmethod(assemble_cell!, Tuple{ResidualRequest, T, A}) || throw(ArgumentError(
-        "$(T) implements no `assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::$(A))` " *
+    hasmethod(assemble_cell!, Tuple{ResidualRequest, T, CellArgs}) || throw(ArgumentError(
+        "$(T) implements no `assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::CellArgs)` " *
         "method. The residual kernel is mandatory: it is the basis for AD-derived Jacobians " *
         "and sensitivities."))
     hasmethod(reinit_values!, Tuple{T, CellCache}) || throw(ArgumentError(
         "$(T) implements no `reinit_values!(::$(nameof(T)), cell)` method. The engine " *
         "reinitializes element values once per cell and sweep through this hook; " *
         "kernels are pure evaluation and must not rely on reinit inside them."))
-    _warn_pinned_kernel_args(T, A)
     for kind in _primal_validatable_kinds()
-        _assert_trait_backed(T, kind, A)
+        _assert_trait_backed(T, kind)
         requires_admissibility_check(kind) && assert_sensitivity_admissible(T, kind)
     end
     for K in declared_requests
         has_cell_request(K) || continue
         kind = validation_instance(K)
-        _assert_trait_backed(T, kind, A)
+        _assert_trait_backed(T, kind)
         requires_admissibility_check(kind) && assert_sensitivity_admissible(T, kind)
     end
     return nothing
@@ -387,32 +364,13 @@ is `false`, so a downstream kind opts in.
 """
 requires_admissibility_check(kind) = false
 
-function _assert_trait_backed(T, kind, ::Type{A} = KernelArgs) where {A}
+function _assert_trait_backed(T, kind)
     ReqT = request_type(kind)
-    if provides_analytic(T, kind) && !hasmethod(assemble_cell!, Tuple{ReqT, T, A})
+    if provides_analytic(T, kind) && !hasmethod(assemble_cell!, Tuple{ReqT, T, CellArgs})
         throw(ArgumentError(
             "$(T) declares `provides_analytic` for $(typeof(kind)) but implements no " *
-            "matching `assemble_cell!(::$(ReqT), ::$(nameof(T)), ::$(A))` method."))
+            "matching `assemble_cell!(::$(ReqT), ::$(nameof(T)), ::CellArgs)` method."))
     end
-    return nothing
-end
-
-# An unannotated kernel parameter reaches the method table as `Any`; a method
-# written with a free type variable (`args::X where X`) is equally open.
-_args_parameter_is_open(t) = t === Any || (t isa TypeVar && t.ub === Any)
-
-# Advisory only: a working element that merely trades away reuse. Keyed by
-# cache type so a repeated setup of the same element stays quiet.
-function _warn_pinned_kernel_args(::Type{T}, ::Type{A}) where {T, A}
-    m = which(assemble_cell!, Tuple{ResidualRequest, T, A})
-    argsig = Base.unwrap_unionall(m.sig).parameters[4]
-    _args_parameter_is_open(argsig) && return nothing
-    @warn "$(nameof(T)) pins its residual kernel to one kernel-args family: " *
-          "`assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::$(argsig))`. Kernel args are " *
-          "a structural channel protocol (states/cell/p/scratch/ctx plus the " *
-          "`with_states`/`with_parameters`/`with_context` seams), not a type hierarchy — an " *
-          "operator family building its own args type cannot use this element. Leave the " *
-          "args parameter unannotated." _id = Symbol(:pinned_kernel_args_, T) maxlog = 1
     return nothing
 end
 
@@ -471,33 +429,6 @@ CANNOT verify this claim; a wrong assertion produces a silently wrong
 sensitivity. Same trust model as [`provides_analytic`](@ref).
 """
 internal_state_insensitive(::Type, kind) = false
-
-"""
-    declare_scratch(cache) -> NamedTuple of nullary constructors
-
-Element-side scratch declaration: each entry is instantiated once per worker
-and reaches kernels via `args.scratch`. Solvers declare their own entries via
-`setup_operator(...; scratch = (name = () -> ...,))`; both land merged in the
-workspace.
-"""
-declare_scratch(cache) = (;)
-
-####################################
-## Reserved item shapes (contract space only)
-####################################
-
-"""
-    InterfaceKernelArgs
-
-RESERVED: the N-participant argument bundle for interface/pair items (DG
-facet pairs as the `N = 2` case, contact pairs, non-local one-to-many
-couplings with an indexed collection of secondary sides). Each participant
-carries its own states/geometry/restriction; `p`, `scratch`, and
-per-participant contexts ride alongside. Not implemented: the name and shape
-are reserved so an interface item family can adopt them without a breaking
-rename.
-"""
-abstract type InterfaceKernelArgs end
 
 ####################################
 ## Differentiable parameter protocol

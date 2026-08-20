@@ -108,7 +108,7 @@ end
         Kₑ¹ = zeros(ndofs(dhs), ndofs(dhs))
         Kₑ² = zeros(ndofs(dhs), ndofs(dhs))
 
-        args = KernelArgs((u = uₑs,), cell_cache_s, 0.0, nothing, nothing)
+        args = CellArgs((u = uₑs,), cell_cache_s, 0.0, nothing)
 
         # Volume
         assemble_cell!(JacobianResidualRequest(Kₑ¹, rₑ¹), FerriteOperators.EmptyVolumetricElementCache(), args)
@@ -127,14 +127,15 @@ end
         end
 
         # … and its kernels are no-ops, whichever facet they are handed
-        assemble_facet!(JacobianResidualRequest(Kₑ¹, rₑ¹), FerriteOperators.EmptySurfaceElementCache(), args, 1)
+        fargs = FacetArgs((u = uₑs,), cell_cache_s, 0.0, nothing)
+        assemble_facet!(JacobianResidualRequest(Kₑ¹, rₑ¹), FerriteOperators.EmptySurfaceElementCache(), fargs, 1)
         @test iszero(Kₑ¹)
         @test iszero(rₑ¹)
 
-        assemble_facet!(ResidualRequest(rₑ²), FerriteOperators.EmptySurfaceElementCache(), args, 1)
+        assemble_facet!(ResidualRequest(rₑ²), FerriteOperators.EmptySurfaceElementCache(), fargs, 1)
         @test iszero(rₑ²)
 
-        assemble_facet!(JacobianRequest{:u}(Kₑ²), FerriteOperators.EmptySurfaceElementCache(), args, 1)
+        assemble_facet!(JacobianRequest{:u}(Kₑ²), FerriteOperators.EmptySurfaceElementCache(), fargs, 1)
         @test iszero(Kₑ²)
     end
 
@@ -147,7 +148,7 @@ end
 
         element_cache = setup_test_cache(model, sdhs)
 
-        args = KernelArgs((;), cell_cache_s, 0.0, nothing, nothing)
+        args = CellArgs((;), cell_cache_s, 0.0, nothing)
         reinit_values!(element_cache, cell_cache_s)
         assemble_cell!(JacobianRequest{:u}(Kₑ¹), element_cache, args)
         @test !iszero(Kₑ¹)
@@ -258,10 +259,10 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
         Ferrite.reinit!(cc, 1)
         reinit_values!(composite, cc)
         rraw = zeros(ndofs_per_cell(sdh))
-        assemble_cell!(ResidualRequest(rraw), composite, KernelArgs((;), cc, p, nothing, nothing))
+        assemble_cell!(ResidualRequest(rraw), composite, CellArgs((;), cc, p, nothing))
         rown = zeros(ndofs_per_cell(sdh))
         pₑ = FerriteOperators.query_cell_parameters(composite, cc, p)
-        assemble_cell!(ResidualRequest(rown), composite, KernelArgs((;), cc, pₑ, nothing, nothing))
+        assemble_cell!(ResidualRequest(rown), composite, CellArgs((;), cc, pₑ, nothing))
         @test sum(rraw) ≈ 2 * p * 1.0 rtol = 1e-12
         @test sum(rown) ≈ (2.0 + 5.0) * p * 1.0 rtol = 1e-12
     end
@@ -276,7 +277,7 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
         ))
         cc = Ferrite.CellCache(sdh)
         Ferrite.reinit!(cc, 1)
-        args = KernelArgs((;), cc, nothing, nothing, nothing)
+        args = CellArgs((;), cc, nothing, nothing)
         K1 = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
         K2 = similar(K1); fill!(K2, 0.0)
         reinit_values!(built, cc); assemble_cell!(JacobianRequest{:u}(K1), built, args)

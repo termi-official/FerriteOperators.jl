@@ -22,7 +22,7 @@ function reference_patch_matrix(provider, i, cache, dh, u, p)
         uₑ .= u[celldofs(cc)]
         fill!(Ke, 0.0)
         FerriteOperators.assemble_cell!(JacobianRequest{:u}(Ke), cache,
-            KernelArgs((u = uₑ,), cc, p, nothing, nothing))
+            CellArgs((u = uₑ,), cc, p, nothing))
         dofs = celldofs(cc)
         for (j, gj) in pairs(dofs), (i2, gi) in pairs(dofs)
             KP[dofmap[gi], dofmap[gj]] += Ke[i2, j]
@@ -64,7 +64,7 @@ function reference_patch_vector(provider, i, cache, dh, terms)
             FerriteOperators.patch_term_active(t.restriction, group) || continue
             active = true
             FerriteOperators.assemble_patch_cell!(ResidualRequest(re), cache,
-                KernelArgs((;), cc, nothing, nothing, nothing), t.data)
+                CellArgs((;), cc, nothing, nothing), t.data)
         end
         active || continue
         for (l, g) in pairs(celldofs(cc))

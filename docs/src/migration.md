@@ -107,7 +107,7 @@ function assemble_element!(rₑ, uₑ, cell, cache::MyCache, p) ... end
 FerriteOperators.reinit_values!(c::MyCache, cell) = reinit!(c.cv, cell)
 
 # … one mandatory residual kernel (pure evaluation, no reinit) …
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args::CellArgs)
     uₑ = args.states.u
     pₑ = args.p
     # accumulate into req.r
@@ -115,7 +115,7 @@ end
 
 # … and optional analytic kernels, declared via a trait
 FerriteOperators.provides_analytic(::Type{<:MyCache}, ::FerriteOperators.JacobianKind) = true
-function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args)
+function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args::CellArgs)
     # accumulate into req.K
 end
 # fused Newton path: JacobianResidualRequest (req.K and req.r), kind JacobianResidualKind
@@ -129,15 +129,12 @@ several values objects specialize the kind-dispatched form to reinitialize
 only what a request needs). Facet kernels reinitialize their `FacetValues` per
 facet themselves.
 
-**Leave the `args` parameter unannotated.** Kernels select on the
-`(request, cache)` pair; the third argument is a *channel protocol*
-(`args.states`, `args.cell`, `args.p`, `args.scratch`, `args.ctx`) with no
-supertype, plus the three rebuild seams `with_states`, `with_parameters` and
-`with_context` that derivative sweeps re-seed channels through. `KernelArgs`
-is the type this package's operators build — annotating `args::KernelArgs`
-pins the element to that one family and makes it unusable to an operator
-family building its own args type. `setup_operator` emits an advisory warning
-per element cache whose residual kernel carries a concrete args annotation.
+**`args` is a [`CellArgs`](@ref)** (a [`FacetArgs`](@ref) for facet kernels) —
+four fields, `states`/`cell`/`p`/`ctx`, no supertype between the two. Kernels
+select on the `(request, cache)` pair, never on `args`, so annotating the
+parameter (`args::CellArgs`) is permitted; leaving it unannotated works the
+same. Derivative sweeps rebuild `args` with one field replaced through
+`with_states`, `with_parameters` and `with_context`.
 
 ## Time protocols (GTO1, Newmark)
 
@@ -237,30 +234,25 @@ are payload + engine + integrator; anything that read `op.dh`/`op.strategy`/
 keep working.
 
 The engine's setup-time declarations live on its scheme protocol:
-`get_declared_slots`, `get_declared_kinds` and `get_declared_args_type` of
-`op.engine.protocol`.
+`get_declared_slots` and `get_declared_kinds` of `op.engine.protocol`.
 
-## Solver-owned scratch
+## Per-worker mutable state
 
 The pattern of smuggling solver state into element caches (model-tree
-rewrites, parameter-bag payloads) is replaced by declared scratch:
-
-```julia
-op = setup_operator(strategy, integrator, dh;
-                    scratch = (local_solver = () -> MyLocalSolverCache(...),))
-# element side: FerriteOperators.declare_scratch(cache::MyCache) = (buf = () -> zeros(6),)
-# kernels: args.scratch.local_solver, args.scratch.buf — instantiated per worker
-```
+rewrites, parameter-bag payloads) has no args-channel replacement: per-worker
+mutable working memory is an ordinary cache field, duplicated — not aliased —
+per worker by `duplicate_for_device` (see [storage classes for elements with
+local problems](elements.md)).
 
 ## New capabilities worth adopting during the port
 
 - **Scheme protocols**: `setup_operator(strategy, integrator, dh, protocol)` is
   the positional form for scheme operators; the keyword form is sugar whose
   keywords are `DefaultProtocol`'s constructor arguments, so
-  `setup_operator(strategy, integrator, dh; slots, requests, scratch, args_type)`
-  keeps working verbatim. Declarations move admissibility failures from first
-  use to `setup_operator`, and select which per-worker sweep-state families
-  exist — a bilinear or linear operator carries no AD machinery.
+  `setup_operator(strategy, integrator, dh; slots, requests)` keeps working
+  verbatim. Declarations move admissibility failures from first use to
+  `setup_operator`, and select which per-worker sweep-state families exist —
+  a bilinear or linear operator carries no AD machinery.
 - **Sensitivities**: `update_parameter_jacobian!(B, op, states, p, ctx)`,
   `parameter_vjp!(g, op, λ, states, p, ctx)`,
   `time_sensitivity!(g, op, states, p, ctx)` (AD by default, analytic kernels
@@ -313,10 +305,10 @@ op = setup_operator(strategy, integrator, dh;
    and delete `reinit!` calls from cell-kernel bodies.
 5. Replace parameter-wrapper unwrapping hacks with one `unwrap_parameters`
    method; move facet-specific parameters into `query_facet_parameters`.
-6. Replace solver-state smuggling with `scratch` declarations.
-7. Drop `::KernelArgs` annotations from kernel signatures (setup warns about
-   the ones you miss), and move every kernel that read time out of `p` onto
-   `evaluation_time(args.ctx)`.
+6. Replace solver-state smuggling with an ordinary cache field, duplicated per
+   worker by `duplicate_for_device`.
+7. Move every kernel that read time out of `p` onto `evaluation_time(args.ctx)`.
+   Annotating `args::CellArgs`/`args::FacetArgs` is optional either way.
 8. Rename `residual!` call sites to `evaluate!`.
 9. Run your suite; every port failure except facets is a loud
    `MethodError`/`ArgumentError` at setup or first assembly.

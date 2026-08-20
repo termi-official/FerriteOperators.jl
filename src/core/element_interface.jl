@@ -102,10 +102,10 @@ abstract type AbstractSurfaceElementCache end
     assemble_facet!(req, cache, args, local_facet_index::Int)
 
 The volumetric-kernel analogue for facets: accumulate this facet's
-contribution to `req`'s buffers. Facet kernels reinitialize their own
-`FacetValues` for `local_facet_index`, and have no automatic-differentiation
-fallback — a surface cache serves the sweep's request analytically or not at
-all.
+contribution to `req`'s buffers. `args` is a [`FacetArgs`](@ref); annotating
+the parameter is permitted. Facet kernels reinitialize their own `FacetValues`
+for `local_facet_index`, and have no automatic-differentiation fallback — a
+surface cache serves the sweep's request analytically or not at all.
 """
 function assemble_facet! end
 
@@ -137,11 +137,7 @@ empty cache — "no boundary terms" is the legitimate common case.
 setup_boundary_cache(integrator, sdh) = EmptySurfaceElementCache()
 
 """
-Supertype for all caches to integrate over interfaces (facet pairs).
-
-Reserved for the DG work: interface kernels are request-typed over a
-two-sided argument bundle (see [`InterfaceKernelArgs`](@ref)); the
-one-to-many generalization for non-local coupling reserves its own shape.
-Concrete interface caches and their setup hook land with that work.
+Supertype for all caches to integrate over interfaces (facet pairs). Reserved
+for the DG work; concrete interface caches and their setup hook land with it.
 """
 abstract type AbstractInterfaceElementCache end

@@ -752,7 +752,7 @@ end
     cell_kernel!(ekind, iws.element, iws, statesₑ, pₑ, ctx)
 @inline run_patch_term!(ekind, data, iws, statesₑ, pₑ, ctx) =
     assemble_patch_cell!(materialize_request(ekind, iws), iws.element,
-                         _kernel_args(iws, statesₑ, pₑ, ctx), data)
+                         _cell_args(iws, statesₑ, pₑ, ctx), data)
 
 # --- the drivers -----------------------------------------------------------
 

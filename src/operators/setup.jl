@@ -9,13 +9,11 @@ A typed, DECLARATIONS-ONLY description of what a scheme asks of an operator,
 passed positionally: `setup_operator(strategy, problem, dh, protocol)`.
 
 A protocol declares exactly what setup consumes: [`get_declared_slots`](@ref)
-(the state slot names sweeps may carry), [`get_declared_kinds`](@ref) (the
-request kinds the operator will be asked to compute),
-[`get_declared_scratch`](@ref) (per-worker scratch constructors), and
-[`get_declared_args_type`](@ref) (the kernel-args type the engine builds).
-Those declarations size the per-worker slot buffers, select which sweep-state
-families are built ([`sweep_state`](@ref)), and drive the setup-time trait ↔
-kernel and internal-state admissibility checks.
+(the state slot names sweeps may carry) and [`get_declared_kinds`](@ref) (the
+request kinds the operator will be asked to compute). Those declarations size
+the per-worker slot buffers, select which sweep-state families are built
+([`sweep_state`](@ref)), and drive the setup-time trait ↔ kernel and
+internal-state admissibility checks.
 
 Protocols carry NO coefficients — γ, tableaus, and weights are per-evaluation
 solver data, not declarations — and nothing term-shaped: no per-term contexts,
@@ -49,45 +47,21 @@ the per-worker sweep-state families built eagerly.
 function get_declared_kinds end
 
 """
-    get_declared_scratch(protocol) -> NamedTuple of nullary constructors
-
-Solver-side scratch declaration, merged with the element-side
-[`declare_scratch`](@ref) into `args.scratch`. The two are separate hooks:
-`declare_scratch` is asked of element CACHES, `get_declared_scratch` of PROTOCOLS.
-"""
-function get_declared_scratch end
-
-"""
-    get_declared_args_type(protocol) -> Type
-
-The concrete kernel-args type the engine hands to element kernels; setup-time
-method lookups query against it (see [`kernel_args_type`](@ref)).
-"""
-function get_declared_args_type end
-
-# The element-side hook has an `Any` fallback returning `(;)`, so a protocol
-# passed to it would be silently ignored.
-declare_scratch(::AbstractSchemeProtocol) = throw(ArgumentError(
-    "`declare_scratch` is the ELEMENT-side scratch hook. A protocol declares its scratch " *
-    "through `get_declared_scratch`."))
-
-"""
-    DefaultProtocol(; slots = (:u,), requests = (), scratch = (;), args_type = KernelArgs)
+    DefaultProtocol(; slots = (:u,), requests = ())
 
 The protocol the keyword form of [`setup_operator`](@ref) lowers to — its
 constructor arguments ARE those keywords, so
-`setup_operator(strategy, integrator, dh; slots, requests, scratch, args_type)`
-and `setup_operator(strategy, integrator, dh, DefaultProtocol(; …))` build the
+`setup_operator(strategy, integrator, dh; slots, requests)` and
+`setup_operator(strategy, integrator, dh, DefaultProtocol(; …))` build the
 same operator. Declares no context type and no slot tags: the default world is
 `integrator + dh`, and a scheme that needs more declares its own protocol.
 """
-struct DefaultProtocol{slots, A, K <: Tuple, S <: NamedTuple} <: AbstractSchemeProtocol
+struct DefaultProtocol{slots, K <: Tuple} <: AbstractSchemeProtocol
     kinds::K       # a tuple of request-kind TYPES cannot ride in a type parameter
-    scratch::S
 end
-function DefaultProtocol(; slots = (:u,), requests::Tuple = (), scratch::NamedTuple = (;), args_type::Type = KernelArgs)
+function DefaultProtocol(; slots = (:u,), requests::Tuple = ())
     kinds = map(_kind_type, requests)
-    return DefaultProtocol{Tuple(slots), args_type, typeof(kinds), typeof(scratch)}(kinds, scratch)
+    return DefaultProtocol{Tuple(slots), typeof(kinds)}(kinds)
 end
 
 # Kind types or instances normalize to their UnionAll base, so a payload type
@@ -96,9 +70,7 @@ end
 _kind_type(r) = Base.typename(r isa Type ? r : typeof(r)).wrapper
 
 get_declared_slots(::DefaultProtocol{slots}) where {slots} = slots
-get_declared_args_type(::DefaultProtocol{slots, A}) where {slots, A} = A
 get_declared_kinds(protocol::DefaultProtocol) = protocol.kinds
-get_declared_scratch(protocol::DefaultProtocol) = protocol.scratch
 
 """
     mandatory_kinds(integrator) -> Tuple of request-kind types
@@ -168,14 +140,12 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
 end
 
 function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh;
-        slots::NTuple{<:Any, Symbol}, scratch::NamedTuple, derivative_family::Bool)
+        slots::NTuple{<:Any, Symbol}, derivative_family::Bool)
     device = strategy.device
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
-        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots,
-                                       merge(declare_scratch(element_cache), scratch);
-                                       derivative_family)
+        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots; derivative_family)
         dc = setup_device_instances(device, ws, n)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
     end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
@@ -185,32 +155,30 @@ end
     setup_engine(strategy, integrator, dh, protocol::AbstractSchemeProtocol)
 
 Build the [`AssemblyEngine`](@ref) shared by all operator kinds from the
-protocol's declarations: slot names size the per-worker slot buffers, declared
-kinds run their trait ↔ kernel and internal-state admissibility checks eagerly
-(instead of on first use) and — unioned with the integrator family's
-[`mandatory_kinds`](@ref) — select which per-worker sweep-state families are
-built, and the declared args type is what setup-time method lookups query
-against.
+protocol's declarations: slot names size the per-worker slot buffers, and
+declared kinds run their trait ↔ kernel and internal-state admissibility
+checks eagerly (instead of on first use) and — unioned with the integrator
+family's [`mandatory_kinds`](@ref) — select which per-worker sweep-state
+families are built.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
     requests          = get_declared_kinds(protocol)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     element_caches    = setup_elements(integrator, dh)
-    foreach(cache -> validate_element_cache(cache, requests, get_declared_args_type(protocol)), element_caches)
+    foreach(cache -> validate_element_cache(cache, requests), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
     ivh               = setup_internal_variable_handler(integrator, element_caches, dh)
     _warn_boundary_sensitivity(requests, boundary_caches)
     kinds             = (requests..., mandatory_kinds(integrator)...)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
                                                slots = get_declared_slots(protocol),
-                                               scratch = get_declared_scratch(protocol),
                                                derivative_family = needs_derivative_family(kinds))
     return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, protocol)
 end
 
 """
     setup_operator(strategy, problem, dh, protocol::AbstractSchemeProtocol)
-    setup_operator(strategy, problem, dh; slots = (:u,), requests = (), scratch = (;), args_type = KernelArgs)
+    setup_operator(strategy, problem, dh; slots = (:u,), requests = ())
 
 Build the operator for `problem` (an integrator) over `dh`. The positional
 form takes the scheme's declarations as a protocol
@@ -240,8 +208,8 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 end
 
 setup_operator(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler;
-        slots = (:u,), requests::Tuple = (), scratch::NamedTuple = (;), args_type::Type = KernelArgs) =
-    setup_operator(strategy, integrator, dh, DefaultProtocol(; slots, requests, scratch, args_type))
+        slots = (:u,), requests::Tuple = ()) =
+    setup_operator(strategy, integrator, dh, DefaultProtocol(; slots, requests))
 
 """
     init_transfer_sparsity_pattern(dh_row::DofHandler, dh_col::DofHandler)

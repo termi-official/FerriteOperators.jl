@@ -15,10 +15,10 @@ Three layers share the assembly pipeline, and every design question about
 
 ## The term layer
 
-An element expresses an integrand. It reads slot *values*, a parameter view, a
-per-sweep context, and its scratch — and nothing else. It does not know which
-time discretization produced the values in its slots, whether a Jacobian will
-be derived from it by automatic differentiation, or how many other terms share
+An element expresses an integrand. It reads slot *values*, a parameter view,
+and a per-sweep context — and nothing else. It does not know which time
+discretization produced the values in its slots, whether a Jacobian will be
+derived from it by automatic differentiation, or how many other terms share
 its cell.
 
 The consequence that makes the layering worth having: one element serves every
@@ -77,8 +77,8 @@ is made by the *shape* of the information, not by which layer produced it.
 | point-shaped, one value per quadrature point | quadrature storage and the **query seams** | [`QVector`](@ref) for stored per-QP data; [`query_cell_parameters`](@ref) / [`query_facet_parameters`](@ref) for element-owned gathers, including parameter fields. |
 | a scalar of *this* sweep | **`args.ctx`** | `t`, `Δt`, `γ̃` in [`TimeIntegrationContext`](@ref). A scheme with richer per-sweep scalars passes its own context type; framework code touches contexts only through [`evaluation_time`](@ref), [`with_time`](@ref) and [`stage_scaling`](@ref). |
 | configuration, constant across the sweep | **`args.p`** | material parameters and the user's bag. Never time, never history. `p` stays opaque: [`unwrap_parameters`](@ref) is the one place a solver-side wrapper is unwrapped. |
-| per-worker mutable working memory | **`args.scratch`** | declared by the solver (`scratch = (…)`) and/or the element ([`declare_scratch`](@ref)), instantiated once per worker. |
-| a property *of a slot* | reserved vocabulary | an args family may carry per-slot metadata; [`KernelArgs`](@ref) carries none, and no in-repo kernel reads any. A scheme scalar attached to a slot rides as request payload instead — that is what [`WeightedJacobianKind`](@ref) does with its weights. |
+| per-worker mutable working memory | **element cache fields** | duplicated — not aliased — per worker by `duplicate_for_device`, see [storage classes for elements with local problems](elements.md). |
+| a scheme scalar attached to a slot | request payload | rides on the request instead of the args bundle — that is what [`WeightedJacobianKind`](@ref) does with its weights. |
 
 Two consequences worth stating explicitly.
 
@@ -199,13 +199,6 @@ families is open; adding a new family *type* is not.
 integrator family always issues regardless of what a protocol declares, which
 is what keeps declarations additive: an operator is never *less* capable for
 having declared nothing.
-
-**New args families** — an operator family building its own kernel-args type
-implements [`with_states`](@ref), [`with_parameters`](@ref) and
-[`with_context`](@ref) for it, and declares it through
-[`get_declared_args_type`](@ref) so setup-time method lookups query against the
-right type. Elements written with an unannotated `args` parameter serve every
-family unchanged.
 
 **New devices and scheduling** — `execute_on_device!`,
 `setup_device_instances` and `compute_partition` are the three hooks a device

@@ -27,10 +27,8 @@ The assembly machinery shared by all operators: the execution strategy, the
 per-subdomain caches (workspaces + partitions), the dof handler the operator
 assembles against, the engine-scoped internal-variable handler, and the
 scheme protocol carrying the setup-time declarations
-([`AbstractSchemeProtocol`](@ref) — slot names, request kinds, scratch, and
-the kernel-args type queried through [`kernel_args_type`](@ref) wherever
-element methods are looked up). Operators are payload (matrices/vectors) plus
-an engine plus their integrator.
+([`AbstractSchemeProtocol`](@ref) — slot names and request kinds). Operators
+are payload (matrices/vectors) plus an engine plus their integrator.
 """
 @concrete struct AssemblyEngine
     strategy
@@ -39,8 +37,6 @@ an engine plus their integrator.
     ivh         # shared by all subdomains
     protocol    # the setup-time declarations
 end
-
-kernel_args_type(engine::AssemblyEngine) = get_declared_args_type(engine.protocol)
 
 function execute_on_subdomains!(task, strategy, subdomain_caches)
     for (subdomain_id, sc) in enumerate(subdomain_caches)

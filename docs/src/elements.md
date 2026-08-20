@@ -30,7 +30,7 @@ FerriteOperators.duplicate_for_device(device, c::MyCache) =
 
 FerriteOperators.reinit_values!(c::MyCache, cell) = reinit!(c.cv, cell)
 
-function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args::CellArgs)
     (; cv) = cache
     uₑ = args.states.u
     for qp in 1:getnquadpoints(cv)
@@ -46,9 +46,9 @@ sensitivities through the AD fallback.
 The residual kernel must be eltype-generic in `eltype(args.states.*)`,
 `eltype(args.p)`, and the context time — that is the entire AD contract.
 Kernels never write global state; the geometry cache in `args.cell` is
-read-only. The `args` parameter stays **unannotated**: kernels select on the
-`(request, cache)` pair alone, and an open parameter lets the element serve
-any operator family's args type (setup warns about a concrete annotation).
+read-only. Kernels select on the `(request, cache)` pair alone, never on
+`args`, so annotating the parameter (`args::CellArgs`) is permitted; leaving
+it unannotated works exactly the same.
 
 An element is a scheme-agnostic integrand: it reads slot *values* and never
 encodes a time discretization. [The layer contract](design.md) states where
@@ -81,7 +81,7 @@ Analytic kernels are an opt-in, declared through a compile-time trait so no
 
 ```julia
 FerriteOperators.provides_analytic(::Type{<:MyCache}, ::FerriteOperators.JacobianKind) = true
-function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args)
+function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args::CellArgs)
     # ... accumulate into req.K ...
 end
 ```
@@ -100,12 +100,12 @@ requests [`ParameterJacobianRequest`](@ref), [`ParameterVJPRequest`](@ref),
 [`TimeSensitivityRequest`](@ref), [`StateJVPRequest`](@ref),
 [`StateVJPRequest`](@ref).
 
-## The kernel-args channel protocol
+## The `args` bundle
 
-`args` is any object carrying the channels below; [`KernelArgs`](@ref) is what
-this package's operators build, not the contract. The contract is structural
-(a Tables.jl-style protocol): there is no supertype, and kernels never
-dispatch on the args.
+`args` is a [`CellArgs`](@ref) for cell kernels and a [`FacetArgs`](@ref) for
+facet kernels — the same four fields, no supertype between the two.
+Annotating the parameter (`args::CellArgs`) is permitted; kernels select on
+the `(request, cache)` pair, never on `args`.
 
 - `args.states` — NamedTuple of element-local state buffers, one per slot
   declared at setup (`setup_operator(...; slots = (:u, :uprev))`). Slots are
@@ -116,25 +116,17 @@ dispatch on the args.
   [`query_cell_parameters`](@ref) (facets get their own
   [`query_facet_parameters`](@ref) per facet). Configuration only: time lives
   in `ctx`, history in slots.
-- `args.scratch` — per-worker scratch declared by the solver
-  (`setup_operator(...; scratch = (name = () -> ...,))`) and/or the element
-  ([`declare_scratch`](@ref)).
 - `args.ctx` — the per-sweep solver scalars, i.e. the
   [`TimeIntegrationContext`](@ref) `(t, Δt, γ̃)` read through
   `evaluation_time(args.ctx)` and `stage_scaling(args.ctx)`, or `nothing` for
-  stationary problems. `γ̃` is the *normalized* local stage interval of the
-  element-local internal-variable problem — see its docstring for the exact
-  contract and for why it is **not** a rate slope.
+  stationary problems. This is the one open channel: a scheme with richer
+  per-sweep scalars passes its own context type. `γ̃` is the *normalized*
+  local stage interval of the element-local internal-variable problem — see
+  its docstring for the exact contract and for why it is **not** a rate slope.
 
-Per-slot metadata is reserved protocol vocabulary: an args family may carry a
-per-slot property, and `KernelArgs` carries none.
-
-An operator family may build its own args type; it then implements the three
-rebuild seams the framework re-seeds channels through —
-[`with_states`](@ref), [`with_parameters`](@ref) and [`with_context`](@ref) —
-as plain methods on that type. There is no abstract fallback: a family missing
-a seam gets a `MethodError` on the sweep that needs it, never a silently
-unseeded derivative.
+A derivative sweep rebuilds `args` with one field replaced instead of
+re-deriving it from scratch: [`with_states`](@ref), [`with_parameters`](@ref)
+and [`with_context`](@ref).
 
 ## Values and reinitialization
 
@@ -156,7 +148,7 @@ The framework owns the facet loop: it walks each cell's facets, gates on
 sweep's request to the facet kernel.
 
 ```julia
-function FerriteOperators.assemble_facet!(req::ResidualRequest, cache::MyFacetCache, args, lfi::Int)
+function FerriteOperators.assemble_facet!(req::ResidualRequest, cache::MyFacetCache, args::FacetArgs, lfi::Int)
     reinit!(cache.fv, args.cell, lfi)
     # accumulate into req.r; args.p came from query_facet_parameters(cache, cell, lfi, p)
 end
@@ -277,7 +269,7 @@ an empty sum only has a value once its type is known. Declaring
 ## Unit-testing a kernel
 
 Kernels are pure evaluation, so they can be called directly on a single cell
-without an operator. Building the cell cache and the [`KernelArgs`](@ref) by
+without an operator. Building the cell cache and the [`CellArgs`](@ref) by
 hand is the supported testing seam:
 
 ```julia
@@ -289,13 +281,13 @@ reinit_values!(cache, cc)           # the element's own values objects
 
 uₑ = rand(ndofs_per_cell(sdh))
 rₑ = zeros(ndofs_per_cell(sdh))
-args = KernelArgs((u = uₑ,), cc, p, nothing, nothing)
+args = CellArgs((u = uₑ,), cc, p, nothing)
 assemble_cell!(ResidualRequest(rₑ), cache, args)
 ```
 
-`KernelArgs` is constructed positionally as `(states, cell, p, scratch, ctx)`;
-`scratch` and `ctx` are whatever the kernel reads (`nothing` when it reads
-neither). Pass further slots as additional entries of the states NamedTuple.
+`CellArgs` is constructed positionally as `(states, cell, p, ctx)`; `ctx` is
+whatever the kernel reads (`nothing` when it reads none). Pass further slots
+as additional entries of the states NamedTuple.
 
 ## Example elements
 

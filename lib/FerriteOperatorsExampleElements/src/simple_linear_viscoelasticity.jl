@@ -101,11 +101,11 @@ end
 
 # One concrete entry method per provided kernel (no blanket request method:
 # it would satisfy every `hasmethod` probe in the setup-time validation).
-assemble_cell!(req::ResidualRequest, cache::SimpleCondensedLinearViscoelasticityCache, args) = _sls_assemble!(req, cache, args)
-assemble_cell!(req::JacobianRequest{:u}, cache::SimpleCondensedLinearViscoelasticityCache, args) = _sls_assemble!(req, cache, args)
-assemble_cell!(req::JacobianResidualRequest, cache::SimpleCondensedLinearViscoelasticityCache, args) = _sls_assemble!(req, cache, args)
+assemble_cell!(req::ResidualRequest, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
+assemble_cell!(req::JacobianRequest{:u}, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
+assemble_cell!(req::JacobianResidualRequest, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
 
-function _sls_assemble!(req::Union{ResidualRequest, JacobianRequest{:u}, JacobianResidualRequest}, cache::SimpleCondensedLinearViscoelasticityCache, args)
+function _sls_assemble!(req::Union{ResidualRequest, JacobianRequest{:u}, JacobianResidualRequest}, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs)
     (; displacement_range, viscosity_range, cv) = cache
     (; E₀, E₁ ) = cache.material_parameters
     γ̃ = _sls_stage_scaling(args.ctx)

@@ -92,7 +92,7 @@ export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, 
 
 export setup_operator, update_operator!, update_linearization!, evaluate!
 export AbstractSchemeProtocol, DefaultProtocol
-export get_declared_slots, get_declared_kinds, get_declared_scratch, get_declared_args_type, mandatory_kinds
+export get_declared_slots, get_declared_kinds, mandatory_kinds
 export assemble_slot_jacobian!, assemble_weighted_jacobian!
 export allocate_components, share_pattern, combine!
 export StageBlockOperator, assemble_stages!
@@ -101,7 +101,7 @@ export ADSensitivity, FiniteDifferenceSensitivity, has_internal_state, internal_
 export state_jvp!, state_vjp!, StateJVPRequest, StateVJPRequest
 export check_derivatives
 export parameter_vector, rebuild_parameters
-export TimeIntegrationContext, evaluation_time, stage_scaling, KernelArgs, assemble_cell!
+export TimeIntegrationContext, evaluation_time, stage_scaling, CellArgs, FacetArgs, assemble_cell!
 export AffineRate
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
 export WeightedJacobianRequest

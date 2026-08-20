@@ -30,7 +30,7 @@ Ferrite.getnquadpoints(e::SimpleHyperelasticityElementCache) = getnquadpoints(e.
 reinit_values!(e::SimpleHyperelasticityElementCache, cell) = Ferrite.reinit!(e.cv, cell)
 
 # Element residual
-function assemble_cell!(req::ResidualRequest, element_cache::SimpleHyperelasticityElementCache, args)
+function assemble_cell!(req::ResidualRequest, element_cache::SimpleHyperelasticityElementCache, args::CellArgs)
     residualₑ = req.r
     uₑ = args.states.u
     cell = args.cell
@@ -59,7 +59,7 @@ function assemble_cell!(req::ResidualRequest, element_cache::SimpleHyperelastici
 end
 
 # jac
-function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleHyperelasticityElementCache, args)
+function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleHyperelasticityElementCache, args::CellArgs)
     Kₑ = req.K
     uₑ = args.states.u
     cell = args.cell
@@ -92,7 +92,7 @@ function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleHyperelas
 end
 
 # Combined residual and jac
-function assemble_cell!(req::JacobianResidualRequest, element_cache::SimpleHyperelasticityElementCache, args)
+function assemble_cell!(req::JacobianResidualRequest, element_cache::SimpleHyperelasticityElementCache, args::CellArgs)
     Kₑ = req.K
     residualₑ = req.r
     uₑ = args.states.u

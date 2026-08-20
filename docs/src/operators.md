@@ -30,18 +30,16 @@ where it is declared:
 
 ```julia
 struct SDIRKWProtocol <: AbstractSchemeProtocol end
-FerriteOperators.get_declared_slots(::SDIRKWProtocol)     = (:u, :du)
-FerriteOperators.get_declared_kinds(::SDIRKWProtocol)     = (WeightedJacobianKind, ResidualKind)
-FerriteOperators.get_declared_scratch(::SDIRKWProtocol)   = (;)
-FerriteOperators.get_declared_args_type(::SDIRKWProtocol) = KernelArgs
+FerriteOperators.get_declared_slots(::SDIRKWProtocol) = (:u, :du)
+FerriteOperators.get_declared_kinds(::SDIRKWProtocol) = (WeightedJacobianKind, ResidualKind)
 
 op = setup_operator(strategy, integrator, dh, SDIRKWProtocol())
 ```
 
-Protocols are **declarations only**: slot names, request kinds, per-worker
-scratch, and the kernel-args type. They carry no coefficients — γ, tableaus
-and weights are per-evaluation solver data — and nothing term-shaped; a term
-needing its own context or sink is its own sweep.
+Protocols are **declarations only**: slot names and request kinds. They carry
+no coefficients — γ, tableaus and weights are per-evaluation solver data —
+and nothing term-shaped; a term needing its own context or sink is its own
+sweep.
 
 The keyword form is sugar whose keywords are the [`DefaultProtocol`](@ref)
 constructor arguments, so both forms build the same operator:
@@ -56,7 +54,7 @@ internal-state admissibility checks eagerly at `setup_operator` instead of on
 first use — an inadmissible adjoint fails when the operator is built, not
 mid-solve. And they select which per-worker *sweep-state families* are built:
 a workspace is a fixed core (geometry cache, element caches, slot buffers,
-scratch, element matrix/residual) plus the families its declarations call for,
+element matrix/residual) plus the families its declarations call for,
 so a bilinear or linear operator carries no ForwardDiff machinery at all. The
 workspace is immutable — every field is bound at `setup_operator`, and a sweep
 works by filling the buffers those fields point at.

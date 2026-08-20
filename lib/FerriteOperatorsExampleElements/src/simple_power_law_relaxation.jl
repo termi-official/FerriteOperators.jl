@@ -226,11 +226,11 @@ end
 
 # One concrete entry method per provided kernel (no blanket request method:
 # it would satisfy every `hasmethod` probe in the setup-time validation).
-assemble_cell!(req::ResidualRequest, cache::SimpleCondensedPowerLawRelaxationCache, args) = _plr_assemble!(req, cache, args)
-assemble_cell!(req::JacobianRequest{:u}, cache::SimpleCondensedPowerLawRelaxationCache, args) = _plr_assemble!(req, cache, args)
-assemble_cell!(req::JacobianResidualRequest, cache::SimpleCondensedPowerLawRelaxationCache, args) = _plr_assemble!(req, cache, args)
+assemble_cell!(req::ResidualRequest, cache::SimpleCondensedPowerLawRelaxationCache, args::CellArgs) = _plr_assemble!(req, cache, args)
+assemble_cell!(req::JacobianRequest{:u}, cache::SimpleCondensedPowerLawRelaxationCache, args::CellArgs) = _plr_assemble!(req, cache, args)
+assemble_cell!(req::JacobianResidualRequest, cache::SimpleCondensedPowerLawRelaxationCache, args::CellArgs) = _plr_assemble!(req, cache, args)
 
-function _plr_assemble!(req::Union{ResidualRequest, JacobianRequest{:u}, JacobianResidualRequest}, cache::SimpleCondensedPowerLawRelaxationCache, args)
+function _plr_assemble!(req::Union{ResidualRequest, JacobianRequest{:u}, JacobianResidualRequest}, cache::SimpleCondensedPowerLawRelaxationCache, args::CellArgs)
     (; field_range, internal_range, cv, statistics) = cache
     (; κ, α) = cache.material_parameters
     γ̃   = stage_scaling(args.ctx)

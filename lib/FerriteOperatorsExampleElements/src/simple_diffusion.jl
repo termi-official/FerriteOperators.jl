@@ -29,7 +29,7 @@ function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache
     )
 end
 
-function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleBilinearDiffusionElementCache, args)
+function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleBilinearDiffusionElementCache, args::CellArgs)
     Kₑ = req.K
     cell = args.cell
     (; cellvalues, D) = element_cache
@@ -59,7 +59,7 @@ provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind)
 # The bilinear form induces a linear operator, so its residual is the element
 # matrix acting on the element vector — mandatory so the element composes
 # into nonlinear operators and AD-based sensitivities.
-function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearDiffusionElementCache, args)
+function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearDiffusionElementCache, args::CellArgs)
     (; cellvalues, D) = cache
     uₑ = args.states.u
     for qp in 1:getnquadpoints(cellvalues)

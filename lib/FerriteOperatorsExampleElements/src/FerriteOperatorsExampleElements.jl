@@ -32,7 +32,7 @@ import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!,
     geometric_subdomain_interpolation, get_number_of_internal_dofs_per_element,
     load_element_unknowns!, store_condensed_element_unknowns!,
     allocate_element_unknown_vector, internal_variable_offset,
-    evaluation_time, with_time, stage_scaling
+    evaluation_time, with_time, stage_scaling, CellArgs
 
 include("simple_diffusion.jl")             # Bilinear form + its induced residual
 include("simple_mass.jl")                  # Linear form and mass bilinear form

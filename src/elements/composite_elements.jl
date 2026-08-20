@@ -2,7 +2,8 @@
 Per-inner parameter views produced by a composite cache's
 [`query_cell_parameters`](@ref) / [`query_facet_parameters`](@ref). The fan-out
 re-seeds `args.p` per inner from this bundle; any other `p` object reaches
-every inner unchanged, so a hand-built `KernelArgs` still works.
+every inner unchanged, so a hand-built [`CellArgs`](@ref)/[`FacetArgs`](@ref)
+still works.
 """
 struct CompositeParameters{Views <: Tuple}
     views::Views
@@ -77,7 +78,7 @@ end
 
 # The composite's blanket fan-out method would satisfy any hasmethod check,
 # so validation must recurse into the inner caches.
-function validate_element_cache(composite::CompositeVolumetricElementCache, declared_requests::Tuple = (), ::Type{A} = KernelArgs) where {A}
+function validate_element_cache(composite::CompositeVolumetricElementCache, declared_requests::Tuple = ())
     stateful = filter(inner -> has_internal_state(typeof(inner)), composite.inner_caches)
     isempty(stateful) || throw(ArgumentError(
         "Composing condensed elements is not supported yet, but $(_cache_names(stateful)) " *
@@ -87,7 +88,7 @@ function validate_element_cache(composite::CompositeVolumetricElementCache, decl
         "none of them, and the internal variable handler keys on the outer integrator — so " *
         "the internal dofs would never be allocated and the trial write-back would be " *
         "dropped. Assemble the condensed element as its own operator term."))
-    foreach(cache -> validate_element_cache(cache, declared_requests, A), composite.inner_caches)
+    foreach(cache -> validate_element_cache(cache, declared_requests), composite.inner_caches)
     return nothing
 end
 
@@ -113,11 +114,6 @@ function _inner_types_without(::Type{T}, kind) where {T <: Tuple}
     return provides_analytic(H, kind) ? rest : (nameof(H), rest...)
 end
 _cache_names(caches::Tuple) = map(c -> nameof(typeof(c)), caches)
-
-# Inner scratch declarations survive composition (later inners win on name
-# collisions, like the solver-vs-element merge at setup).
-declare_scratch(composite::CompositeVolumetricElementCache) =
-    reduce(merge, map(declare_scratch, composite.inner_caches); init = (;))
 
 # Values instances deliberately shared between inners are reinitialized once
 # per inner that holds them.
