@@ -49,13 +49,14 @@ op = setup_operator(strategy, integrator, dh;
                     requests = (ParameterVJPKind, TimeSensitivityKind))
 ```
 
-Declarations do two things. Declared kinds run their trait ↔ kernel and
-internal-state admissibility checks eagerly at `setup_operator` instead of on
-first use — an inadmissible adjoint fails when the operator is built, not
-mid-solve. And they select which per-worker *sweep-state families* are built:
-a workspace is a fixed core (geometry cache, element caches, slot buffers,
-element matrix/residual) plus the families its declarations call for,
-so a bilinear or linear operator carries no ForwardDiff machinery at all. The
+Declaring a kind runs its trait ↔ kernel and internal-state admissibility
+checks eagerly at `setup_operator` instead of on first use — an inadmissible
+adjoint fails when the operator is built, not mid-solve. Which element caches
+carry [`ADElementCache`](@ref) decoration, and whether the workspace carries
+[`SensitivityBuffers`](@ref) at all, is decided separately and structurally by
+the integrator family ([`needs_ad_decoration`](@ref)) — a bilinear or linear
+operator carries no AD/sensitivity machinery whatever an element cache does or
+does not implement analytically, whatever the protocol declares. The
 workspace is immutable — every field is bound at `setup_operator`, and a sweep
 works by filling the buffers those fields point at.
 
@@ -188,8 +189,11 @@ time_sensitivity!(g, op, states, p, ctx; method = FiniteDifferenceSensitivity())
 θ is the flat view defined by [`parameter_vector`](@ref) /
 [`rebuild_parameters`](@ref); entries it does not expose are static and no
 sensitivity cost scales with them. Per cache, analytic sensitivity kernels
-win; otherwise ForwardDiff differentiates the residual kernel. Sensitivity
-sweeps **never** write back into the caller's state.
+win; otherwise the resolved cache — automatically wrapped in
+[`ADElementCache`](@ref) at `setup_operator` time — differentiates the
+residual kernel. The engine itself never forks between the two: it always
+calls `assemble_cell!` on the resolved cache, analytic-or-decorated.
+Sensitivity sweeps **never** write back into the caller's state.
 
 !!! warning "Boundary terms are not differentiated"
     A sensitivity sweep runs the **volumetric** kernel only. Boundary

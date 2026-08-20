@@ -150,16 +150,6 @@ const PrimalKind = Union{JacobianResidualKind, JacobianKind, WeightedJacobianKin
 const SensitivityKind = Union{ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind}
 
 """
-    DerivativeSweepKind
-
-The kinds whose sweeps can seed ForwardDiff Duals through the residual kernel,
-i.e. the ones served by the per-worker derivative family
-([`ADWorkspace`](@ref)). Jacobian kinds belong here through their AD fallback,
-even when an element serves them analytically.
-"""
-const DerivativeSweepKind = Union{JacobianKind, JacobianResidualKind, WeightedJacobianKind, SensitivityKind}
-
-"""
     assembles_matrix(kind) -> Bool
     assembles_vector(kind) -> Bool
     depends_on_unknowns(kind) -> Bool
@@ -184,18 +174,20 @@ assembles_matrix(kind) = kind isa MatrixAssemblyKind
 
 """
     NoFamily
-    DerivativeFamily
     FunctionalFamily
 
-The per-worker sweep-state families, which double as the driver-shape routing.
-`DerivativeFamily` is the [`ADWorkspace`](@ref) and `NoFamily` marks a sweep
-that reads only the workspace core; both scatter their result through an
-assembler. `FunctionalFamily` selects the VALUE-RETURNING driver instead: its
-kernel returns the item's contribution and the sweep reduces the returned
-values, so it needs — and builds — no per-worker state at all.
+The per-worker driver-shape routing. `NoFamily` marks a sweep that scatters
+its result through an assembler (every request-carrying kind); `FunctionalFamily`
+selects the VALUE-RETURNING driver instead: its kernel returns the item's
+contribution and the sweep reduces the returned values, so it needs no
+per-worker state at all. A sensitivity kind's OUTPUT buffers
+([`SensitivityBuffers`](@ref)) are engine/workspace-owned unconditionally for
+a nonlinear operator (see [`needs_ad_decoration`](@ref)) rather than gated by
+a third family — the ForwardDiff seeding machinery those kinds may fall back
+to lives on the resolved element cache ([`ADElementCache`](@ref)) instead of a
+family-gated workspace member.
 """
 struct NoFamily end
-@doc (@doc NoFamily) struct DerivativeFamily end
 @doc (@doc NoFamily) struct FunctionalFamily end
 
 """
@@ -203,54 +195,12 @@ struct NoFamily end
 
 The per-worker family a sweep of kind `K` reads. Queried on the TYPE, because
 declarations carry kind types (normalized to their `UnionAll` base) while
-sweeps carry instances — one overload point serves both.
-
-Declaring a family is what makes it exist: `setup_operator(...; requests =
-(MyKind,))` builds the family this returns, so
-
-    FerriteOperators.sweep_family(::Type{<:MyKind}) = FerriteOperators.DerivativeFamily()
-
-gives `MyKind` an [`ADWorkspace`](@ref) at setup and lets [`sweep_state`](@ref)
-resolve. `FunctionalFamily()` is the one answer that builds NOTHING: it routes
-the kind to the value-returning driver ([`run_reduction`](@ref)), which reads
-no per-worker state. The default derives the answer from the built-in unions
-and folds to a constant.
+sweeps carry instances — one overload point serves both. `FunctionalFamily()`
+routes the kind to the value-returning driver ([`run_reduction`](@ref)); every
+other kind is `NoFamily()`. The default derives the answer from the built-in
+kind and folds to a constant.
 """
-sweep_family(::Type{K}) where {K} =
-    K <: DerivativeSweepKind ? DerivativeFamily() :
-    K <: FunctionalKind ? FunctionalFamily() : NoFamily()
-
-"""
-    sweep_state(ws, kind)
-
-The per-worker member serving `kind`'s sweep family. The workspace is a fixed
-CORE (geometry cache, element caches, slot buffers, `Ke`/`re`) plus
-kind-family members that exist only when the operator's declarations call for
-them: derivative kinds read the [`ADWorkspace`](@ref). The other two families
-have no member to read — a `NoFamily` kind works out of the core, and a
-`FunctionalFamily` kind returns its value rather than parking it anywhere.
-"""
-sweep_state(ws, kind) = sweep_state(ws, kind, sweep_family(typeof(kind)))
-function sweep_state(ws, kind, ::DerivativeFamily)
-    ad = ws.ad
-    ad === nothing && throw(ArgumentError(
-        "This operator carries no derivative sweep family: neither its protocol's declared " *
-        "kinds nor its integrator family's mandatory kinds differentiate. Declare the kind at " *
-        "setup — `setup_operator(...; requests = ($(nameof(typeof(kind))),))` or a protocol " *
-        "whose `get_declared_kinds` names it."))
-    return ad
-end
-sweep_state(ws, kind, ::FunctionalFamily) = throw(ArgumentError(
-    "$(nameof(typeof(kind))) rides the value-returning driver: its kernel RETURNS the item's " *
-    "contribution and the sweep reduces the returned values, so there is no per-worker state " *
-    "to read."))
-sweep_state(ws, kind, ::NoFamily) = throw(ArgumentError(
-    "$(nameof(typeof(kind))) declares no sweep-state family, so it has no per-worker state " *
-    "to read. Declare one with `sweep_family(::Type{<:$(nameof(typeof(kind)))})`."))
-
-# Which per-worker families a declared kind set calls for. Kinds arrive as
-# their UnionAll bases, which [`sweep_family`](@ref) is queried on directly.
-needs_derivative_family(kinds) = any(K -> sweep_family(K) isa DerivativeFamily, kinds)
+sweep_family(::Type{K}) where {K} = K <: FunctionalKind ? FunctionalFamily() : NoFamily()
 
 """
     request_type(kind) -> Type
@@ -309,6 +259,54 @@ materialize_request(::JacobianKind{slot, C}, ws) where {slot, C} = JacobianReque
 materialize_request(::BilinearKind, ws)                    = JacobianRequest{:u}(ws.Ke)
 materialize_request(::JacobianResidualKind{C}, ws) where {C} = JacobianResidualRequest{C}(ws.Ke, ws.re)
 materialize_request(kind::WeightedJacobianKind{slots, C}, ws) where {slots, C} = WeightedJacobianRequest{C}(ws.Ke, kind.weights)
+
+# The five sensitivity kinds: `ws` alone is not enough (their destination
+# buffers live on `ws.sensitivity`, and the parameter kinds size themselves
+# from `task.p`), so these take the 3-arg form. The destination is zeroed
+# unconditionally — cheap, and correct whether the resolved cache serves the
+# request analytically (accumulates) or falls back to AD (overwrites), so the
+# engine needs no fork between the two to decide.
+function materialize_request(::ParameterJacobianKind, ws, task)
+    s = parameter_sweep_buffers!(ws.sensitivity, length(parameter_vector(task.p)))
+    fill!(s.Bₑ, zero(eltype(s.Bₑ)))
+    return ParameterJacobianRequest(s.Bₑ, task.p)
+end
+function materialize_request(kind::ParameterVJPKind, ws, task)
+    s = ws.sensitivity
+    λₑ = _gather_residual_dofs!(s.λₑ, kind.λ, ws.cell)
+    parameter_sweep_buffers!(s, length(parameter_vector(task.p)))
+    fill!(s.gθ, zero(eltype(s.gθ)))
+    return ParameterVJPRequest(s.gθ, λₑ, task.p)
+end
+function materialize_request(::TimeSensitivityKind, ws, task)
+    fill!(ws.sensitivity.gₜ, zero(eltype(ws.sensitivity.gₜ)))
+    return TimeSensitivityRequest(ws.sensitivity.gₜ)
+end
+function materialize_request(kind::StateJVPKind, ws, task)
+    s = ws.sensitivity
+    s.vₑ .= @view kind.v[celldofs(ws.cell)]
+    fill!(s.Jvₑ, zero(eltype(s.Jvₑ)))
+    return StateJVPRequest(s.Jvₑ, s.vₑ)
+end
+function materialize_request(kind::StateVJPKind, ws, task)
+    s = ws.sensitivity
+    λₑ = _gather_residual_dofs!(s.λₑ, kind.λ, ws.cell)
+    fill!(s.gu, zero(eltype(s.gu)))
+    return StateVJPRequest(s.gu, λₑ)
+end
+
+"""
+    scatter_request!(req, assembler, cell)
+
+Hand a sensitivity request's payload to the assembler — the sensitivity
+counterpart of [`scatter_local!`](@ref), dispatching on the request type
+instead of the kind since the destination buffer IS the request's own field.
+"""
+scatter_request!(req::ParameterJacobianRequest, assembler, cell) = assemble!(assembler, cell, req.B)
+scatter_request!(req::ParameterVJPRequest, assembler, cell)      = assemble!(assembler, cell, req.g)
+scatter_request!(req::TimeSensitivityRequest, assembler, cell)   = assemble!(assembler, cell, req.g)
+scatter_request!(req::StateJVPRequest, assembler, cell)          = assemble!(assembler, cell, req.Jv)
+scatter_request!(req::StateVJPRequest, assembler, cell)          = assemble!(assembler, cell, req.g)
 
 """
     AssemblyTask(kind, inner_assembler, states, p, ctx)
@@ -444,62 +442,28 @@ end
 # the sweep's request analytically or not at all. For a weighted sweep that
 # means the WEIGHTED facet kernel: per-slot facet kernels are not composed
 # behind the driver's back.
-function cell_kernel!(kind::ResidualKind, cache, ws, statesₑ, pₑ, ctx)
-    assemble_cell!(materialize_request(kind, ws), cache, _cell_args(ws, statesₑ, pₑ, ctx))
-end
-function cell_kernel!(kind::JacobianKind{slot}, cache, ws, statesₑ, pₑ, ctx) where {slot}
-    args = _cell_args(ws, statesₑ, pₑ, ctx)
-    if provides_analytic(typeof(cache), kind)
-        assemble_cell!(materialize_request(kind, ws), cache, args)
-    else
-        ad_state_jacobian!(ws.Ke, ws, args, Val(slot))
-    end
-end
-function cell_kernel!(kind::WeightedJacobianKind, cache, ws, statesₑ, pₑ, ctx)
-    args = _cell_args(ws, statesₑ, pₑ, ctx)
-    if provides_analytic(typeof(cache), kind)
-        assemble_cell!(materialize_request(kind, ws), cache, args)
-    else
-        ad_weighted_jacobian!(ws.Ke, ws, args, kind.weights)
-    end
-end
-function cell_kernel!(kind::JacobianResidualKind{C}, cache, ws, statesₑ, pₑ, ctx) where {C}
-    args = _cell_args(ws, statesₑ, pₑ, ctx)
-    ujac = JacobianKind{:u, C}()
-    if provides_analytic(typeof(cache), kind)
-        assemble_cell!(materialize_request(kind, ws), cache, args)
-    elseif provides_analytic(typeof(cache), ujac)
-        # No fused kernel, but both split kernels exist: two of the table's
-        # other kinds, issued back to back over the same buffers.
-        assemble_cell!(materialize_request(ujac, ws), cache, args)
-        assemble_cell!(materialize_request(ResidualKind(), ws), cache, args)
-    else
-        ad_state_jacobian!(ws.Ke, ws, args)   # also leaves the primal residual in ws.re
-    end
-end
-# The plain analytic route: issue the kind's request and let the element serve
-# it. This is what the state-independent built-in forms use — they have no
-# residual kernel to differentiate, so the analytic kernel is mandatory for the
-# elements used in these operators — and what a downstream kind riding
-# [`primal_cell_sweep!`](@ref) gets without writing a kernel dispatch of its own.
+#
+# ONE generic method for every primal kind: `cache` (`ws.element`) is EITHER
+# genuinely analytic for `kind` or a decorator ([`ADElementCache`](@ref)) that
+# resolves it — the engine never forks on `provides_analytic` itself, and a
+# downstream kind riding [`primal_cell_sweep!`](@ref) gets this without
+# writing a kernel dispatch of its own.
 cell_kernel!(kind, cache, ws, statesₑ, pₑ, ctx) =
     assemble_cell!(materialize_request(kind, ws), cache, _cell_args(ws, statesₑ, pₑ, ctx))
 
 # Sensitivity sweeps: gather the trial state, never write anything back into
-# `u`, and route through analytic kernels or AD-from-residual. Local outputs
-# live in the per-worker `ws.ad` buffers; analytic kernels ACCUMULATE into
-# their target (zeroed in that branch), the ForwardDiff fallbacks overwrite
-# it fully.
+# `u`. `materialize_request`/`scatter_request!` bind and scatter the local
+# output — `cache` is resolved exactly like a primal sweep's.
 execute_kind!(kind::SensitivityKind, task, ws) = sensitivity_cell_sweep!(kind, task, ws)
 
 """
     sensitivity_cell_sweep!(kind, task, ws)
 
 The built-in sensitivity driver body, reusable by a downstream kind's own
-`execute_kind!`. Gathers the trial state, queries the cell parameters and
-hands the kernel args to `sensitivity_kernel!(kind, task, ws, args)`, which
-the kind implements. Nothing is written back into `u`, and the local output
-lives in the kind's own sweep-state buffers.
+`execute_kind!`. Gathers the trial state, queries the cell parameters, binds
+the request through `materialize_request(kind, ws, task)`, issues it against
+the resolved element cache, and scatters through [`scatter_request!`](@ref).
+Nothing is written back into `u`.
 """
 function sensitivity_cell_sweep!(kind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
@@ -509,64 +473,24 @@ function sensitivity_cell_sweep!(kind, task, ws)
     @timeit_debug "assemble sensitivity" sensitivity_kernel!(kind, task, ws, args)
 end
 
+"""
+    sensitivity_kernel!(kind, task, ws, args)
+
+Bind `kind`'s request over `ws.sensitivity`, issue it against the resolved
+element cache, and scatter the result — the entry point a downstream
+sensitivity-family kind's own `execute_kind!` (via
+[`sensitivity_cell_sweep!`](@ref)) reaches without writing anything beyond a
+`materialize_request(::MyKind, ws, task)` / `scatter_request!` pair.
+"""
+function sensitivity_kernel!(kind, task, ws, args)
+    req = materialize_request(kind, ws, task)
+    assemble_cell!(req, ws.element, args)
+    scatter_request!(req, task.inner_assembler, ws.cell)
+end
+
 # Residual-shaped gather (plain celldofs slice — adjoint vectors carry no
 # condensed tail, unlike the slot gathers).
 _gather_residual_dofs!(dest, src, cell) = dest .= @view src[celldofs(cell)]
-
-function sensitivity_kernel!(kind::ParameterJacobianKind, task, ws, args)
-    cache = ws.element
-    Bₑ = parameter_sweep_buffers!(sweep_state(ws, kind), length(parameter_vector(task.p))).Bₑ
-    if provides_analytic(typeof(cache), kind)
-        fill!(Bₑ, zero(eltype(Bₑ)))
-        assemble_cell!(ParameterJacobianRequest(Bₑ), cache, args)
-    else
-        ad_parameter_jacobian!(Bₑ, ws, args, task.p)
-    end
-    assemble!(task.inner_assembler, ws.cell, Bₑ)
-end
-
-function sensitivity_kernel!(kind::ParameterVJPKind, task, ws, args)
-    cache = ws.element
-    ad = sweep_state(ws, kind)
-    λₑ = _gather_residual_dofs!(ad.λₑ, kind.λ, ws.cell)
-    gₑ = parameter_sweep_buffers!(ad, length(parameter_vector(task.p))).gθ
-    if provides_analytic(typeof(cache), kind)
-        fill!(gₑ, zero(eltype(gₑ)))
-        assemble_cell!(ParameterVJPRequest(gₑ, λₑ), cache, args)
-    else
-        ad_parameter_vjp!(gₑ, λₑ, ws, args, task.p)
-    end
-    assemble!(task.inner_assembler, ws.cell, gₑ)
-end
-
-function sensitivity_kernel!(kind::StateJVPKind, task, ws, args)
-    cache = ws.element
-    ad = sweep_state(ws, kind)
-    vₑ = ad.vₑ
-    vₑ .= @view kind.v[celldofs(ws.cell)]
-    Jvₑ = ad.Jvₑ
-    if provides_analytic(typeof(cache), kind)
-        fill!(Jvₑ, zero(eltype(Jvₑ)))
-        assemble_cell!(StateJVPRequest(Jvₑ, vₑ), cache, args)
-    else
-        ad_state_jvp!(Jvₑ, ws, args, vₑ)
-    end
-    assemble!(task.inner_assembler, ws.cell, Jvₑ)
-end
-
-function sensitivity_kernel!(kind::StateVJPKind, task, ws, args)
-    cache = ws.element
-    ad = sweep_state(ws, kind)
-    λₑ = _gather_residual_dofs!(ad.λₑ, kind.λ, ws.cell)
-    gₑ = ad.gu
-    if provides_analytic(typeof(cache), kind)
-        fill!(gₑ, zero(eltype(gₑ)))
-        assemble_cell!(StateVJPRequest(gₑ, λₑ), cache, args)
-    else
-        ad_state_vjp!(gₑ, λₑ, ws, args)
-    end
-    assemble!(task.inner_assembler, ws.cell, gₑ)
-end
 
 execute_kind!(kind::FunctionalKind, task, ws) = functional_cell_sweep(kind, task, ws)
 
@@ -588,18 +512,6 @@ function functional_cell_sweep(kind, task, ws)
     statesₑ = load_slots!(ws, task.states)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     return evaluate_cell_functional(kind, ws.element, _cell_args(ws, statesₑ, pₑ, task.ctx))
-end
-
-function sensitivity_kernel!(kind::TimeSensitivityKind, task, ws, args)
-    cache = ws.element
-    gₑ = sweep_state(ws, kind).gₜ
-    if provides_analytic(typeof(cache), kind)
-        fill!(gₑ, zero(eltype(gₑ)))
-        assemble_cell!(TimeSensitivityRequest(gₑ), cache, args)
-    else
-        ad_time_sensitivity!(gₑ, ws, args)
-    end
-    assemble!(task.inner_assembler, ws.cell, gₑ)
 end
 
 

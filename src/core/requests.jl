@@ -136,15 +136,23 @@ end
 WeightedJacobianRequest(K::M, weights::W) where {M <: AbstractMatrix, W <: NamedTuple} = WeightedJacobianRequest{Consistent, M, W}(K, weights)
 WeightedJacobianRequest{C}(K::M, weights::W) where {C <: CorrectionMode, M <: AbstractMatrix, W <: NamedTuple} = WeightedJacobianRequest{C, M, W}(K, weights)
 
-"Accumulate the dense local parameter Jacobian ∂Fₑ/∂θ into `B` (ndofsₑ × nθ)."
-struct ParameterJacobianRequest{M <: AbstractMatrix} <: AbstractAssemblyRequest
+"""
+Accumulate the dense local parameter Jacobian ∂Fₑ/∂θ into `B` (ndofsₑ × nθ).
+`p` is the GLOBAL parameter bag (not `args.p`, the element-local view) — the
+AD fallback re-queries [`query_cell_parameters`](@ref) from a Dual-rebuilt `p`
+per seed direction, so wrappers and per-element parameter views forward Duals
+transparently; an analytic kernel reads `B` only.
+"""
+struct ParameterJacobianRequest{M <: AbstractMatrix, P} <: AbstractAssemblyRequest
     B::M
+    p::P
 end
 
-"Accumulate the local adjoint pullback (∂Fₑ/∂θ)ᵀλₑ into `g` (length nθ)."
-struct ParameterVJPRequest{V <: AbstractVector, L <: AbstractVector} <: AbstractAssemblyRequest
+@doc (@doc ParameterJacobianRequest)
+struct ParameterVJPRequest{V <: AbstractVector, L <: AbstractVector, P} <: AbstractAssemblyRequest
     g::V
     λₑ::L
+    p::P
 end
 
 "Accumulate the explicit time sensitivity ∂Fₑ/∂t into `g`."
@@ -452,21 +460,43 @@ _primal_validatable_kinds() = (JacobianKind{:u}(), JacobianResidualKind())
 # tangent), or when the author asserts the local equations are insensitive to
 # the seeded quantity (`dq/∂seed ≡ 0`, making the partial exact — there is
 # nothing to correct). Only the would-be AD fallback is rejected.
+"""
+    _display_cache_type(T) -> Type
+
+The cache type an admissibility error should NAME: `T` itself, or the
+innermost cache a decorator ([`ADElementCache`](@ref), [`FusedFromSplit`](@ref))
+wraps — an author never wrote `T` when `T` is a decorator, so naming it would
+send them looking at the wrong type. One root method; decorators override it.
+"""
+_display_cache_type(T::Type) = T
+
 function assert_sensitivity_admissible(T::Type, kind)
     if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
-        # FiniteDifferenceSensitivity is a remedy only where a call-time
-        # override to it exists (time sensitivities); naming it for any other
-        # kind would point at an escape the kind does not have.
-        remedy = kind isa TimeSensitivityKind ?
+        name = nameof(_display_cache_type(T))
+        wrapping_note = _display_cache_type(T) === T ? "" :
+            " — automatically wrapped in `$(nameof(T))` because it lacks analytic coverage of " *
+            "some request kind, which does not by itself supply this correction"
+        # FiniteDifferenceSensitivity and `condensed_corrector` are remedies
+        # only where they actually apply: the former is a call-time override
+        # that exists for time sensitivities alone, the latter is what
+        # ADElementCache's generic Consistent combination reads and is
+        # meaningless for any other kind.
+        remedy = if kind isa TimeSensitivityKind
             "declare `internal_state_insensitive` if the local equations do not depend on " *
-            "the seeded quantity, or use `FiniteDifferenceSensitivity`." :
+            "the seeded quantity, or use `FiniteDifferenceSensitivity`."
+        elseif kind isa Union{JacobianKind{:u, Consistent}, JacobianResidualKind{Consistent}}
+            "declare `internal_state_insensitive` if the local equations do not depend on " *
+            "the seeded quantity, or implement `condensed_corrector` to admit the generic " *
+            "`Consistent` combination."
+        else
             "declare `internal_state_insensitive` if the local equations do not depend on " *
             "the seeded quantity."
+        end
         throw(ArgumentError(
-            "$(nameof(T)) carries condensed internal state, and AD-from-residual through " *
-            "its (now pure) residual kernel would compute only the frozen-q partial, missing " *
-            "the ∂F/∂q·dq/d· correction this kind's total needs. Either implement the analytic " *
-            "`assemble_cell!` kernel for $(typeof(kind)) (declared via `provides_analytic`), or " *
+            "$(name) carries condensed internal state$(wrapping_note), and AD-from-residual " *
+            "through its (now pure) residual kernel would compute only the frozen-q partial, " *
+            "missing the ∂F/∂q·dq/d· correction this kind's total needs. Either implement the " *
+            "analytic `assemble_cell!` kernel for $(typeof(kind)) (declared via `provides_analytic`), or " *
             remedy))
     end
     return nothing

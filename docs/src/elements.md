@@ -41,7 +41,10 @@ end
 ```
 
 This alone buys the assembled Jacobian, the fused Newton path, and all
-sensitivities through the AD fallback.
+sensitivities: `setup_operator` wraps a cache lacking analytic coverage of a
+kind in [`ADElementCache`](@ref) automatically, and the engine calls
+`assemble_cell!` on the resolved cache unconditionally — it never forks
+between an analytic kernel and the AD fallback itself.
 
 The residual kernel must be eltype-generic in `eltype(args.states.*)`,
 `eltype(args.p)`, and the context time — that is the entire AD contract.
@@ -91,6 +94,17 @@ specialization is always strictly more specific and a blanket declaration
 cannot create an ambiguity. `setup_operator` checks trait against kernel per
 element cache: a kind the trait claims without a matching `assemble_cell!`
 method is a loud `ArgumentError` at setup, never a silent fallback to AD.
+
+A cache lacking analytic coverage of some kind is wrapped in
+[`ADElementCache`](@ref) at `setup_operator` time (`ad_backend =
+ForwardDiffAD()` by default; `ad_backend = nothing` opts out). Per request the
+decorator forwards to the inner's own kernel where declared and differentiates
+the residual kernel otherwise — this is a construction-time, per-cache
+resolution, not a per-cell branch: element files need not know decoration
+exists. A composite wraps its non-analytic inners as ONE sub-composite rather
+than each individually (naive per-inner wrapping costs one full seeding pass
+per wrapped inner, worse than not wrapping at all once two or more inners need
+it).
 
 The available request types are [`ResidualRequest`](@ref),
 [`JacobianRequest`](@ref), [`JacobianResidualRequest`](@ref) (the fused Newton
@@ -205,6 +219,17 @@ is always the total, so a plain AD fallback (which computes only the
 frozen-`q` partial, now that the kernel is pure) is missing the correction
 unless the cache serves the kind analytically or declares it
 [`internal_state_insensitive`](@ref).
+
+A condensed cache still gets wrapped in [`ADElementCache`](@ref) when it lacks
+some kind's analytic coverage, and the decorator's `Consistent` state
+Jacobian/JacobianResidual then has a GENERIC path: it AD-differentiates the
+(now pure) residual seeding `ū` and `q` separately and combines them with the
+stored `dq/dū` block, read through [`condensed_corrector`](@ref) — `Jₑ =
+∂F/∂ū|_q + ∂F/∂q · dq/dū`. This is the getting-started path (bigger than the
+compact Tier-1 corrector most analytic kernels read, since the framework needs
+the completed `nq × ndofs` block); an element serving `Consistent` kinds
+analytically never needs to implement it. Every other sensitivity kind on a
+condensed cache without an analytic kernel keeps the admissibility rejection.
 
 ## Composition
 

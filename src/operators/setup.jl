@@ -11,9 +11,10 @@ passed positionally: `setup_operator(strategy, problem, dh, protocol)`.
 A protocol declares exactly what setup consumes: [`get_declared_slots`](@ref)
 (the state slot names sweeps may carry) and [`get_declared_kinds`](@ref) (the
 request kinds the operator will be asked to compute). Those declarations size
-the per-worker slot buffers, select which sweep-state families are built
-([`sweep_state`](@ref)), and drive the setup-time trait ↔ kernel and
-internal-state admissibility checks.
+the per-worker slot buffers and drive the setup-time trait ↔ kernel and
+internal-state admissibility checks. Which element caches carry
+[`ADElementCache`](@ref) decoration is decided separately, structurally, by
+[`needs_ad_decoration`](@ref) — not by protocol declarations.
 
 Protocols carry NO coefficients — γ, tableaus, and weights are per-evaluation
 solver data, not declarations — and nothing term-shaped: no per-term contexts,
@@ -113,8 +114,9 @@ end
 create_system_matrix(strategy, dh) = allocate_matrix(matrix_type(strategy), dh)
 create_system_vector(strategy, dh) = allocate_vector(vector_type(strategy), dh)
 
-function setup_elements(integrator, dh)
-    return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
+function setup_elements(integrator, dh, ad_backend)
+    needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
+    return [decorate_element_cache(setup_element_cache(integrator, sdh), sdh, ad_backend) for sdh in dh.subdofhandlers]
 end
 
 function setup_boundaries(integrator, dh)
@@ -140,76 +142,82 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
 end
 
 function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh;
-        slots::NTuple{<:Any, Symbol}, derivative_family::Bool)
+        slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool)
     device = strategy.device
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
-        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots; derivative_family)
+        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots; needs_sensitivity)
         dc = setup_device_instances(device, ws, n)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
     end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
 end
 
 """
-    setup_engine(strategy, integrator, dh, protocol::AbstractSchemeProtocol)
+    setup_engine(strategy, integrator, dh, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
 
 Build the [`AssemblyEngine`](@ref) shared by all operator kinds from the
 protocol's declarations: slot names size the per-worker slot buffers, and
 declared kinds run their trait ↔ kernel and internal-state admissibility
-checks eagerly (instead of on first use) and — unioned with the integrator
-family's [`mandatory_kinds`](@ref) — select which per-worker sweep-state
-families are built.
+checks eagerly (instead of on first use).
+
+Element caches lacking analytic coverage of some AD-decorator kind are
+wrapped in [`ADElementCache`](@ref) — construction IS the resolution, for
+every kind the integrator might issue, not only declared ones — decided
+STRUCTURALLY by [`needs_ad_decoration`](@ref): a bilinear or linear operator
+carries no AD/sensitivity machinery whatever an element does or does not
+implement analytically. `ad_backend = nothing` opts out of wrapping.
 """
-function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
+function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol;
+        ad_backend = ForwardDiffAD())
     requests          = get_declared_kinds(protocol)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
-    element_caches    = setup_elements(integrator, dh)
+    element_caches    = setup_elements(integrator, dh, ad_backend)
     foreach(cache -> validate_element_cache(cache, requests), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
     ivh               = setup_internal_variable_handler(integrator, element_caches, dh)
     _warn_boundary_sensitivity(requests, boundary_caches)
-    kinds             = (requests..., mandatory_kinds(integrator)...)
     subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
                                                slots = get_declared_slots(protocol),
-                                               derivative_family = needs_derivative_family(kinds))
+                                               needs_sensitivity = needs_ad_decoration(integrator))
     return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, protocol)
 end
 
 """
-    setup_operator(strategy, problem, dh, protocol::AbstractSchemeProtocol)
-    setup_operator(strategy, problem, dh; slots = (:u,), requests = ())
+    setup_operator(strategy, problem, dh, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
+    setup_operator(strategy, problem, dh; slots = (:u,), requests = (), ad_backend = ForwardDiffAD())
 
 Build the operator for `problem` (an integrator) over `dh`. The positional
 form takes the scheme's declarations as a protocol
 ([`AbstractSchemeProtocol`](@ref)); the keyword form is sugar whose keywords
 are the [`DefaultProtocol`](@ref) constructor arguments, and it lowers to the
-positional form here.
+positional form here. `ad_backend` selects the [`ADElementCache`](@ref)
+backend wrapping caches that lack analytic coverage (`nothing` opts out).
 
 Transfer and patch operators keep their own constructors
 ([`setup_transfer_operator`](@ref), [`assemble_patches!`](@ref)).
 """
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
-    engine = setup_engine(strategy, integrator, dh, protocol)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
+    engine = setup_engine(strategy, integrator, dh, protocol; ad_backend)
     A      = create_system_matrix(engine.strategy, dh)
     return BilinearFerriteOperator(A, engine, integrator)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
-    engine = setup_engine(strategy, integrator, dh, protocol)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
+    engine = setup_engine(strategy, integrator, dh, protocol; ad_backend)
     J      = create_system_matrix(engine.strategy, dh)
     return LinearizedFerriteOperator(J, engine, integrator)
 end
 
-function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol)
-    engine = setup_engine(strategy, integrator, dh, protocol)
+function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
+    engine = setup_engine(strategy, integrator, dh, protocol; ad_backend)
     b      = create_system_vector(engine.strategy, dh)
     return LinearFerriteOperator(b, engine, integrator)
 end
 
 setup_operator(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler;
-        slots = (:u,), requests::Tuple = ()) =
-    setup_operator(strategy, integrator, dh, DefaultProtocol(; slots, requests))
+        slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD()) =
+    setup_operator(strategy, integrator, dh, DefaultProtocol(; slots, requests); ad_backend)
 
 """
     init_transfer_sparsity_pattern(dh_row::DofHandler, dh_col::DofHandler)

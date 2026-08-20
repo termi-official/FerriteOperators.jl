@@ -124,24 +124,22 @@ end
         @test kw.J == pos.J
     end
 
-    @testset "families are built only where declarations call for them" begin
+    @testset "sensitivity buffers are built structurally, by integrator family" begin
         tb = protocol_testbed()
         qrc = QuadratureRuleCollection(2)
 
-        # bilinear and linear operators never differentiate
+        # bilinear and linear operators never carry sensitivity machinery —
+        # decided by `needs_ad_decoration(integrator)`, not by declarations
         bws = first_workspace(tb.Mop)
-        @test bws.ad === nothing
+        @test bws.sensitivity === nothing
         lop = setup_operator(tb.strategy, SimpleLinearIntegrator(1.0, qrc, :u), tb.dh)
-        @test first_workspace(lop).ad === nothing
+        @test first_workspace(lop).sensitivity === nothing
 
-        # the nonlinear family always differentiates, declared or not
-        @test first_workspace(tb.op).ad !== nothing
+        # the nonlinear family always carries it, declared or not
+        @test first_workspace(tb.op).sensitivity !== nothing
         @test mandatory_kinds(tb.Mop.integrator) == (FerriteOperators.BilinearKind, ResidualKind)
-
-        # a bilinear operator asked to differentiate says so instead of failing obscurely
-        @test_throws ArgumentError FerriteOperators.sweep_state(bws, StateJVPKind(nothing))
-        # a functional kind returns its value, so it has no per-worker state to read
-        @test_throws ArgumentError FerriteOperators.sweep_state(bws, FunctionalKind(:mass))
+        @test !FerriteOperators.needs_ad_decoration(tb.Mop.integrator)
+        @test FerriteOperators.needs_ad_decoration(tb.op.integrator)
     end
 
     @testset "workspaces are immutable" begin
@@ -167,13 +165,13 @@ end
         @test area ≈ 4.0 rtol = 1e-12          # the [-1,1]² reference grid
 
         # …and declaring it builds nothing: the declaring operator answers the
-        # same, and a bilinear one still carries no sweep-state family at all.
+        # same, and a bilinear one still carries no sensitivity buffers at all.
         fop = setup_operator(tb.strategy, ProtocolDiffusionIntegrator(tb.qrc, :u), tb.dh,
                              DefaultProtocol(; slots = (:u, :du), requests = (FunctionalKind,)))
         @test evaluate_functional(fop, FunctionalKind(:mass), states, nothing, ctx) == area
         bfop = setup_operator(tb.strategy, SimpleBilinearMassIntegrator(1.0, tb.qrc, :u), tb.dh,
                               DefaultProtocol(; requests = (FunctionalKind,)))
-        @test first_workspace(bfop).ad === nothing
+        @test first_workspace(bfop).sensitivity === nothing
     end
 
     @testset "two operators from one protocol evaluate concurrently" begin
@@ -191,7 +189,7 @@ end
         @test op1.J !== op2.J
         @test first_workspace(op1) !== first_workspace(op2)
         @test first_workspace(op1).Ke !== first_workspace(op2).Ke
-        @test first_workspace(op1).ad !== first_workspace(op2).ad
+        @test first_workspace(op1).sensitivity !== first_workspace(op2).sensitivity
         @test first_workspace(op1).slot_buffers.u !== first_workspace(op2).slot_buffers.u
 
         s1 = (u = sin.(0.3 .* (1:n)), du = cos.(0.2 .* (1:n)))
@@ -243,20 +241,20 @@ function FerriteOperators.assemble_cell!(req::ScaledStiffnessRequest, cache::Any
     end
 end
 
-# 2. A derivative-family kind riding the sensitivity driver body. Declaring it
-#    must build the ADWorkspace; its kernel reads the family through
-#    `sweep_state`, which only resolves if that happened.
+# 2. A kind riding the sensitivity driver body, reading the engine's
+#    SensitivityBuffers directly — no family declaration needed, since they
+#    are structurally present on any nonlinear operator (`needs_ad_decoration`)
+#    and absent otherwise. `materialize_request`/`scatter_request!` alone are
+#    the whole recipe; `execute_kind!` reuses `sensitivity_cell_sweep!` as-is.
 struct ResidualProbeKind end
-FerriteOperators.sweep_family(::Type{<:ResidualProbeKind}) = FerriteOperators.DerivativeFamily()
 FerriteOperators.has_cell_request(::Type{<:ResidualProbeKind}) = false
 FerriteOperators.execute_kind!(kind::ResidualProbeKind, task, ws) =
     FerriteOperators.sensitivity_cell_sweep!(kind, task, ws)
-function FerriteOperators.sensitivity_kernel!(kind::ResidualProbeKind, task, ws, args)
-    gₑ = FerriteOperators.sweep_state(ws, kind).gu     # the declared family
-    fill!(gₑ, 0.0)
-    FerriteOperators.assemble_cell!(ResidualRequest(gₑ), ws.element, args)
-    assemble!(task.inner_assembler, ws.cell, gₑ)
+function FerriteOperators.materialize_request(::ResidualProbeKind, ws, task)
+    fill!(ws.sensitivity.gu, 0.0)
+    return ResidualRequest(ws.sensitivity.gu)
 end
+FerriteOperators.scatter_request!(req::ResidualRequest, assembler, cell) = assemble!(assembler, cell, req.r)
 
 # 3. A kind claiming an analytic kernel it does not implement.
 struct OrphanKind end
@@ -305,15 +303,14 @@ end
             CustomKindProtocol((OrphanKind,)))
     end
 
-    @testset "derivative-family kind builds the ADWorkspace" begin
+    @testset "sensitivity-shaped downstream kind reads ws.sensitivity directly" begin
         plain = protocol_testbed(protocol = CustomKindProtocol((ResidualProbeKind,)))
 
-        # An operator whose mandatory kinds never differentiate carries no
-        # derivative family; declaring a derivative-family kind builds one.
-        @test first_workspace(plain.Mop).ad === nothing
+        # A bilinear operator carries no sensitivity buffers whatever it
+        # declares — structural, by integrator family, not by declaration.
         declared = setup_operator(plain.strategy, SimpleBilinearMassIntegrator(1.0, plain.qrc, :u),
                                   plain.dh, DefaultProtocol(; requests = (ResidualProbeKind,)))
-        @test first_workspace(declared).ad !== nothing
+        @test first_workspace(declared).sensitivity === nothing
 
         n = plain.n
         u  = sin.(0.3 .* (1:n))
@@ -343,7 +340,6 @@ end
         ci = code_typed(FerriteOperators.scatter_local!, Tuple{ScaledStiffnessKind, Any, Any})[1][1]
         @test count_branches(ci) == 0
         # Family resolution folds to the singleton, so declarations are static.
-        @test FerriteOperators.sweep_family(ResidualProbeKind) === FerriteOperators.DerivativeFamily()
         @test FerriteOperators.sweep_family(ScaledStiffnessKind) === FerriteOperators.NoFamily()
     end
 end

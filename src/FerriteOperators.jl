@@ -35,7 +35,6 @@ include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or 
 include("core/strategy.jl")  # Utilities to control the assembly strategy
 include("core/requests.jl")           # Assembly requests: the element kernel contract
 include("core/element_interface.jl")  # Cache supertypes + the empty caches
-include("core/ad.jl")                 # ForwardDiff fallbacks deriving requests from residual kernels
 include("core/tasks.jl")              # Contains the basic task system
 include("core/iterators.jl")          # Transfer cell iterators for two-DofHandler assembly
 
@@ -58,6 +57,7 @@ abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrato
 abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
+include("elements/ad_element.jl")             # ADElementCache: AD as an element cache decorator
 
 include("operators/general.jl")         # Some general operators which might be handy
 include("operators/matrix_free.jl")     # Everything related to the fundamental decomposition
@@ -66,6 +66,7 @@ include("operators/bilinear.jl")
 include("operators/linear.jl")
 include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
 include("elements/prolongators.jl")     # Transfer integrators assembling mass-based prolongators
+include("operators/ad_decoration.jl")   # Construction-time ADElementCache/FusedFromSplit wrapping policy
 include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
 include("elements/domain_elements.jl")  # Subdomain routing; specializes setup.jl's per-DofHandler cache setup seam
 include("operators/components.jl")      # Component bags over a shared sparsity pattern + combine!
@@ -128,6 +129,8 @@ export ItemStates, item_state, set_item_state!, has_item_state, invalidate_item_
 export provides_analytic
 export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
 export reinit_values!
+export ADElementCache, ForwardDiffAD, FusedFromSplit, condensed_corrector
+export decorate_element_cache, needs_ad_decoration, fully_analytic
 
 export residual_size, unknown_size
 

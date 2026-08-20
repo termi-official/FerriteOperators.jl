@@ -62,9 +62,14 @@ const AnyMultiDomainIntegrator = Union{NonlinearMultiDomainIntegrator, BilinearM
 
 # The engine builds all subdomain caches in one go, so resolution is hoisted to
 # the plural hooks: it runs twice per operator setup (elements, boundaries)
-# instead of once per subdomain and hook.
-setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler) =
-    [setup_element_cache(sub, sdh) for (sub, sdh) in zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers)]
+# instead of once per subdomain and hook. Decoration is per-subdomain — a
+# subdomain's own sub-integrator may or may not need it, independent of its
+# neighbours.
+function setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler, ad_backend)
+    resolved = zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers)
+    needs_ad_decoration(integrator) || return [setup_element_cache(sub, sdh) for (sub, sdh) in resolved]
+    return [decorate_element_cache(setup_element_cache(sub, sdh), sdh, ad_backend) for (sub, sdh) in resolved]
+end
 setup_boundaries(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler) =
     [setup_boundary_cache(sub, sdh) for (sub, sdh) in zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers)]
 

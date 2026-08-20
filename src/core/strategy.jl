@@ -108,12 +108,65 @@ New device backends must allocate and manage workspaces of a concrete subtype.
 abstract type AbstractWorkspace end
 
 """
+    SensitivityBuffers
+
+Per-worker OUTPUT buffers the five sensitivity requests
+([`ParameterJacobianRequest`](@ref), [`ParameterVJPRequest`](@ref),
+[`TimeSensitivityRequest`](@ref), [`StateJVPRequest`](@ref),
+[`StateVJPRequest`](@ref)) accumulate into and the engine scatters — the
+"outputs and payload gathers" half of the AD decorator's buffer split (see
+[`ADElementCache`](@ref) for the other half, the seeds/configs). Element-sized
+members (`λₑ`, `vₑ`, `Jvₑ`, `gu`, `gₜ`) are eager; parameter-sized members
+(`θ`, `Bₑ`, `gθ`) are (re)allocated on first use via
+[`parameter_sweep_buffers!`](@ref) because nθ arrives with `p` at call time.
+"""
+@concrete mutable struct SensitivityBuffers
+    λₑ        # residual-sized adjoint gather
+    vₑ        # unknown-sized JVP direction gather
+    Jvₑ       # residual-sized JVP output
+    gu        # unknown-sized state-VJP output
+    gₜ        # residual-sized time-sensitivity output
+    θ         # flat primal parameter copy (nθ)
+    Bₑ        # local parameter Jacobian block (residual × nθ)
+    gθ        # parameter pullback output (nθ)
+end
+
+function create_sensitivity_buffers(element, sdh)
+    vₑ  = allocate_element_unknown_vector(element, sdh)
+    gu  = allocate_element_unknown_vector(element, sdh)
+    λₑ  = allocate_element_residual_vector(element, sdh)
+    Jvₑ = allocate_element_residual_vector(element, sdh)
+    gₜ  = allocate_element_residual_vector(element, sdh)
+    T   = eltype(Jvₑ)
+    return SensitivityBuffers(λₑ, vₑ, Jvₑ, gu, gₜ, Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0), Vector{T}())
+end
+
+duplicate_for_device(device::AbstractCPUDevice, s::SensitivityBuffers) =
+    SensitivityBuffers(copy(s.λₑ), copy(s.vₑ), copy(s.Jvₑ), copy(s.gu), copy(s.gₜ), copy(s.θ), copy(s.Bₑ), copy(s.gθ))
+
+"""
+    parameter_sweep_buffers!(s::SensitivityBuffers, nθ) -> SensitivityBuffers
+
+Size the parameter-sweep members (`θ`, `Bₑ`, `gθ`) for `nθ` flat parameters,
+reallocating only when nθ changed since the last sweep on this worker.
+"""
+function parameter_sweep_buffers!(s::SensitivityBuffers, nθ::Int)
+    if length(s.θ) != nθ
+        T = eltype(s.θ)
+        s.θ  = Vector{T}(undef, nθ)
+        s.gθ = Vector{T}(undef, nθ)
+        s.Bₑ = Matrix{T}(undef, size(s.Bₑ, 1), nθ)
+    end
+    return s
+end
+
+"""
     AssemblyWorkspace
 
 Per-worker workspace for square operator assembly (bilinear, nonlinear, linear):
 a fixed CORE of pre-allocated element-local buffers and caches reused across
-cells, plus the kind-family members the operator's declarations call for (see
-[`sweep_state`](@ref)).
+cells, plus the [`SensitivityBuffers`](@ref) a nonlinear operator's sensitivity
+entry points need.
 
 IMMUTABLE: every field is bound at construction, and a sweep works by filling
 the buffers those fields point at. No sweep ever rebinds a field, which is what
@@ -129,9 +182,8 @@ Core fields:
 - `ivh`: internal variable handler
 - `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
 - `boundary_element`: surface cache walked by the facet driver
-
-Sweep-state family, `nothing` when no declared or mandatory kind needs it:
-- `ad`: derivative-sweep buffers and ForwardDiff configs ([`ADWorkspace`](@ref))
+- `sensitivity`: [`SensitivityBuffers`](@ref), or `nothing` for an operator
+  family that never issues a sensitivity kind (bilinear, linear)
 """
 @concrete struct AssemblyWorkspace <: AbstractWorkspace
     Ke
@@ -141,7 +193,7 @@ Sweep-state family, `nothing` when no declared or mandatory kind needs it:
     ivh
     element
     boundary_element
-    ad             # derivative family: ADWorkspace, or `nothing`
+    sensitivity    # SensitivityBuffers, or `nothing`
 end
 
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
@@ -153,13 +205,13 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
         ws.cell.dh,
         duplicate_for_device(device, ws.ivh),
         keys(ws.slot_buffers);
-        derivative_family = ws.ad !== nothing,
+        needs_sensitivity = ws.sensitivity !== nothing,
     )
 end
 
 """
     create_assembly_workspace(element, boundary_element, sdh, ivh, slots;
-                              derivative_family = true)
+                              needs_sensitivity = true)
 
 Create a single [`AssemblyWorkspace`](@ref) with freshly allocated
 element-local buffers, one state buffer per declared slot name. Slot buffers
@@ -169,13 +221,13 @@ condensed element's `q`) is resized to fit the cell's internal-dof range on
 every gather instead, since that count is generally different from — and can
 vary per cell independently of — the field dof count.
 
-`derivative_family` selects whether the [`ADWorkspace`](@ref) is built; the
-engine derives it from the protocol's declared kinds and the integrator
-family's mandatory kinds, so an operator that never differentiates carries no
-ForwardDiff machinery at all.
+`needs_sensitivity` selects whether [`SensitivityBuffers`](@ref) is built —
+STRUCTURAL, decided by the integrator family (see
+[`needs_ad_decoration`](@ref)): a bilinear or linear operator never issues a
+sensitivity kind, so it carries none of this machinery.
 """
 function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
-        derivative_family::Bool = true) where {N}
+        needs_sensitivity::Bool = true) where {N}
     slot_buffers = NamedTuple{slots}(ntuple(_ -> allocate_element_unknown_vector(element, sdh), N))
     return AssemblyWorkspace(
         allocate_element_matrix(element, sdh),
@@ -185,7 +237,7 @@ function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::N
         ivh,
         element,
         boundary_element,
-        derivative_family ? create_ad_workspace(element, sdh) : nothing,
+        needs_sensitivity ? create_sensitivity_buffers(element, sdh) : nothing,
     )
 end
 

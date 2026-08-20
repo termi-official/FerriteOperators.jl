@@ -8,6 +8,7 @@ CurrentModule = FerriteOperators
 Modules = [FerriteOperators]
 Pages = [
     "operators/general.jl",
+    "operators/ad_decoration.jl",
     "operators/setup.jl",
     "operators/nonlinear.jl",
     "operators/bilinear.jl",

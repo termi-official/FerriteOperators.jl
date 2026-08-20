@@ -120,14 +120,18 @@ FerriteOperators.materialize_request(::MyKind, ws) = MyRequest(ws.Ke)
 FerriteOperators.assembles_matrix(::MyKind) = true
 # assembles_vector / depends_on_unknowns default to `false` for a new kind.
 
-# 3. The per-worker family the sweep reads, queried on the TYPE. Declaring
-#    `DerivativeFamily()` is what builds the `ADWorkspace` at setup.
-FerriteOperators.sweep_family(::Type{<:MyKind}) = FerriteOperators.NoFamily()
-
-# 4. The driver. Reuse a provided body, or write a bespoke one.
+# 3. The driver. Reuse a provided body, or write a bespoke one.
 FerriteOperators.execute_kind!(kind::MyKind, task, ws) =
     FerriteOperators.primal_cell_sweep!(kind, task, ws)
 ```
+
+A kind whose sweep needs per-worker scratch beyond `ws.Ke`/`ws.re` reads
+[`SensitivityBuffers`](@ref) through `ws.sensitivity` — structurally present
+whenever the operator's integrator [`needs_ad_decoration`](@ref) (any
+`AbstractNonlinearIntegrator`) and `nothing` otherwise, no family declaration
+required. `materialize_request(::MyKind, ws, task)` (the 3-arg form) is where
+a sensitivity-shaped kind binds it; see the five built-in sensitivity kinds
+for the pattern.
 
 A kind computing a global scalar or tensor rather than something scattered
 declares `FunctionalFamily()` instead, which routes it to the
@@ -191,12 +195,20 @@ the default `K()` cannot construct one — and [`has_cell_request`](@ref) is
 `assemble_cell!`. [`requires_admissibility_check`](@ref) opts a kind into the
 internal-state admissibility rule at setup.
 
-**New per-worker state** — [`sweep_state`](@ref) is the accessor for a
-workspace's kind-family members. A workspace is a fixed core plus those
-members, all of them bound at construction from the protocol's declarations
-routed through [`sweep_family`](@ref); the workspace itself is immutable, so a
-sweep fills buffers and never rebinds a field. Membership in the existing
-families is open; adding a new family *type* is not.
+**New per-worker state** — a workspace is a fixed core (geometry cache, slot
+buffers, `Ke`/`re`) plus [`SensitivityBuffers`](@ref), present exactly when
+[`needs_ad_decoration`](@ref) says so — structural, by integrator family, not
+by protocol declaration. The workspace itself is immutable, so a sweep fills
+buffers and never rebinds a field. There is no third, downstream-openable
+family: an element cache wanting its own per-worker scratch carries it as an
+ordinary cache field, duplicated per worker by its own `duplicate_for_device`
+(see [storage classes for elements with local problems](elements.md)).
+
+**New AD backends** — [`ADElementCache`](@ref)'s `backend` field is the seam:
+[`ForwardDiffAD`](@ref) is the default, and a downstream extension implements
+its own buffer struct plus the same eight `assemble_cell!` methods for its own
+backend marker type, activated via `setup_operator(...; ad_backend =
+MyBackend())`.
 
 **New operator families** — [`mandatory_kinds`](@ref) states the kinds an
 integrator family always issues regardless of what a protocol declares, which

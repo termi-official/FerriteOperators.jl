@@ -112,7 +112,7 @@ end
         uprev = zeros(n)
         ctx = TimeIntegrationContext(0.0, 1.0, 1.0)
 
-        nqp    = getnquadpoints(first_element_cache(op).cv)
+        nqp    = getnquadpoints(first_element_cache(op))
         ncells = getncells(tb.grid)
 
         report = condense_internal!(op, condensed_states(u, uprev), nothing, ctx)

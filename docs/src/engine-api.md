@@ -10,7 +10,6 @@ Pages = [
     "core/tasks.jl",
     "core/strategy.jl",
     "core/device.jl",
-    "core/ad.jl",
     "core/iterators.jl",
     "core/qvector.jl",
     "core/quadrature-task.jl",
