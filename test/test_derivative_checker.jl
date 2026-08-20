@@ -241,13 +241,14 @@ end
         strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
         vop = visco_testbed(strategy, QuadratureRuleCollection(2)).op
         vu = 1e-3 .* sin.(0.2 .* (1:unknown_size(vop)))
-        vstates = (u = vu, uprev = zeros(unknown_size(vop)))
+        vuprev = zeros(unknown_size(vop))
+        vstates = condensed_states(vu, vuprev)
         vctx = TimeIntegrationContext(0.0, 0.1, 0.1)
 
         vu_before = copy(vu)
         res = check_derivatives(vop, vstates, MaxwellParameters(), vctx)
         @test res.passed
-        @test res.checks.jacobian.passed              # condensed tangent vs FD through local solves
+        @test res.checks.jacobian.passed              # condensed tangent vs FD through condense_internal!
         @test res.checks.jacobian.skipped === nothing
         @test res.checks.state_jvp.skipped !== nothing    # condensed: state actions unsupported
         @test res.checks.parameter_jacobian.skipped !== nothing  # no parameter_vector for MaxwellParameters

@@ -12,32 +12,50 @@ Material parameters of the standard linear solid used by
 end
 
 @doc raw"""
-    SimpleCondensedLinearViscoelasticity
+    SimpleCondensedLinearViscoelasticity(material_parameters, qrc, displacement_name, viscosity_name;
+                                          condensation = Separate(), corrector = Stored())
 
 Linear viscoelasticity (standard linear solid) with the viscous strain εᵛ as a
 condensed per-quadrature-point internal variable. The element owns the LOCAL
-stage problem for εᵛ (scaled by `stage_scaling(ctx)`); the previous state arrives through
-the `uprev` slot and the trial state is written back into the element-local
-`u` buffer per the condensation contract.
+stage problem for εᵛ (scaled by `stage_scaling(ctx)`), solved once per
+quadrature point by [`condense_cell!`](@ref) — [`condense_internal!`](@ref)
+must run before any evaluation sweep. The Mandel factorization `A` of the
+local operator is retained per quadrature point and read by the `Consistent`
+kernel.
+
+`condensation`/`corrector` are construction-time seams
+([`CondensationElection`](@ref)/[`CorrectorElection`](@ref)); only their
+defaults (`Separate()`/`Stored()`) are implemented.
 """
-struct SimpleCondensedLinearViscoelasticity <: AbstractCondensedNonlinearIntegrator
+struct SimpleCondensedLinearViscoelasticity{Cond <: CondensationElection, Corr <: CorrectorElection} <: AbstractCondensedNonlinearIntegrator
     material_parameters::MaxwellParameters
     # Every integrator needs these
     qrc::QuadratureRuleCollection
     displacement_name::Symbol
     viscosity_name::Symbol
+    condensation::Cond
+    corrector::Corr
 end
+function SimpleCondensedLinearViscoelasticity(material_parameters, qrc, displacement_name, viscosity_name;
+        condensation = Separate(), corrector = Stored())
+    condensation isa Separate || condensation_election_error(condensation)
+    corrector isa Stored || corrector_election_error(corrector)
+    return SimpleCondensedLinearViscoelasticity(material_parameters, qrc, displacement_name, viscosity_name,
+                                                 condensation, corrector)
+end
+FerriteOperators.condensation_election(integrator::SimpleCondensedLinearViscoelasticity) = integrator.condensation
+FerriteOperators.corrector_election(integrator::SimpleCondensedLinearViscoelasticity) = integrator.corrector
 
 """
 The cache associated with [`SimpleCondensedLinearViscoelasticity`](@ref). It
-carries the element-local dof ranges of the displacement and of the condensed
-viscous strain, and declares [`has_internal_state`](@ref).
+carries the retained per-quadrature-point Mandel factorization `A`
+(`correctors`, populated by [`condense_cell!`](@ref) and read by the
+`Consistent` kernel), and declares [`has_internal_state`](@ref).
 """
-struct SimpleCondensedLinearViscoelasticityCache{CV <: CellValues} <: AbstractVolumetricElementCache
+struct SimpleCondensedLinearViscoelasticityCache{NQP, CV <: CellValues} <: AbstractVolumetricElementCache
     material_parameters::MaxwellParameters
-    displacement_range::UnitRange{Int}
-    viscosity_range::UnitRange{Int}
     cv::CV
+    correctors::ItemStates{SVector{NQP, SMatrix{6, 6, Float64, 36}}}
 end
 
 Ferrite.getnquadpoints(e::SimpleCondensedLinearViscoelasticityCache) = getnquadpoints(e.cv)
@@ -46,20 +64,26 @@ reinit_values!(e::SimpleCondensedLinearViscoelasticityCache, cell) = Ferrite.rei
 function duplicate_for_device(device, cache::SimpleCondensedLinearViscoelasticityCache)
     return SimpleCondensedLinearViscoelasticityCache(
         cache.material_parameters,
-        cache.displacement_range,
-        cache.viscosity_range,
         duplicate_for_device(device, cache.cv),
+        duplicate_for_device(device, cache.correctors),
     )
 end
 
 function get_number_of_internal_dofs_per_element(element_model, cache::SimpleCondensedLinearViscoelasticityCache, sdh)
-    return [length(cache.viscosity_range) for i in sdh.cellset]
+    nqp = getnquadpoints(cache.cv)
+    return [6nqp for i in sdh.cellset]
 end
 
 provides_analytic(::Type{<:SimpleCondensedLinearViscoelasticityCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
 has_internal_state(::Type{<:SimpleCondensedLinearViscoelasticityCache}) = true
 
-# The elastic stiffness (unit modulus) — shared by predictor and corrector.
+function FerriteOperators.invalidate_correctors!(cache::SimpleCondensedLinearViscoelasticityCache)
+    FerriteOperators.invalidate_item_states!(cache.correctors)
+    return nothing
+end
+
+# The elastic stiffness (unit modulus) — shared by predictor and corrector,
+# and by the pure residual kernel (no local-solve dependence).
 @inline function _sls_unit_stiffness(ε, ν)
     I = one(ε)
     c₁ = ν / ((ν + 1) * (1 - 2ν)) * I ⊗ I
@@ -70,8 +94,8 @@ end
 # Local stage problem (backward-Euler form scaled by γ̃):
 #     dεᵛdt = E₁/η₁ ℂ : (ε - εᵛ)
 # <=> (𝐈/γ̃ + E₁/η₁ ℂ) : εᵛ₁ = εᵛ₀/γ̃ + E₁/η₁ ℂ : ε
-# Returns (ℂ, A, εᵛ₁); A is the Mandel matrix of the local operator, reused by
-# the corrector.
+# Returns (ℂ, A, εᵛ₁); A is the Mandel matrix of the local operator, retained
+# by `condense_cell!` and reused by the consistent tangent.
 @inline function _sls_local_solve(cache::SimpleCondensedLinearViscoelasticityCache, ε, εᵛ₀, γ̃)
     (; E₁, η₁, ν) = cache.material_parameters
     ℂ = _sls_unit_stiffness(ε, ν)
@@ -82,7 +106,8 @@ end
     return ℂ, A, εᵛ₁
 end
 
-# Corrector: consistent (algorithmic) tangent through the local solve.
+# Corrector: consistent (algorithmic) tangent through the local solve, reading
+# the retained factorization `A` instead of receiving it from an inline solve.
 @inline function _sls_consistent_tangent(cache::SimpleCondensedLinearViscoelasticityCache, ℂ, A)
     (; E₀, E₁, η₁) = cache.material_parameters
     # FIXME non-allocating version by using state_cache nlsolver
@@ -90,6 +115,12 @@ end
     dqdε = frommandel(typeof(ℂ), A \ B)
     ∂σ∂q = -E₁ * ℂ
     return (E₀ + E₁) * ℂ + ∂σ∂q ⊡ dqdε
+end
+# The FrozenQ partial: dq/dε = 0, so only the elastic + relaxed-branch term
+# survives — three lines, the same expression with the correction dropped.
+@inline function _sls_frozen_tangent(cache::SimpleCondensedLinearViscoelasticityCache, ℂ)
+    (; E₀, E₁) = cache.material_parameters
+    return (E₀ + E₁) * ℂ
 end
 
 @inline function _sls_stage_scaling(ctx)
@@ -99,35 +130,65 @@ end
     return stage_scaling(ctx)
 end
 
+"""
+    condense_cell!(cache::SimpleCondensedLinearViscoelasticityCache, args, weights) -> CondensationReport
+
+Solve the local viscous-strain problem at every quadrature point (a direct
+linear solve — always converged, zero inner iterations), write the trial εᵛ
+and retain the Mandel factorization `A`.
+"""
+function FerriteOperators.condense_cell!(cache::SimpleCondensedLinearViscoelasticityCache{NQP}, args::CellArgs, weights::NamedTuple) where {NQP}
+    cv  = cache.cv
+    γ̃   = _sls_stage_scaling(args.ctx)
+    id  = cellid(args.cell)
+
+    dₑ        = args.states.u
+    qₑmat     = reshape(args.states.q, (6, NQP))
+    qₑprevmat = reshape(args.states.qprev, (6, NQP))
+
+    As = MVector{NQP, SMatrix{6, 6, Float64, 36}}(undef)
+    @inbounds for qp in 1:NQP
+        ε   = symmetric(function_gradient(cv, qp, dₑ))
+        εᵛ₀ = SymmetricTensor{2, 3}(@view qₑprevmat[:, qp])
+        ℂ, A, εᵛ₁ = _sls_local_solve(cache, ε, εᵛ₀, γ̃)
+        (@view qₑmat[:, qp]) .= εᵛ₁.data
+        As[qp] = A
+    end
+    FerriteOperators.set_item_state!(cache.correctors, id, SVector{NQP}(As))
+    return CondensationReport(true, NQP, 0, 0, id, 0, 0.0, 1.0)
+end
+
 # One concrete entry method per provided kernel (no blanket request method:
 # it would satisfy every `hasmethod` probe in the setup-time validation).
 assemble_cell!(req::ResidualRequest, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
-assemble_cell!(req::JacobianRequest{:u}, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
-assemble_cell!(req::JacobianResidualRequest, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
+assemble_cell!(req::JacobianRequest{:u, Consistent}, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
+assemble_cell!(req::JacobianRequest{:u, FrozenQ}, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
+assemble_cell!(req::JacobianResidualRequest{Consistent}, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
+assemble_cell!(req::JacobianResidualRequest{FrozenQ}, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs) = _sls_assemble!(req, cache, args)
 
-function _sls_assemble!(req::Union{ResidualRequest, JacobianRequest{:u}, JacobianResidualRequest}, cache::SimpleCondensedLinearViscoelasticityCache, args::CellArgs)
-    (; displacement_range, viscosity_range, cv) = cache
-    (; E₀, E₁ ) = cache.material_parameters
-    γ̃ = _sls_stage_scaling(args.ctx)
-    uₑ     = args.states.u
-    uₑprev = args.states.uprev
+const _SLSJacobianLike = Union{JacobianRequest{:u, Consistent}, JacobianRequest{:u, FrozenQ}, JacobianResidualRequest{Consistent}, JacobianResidualRequest{FrozenQ}}
+const _SLSFrozenLike   = Union{JacobianRequest{:u, FrozenQ}, JacobianResidualRequest{FrozenQ}}
 
-    nqp   = getnquadpoints(cv)
+# Pure evaluation at the FROZEN εᵛ the last `condense_internal!` wrote: no
+# solve, no write-back, ℂ recomputed freely (a pure function of ε, no local
+# solve dependence). `item_state` throws, naming the cell, if
+# `condense_internal!` never ran for it.
+function _sls_assemble!(req::Union{ResidualRequest, _SLSJacobianLike}, cache::SimpleCondensedLinearViscoelasticityCache{NQP}, args::CellArgs) where {NQP}
+    (; E₀, E₁, ν) = cache.material_parameters
+    cv = cache.cv
+    id = cellid(args.cell)
+    dₑ = args.states.u
+    qₑmat = reshape(args.states.q, (6, NQP))
     ndofs = getnbasefunctions(cv)
 
-    dₑ         = @view uₑ[displacement_range]
-    qₑmat      = reshape((@view uₑ[viscosity_range]), (6, nqp))
-    qₑprevmat  = reshape((@view uₑprev[viscosity_range]), (6, nqp))
+    needs_jac = req isa _SLSJacobianLike
+    As = (needs_jac && !(req isa _SLSFrozenLike)) ? FerriteOperators.item_state(cache.correctors, id) : nothing
 
-    @inbounds for qp in 1:nqp
-        dΩ = getdetJdV(cv, qp)
-        ε  = symmetric(function_gradient(cv, qp, dₑ))
-        εᵛ₀ = SymmetricTensor{2, 3}(@view qₑprevmat[:, qp])
-
-        ℂ, A, εᵛ₁ = _sls_local_solve(cache, ε, εᵛ₀, γ̃)
-        # Trial write-back into the element-local buffer (the condensation
-        # contract; the framework's store step propagates it into global u).
-        (@view qₑmat[:, qp]) .= εᵛ₁.data
+    @inbounds for qp in 1:NQP
+        dΩ  = getdetJdV(cv, qp)
+        ε   = symmetric(function_gradient(cv, qp, dₑ))
+        εᵛ₁ = SymmetricTensor{2, 3}(@view qₑmat[:, qp])
+        ℂ   = _sls_unit_stiffness(ε, ν)
 
         if req isa Union{ResidualRequest, JacobianResidualRequest}
             σ = E₀ * ℂ ⊡ ε + E₁ * ℂ ⊡ (ε - εᵛ₁)
@@ -135,8 +196,8 @@ function _sls_assemble!(req::Union{ResidualRequest, JacobianRequest{:u}, Jacobia
                 req.r[i] += shape_gradient(cv, qp, i) ⊡ σ * dΩ
             end
         end
-        if req isa Union{JacobianRequest{:u}, JacobianResidualRequest}
-            ∂σ∂ε = _sls_consistent_tangent(cache, ℂ, A)
+        if needs_jac
+            ∂σ∂ε = req isa _SLSFrozenLike ? _sls_frozen_tangent(cache, ℂ) : _sls_consistent_tangent(cache, ℂ, As[qp])
             for i in 1:ndofs
                 ∇δui∂σ∂ε = shape_gradient(cv, qp, i) ⊡ ∂σ∂ε
                 for j in 1:ndofs
@@ -152,38 +213,11 @@ function setup_element_cache(element_model::SimpleCondensedLinearViscoelasticity
     nqp        = getnquadpoints(qr)
     ip         = Ferrite.getfieldinterpolation(sdh, element_model.displacement_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
-
-    displacement_range = dof_range(sdh, element_model.displacement_name)
-    viscosity_range    = (displacement_range[end]+1):(displacement_range[end]+6nqp)
+    ncells     = getncells(Ferrite.get_grid(sdh.dh))
 
     return SimpleCondensedLinearViscoelasticityCache(
         element_model.material_parameters,
-        displacement_range,
-        viscosity_range,
         CellValues(qr, ip, ip_geo),
+        ItemStates{SVector{nqp, SMatrix{6, 6, Float64, 36}}}(ncells),
     )
 end
-
-function get_element_internal_index_range(cell, ivh, element::SimpleCondensedLinearViscoelasticityCache)
-    nqp = getnquadpoints(element.cv)
-    id  = cellid(cell)
-    offset = internal_variable_offset(ivh, id)
-    internal_beg = offset+1
-    internal_end = offset+6nqp
-    return internal_beg:internal_end
-end
-
-function load_element_unknowns!(uₑ, u, cell, ivh, element::SimpleCondensedLinearViscoelasticityCache)
-    internal_range                         = get_element_internal_index_range(cell, ivh, element)
-    @views uₑ[element.displacement_range] .= u[celldofs(cell)]
-    @views uₑ[element.viscosity_range]    .= u[internal_range]
-    return nothing
-end
-
-function store_condensed_element_unknowns!(uₑ, u, cell, ivh, element::SimpleCondensedLinearViscoelasticityCache)
-    internal_range    = get_element_internal_index_range(cell, ivh, element)
-    u[internal_range] .= uₑ[element.viscosity_range]
-    return nothing
-end
-
-allocate_element_unknown_vector(element::SimpleCondensedLinearViscoelasticityCache, sdh) = zeros(getnbasefunctions(element.cv)+6getnquadpoints(element.cv))

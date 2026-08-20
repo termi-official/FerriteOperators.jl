@@ -108,9 +108,12 @@ Annotating the parameter (`args::CellArgs`) is permitted; kernels select on
 the `(request, cache)` pair, never on `args`.
 
 - `args.states` — NamedTuple of element-local state buffers, one per slot
-  declared at setup (`setup_operator(...; slots = (:u, :uprev))`). Slots are
-  gathered through the element-overridable `load_element_unknowns!`, so
-  condensed elements receive their full `[ū; q]` local layout for every slot.
+  declared at setup (`setup_operator(...; slots = (:u, :uprev))`). A slot's
+  *source* decides how it gathers: a plain vector reads `celldofs(cell)`,
+  [`AffineRate`](@ref) reconstructs over that same field-space gather, and
+  [`InternalSource`](@ref) restricts to a cell's condensed internal-dof range
+  — the mechanism that makes a condensed element's internal state `q` an
+  ordinary slot (see [Condensed elements](#Condensed-elements-(internal-variables))).
 - `args.cell` — the geometry cache of the current item, read-only.
 - `args.p` — the user parameter bag, produced by the overridable
   [`query_cell_parameters`](@ref) (facets get their own
@@ -163,17 +166,45 @@ behind the driver's back.
 ## Condensed elements (internal variables)
 
 Elements with per-quadrature-point internal state append their unknowns after
-the FE dofs (`u = [ū; q]`, managed by the [`InternalVariableHandler`](@ref))
-and own their local stage problem: the previous state arrives through a slot
-(e.g. `uprev`), the local solve scales by `stage_scaling(args.ctx)`, and the trial result
-is written into the element-local `u` buffer — the framework propagates it
-into the global trial vector. That per-evaluation write-back *is* the
-condensation contract: `q(ū)` is refreshed at every trial evaluation, line
-search included.
+the FE dofs (`u = [ū; q]`, managed by the [`InternalVariableHandler`](@ref)),
+own their local stage problem, and are solved in two phases:
+
+```julia
+report = condense_internal!(op, weights, states, p, ctx)   # solves every q, stores correctors, writes the tail
+update_linearization!(op, r, states, p, ctx)                # pure evaluation at frozen q
+```
+
+[`condense_internal!`](@ref) is the ONLY writer of `q`: it runs once over the
+whole domain, solves each quadrature point's local problem in
+[`condense_cell!`](@ref) — the element hook that replaces the local solve
+elements used to run inside every kernel — writes the trial `q` into the
+`[ū; q]` tail, and stores a corrector (an element-allocated
+[`ItemStates`](@ref) cache field) that the `Consistent` correction mode reads.
+Every evaluation sweep afterwards is a PURE function of `(ū, q, p, t)` at
+frozen `q`; no sweep writes back. `q` is gathered through an
+[`InternalSource`](@ref) slot like any other state — declared at setup
+(`slots = (:u, :q, …)`) and sourced per call (`states = (u = u, q =
+InternalSource(u), …)`).
+
+A Jacobian-shaped kind's [`CorrectionMode`](@ref) (`Consistent`, the default,
+or `FrozenQ`) selects the total `∂F/∂·|_q + ∂F/∂q · dq/d·` or the partial
+`∂F/∂·|_q` alone; `FrozenQ` must always be spelled and is refused at
+construction for the sensitivity kinds (a wrong gradient, unlike a wrong
+iteration matrix, is never a legitimate election). Reading an uncondensed or
+stale corrector throws, naming the cell; [`rollback_state!`](@ref) invalidates
+every corrector the operator carries (a rejected trial's `q` is stale),
+[`commit_state!`](@ref) does not (the committed point is the last condensed
+point). [`condensed_update_linearization!`](@ref) is the fused convenience
+entry point — condense, bail out on `!report.converged`, evaluate — that a
+Newton loop calls once per trial point.
 
 Declare [`has_internal_state`](@ref) for such caches — it governs the
 sensitivity admissibility rules in
-[Sensitivities](operators.md#Sensitivities).
+[Sensitivities](operators.md#Sensitivities): a kind with no `CorrectionMode`
+is always the total, so a plain AD fallback (which computes only the
+frozen-`q` partial, now that the kernel is pure) is missing the correction
+unless the cache serves the kind analytically or declares it
+[`internal_state_insensitive`](@ref).
 
 ## Composition
 

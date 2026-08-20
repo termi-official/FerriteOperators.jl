@@ -30,9 +30,15 @@ import FerriteOperators: AbstractBilinearIntegrator, AbstractLinearIntegrator,
 import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!,
     provides_analytic, has_internal_state, duplicate_for_device,
     geometric_subdomain_interpolation, get_number_of_internal_dofs_per_element,
-    load_element_unknowns!, store_condensed_element_unknowns!,
-    allocate_element_unknown_vector, internal_variable_offset,
-    evaluation_time, with_time, stage_scaling, CellArgs
+    internal_variable_offset, internal_variable_range,
+    evaluation_time, with_time, stage_scaling, CellArgs,
+    CorrectionMode, Consistent, FrozenQ, InternalSource,
+    JacobianKind, JacobianResidualKind, JacobianRequest, JacobianResidualRequest,
+    ParameterJacobianKind, ParameterJacobianRequest,
+    CondensationReport, condense_cell!,
+    CondensationElection, Separate, FusedWithResidual, condensation_election, condensation_election_error,
+    CorrectorElection, Stored, Recompute, corrector_election, corrector_election_error,
+    ItemStates, item_state, set_item_state!, has_item_state, invalidate_item_states!
 
 include("simple_diffusion.jl")             # Bilinear form + its induced residual
 include("simple_mass.jl")                  # Linear form and mass bilinear form
@@ -51,7 +57,5 @@ export MaxwellParameters
 export SimpleCondensedPowerLawRelaxation
 export NortonRelaxationParameters, LocalNewtonSettings
 export InexactLocalSolveContext, local_solve_tolerance
-export LocalSolveStatistics, local_solve_statistics, reset_local_solve_statistics!
-export LocalSolveNotConvergedError
 
 end

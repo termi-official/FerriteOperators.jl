@@ -164,8 +164,11 @@ end
 ####################################
 ## Condensed-viscoelasticity testbed
 ####################################
-# Vector displacement on a hex block plus a hidden per-QP εᵛ, slots (:u, :uprev).
-# `transform` reshapes the reference grid before the dofs are distributed.
+# Vector displacement on a hex block plus a hidden per-QP εᵛ, slots (:u, :q,
+# :qprev) — :q the trial internal state (InternalSource over the trial `u`),
+# :qprev its committed predecessor (InternalSource over a separate `uprev`
+# vector). `transform` reshapes the reference grid before the dofs are
+# distributed.
 function visco_testbed(strategy, qrc, dims = (1, 1, 1); transform = nothing, kwargs...)
     grid = generate_grid(Hexahedron, dims)
     transform === nothing || Ferrite.transform_coordinates!(grid, transform)
@@ -173,17 +176,20 @@ function visco_testbed(strategy, qrc, dims = (1, 1, 1); transform = nothing, kwa
     add!(dh, :u, Lagrange{RefHexahedron, 1}()^3)
     close!(dh)
     integrator = SimpleCondensedLinearViscoelasticity(MaxwellParameters(), qrc, :u, :εᵛ)
-    op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev), kwargs...)
+    op = setup_operator(strategy, integrator, dh; slots = (:u, :q, :qprev), kwargs...)
     return (; op, dh, grid)
 end
+
+"States NamedTuple for a condensed testbed's trial `u`/committed `uprev` pair."
+condensed_states(u, uprev) = (u = u, q = InternalSource(u), qprev = InternalSource(uprev))
 
 ####################################
 ## Condensed power-law relaxation testbed
 ####################################
 # Scalar field on a quad grid plus a hidden per-QP internal state whose local
-# stage problem is nonlinear, slots (:u, :uprev). `material` and
-# `local_solver` are the element's configuration, both arriving through the
-# integrator.
+# stage problem is nonlinear, slots (:u, :q, :qprev) — see `visco_testbed`.
+# `material` and `local_solver` are the element's configuration, both
+# arriving through the integrator.
 function relaxation_testbed(strategy, qrc, dims = (2, 2);
                             material = NortonRelaxationParameters(),
                             local_solver = LocalNewtonSettings(), kwargs...)
@@ -192,6 +198,6 @@ function relaxation_testbed(strategy, qrc, dims = (2, 2);
     add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
     close!(dh)
     integrator = SimpleCondensedPowerLawRelaxation(material, qrc, :u, :q; local_solver)
-    op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev), kwargs...)
+    op = setup_operator(strategy, integrator, dh; slots = (:u, :q, :qprev), kwargs...)
     return (; op, dh, grid)
 end

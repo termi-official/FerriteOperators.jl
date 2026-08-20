@@ -163,8 +163,11 @@ end
 
 Create a single [`AssemblyWorkspace`](@ref) with freshly allocated
 element-local buffers, one state buffer per declared slot name. Slot buffers
-are sized by `allocate_element_unknown_vector`, so condensed elements get
-their full `[ū; q]`-sized local vectors for every slot.
+are sized by `allocate_element_unknown_vector` at construction, matching
+`ndofs_per_cell`; a slot gathered through [`InternalSource`](@ref) (a
+condensed element's `q`) is resized to fit the cell's internal-dof range on
+every gather instead, since that count is generally different from — and can
+vary per cell independently of — the field dof count.
 
 `derivative_family` selects whether the [`ADWorkspace`](@ref) is built; the
 engine derives it from the protocol's declared kinds and the integrator

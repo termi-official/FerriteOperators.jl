@@ -286,26 +286,27 @@ FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperatorsExampleElem
         vop = visco_testbed(strategy, qrc).op
         vu = 1e-4 .* sin.(0.2 .* (1:unknown_size(vop)))
         vuprev = zeros(unknown_size(vop))
+        vstates = condensed_states(vu, vuprev)
         vctx = TimeIntegrationContext(0.0, 0.1, 0.1)
 
         # analytic (trivially zero) parameter kernel: accepted, runs, B stays 0
         B = zeros(residual_size(vop), 1)
-        update_parameter_jacobian!(B, vop, (u = vu, uprev = vuprev), 1.0, vctx)
+        update_parameter_jacobian!(B, vop, vstates, 1.0, vctx)
         @test iszero(B)
 
         # insensitivity declaration: VJP runs through AD with zero result
         # (the material has no parameter dependence)
         gv = zeros(1)
-        parameter_vjp!(gv, vop, ones(residual_size(vop)), (u = vu, uprev = vuprev), 1.0, vctx)
+        parameter_vjp!(gv, vop, ones(residual_size(vop)), vstates, 1.0, vctx)
         @test abs(gv[1]) < 1e-12
 
         # time sensitivity via AD is still rejected (no analytic kernel, no
         # declaration for that kind) …
-        @test_throws ArgumentError time_sensitivity!(zeros(residual_size(vop)), vop, (u = vu, uprev = vuprev), 1.0, vctx)
+        @test_throws ArgumentError time_sensitivity!(zeros(residual_size(vop)), vop, vstates, 1.0, vctx)
         # … but FD is admissible: primal evaluations on a protected copy.
         vu_before = copy(vu)
         g = zeros(residual_size(vop))
-        time_sensitivity!(g, vop, (u = vu, uprev = vuprev), 1.0, vctx; method = FiniteDifferenceSensitivity())
+        time_sensitivity!(g, vop, vstates, 1.0, vctx; method = FiniteDifferenceSensitivity())
         @test vu == vu_before                       # trial write-back never leaked
         @test norm(g) < 1e-8                        # the residual reads γ̃, not the evaluation time
     end

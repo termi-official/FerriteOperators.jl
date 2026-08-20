@@ -15,6 +15,7 @@ Pages = [
     "operators/components.jl",
     "operators/stage_block.jl",
     "operators/verification.jl",
+    "operators/condensation.jl",
     "operators/matrix_free.jl",
     "operators/transfer.jl",
 ]

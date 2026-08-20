@@ -52,3 +52,8 @@ invalidate_item_state!(st::ItemStates, i::Int) = (st.valid[i] = false; st)
 
 "Drop every item's state."
 invalidate_item_states!(st::ItemStates) = (fill!(st.valid, false); st)
+
+# Entries are indexed by ITEM, and the cell partition assigns each item to
+# exactly one worker at a time, so per-worker copies would only duplicate
+# memory without adding safety — every worker shares the same backing arrays.
+duplicate_for_device(device, st::ItemStates) = st

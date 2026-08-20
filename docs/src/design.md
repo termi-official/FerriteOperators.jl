@@ -73,7 +73,7 @@ is made by the *shape* of the information, not by which layer produced it.
 
 | shape | channel | notes |
 |---|---|---|
-| dof-shaped, one value per dof | a **slot** (`args.states.<name>`) | histories, rates, adjoint directions, stochastic realizations — anything the operator can gather with a dof map. Slots may be plain vectors or [`AffineRate`](@ref) reconstructions. |
+| dof-shaped, one value per dof | a **slot** (`args.states.<name>`) | histories, rates, adjoint directions, stochastic realizations — anything the operator can gather with a dof map. Slots may be plain vectors, [`AffineRate`](@ref) reconstructions, or — for a condensed element's internal state `q` — [`InternalSource`](@ref) restrictions (see [Condensed elements](elements.md#Condensed-elements-(internal-variables))). |
 | point-shaped, one value per quadrature point | quadrature storage and the **query seams** | [`QVector`](@ref) for stored per-QP data; [`query_cell_parameters`](@ref) / [`query_facet_parameters`](@ref) for element-owned gathers, including parameter fields. |
 | a scalar of *this* sweep | **`args.ctx`** | `t`, `Δt`, `γ̃` in [`TimeIntegrationContext`](@ref). A scheme with richer per-sweep scalars passes its own context type; framework code touches contexts only through [`evaluation_time`](@ref), [`with_time`](@ref) and [`stage_scaling`](@ref). |
 | configuration, constant across the sweep | **`args.p`** | material parameters and the user's bag. Never time, never history. `p` stays opaque: [`unwrap_parameters`](@ref) is the one place a solver-side wrapper is unwrapped. |
@@ -171,13 +171,16 @@ Declaring it (`setup_operator(...; requests = (MyKind,))`, or a protocol whose
 `get_declared_kinds` names it) selects its sweep-state family and runs its
 setup-time trait ↔ kernel validation.
 
-Three provided bodies exist: [`primal_cell_sweep!`](@ref) (buffer zeroing, slot
-gather, cell and facet kernels, condensed write-back, scatter),
-[`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to
-`sensitivity_kernel!`), and [`functional_cell_sweep`](@ref) (slot gather, no
-write-back, RETURN what the kernel hook gives). A kind riding
-`primal_cell_sweep!` without its own `cell_kernel!` method gets the plain
-analytic route.
+Four provided bodies exist: [`primal_cell_sweep!`](@ref) (buffer zeroing, slot
+gather, cell and facet kernels, scatter — no write-back: [`condense_internal!`](@ref)
+is the only writer of `q`), [`sensitivity_cell_sweep!`](@ref) (trial gather, no
+write-back, dispatch to `sensitivity_kernel!`), [`functional_cell_sweep`](@ref)
+(slot gather, no write-back, RETURN what the kernel hook gives), and
+[`condensation_cell_sweep!`](@ref) (slot gather, dispatch to
+[`condense_cell!`](@ref), RETURN the [`CondensationReport`](@ref) AND write the
+trial `q` back — the one combination the other three don't have). A kind
+riding `primal_cell_sweep!` without its own `cell_kernel!` method gets the
+plain analytic route.
 
 Declarations carry kind *types*, normalized to their `UnionAll` base, while
 sweeps carry instances. Two hooks bridge that for validation:

@@ -1,6 +1,15 @@
 # What a single assembly sweep computes. Kinds select which request is
 # materialized over the workspace buffers and which kernels run.
-struct JacobianResidualKind end     # state-dependent J(u) and r(u), fused
+"""
+    JacobianResidualKind{C <: CorrectionMode}
+    JacobianResidualKind()
+
+State-dependent J(u) and r(u), fused (the Newton hot path). `C` is the
+[`CorrectionMode`](@ref) of the Jacobian half; `JacobianResidualKind()`
+defaults it to `Consistent` — see [`JacobianKind`](@ref).
+"""
+struct JacobianResidualKind{C <: CorrectionMode} end
+JacobianResidualKind() = JacobianResidualKind{Consistent}()
 struct ResidualKind end             # state-dependent r(u)
 struct BilinearKind end             # u-independent matrix
 struct LinearKind end               # u-independent vector
@@ -11,27 +20,38 @@ struct StateJVPKind{V}; v::V; end              # (∂F/∂u)·v, matrix-free J a
 struct StateVJPKind{L}; λ::L; end              # (∂F/∂u)ᵀλ, matrix-free Jᵀ action
 
 """
-    JacobianKind{slot}
+    JacobianKind{slot, C <: CorrectionMode}
+    JacobianKind{slot}()
     JacobianKind()
 
 Assembly of the Jacobian ∂F/∂slot, materialized into the operator's matrix.
 `slot` names the state slot differentiated against; `JacobianKind()` is
-`JacobianKind{:u}()`, the Newton path. Every other slot is a *component* of a
-multi-slot linearization (`JacobianKind{:du}()` for the DAE mass block,
-`JacobianKind{:v}()`/`JacobianKind{:a}()` for structural dynamics); the
-chain-rule weights that fold components into a Newton matrix are the solver's,
-not the framework's.
+`JacobianKind{:u, Consistent}()`, the Newton path. Every other slot is a
+*component* of a multi-slot linearization (`JacobianKind{:du}()` for the DAE
+mass block, `JacobianKind{:v}()`/`JacobianKind{:a}()` for structural
+dynamics); the chain-rule weights that fold components into a Newton matrix
+are the solver's, not the framework's. `slot = :q` is the block a
+Schur-complement consumer or the generic corrector combination wants — see
+[`condense_internal!`](@ref).
+
+`C` is the [`CorrectionMode`](@ref): `JacobianKind{slot}()` defaults it to
+`Consistent`, so `FrozenQ` must always be spelled — `JacobianKind{slot,
+FrozenQ}()`.
 
 The differentiated slot must carry a plain vector source: [`AffineRate`](@ref)
 slots are reconstructed at gather time and frozen under AD, so a Jacobian
 w.r.t. them is not what the sweep computes and the entry point rejects it.
 
 Elements serve the kind either analytically — `assemble_cell!` on
-`JacobianRequest{slot}`, declared through [`provides_analytic`](@ref) — or
-through ForwardDiff seeding of the named slot buffer.
+`JacobianRequest{slot, C}`, declared through [`provides_analytic`](@ref) — or
+through ForwardDiff seeding of the named slot buffer, which computes exactly
+the `FrozenQ` partial (the kernel it differentiates is pure at frozen `q`) —
+correct as-is for `C = FrozenQ`, and admissible for `C = Consistent` only when
+the element has no condensed internal state to miss a correction for.
 """
-struct JacobianKind{slot} end
-JacobianKind() = JacobianKind{:u}()
+struct JacobianKind{slot, C <: CorrectionMode} end
+JacobianKind{slot}() where {slot} = JacobianKind{slot, Consistent}()
+JacobianKind() = JacobianKind{:u, Consistent}()
 
 """
     WeightedJacobianKind(weights::NamedTuple)
@@ -48,6 +68,10 @@ Weights are REQUEST payload: the kernel reads them from
 same NamedTuple with [`combine!`](@ref), so the two routes cannot disagree
 about the scheme's scalars. Solvers issue the kind through
 [`assemble_weighted_jacobian!`](@ref), which selects the route.
+
+`C` is the [`CorrectionMode`](@ref) of every participating slot;
+`WeightedJacobianKind(weights)` defaults it to `Consistent` —
+`WeightedJacobianKind{slots, FrozenQ}(weights)` spells the partial.
 
 An element opts into the fused route with
 
@@ -68,15 +92,20 @@ Radau) go through the composed route.
     `−(∂L/∂q)⁻¹(∂L/∂ε + slope·∂L/∂ε̇)` carries the slope inside the local
     inverse and cannot be recovered by weighting separated partials).
 """
-struct WeightedJacobianKind{slots, W <: NamedTuple}
+struct WeightedJacobianKind{slots, C <: CorrectionMode, W <: NamedTuple}
     weights::W
 end
 function WeightedJacobianKind(weights::NamedTuple{slots}) where {slots}
     isempty(slots) && throw(ArgumentError(
         "A `WeightedJacobianKind` needs at least one weighted slot, got empty weights."))
-    return WeightedJacobianKind{slots, typeof(weights)}(weights)
+    return WeightedJacobianKind{slots, Consistent, typeof(weights)}(weights)
 end
 WeightedJacobianKind{slots}(weights::NamedTuple{slots}) where {slots} = WeightedJacobianKind(weights)
+function WeightedJacobianKind{slots, C}(weights::NamedTuple{slots}) where {slots, C <: CorrectionMode}
+    isempty(slots) && throw(ArgumentError(
+        "A `WeightedJacobianKind` needs at least one weighted slot, got empty weights."))
+    return WeightedJacobianKind{slots, C, typeof(weights)}(weights)
+end
 
 """
     FunctionalKind{tag}
@@ -136,10 +165,9 @@ const DerivativeSweepKind = Union{JacobianKind, JacobianResidualKind, WeightedJa
     depends_on_unknowns(kind) -> Bool
 
 What a sweep of `kind` does with the workspace: which of `ws.Ke`/`ws.re` it
-zeroes and scatters, and whether it gathers the state slots (and therefore
-runs the condensed write-back). The driver bodies consult these instead of
-testing kind membership, so a downstream kind joins the built-in driver by
-declaring them.
+zeroes and scatters, and whether it gathers the state slots. The driver bodies
+consult these instead of testing kind membership, so a downstream kind joins
+the built-in driver by declaring them.
 
 The defaults read the built-in family unions, so the answers are compile-time
 constants and the branches they guard are eliminated. An overload must return
@@ -241,10 +269,10 @@ function request_type end
 
 request_type(::ResidualKind)                     = ResidualRequest
 request_type(::LinearKind)                       = ResidualRequest
-request_type(::JacobianKind{slot}) where {slot}  = JacobianRequest{slot}
+request_type(::JacobianKind{slot, C}) where {slot, C}  = JacobianRequest{slot, C}
 request_type(::BilinearKind)                     = JacobianRequest{:u}
-request_type(::JacobianResidualKind)             = JacobianResidualRequest
-request_type(::WeightedJacobianKind)             = WeightedJacobianRequest
+request_type(::JacobianResidualKind{C}) where {C} = JacobianResidualRequest{C}
+request_type(::WeightedJacobianKind{slots, C}) where {slots, C} = WeightedJacobianRequest{C}
 request_type(::ParameterJacobianKind)            = ParameterJacobianRequest
 request_type(::ParameterVJPKind)                 = ParameterVJPRequest
 request_type(::TimeSensitivityKind)              = TimeSensitivityRequest
@@ -258,8 +286,18 @@ validation_instance(::Type{<:StateJVPKind})         = StateJVPKind(nothing)
 validation_instance(::Type{<:StateVJPKind})         = StateVJPKind(nothing)
 validation_instance(::Type{<:WeightedJacobianKind}) = WeightedJacobianKind((u = 1.0,))
 
-# The kinds whose AD fallback differentiates through an element's local solve.
-requires_admissibility_check(::Union{JacobianKind, JacobianResidualKind, ParameterJacobianKind, ParameterVJPKind, StateJVPKind, StateVJPKind}) = true
+# The kinds whose AD fallback differentiates through an element's local solve
+# — for the sensitivity kinds always (they carry no `CorrectionMode`, so they
+# are always the total). `JacobianKind`/`JacobianResidualKind` are mode-aware:
+# a `Consistent` AD fallback would silently drop the ∂F/∂q·dq/d· correction on
+# a condensed cache, so it needs the check; a `FrozenQ` AD fallback IS the
+# requested partial (the kernel it differentiates is pure at frozen `q`), so
+# it never needs it — see `CorrectionMode`.
+requires_admissibility_check(::Union{ParameterJacobianKind, ParameterVJPKind, StateJVPKind, StateVJPKind}) = true
+requires_admissibility_check(::JacobianKind{slot, Consistent}) where {slot} = true
+requires_admissibility_check(::JacobianKind{slot, FrozenQ}) where {slot} = false
+requires_admissibility_check(::JacobianResidualKind{Consistent}) = true
+requires_admissibility_check(::JacobianResidualKind{FrozenQ}) = false
 
 # Functional kernels return their contribution through `evaluate_cell_functional`
 # rather than filling a request, so there is no cell request to validate.
@@ -267,10 +305,10 @@ has_cell_request(::Type{<:FunctionalKind}) = false
 
 materialize_request(::ResidualKind, ws)                    = ResidualRequest(ws.re)
 materialize_request(::LinearKind, ws)                      = ResidualRequest(ws.re)
-materialize_request(::JacobianKind{slot}, ws) where {slot} = JacobianRequest{slot}(ws.Ke)
+materialize_request(::JacobianKind{slot, C}, ws) where {slot, C} = JacobianRequest{slot, C}(ws.Ke)
 materialize_request(::BilinearKind, ws)                    = JacobianRequest{:u}(ws.Ke)
-materialize_request(::JacobianResidualKind, ws)            = JacobianResidualRequest(ws.Ke, ws.re)
-materialize_request(kind::WeightedJacobianKind, ws)        = WeightedJacobianRequest(ws.Ke, kind.weights)
+materialize_request(::JacobianResidualKind{C}, ws) where {C} = JacobianResidualRequest{C}(ws.Ke, ws.re)
+materialize_request(kind::WeightedJacobianKind{slots, C}, ws) where {slots, C} = WeightedJacobianRequest{C}(ws.Ke, kind.weights)
 
 """
     AssemblyTask(kind, inner_assembler, states, p, ctx)
@@ -315,21 +353,38 @@ function _check_rate_slots(states::NamedTuple{names}) where {names}
 end
 
 # Gather every task slot into the workspace's slot buffers, returning the
-# element-local states NamedTuple. Gathering goes through
-# `load_element_unknowns!` per slot so condensed elements keep their
-# element-overridable [ū; q] layout for every slot.
+# element-local states NamedTuple. A slot's SOURCE decides how it gathers — a
+# plain vector reads `celldofs(cell)` (the field space, `ndofs_per_cell`
+# fixed), `AffineRate` reconstructs over that same field-space gather, and
+# `InternalSource` restricts to the cell's condensed internal-dof range,
+# resizing the buffer to fit (a per-cell size, not `ndofs_per_cell`). A
+# reconstructed slot's source is therefore structurally the field space: it
+# cannot touch `q` any more.
 function load_slots!(ws, states::NamedTuple{names}) where {names}
     return map(NamedTuple{names}(ws.slot_buffers), states) do buf, src
         load_slot!(buf, src, ws)
         buf
     end
 end
-load_slot!(buf, src, ws) = load_element_unknowns!(buf, src, ws.cell, ws.ivh, ws.element)
+function load_slot!(buf, src::AbstractVector, ws)
+    dofs = celldofs(ws.cell)
+    resize!(buf, length(dofs))
+    buf .= @view src[dofs]
+    return buf
+end
 # The anchor lands in the slot's own buffer first, then the buffer becomes the
 # reconstruction against the already-gathered `:u` buffer.
 function load_slot!(buf, src::AffineRate, ws)
-    load_element_unknowns!(buf, src.anchor, ws.cell, ws.ivh, ws.element)
+    dofs = celldofs(ws.cell)
+    resize!(buf, length(dofs))
+    buf .= @view src.anchor[dofs]
     buf .= src.slope .* (ws.slot_buffers.u .- buf)
+    return buf
+end
+function load_slot!(buf, src::InternalSource, ws)
+    range = internal_variable_range(ws.ivh, cellid(ws.cell))
+    resize!(buf, length(range))
+    buf .= @view src.u[range]
     return buf
 end
 
@@ -342,12 +397,14 @@ The built-in primal driver body, reusable by a downstream kind's own
 `execute_kind!`. Zeroes the buffers [`assembles_matrix`](@ref) /
 [`assembles_vector`](@ref) name, reinitializes the element's values, queries
 the cell parameters, runs the cell and facet kernels — gathering the state
-slots and running the condensed write-back iff [`depends_on_unknowns`](@ref) —
-and scatters through [`scatter_local!`](@ref).
+slots iff [`depends_on_unknowns`](@ref) — and scatters through
+[`scatter_local!`](@ref).
 
 The kernel it calls is `cell_kernel!(kind, …)`, whose generic method issues
 the kind's request analytically; the built-in kinds with an AD fallback
-specialize it.
+specialize it. It writes nothing back — [`condense_internal!`](@ref) is the
+only writer of `q`, so a primal sweep is a pure evaluation at whatever `q` is
+currently stored.
 """
 function primal_cell_sweep!(kind, task, ws)
     assembles_matrix(kind) && fill!(ws.Ke, 0.0)
@@ -358,7 +415,6 @@ function primal_cell_sweep!(kind, task, ws)
         statesₑ = load_slots!(ws, task.states)
         @timeit_debug "assemble element" cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx)
         @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, statesₑ, task)
-        store_condensed_element_unknowns!(statesₑ.u, task.states.u, ws.cell, ws.ivh, ws.element)
     else
         @timeit_debug "assemble element" cell_kernel!(kind, ws.element, ws, (;), pₑ, task.ctx)
         @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, (;), task)
@@ -407,14 +463,15 @@ function cell_kernel!(kind::WeightedJacobianKind, cache, ws, statesₑ, pₑ, ct
         ad_weighted_jacobian!(ws.Ke, ws, args, kind.weights)
     end
 end
-function cell_kernel!(kind::JacobianResidualKind, cache, ws, statesₑ, pₑ, ctx)
+function cell_kernel!(kind::JacobianResidualKind{C}, cache, ws, statesₑ, pₑ, ctx) where {C}
     args = _cell_args(ws, statesₑ, pₑ, ctx)
+    ujac = JacobianKind{:u, C}()
     if provides_analytic(typeof(cache), kind)
         assemble_cell!(materialize_request(kind, ws), cache, args)
-    elseif provides_analytic(typeof(cache), JacobianKind())
+    elseif provides_analytic(typeof(cache), ujac)
         # No fused kernel, but both split kernels exist: two of the table's
         # other kinds, issued back to back over the same buffers.
-        assemble_cell!(materialize_request(JacobianKind(), ws), cache, args)
+        assemble_cell!(materialize_request(ujac, ws), cache, args)
         assemble_cell!(materialize_request(ResidualKind(), ws), cache, args)
     else
         ad_state_jacobian!(ws.Ke, ws, args)   # also leaves the primal residual in ws.re
@@ -486,7 +543,7 @@ function sensitivity_kernel!(kind::StateJVPKind, task, ws, args)
     cache = ws.element
     ad = sweep_state(ws, kind)
     vₑ = ad.vₑ
-    load_element_unknowns!(vₑ, kind.v, ws.cell, ws.ivh, cache)
+    vₑ .= @view kind.v[celldofs(ws.cell)]
     Jvₑ = ad.Jvₑ
     if provides_analytic(typeof(cache), kind)
         fill!(Jvₑ, zero(eltype(Jvₑ)))

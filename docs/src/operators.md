@@ -212,14 +212,22 @@ evaluates the primal residual at contexts with perturbed times. An element
 therefore reads time as `evaluation_time(args.ctx)`, and `time_sensitivity!`
 requires a context — passing `nothing` is an `ArgumentError`.
 
-Admissibility with internal state: AD through an element-local solve is wrong
-in principle, so a cache with [`has_internal_state`](@ref) is admissible for
-a sensitivity kind only if it (a) provides the analytic kernel, (b) declares
+Admissibility with internal state: a condensed element's residual kernel is
+PURE (it reads the frozen `q` a prior [`condense_internal!`](@ref) wrote), so
+a plain AD fallback computes a genuine `∂F/∂·|_q` partial rather than
+differentiating through an iteration — but the sensitivity kinds carry no
+[`CorrectionMode`](@ref) (they are always the total), so that partial is
+missing the `∂F/∂q · dq/d·` correction. A cache with [`has_internal_state`](@ref)
+is therefore admissible for a sensitivity kind only if it (a) provides the
+analytic kernel (the correction, folded in — the payoff a corrector store
+unlocks: exact parameter/state sensitivities on a condensed element,
+generically, once the store exists), (b) declares
 [`internal_state_insensitive`](@ref) (asserting the local equations do not
-depend on the seeded quantity — then AD is exact), or (c) for time
-sensitivities, the caller selects [`FiniteDifferenceSensitivity`](@ref)
-(primal central differences on a protected copy — exact local solves, but it
-bypasses analytic sensitivity kernels).
+depend on the seeded quantity, so there is nothing to correct — then AD is
+exact), or (c) for time sensitivities, the caller selects
+[`FiniteDifferenceSensitivity`](@ref) (primal evaluations on a protected
+copy, condensing at each — the total, but it bypasses analytic sensitivity
+kernels).
 
 State and time derivative sweeps (`update_linearization!` via AD,
 `state_jvp!`, `state_vjp!`, `time_sensitivity!`) run over per-worker

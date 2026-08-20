@@ -63,19 +63,37 @@ solves, so the check validates the consistent condensed tangent.
 function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
         h::Float64 = cbrt(eps(Float64)),
         rtol::Float64 = 1e-5, atol::Float64 = 1e-8, nprobes::Int = 3,
-        weights::Union{Nothing, NamedTuple} = nothing)
+        weights::Union{Nothing, NamedTuple} = nothing,
+        correction::Type{<:CorrectionMode} = Consistent)
     nres  = residual_size(op)
     ubase = copy(states.u)
     uw    = copy(states.u)
     statesw = merge(states, (u = uw,))
+    # `uw` is mutated in place (never reassigned) below, so a `:q` slot
+    # sourced by `InternalSource` — which wraps `uw` once, here — stays valid
+    # across every perturbation without being rebuilt per trial point.
+    condensed = unknown_size(op) > residual_size(op)
+    if condensed && haskey(states, :q) && states.q isa InternalSource
+        statesw = merge(statesw, (q = InternalSource(uw),))
+    end
+    # The FD referee must re-solve `q` at every trial point to be a total,
+    # matching what a `Consistent` analytic kernel computes — condensation is
+    # the evaluation that makes that solve happen post-phase (see
+    # `condense_internal!`). A `FrozenQ` election is a deliberately partial
+    # kernel with no total to compare against, so its checks are skipped
+    # rather than run against a doomed reference — an elected mismatch is
+    # as-elected, not a failure.
+    _condense!(s, pc, cc) = condensed && correction === Consistent && condense_internal!(op, s, pc, cc)
     hs = h * max(1.0, maximum(abs, view(ubase, 1:nres)))
 
     rp = zeros(nres); rm = zeros(nres)
     # Central FD of the residual along the field-dof direction v.
     function fd_dir!(out, v, pfd)
         uw .= ubase; view(uw, 1:nres) .+= hs .* v
+        _condense!(statesw, pfd, ctx)
         evaluate!(op, rp, statesw, pfd, ctx)
         uw .= ubase; view(uw, 1:nres) .-= hs .* v
+        _condense!(statesw, pfd, ctx)
         evaluate!(op, rm, statesw, pfd, ctx)
         out .= (rp .- rm) ./ 2hs
         return out
@@ -83,7 +101,13 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
 
     r_fused = zeros(nres)
     jacobian = _run_check() do
+        if condensed && correction !== Consistent
+            return (passed = true, err = NaN, skipped =
+                "correction = $(correction) is an elected partial; the FD referee validates " *
+                "the total and is not a reference for it")
+        end
         uw .= ubase
+        _condense!(statesw, p, ctx)
         update_linearization!(op, r_fused, statesw, p, ctx)
         Jv = zeros(nres); fd = zeros(nres)
         err = 0.0; ok = true
@@ -99,6 +123,7 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
 
     fused_residual = _run_check() do
         uw .= ubase
+        _condense!(statesw, p, ctx)
         r_split = zeros(nres)
         evaluate!(op, r_split, statesw, p, ctx)
         _check_entry(isapprox(r_fused, r_split; rtol, atol), _relerr(r_fused, r_split))
@@ -110,15 +135,18 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
         nθ = length(θ)
         B = zeros(nres, nθ)
         uw .= ubase
+        _condense!(statesw, p, ctx)
         update_parameter_jacobian!(B, op, statesw, p, ctx)
         Bref[] = B
         Bfd = zeros(nres, nθ)
         hθ = h * max(1.0, maximum(abs, θ; init = 0.0))
         for j in 1:nθ
             θj = copy(θ); θj[j] += hθ
-            uw .= ubase; evaluate!(op, rp, statesw, rebuild_parameters(p, θj), ctx)
+            pj = rebuild_parameters(p, θj)
+            uw .= ubase; _condense!(statesw, pj, ctx); evaluate!(op, rp, statesw, pj, ctx)
             θj[j] -= 2hθ
-            uw .= ubase; evaluate!(op, rm, statesw, rebuild_parameters(p, θj), ctx)
+            pj = rebuild_parameters(p, θj)
+            uw .= ubase; _condense!(statesw, pj, ctx); evaluate!(op, rm, statesw, pj, ctx)
             Bfd[:, j] .= (rp .- rm) ./ 2hθ
         end
         _check_entry(isapprox(B, Bfd; rtol, atol), _relerr(B, Bfd))
@@ -128,6 +156,7 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
         B = Bref[]
         B === nothing && return (passed = true, err = NaN, skipped = "parameter Jacobian unavailable as referee")
         uw .= ubase
+        _condense!(statesw, p, ctx)
         λ = _probe_vector(nres, 7)
         g = zeros(size(B, 2))
         parameter_vjp!(g, op, λ, statesw, p, ctx)
@@ -192,6 +221,7 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
 
         W = allocate_components(op, (:fused,)).fused
         reset!()
+        _condense!(statesq, p, ctx)
         _weighted_jacobian_fused!(W, op, kind, statesq, p, ctx)
         Wf[] = W
 
@@ -203,8 +233,10 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
             for (i, s) in enumerate(slots)
                 hi = h * max(1.0, maximum(abs, view(wbase[i], 1:nres)))
                 reset!(); view(wwork[i], 1:nres) .+= hi .* v
+                _condense!(statesq, p, ctx)
                 evaluate!(op, rp, statesq, p, ctx)
                 reset!(); view(wwork[i], 1:nres) .-= hi .* v
+                _condense!(statesq, p, ctx)
                 evaluate!(op, rm, statesq, p, ctx)
                 @. fd = (rp - rm) / 2hi
                 @. fdw += weights[i] * fd
@@ -223,6 +255,7 @@ function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
             skipped = "fused weighted Jacobian unavailable as reference")
         Wc = share_pattern(Wfused)
         uw .= ubase
+        _condense!(statesw, p, ctx)
         _weighted_jacobian_composed!(Wc, op, WeightedJacobianKind(weights), statesw, p, ctx)
         _check_entry(isapprox(Wfused.nzval, Wc.nzval; rtol, atol), _relerr(Wfused.nzval, Wc.nzval))
     end

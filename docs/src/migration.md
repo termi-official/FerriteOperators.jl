@@ -190,11 +190,12 @@ states NamedTuple — the sweep throws otherwise. The assembled Jacobian is
 chain-rule contribution `slope · ∂F/∂v` remains the solver's, applied through
 its per-slot weights.
 
-Condensed elements: declare `FerriteOperators.has_internal_state(::Type{<:MyCache}) = true`.
-The previous state arrives through your chosen slot; the local solve scales by
-`stage_scaling(args.ctx)`; the trial result is written into the element-local `u` buffer,
-and the framework propagates it — that per-evaluation write-back is the
-condensation contract.
+Condensed elements: declare `FerriteOperators.has_internal_state(::Type{<:MyCache}) = true`
+and implement `condense_cell!(cache, args, weights) -> CondensationReport` —
+the local solve, run once per item by `condense_internal!` rather than inside
+every kernel. `q` is an ordinary slot sourced by `InternalSource`; every
+evaluation sweep afterwards is a pure function at frozen `q`, and
+`condense_internal!` is the only writer of it.
 
 ## Facets ⚠
 

@@ -83,13 +83,16 @@ function assemble_weighted_jacobian!(W::AbstractMatrix, op::LinearizedFerriteOpe
 end
 
 # The fused sweep needs real weights, and needs every cache to either serve the
-# kind analytically or be safe to differentiate: AD through an element-local
-# solve is wrong in principle, and the fused sweep seeds ALL participating
-# slots at once, so a condensed cache without the analytic weighted kernel has
-# no admissible fused route (`assert_sensitivity_admissible`'s rule, applied to
-# this kind).
-function _fused_weighted_route(op, kind::WeightedJacobianKind)
+# kind analytically or be safe to differentiate: a `Consistent` AD fallback
+# would silently drop a condensed cache's ∂F/∂q·dq/d· correction, and the
+# fused sweep seeds ALL participating slots at once, so a condensed cache
+# without the analytic weighted kernel has no admissible fused route
+# (`assert_sensitivity_admissible`'s rule, applied to this kind). A `FrozenQ`
+# election needs no such guard: the AD fallback IS the requested partial (the
+# kernel it differentiates is pure at frozen `q`), same as for `JacobianKind`.
+function _fused_weighted_route(op, kind::WeightedJacobianKind{slots, C}) where {slots, C}
     all(w -> w isa Real, values(kind.weights)) || return false
+    C === FrozenQ && return true
     return all(op.engine.subdomain_caches) do sc
         T = typeof(sc.domain.element)
         provides_analytic(T, kind) || !has_internal_state(T) || internal_state_insensitive(T, kind)
@@ -282,17 +285,20 @@ function _time_sensitivity!(::ADSensitivity, g, op, states, p, ctx)
 end
 
 function _time_sensitivity!(method::FiniteDifferenceSensitivity, g, op, states, p, ctx)
-    # Primal evaluations at perturbed contexts — no internal-state
-    # admissibility check needed: the local solves run exactly as in a normal
-    # residual evaluation. The u slot is copied so the condensation trial
-    # write-back of the perturbed evaluations never leaks into the caller's
-    # state.
+    # Primal evaluations at perturbed contexts — a pure evaluation sweep
+    # writes nothing back, so `u` (and, once condensed, `q`) stay fixed across
+    # both calls; `uw` only protects the caller's `states.u` from aliasing.
+    # `u` itself never changes (only the context time does), so one
+    # condensation ahead of both evaluations covers both.
     t  = evaluation_time(ctx)
     h  = method.h * max(one(t), abs(t))
     uw = copy(states.u)
     statesw = merge(states, (u = uw,))
+    if unknown_size(op) > residual_size(op) && haskey(states, :q) && states.q isa InternalSource
+        statesw = merge(statesw, (q = InternalSource(uw),))
+        condense_internal!(op, statesw, p, ctx)
+    end
     rp = similar(g); evaluate!(op, rp, statesw, p, with_time(ctx, t + h))
-    copyto!(uw, states.u)
     rm = similar(g); evaluate!(op, rm, statesw, p, with_time(ctx, t - h))
     g .= (rp .- rm) ./ (2h)
     return g

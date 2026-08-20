@@ -60,22 +60,61 @@ slots can coexist without ambiguity.
 """
 abstract type AbstractAssemblyRequest end
 
+"""
+    CorrectionMode
+    Consistent <: CorrectionMode
+    FrozenQ    <: CorrectionMode
+
+Whether a Jacobian-shaped request over a condensed element is the TOTAL
+derivative or the PARTIAL at frozen internal state `q`:
+
+    Consistent:  ∂F/∂·|_q + ∂F/∂q · dq/d·     (the total — DEFAULT)
+    FrozenQ:     ∂F/∂·|_q only                (the partial)
+
+`Consistent` is the default everywhere a `CorrectionMode` type parameter is
+left unspecified — the unsafe direction is a silently missing correction, so
+`FrozenQ` must always be spelled explicitly. For a stateless element (no `q`)
+the two coincide. `FrozenQ` is a legitimate election for an iteration matrix
+(modified Newton, MLN outer loops), where a wrong tangent costs convergence
+rate and nothing else; it is never legitimate for a gradient, so the
+sensitivity request kinds carry no `CorrectionMode` parameter at all — there
+is no way to construct a `FrozenQ` election for them.
+"""
+abstract type CorrectionMode end
+@doc (@doc CorrectionMode) struct Consistent <: CorrectionMode end
+@doc (@doc CorrectionMode) struct FrozenQ <: CorrectionMode end
+
 "Accumulate the local residual into `r`."
 struct ResidualRequest{V <: AbstractVector} <: AbstractAssemblyRequest
     r::V
 end
 
-"Accumulate ∂F/∂slot into `K`, slot ∈ (:u, :du, :v, :a, …)."
-struct JacobianRequest{slot, M <: AbstractMatrix} <: AbstractAssemblyRequest
+"""
+    JacobianRequest{slot, C <: CorrectionMode}(K)
+
+Accumulate ∂F/∂slot into `K`, slot ∈ (:u, :du, :v, :a, :q, …), under
+correction mode `C` (see [`CorrectionMode`](@ref)). `JacobianRequest{slot}(K)`
+defaults `C` to [`Consistent`](@ref).
+"""
+struct JacobianRequest{slot, C <: CorrectionMode, M <: AbstractMatrix} <: AbstractAssemblyRequest
     K::M
 end
-JacobianRequest{slot}(K::M) where {slot, M <: AbstractMatrix} = JacobianRequest{slot, M}(K)
+JacobianRequest{slot}(K::M) where {slot, M <: AbstractMatrix} = JacobianRequest{slot, Consistent, M}(K)
+JacobianRequest{slot, C}(K::M) where {slot, C <: CorrectionMode, M <: AbstractMatrix} = JacobianRequest{slot, C, M}(K)
 
-"Accumulate ∂F/∂u and the residual in one sweep (the Newton hot path)."
-struct JacobianResidualRequest{M <: AbstractMatrix, V <: AbstractVector} <: AbstractAssemblyRequest
+"""
+    JacobianResidualRequest{C <: CorrectionMode}(K, r)
+
+Accumulate ∂F/∂u and the residual in one sweep (the Newton hot path), under
+correction mode `C`. `JacobianResidualRequest(K, r)` defaults `C` to
+[`Consistent`](@ref).
+"""
+struct JacobianResidualRequest{C <: CorrectionMode, M <: AbstractMatrix, V <: AbstractVector} <: AbstractAssemblyRequest
     K::M
     r::V
 end
+JacobianResidualRequest(K::M, r::V) where {M <: AbstractMatrix, V <: AbstractVector} = JacobianResidualRequest{Consistent, M, V}(K, r)
+JacobianResidualRequest{C}(K::M, r::V) where {C <: CorrectionMode, M <: AbstractMatrix, V <: AbstractVector} = JacobianResidualRequest{C, M, V}(K, r)
 
 """
     WeightedJacobianRequest(K, weights)
@@ -90,10 +129,12 @@ A hand-fused scheme matrix (SDIRK/backward Euler `W = M/(γΔt) + K`) is an
 analytic provider of THIS request, not of [`JacobianRequest`](@ref): it
 computes the combination internally, which no single-slot Jacobian does.
 """
-struct WeightedJacobianRequest{M <: AbstractMatrix, W <: NamedTuple} <: AbstractAssemblyRequest
+struct WeightedJacobianRequest{C <: CorrectionMode, M <: AbstractMatrix, W <: NamedTuple} <: AbstractAssemblyRequest
     K::M
     weights::W
 end
+WeightedJacobianRequest(K::M, weights::W) where {M <: AbstractMatrix, W <: NamedTuple} = WeightedJacobianRequest{Consistent, M, W}(K, weights)
+WeightedJacobianRequest{C}(K::M, weights::W) where {C <: CorrectionMode, M <: AbstractMatrix, W <: NamedTuple} = WeightedJacobianRequest{C, M, W}(K, weights)
 
 "Accumulate the dense local parameter Jacobian ∂Fₑ/∂θ into `B` (ndofsₑ × nθ)."
 struct ParameterJacobianRequest{M <: AbstractMatrix} <: AbstractAssemblyRequest
@@ -156,6 +197,24 @@ encodes a time-integration scheme.
 struct AffineRate{T, V <: AbstractVector}
     slope::T
     anchor::V
+end
+
+"""
+    InternalSource(u::AbstractVector)
+
+Slot *source* restricting the gather to the condensed internal-variable block
+of `u` (the `q` tail of `[ū; q]`, [`internal_variable_range`](@ref)) instead of
+`celldofs(cell)`. This is what makes `q` an ordinary slot (`states = (u = u,
+q = InternalSource(u), …)`): the source carries its own restriction, exactly
+like [`AffineRate`](@ref) carries reconstruction. A slot sourced this way is
+sized per cell by the number of internal dofs the cell owns, not by
+`ndofs_per_cell` — the element-local buffer is resized to fit on every gather.
+
+[`condense_internal!`](@ref) is the only writer of an `InternalSource`-backed
+slot's underlying vector: every evaluation sweep only reads through it.
+"""
+struct InternalSource{V <: AbstractVector}
+    u::V
 end
 
 """
@@ -380,13 +439,19 @@ end
 # only the type matters for the trait query.
 _primal_validatable_kinds() = (JacobianKind{:u}(), JacobianResidualKind())
 
-# AD-from-residual through an element-local solve is wrong in principle
-# (implicit function theorem: the local solve hides dq/∂seed from plain AD),
-# so the rejection is PER CACHE and PER KIND: a cache with internal state is
-# admissible when the requested kind is served analytically (the author
-# carries dq/∂seed, like the consistent tangent), or when the author asserts
-# the local equations are insensitive to the seeded quantity (`dq/∂seed ≡ 0`,
-# making plain AD exact). Only the would-be AD fallback is rejected.
+# Post-phase (condense_internal!/CondensationReport) a condensed cache's
+# residual kernel is PURE — it reads the frozen `q` a prior condensation
+# wrote, no local solve inside it. AD-from-residual is therefore no longer
+# wrong in principle; what it computes is the FROZEN-q PARTIAL. The rejection
+# survives with a different subject: these kinds carry no `CorrectionMode`
+# (they are always the total, see `CorrectionMode`), so a partial-only AD
+# fallback would be a silently MISSING ∂F/∂q·dq/d· correction, not an invalid
+# derivative through an iteration. The rejection is PER CACHE and PER KIND: a
+# cache with internal state is admissible when the requested kind is served
+# analytically (the author carries the correction, like the consistent
+# tangent), or when the author asserts the local equations are insensitive to
+# the seeded quantity (`dq/∂seed ≡ 0`, making the partial exact — there is
+# nothing to correct). Only the would-be AD fallback is rejected.
 function assert_sensitivity_admissible(T::Type, kind)
     if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
         # FiniteDifferenceSensitivity is a remedy only where a call-time
@@ -399,7 +464,8 @@ function assert_sensitivity_admissible(T::Type, kind)
             "the seeded quantity."
         throw(ArgumentError(
             "$(nameof(T)) carries condensed internal state, and AD-from-residual through " *
-            "its local solve would be silently wrong. Either implement the analytic " *
+            "its (now pure) residual kernel would compute only the frozen-q partial, missing " *
+            "the ∂F/∂q·dq/d· correction this kind's total needs. Either implement the analytic " *
             "`assemble_cell!` kernel for $(typeof(kind)) (declared via `provides_analytic`), or " *
             remedy))
     end
@@ -409,11 +475,13 @@ end
 """
     has_internal_state(::Type{CacheType}) -> Bool
 
-`true` iff the element cache carries condensed per-item internal state whose
-residual contains a local solve. Governs the sensitivity admissibility check:
-AD-from-residual through a local solve is wrong in principle, so such caches
-need an analytic kernel or an [`internal_state_insensitive`](@ref)
-declaration for the requested kind; time sensitivities alone admit a
+`true` iff the element cache carries condensed per-item internal state `q`
+with a corrector store ([`condense_internal!`](@ref)). Governs the
+sensitivity admissibility check: a kind with no [`CorrectionMode`](@ref) is
+always the total, so a plain AD-from-residual fallback — which computes only
+the frozen-q partial now that the kernel is pure — is missing the correction
+unless the cache serves the kind analytically or declares it
+[`internal_state_insensitive`](@ref); time sensitivities alone admit a
 finite-difference method as a further escape.
 """
 has_internal_state(::Type) = false

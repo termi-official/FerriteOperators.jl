@@ -13,8 +13,9 @@ only the geometry cache. Setup happens through
     setup_element_cache(integrator, sdh)
 
 Condensed elements additionally implement
-`get_number_of_internal_dofs_per_element(model, cache, sdh)` and the
-`load_element_unknowns!`/`store_condensed_element_unknowns!` pair.
+`get_number_of_internal_dofs_per_element(model, cache, sdh)` and
+[`condense_cell!`](@ref); `q`, their condensed internal state, is an ordinary
+slot sourced by [`InternalSource`](@ref) (see [`condense_internal!`](@ref)).
 """
 abstract type AbstractVolumetricElementCache end
 
@@ -54,9 +55,6 @@ order. Queried once at setup to build the [`InternalVariableHandler`](@ref);
 there is no fallback, so only condensed elements implement it.
 """
 function get_number_of_internal_dofs_per_element end
-
-load_element_unknowns!(uₑ, u, cell, ivh, element_cache)   = uₑ .= @view u[celldofs(cell)]
-store_condensed_element_unknowns!(uₑ, u, cell, ivh, element_cache) = nothing
 
 """
     Utility to execute noop assembly.

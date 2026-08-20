@@ -71,6 +71,7 @@ include("elements/domain_elements.jl")  # Subdomain routing; specializes setup.j
 include("operators/components.jl")      # Component bags over a shared sparsity pattern + combine!
 include("operators/stage_block.jl")     # Stage-block operator for fully implicit Runge-Kutta schemes
 include("operators/verification.jl")    # check_derivatives: FD referee for analytic kernels and AD paths
+include("operators/condensation.jl")    # condense_internal!: element-local solves up front, pure evaluation after
 
 include("core/quadrature-task.jl")      # Task + operator for evaluating functions at quadrature points
 include("core/item_states.jl")          # ItemStates: provider-agnostic per-item persistent storage
@@ -102,7 +103,12 @@ export state_jvp!, state_vjp!, StateJVPRequest, StateVJPRequest
 export check_derivatives
 export parameter_vector, rebuild_parameters
 export TimeIntegrationContext, evaluation_time, stage_scaling, CellArgs, FacetArgs, assemble_cell!
-export AffineRate
+export AffineRate, InternalSource
+export CorrectionMode, Consistent, FrozenQ
+export CondensationReport, condense_internal!, condense_cell!, CondensationKind
+export condensed_update_linearization!, rollback_state!, commit_state!, invalidate_correctors!
+export CondensationElection, Separate, FusedWithResidual, condensation_election, condensation_election_error
+export CorrectorElection, Stored, Recompute, corrector_election, corrector_election_error
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
 export WeightedJacobianRequest
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest

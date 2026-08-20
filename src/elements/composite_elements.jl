@@ -82,12 +82,11 @@ function validate_element_cache(composite::CompositeVolumetricElementCache, decl
     stateful = filter(inner -> has_internal_state(typeof(inner)), composite.inner_caches)
     isempty(stateful) || throw(ArgumentError(
         "Composing condensed elements is not supported yet, but $(_cache_names(stateful)) " *
-        "carries condensed internal state. The condensation hooks " *
-        "(`get_number_of_internal_dofs_per_element`, `load_element_unknowns!`, " *
-        "`store_condensed_element_unknowns!`) dispatch on the composite, which implements " *
-        "none of them, and the internal variable handler keys on the outer integrator — so " *
-        "the internal dofs would never be allocated and the trial write-back would be " *
-        "dropped. Assemble the condensed element as its own operator term."))
+        "carries condensed internal state. `get_number_of_internal_dofs_per_element` dispatches " *
+        "on the composite, which implements it for none of its inners, and the internal " *
+        "variable handler keys on the outer integrator — so the internal dofs would never be " *
+        "allocated and `condense_internal!`'s write-back would have nowhere to land. Assemble " *
+        "the condensed element as its own operator term."))
     foreach(cache -> validate_element_cache(cache, declared_requests), composite.inner_caches)
     return nothing
 end
@@ -336,9 +335,10 @@ function validate_composite_members(subintegrators::Tuple, allowed::Type, name, 
     for sub in subintegrators
         sub isa AbstractCondensedNonlinearIntegrator && throw(ArgumentError(
             "$(typeof(sub)) carries condensed internal state and cannot be composed. " *
-            "The condensation hooks dispatch on the composite cache, which implements none " *
-            "of them, so the internal dofs would never be allocated and the trial write-back " *
-            "would be dropped. Assemble the condensed element as its own operator term."))
+            "`get_number_of_internal_dofs_per_element` dispatches on the composite cache, " *
+            "which implements it for none of its inners, so the internal dofs would never be " *
+            "allocated and `condense_internal!`'s write-back would have nowhere to land. " *
+            "Assemble the condensed element as its own operator term."))
         sub isa allowed || throw(ArgumentError(
             "$(typeof(sub)) cannot be composed into a $name — $sink_rule. Terms scattering " *
             "into different targets are separate operators, not inners of one composite."))
