@@ -9,6 +9,43 @@ using TimerOutputs
 
 include(joinpath(@__DIR__, "fixture_elements.jl"))
 
+# A bilinear form with a time-dependent coefficient, A(t) = (1 + t)·M. Time
+# reaches a u-independent sweep through the context alone, so this cache
+# assembles only where the entry point was handed one.
+struct TimedMassIntegrator <: AbstractBilinearIntegrator
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+end
+struct TimedMassCache{CV <: CellValues} <: AbstractVolumetricElementCache
+    cv::CV
+end
+function FerriteOperators.setup_element_cache(m::TimedMassIntegrator, sdh::SubDofHandler)
+    qr     = getquadraturerule(m.qrc, sdh)
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return TimedMassCache(CellValues(qr, ip, ip_geo))
+end
+FerriteOperators.duplicate_for_device(device, c::TimedMassCache) =
+    TimedMassCache(FerriteOperators.duplicate_for_device(device, c.cv))
+FerriteOperators.reinit_values!(c::TimedMassCache, cell) = reinit!(c.cv, cell)
+FerriteOperators.provides_analytic(::Type{<:TimedMassCache}, ::JacobianKind{:u}) = true
+
+function _timed_mass!(req, c::TimedMassCache, args)
+    ρ = 1.0 + evaluation_time(args.ctx)
+    for qp in 1:getnquadpoints(c.cv)
+        dΩ = getdetJdV(c.cv, qp)
+        for i in 1:getnbasefunctions(c.cv)
+            Nᵢ = shape_value(c.cv, qp, i) * dΩ
+            req isa ResidualRequest && (req.r[i] += ρ * function_value(c.cv, qp, args.states.u) * Nᵢ)
+            req isa JacobianRequest && for j in 1:getnbasefunctions(c.cv)
+                req.K[i, j] += ρ * Nᵢ * shape_value(c.cv, qp, j)
+            end
+        end
+    end
+end
+FerriteOperators.assemble_cell!(req::ResidualRequest, c::TimedMassCache, args) = _timed_mass!(req, c, args)
+FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, args) = _timed_mass!(req, c, args)
+
 @testset "Operators" begin
     reset_timer!()
     @testset "Element Assembly Matrix" begin
@@ -183,6 +220,39 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
                 @test bilinop.A ≈ bilinop_base.A
             end
         end
+    end
+
+    @testset "u-independent operators see the evaluation context" begin
+        grid = generate_grid(Quadrilateral, (3, 2))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        close!(dh)
+        qrc = QuadratureRuleCollection(2)
+        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        ctx = TimeIntegrationContext(2.0, 0.1, 0.1)
+
+        Mop = setup_operator(strategy, SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
+        update_operator!(Mop, nothing)
+        M0  = copy(Mop.A)
+        top = setup_operator(strategy, TimedMassIntegrator(qrc, :u), dh)
+
+        # ρ(t) = 1 + t is read off the context the entry point was handed.
+        update_operator!(top, nothing, ctx)
+        @test top.A ≈ 3.0 .* Mop.A rtol = 1e-12
+
+        # Without one the element says so instead of freezing the coefficient
+        # at t = 0.
+        err = @test_throws ArgumentError update_operator!(top, nothing)
+        @test occursin("evaluation time", err.value.msg)
+
+        # A ctx-independent cache is unaffected either way, on both families.
+        update_operator!(Mop, nothing, ctx)
+        @test Mop.A ≈ M0 rtol = 1e-13
+        lop = setup_operator(strategy, SimpleLinearIntegrator(1.0, qrc, :u), dh)
+        update_operator!(lop, nothing)
+        b0 = copy(lop.b)
+        update_operator!(lop, nothing, ctx)
+        @test lop.b ≈ b0 rtol = 1e-13
     end
 
     @testset "Nonlinear" begin

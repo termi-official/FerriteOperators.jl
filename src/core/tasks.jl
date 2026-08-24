@@ -511,17 +511,70 @@ function boundary_kernel!(kind, cache::AbstractSurfaceElementCache, ws, states�
     for lfi in 1:nfacets(ws.cell)
         if is_facet_in_cache(FacetIndex(cellid(ws.cell), lfi), ws.cell, cache)
             pᵦ = query_facet_parameters(cache, ws.cell, lfi, task.p)
-            assemble_facet!(materialize_request(kind, ws), cache,
-                            _facet_args(ws, statesₑ, pᵦ, task.ctx), lfi)
+            facet_kernel!(kind, cache, ws, _facet_args(ws, statesₑ, pᵦ, task.ctx), lfi)
         end
     end
 end
 
-# Facet contributions have no AD fallback in any sweep — a surface cache serves
-# the sweep's request analytically or not at all. For a weighted sweep that
-# means the WEIGHTED facet kernel: per-slot facet kernels are not composed
-# behind the driver's back.
-#
+"""
+    facet_kernel!(kind, cache, ws, args, lfi)
+
+One facet's contribution to a sweep of `kind`, over the workspace buffers.
+Facet contributions have no AD fallback in any sweep — a surface cache serves
+the sweep's request analytically or not at all — so the generic method simply
+issues the kind's request.
+"""
+facet_kernel!(kind, cache, ws, args, lfi::Int) =
+    assemble_facet!(materialize_request(kind, ws), cache, args, lfi)
+
+# A weighted sweep takes the cache's FUSED weighted kernel where it declares
+# one, and otherwise composes `Σₛ wₛ·(∂F/∂s facet kernel)` from the per-slot
+# Jacobians the cache DOES declare. A slot it does not claim contributes
+# nothing — the statement a spring makes about ∂F/∂v under `(u, v)` weights.
+# Analytic wins: a cache claiming the weighted kind keeps its fused kernel,
+# which is the only route that can carry a combination no single-slot Jacobian
+# computes.
+function facet_kernel!(kind::WeightedJacobianKind{slots, C}, cache, ws, args, lfi::Int) where {slots, C}
+    T = typeof(cache)
+    provides_analytic(T, kind) &&
+        return assemble_facet!(materialize_request(kind, ws), cache, args, lfi)
+    any(_claimed_facet_slots(T, kind)) || _throw_no_weighted_facet_route(T, kind)
+    return _fold_weighted_facet!(C, slots, values(kind.weights), cache, ws, args, lfi)
+end
+
+_claimed_facet_slots(::Type{T}, ::WeightedJacobianKind{slots, C}) where {T, slots, C} =
+    ntuple(i -> provides_analytic(T, JacobianKind{slots[i], C}()), Val(length(slots)))
+
+# Unrolled by tuple recursion: an `ntuple`/`map` closure over the workspace and
+# the args record is materialized once per facet, which the alloc gate forbids.
+@inline _fold_weighted_facet!(::Type{C}, ::Tuple{}, ::Tuple{}, cache, ws, args, lfi) where {C} = nothing
+@inline function _fold_weighted_facet!(::Type{C}, slots::Tuple, weights::Tuple, cache, ws, args, lfi) where {C}
+    _add_weighted_facet_slot!(ws, JacobianKind{first(slots), C}(), first(weights), cache, args, lfi)
+    return _fold_weighted_facet!(C, Base.tail(slots), Base.tail(weights), cache, ws, args, lfi)
+end
+
+# The slot lands in the per-worker scratch first: a facet kernel ACCUMULATES
+# into the request's matrix, so its contribution has to be separable before the
+# weight can be applied to it.
+@inline function _add_weighted_facet_slot!(ws, ::JacobianKind{slot, C}, w, cache, args, lfi) where {slot, C}
+    provides_analytic(typeof(cache), JacobianKind{slot, C}()) || return nothing
+    scratch = ws.facet_Ke
+    fill!(scratch, zero(eltype(scratch)))
+    assemble_facet!(JacobianRequest{slot, C}(scratch), cache, args, lfi)
+    ws.Ke .+= w .* scratch
+    return nothing
+end
+
+@noinline _throw_no_weighted_facet_route(T::Type, kind::WeightedJacobianKind{slots, C}) where {slots, C} =
+    throw(ArgumentError(
+        "$(T) declares neither route a weighted Jacobian sweep can take on a facet: no fused " *
+        "`assemble_facet!(::WeightedJacobianRequest, …)` kernel (declared through " *
+        "`provides_analytic(::Type{<:$(nameof(T))}, ::WeightedJacobianKind)`), and no per-slot " *
+        "`assemble_facet!(::JacobianRequest{slot}, …)` kernel for any of $(slots) either. Facet " *
+        "kernels have no automatic-differentiation fallback, so declare one of the two — the " *
+        "fused kernel for a hand-derived combination, per-slot kernels for terms the sweep's " *
+        "weights fold."))
+
 # ONE generic method for every primal kind: `cache` (`ws.element`) is EITHER
 # genuinely analytic for `kind` or a decorator ([`ADElementCache`](@ref)) that
 # resolves it — the engine never forks on `provides_analytic` itself, and a

@@ -4,8 +4,15 @@
     integrator
 end
 
-update_operator!(op::BilinearFerriteOperator, p) =
-    assemble_into!(BilinearKind(), (op.A,), op, (;), p, nothing)
+"""
+    update_operator!(op::BilinearFerriteOperator, p, ctx = nothing)
+
+Assemble the operator's matrix `op.A` from the element kernels. `ctx` is the
+sweep's context, read by kernels through [`evaluation_time`](@ref) and friends:
+a coefficient like `ρ(x, t)` or `D(x, t)` needs one, a constant one does not.
+"""
+update_operator!(op::BilinearFerriteOperator, p, ctx = nothing) =
+    assemble_into!(BilinearKind(), (op.A,), op, (;), p, ctx)
 
 """
     evaluate!(op::BilinearFerriteOperator, residual, states, p, ctx)

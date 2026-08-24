@@ -68,6 +68,74 @@ function FerriteOperators.assemble_cell!(req::WeightedJacobianRequest, c::FusedW
     analytic_weighted_jacobian!(req.K, c.inner.cv, req.weights)
 end
 
+# The pericardium shape: a boundary spring reading `:u` next to a boundary
+# dashpot reading `:v`, each with the single-slot facet Jacobian it has and no
+# fused weighted kernel. `slot` spells which state the term reads, so one cache
+# type serves both; `fused` additionally declares the weighted facet kernel,
+# which the driver must prefer over composing the per-slot ones.
+struct RobinFacetCache{slot, fused, FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+    k::Float64
+    fv::FV
+    facetset::Set{FacetIndex}
+end
+RobinFacetCache{slot, fused}(k, fv, facetset) where {slot, fused} =
+    RobinFacetCache{slot, fused, typeof(fv)}(k, fv, facetset)
+
+struct RobinFacetIntegrator{slot, fused} <: AbstractNonlinearIntegrator
+    k::Float64
+    field_name::Symbol
+    facetset::Set{FacetIndex}
+end
+RobinFacetIntegrator(k, field_name, facetset; slot = :u, fused = false) =
+    RobinFacetIntegrator{slot, fused}(k, field_name, facetset)
+
+FerriteOperators.setup_element_cache(::RobinFacetIntegrator, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+function FerriteOperators.setup_boundary_cache(m::RobinFacetIntegrator{slot, fused}, sdh::SubDofHandler) where {slot, fused}
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    fqr    = FacetQuadratureRule{Ferrite.getrefshape(ip)}(2)
+    return RobinFacetCache{slot, fused}(m.k, FacetValues(fqr, ip, ip_geo), m.facetset)
+end
+FerriteOperators.duplicate_for_device(device, c::RobinFacetCache{slot, fused}) where {slot, fused} =
+    RobinFacetCache{slot, fused}(c.k, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
+FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::RobinFacetCache) = idx ∈ c.facetset
+
+# r(v) = k ∫_Γ s·v dΓ over the cache's own slot `s`: ∂r/∂s is k times the facet
+# mass matrix and ∂r/∂(every other slot) is zero.
+function _robin_facet!(req, c::RobinFacetCache{slot}, args, lfi, scale = 1.0) where {slot}
+    reinit!(c.fv, args.cell, lfi)
+    sₑ = args.states[slot]
+    for qp in 1:getnquadpoints(c.fv)
+        dΓ = getdetJdV(c.fv, qp)
+        for i in 1:getnbasefunctions(c.fv)
+            Nᵢ = shape_value(c.fv, qp, i) * dΓ
+            req isa ResidualRequest && (req.r[i] += scale * c.k * function_value(c.fv, qp, sₑ) * Nᵢ)
+            req isa JacobianRequest && for j in 1:getnbasefunctions(c.fv)
+                req.K[i, j] += scale * c.k * Nᵢ * shape_value(c.fv, qp, j)
+            end
+        end
+    end
+end
+FerriteOperators.assemble_facet!(req::ResidualRequest, c::RobinFacetCache, args::FacetArgs, lfi::Int) =
+    _robin_facet!(req, c, args, lfi)
+FerriteOperators.assemble_facet!(req::JacobianRequest{:u}, c::RobinFacetCache{:u}, args::FacetArgs, lfi::Int) =
+    _robin_facet!(req, c, args, lfi)
+FerriteOperators.assemble_facet!(req::JacobianRequest{:v}, c::RobinFacetCache{:v}, args::FacetArgs, lfi::Int) =
+    _robin_facet!(req, c, args, lfi)
+FerriteOperators.provides_analytic(::Type{<:RobinFacetCache{:u}}, ::JacobianKind{:u}) = true
+FerriteOperators.provides_analytic(::Type{<:RobinFacetCache{:v}}, ::JacobianKind{:v}) = true
+
+# The fused facet kernel — same matrix, one call — and the counter that pins
+# which route the driver took.
+const FUSED_FACET_W_CALLS = Ref(0)
+FerriteOperators.provides_analytic(::Type{<:RobinFacetCache{<:Any, true}}, ::WeightedJacobianKind) = true
+function FerriteOperators.assemble_facet!(req::WeightedJacobianRequest, c::RobinFacetCache{slot, true},
+                                          args::FacetArgs, lfi::Int) where {slot}
+    FUSED_FACET_W_CALLS[] += 1
+    _robin_facet!(JacobianRequest{slot}(req.K), c, args, lfi, req.weights[slot])
+end
+
 @testset "Components and stage blocks" begin
     (; grid, dh, n, qrc, strategy) = scalar_quad_testbed((3, 2))
     op  = setup_operator(strategy, StageDiffusionIntegrator(qrc, :u), dh; slots = (:u, :du))
@@ -272,6 +340,63 @@ end
             end
             # measured: 432 B of assembler setup, independent of the cell count
             @test @allocated(assemble_weighted_jacobian!(W, op, weights, states, nothing, ctx)) < 1024
+        end
+    end
+
+    @testset "weighted Jacobians on the boundary" begin
+        # Boundary-only operators: the volumetric cache is empty, so `W` is the
+        # facet contribution alone and the hand-composed reference is exact.
+        right   = Set(getfacetset(grid, "right"))
+        weights = (u = 1.0, v = 1 / (0.5 * Δt))
+        states  = (u = u, v = cos.(0.2 .* (1:n)))
+        spring  = RobinFacetIntegrator(2.5, :u, right; slot = :u)
+        dashpot = RobinFacetIntegrator(0.75, :u, right; slot = :v)
+
+        pericardium = setup_operator(strategy, NonlinearCompositeIntegrator(spring, dashpot), dh; slots = (:u, :v))
+        sop = setup_operator(strategy, spring,  dh; slots = (:u, :v))
+        dop = setup_operator(strategy, dashpot, dh; slots = (:u, :v))
+
+        # ∂F/∂u of the spring and ∂F/∂v of the dashpot, each on its own.
+        Kf = FerriteOperators.create_system_matrix(sop.engine.strategy, dh)
+        Df = share_pattern(Kf)
+        assemble_slot_jacobian!(Kf, sop, JacobianKind{:u}(), states, nothing, ctx)
+        assemble_slot_jacobian!(Df, dop, JacobianKind{:v}(), states, nothing, ctx)
+        @test nnz(Kf) > 0 && nnz(Df) > 0
+
+        Wp = share_pattern(pericardium.J)
+        assemble_weighted_jacobian!(Wp, pericardium, weights, states, nothing, ctx)
+        @test Matrix(Wp) ≈ weights.u .* Matrix(Kf) .+ weights.v .* Matrix(Df) rtol = 1e-12
+
+        # A single per-slot-only cache composes the slots it claims and nothing
+        # for the ones it does not — a spring has no ∂F/∂v.
+        Ws = share_pattern(sop.J)
+        assemble_weighted_jacobian!(Ws, sop, weights, states, nothing, ctx)
+        @test Matrix(Ws) ≈ weights.u .* Matrix(Kf) rtol = 1e-12
+
+        @testset "a declared fused facet kernel wins over composition" begin
+            fop = setup_operator(strategy, RobinFacetIntegrator(2.5, :u, right; slot = :u, fused = true),
+                                 dh; slots = (:u, :v))
+            FUSED_FACET_W_CALLS[] = 0
+            Wf = share_pattern(fop.J)
+            assemble_weighted_jacobian!(Wf, fop, weights, states, nothing, ctx)
+            @test FUSED_FACET_W_CALLS[] == length(right)
+            # composing the per-slot kernel it ALSO has would double this
+            @test Matrix(Wf) ≈ weights.u .* Matrix(Kf) rtol = 1e-12
+        end
+
+        @testset "a cache with neither route is loud" begin
+            nop = setup_operator(strategy, NonlinearNeumannProbe(1.0, :u, right), dh; slots = (:u, :v))
+            err = @test_throws ArgumentError assemble_weighted_jacobian!(
+                share_pattern(nop.J), nop, weights, states, nothing, ctx)
+            @test occursin("WeightedJacobianRequest", err.value.msg)
+            @test occursin("JacobianRequest{slot}", err.value.msg)
+        end
+
+        @testset "the composed facet route does not allocate per facet" begin
+            for _ in 1:2
+                assemble_weighted_jacobian!(Wp, pericardium, weights, states, nothing, ctx)
+            end
+            @test @allocated(assemble_weighted_jacobian!(Wp, pericardium, weights, states, nothing, ctx)) < 1024
         end
     end
 

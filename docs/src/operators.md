@@ -173,8 +173,9 @@ A boundary term riding the cell sweep must serve every slot the components are
 assembled for. The facet driver hands the sweep's `JacobianRequest{:du}` to the
 surface cache with no AD fallback, so a cache implementing only
 `ResidualRequest` and `JacobianRequest{:u}` raises a `MethodError` on the first
-facet of a `:du` component sweep. Facet kernels are per-slot here exactly as
-they are per-weight for a fused weighted sweep.
+facet of a `:du` component sweep. A *weighted* sweep is the one place this is
+softened: it composes the slots the cache declares and takes the ones it does
+not as zero (see below).
 
 Fully implicit Runge-Kutta assembles `s` stage pairs and applies the s×s
 Newton block `δᵢⱼ Jdu⁽ⁱ⁾ + Δt aᵢⱼ Ju⁽ⁱ⁾` without ever building it:
@@ -227,6 +228,26 @@ machinery are real, and wherever condensed internal state makes the AD-seeded
 route inadmissible; there each participating [`JacobianKind`](@ref) applies
 its own guards, so the weighted kind is servable exactly when every
 participating slot Jacobian is.
+
+### Boundary terms in a weighted sweep
+
+A boundary term riding the cell sweep takes its own route per surface cache,
+facet kernels having no AD fallback:
+
+- the cache declares [`WeightedJacobianKind`](@ref) and its
+  `assemble_facet!(::WeightedJacobianRequest, …)` kernel — the fused facet
+  route, and the one that always wins where it exists;
+- otherwise the driver composes `Σₛ wₛ·(∂F/∂s facet kernel)` from the per-slot
+  `JacobianRequest{slot}` kernels the cache declares through
+  [`provides_analytic`](@ref). **A slot it does not declare contributes
+  nothing** — a boundary spring states `∂F/∂v = 0` by not declaring `:v`;
+- a cache declaring neither is an `ArgumentError` naming both routes, on the
+  first facet of the sweep.
+
+That is what puts a spring (`∂F/∂u` only) next to a dashpot (`∂F/∂v` only) in
+one `W`: a composite surface cache routes per inner, so the pair is legal even
+though neither inner serves both slots. The composition runs over a per-worker
+scratch element matrix, so it allocates nothing per facet.
 
 An [`AffineRate`](@ref) slot may participate only through an analytic weighted
 kernel: reconstructed slots are frozen under AD, while a kernel forming the

@@ -42,6 +42,12 @@ end
 # with richer per-sweep scalars can pass their own context types.
 "Evaluation time of the sweep this context belongs to."
 evaluation_time(ctx::TimeIntegrationContext) = ctx.t
+# A contextless sweep has no time to report, and defaulting one would freeze
+# every time-dependent coefficient at t = 0 without a word.
+evaluation_time(::Nothing) = throw(ArgumentError(
+    "this element reads the evaluation time, but the sweep carries no context. Pass one: " *
+    "`update_operator!(op, p, TimeIntegrationContext(t, Δt, γ̃))`, or the `ctx` argument of " *
+    "whichever entry point issued the sweep."))
 "Rebuild `ctx` with the evaluation time replaced by `t̃` (Dual-typed in ∂F/∂t sweeps)."
 with_time(ctx::TimeIntegrationContext, t̃) = TimeIntegrationContext(t̃, oftype(t̃, ctx.Δt), oftype(t̃, ctx.γ̃))
 "Effective local stage interval γ̃ (see `TimeIntegrationContext`); wrapper context types must forward it, same as `evaluation_time`."
@@ -443,6 +449,11 @@ the facet-item route. Unlike that route, a declared kind is not checked
 harder: `boundary_kernel!` (the fused driver) runs only in primal sweeps, so a
 missing sensitivity kernel here is the coverage gap `_warn_boundary_sensitivity`
 already warns about, not a setup error.
+
+A declared [`WeightedJacobianKind`](@ref) is checked for the FUSED facet kernel
+only. The slots a weighted sweep composes per-slot facet Jacobians over are
+runtime payload, absent from the declaration, so their kernels are checked here
+for `:u` alone (as for every other route) and otherwise on first use.
 
 !!! note
     Cannot catch a drifted `setup_boundary_cache` SIGNATURE: Julia falls back

@@ -198,6 +198,34 @@ function _fan_out_facet!(req, inner_caches::Tuple, args, local_facet_index, view
     return _fan_out_facet!(req, Base.tail(inner_caches), args, local_facet_index, Base.tail(views))
 end
 
+# A weighted sweep asks each inner for ITS OWN weighted contribution — fused
+# where the inner declares the weighted kernel, composed from that inner's
+# per-slot Jacobians otherwise — so a spring (∂F/∂u only) next to a dashpot
+# (∂F/∂v only) sums into one `W`. Same per-inner gate and parameter view as the
+# request fan-out above; routing per inner rather than for the composite as a
+# whole is what makes the pair legal, the composite claiming neither slot.
+facet_kernel!(kind::WeightedJacobianKind, composite::CompositeSurfaceElementCache, ws, args, lfi::Int) =
+    _composite_weighted_facet!(kind, composite.inner_caches, ws, args, lfi, args.p)
+
+_composite_weighted_facet!(kind, inner_caches, ws, args, lfi, p::CompositeParameters) =
+    _fan_out_weighted_facet!(kind, inner_caches, ws, args, lfi, p.views)
+@unroll function _composite_weighted_facet!(kind, inner_caches, ws, args, lfi, p)
+    @unroll for inner in inner_caches
+        if is_facet_in_cache(FacetIndex(cellid(args.cell), lfi), args.cell, inner)
+            facet_kernel!(kind, inner, ws, args, lfi)
+        end
+    end
+end
+
+_fan_out_weighted_facet!(kind, ::Tuple{}, ws, args, lfi, ::Tuple{}) = nothing
+function _fan_out_weighted_facet!(kind, inner_caches::Tuple, ws, args, lfi, views::Tuple)
+    inner = first(inner_caches)
+    if is_facet_in_cache(FacetIndex(cellid(args.cell), lfi), args.cell, inner)
+        facet_kernel!(kind, inner, ws, with_parameters(args, first(views)), lfi)
+    end
+    return _fan_out_weighted_facet!(kind, Base.tail(inner_caches), ws, args, lfi, Base.tail(views))
+end
+
 is_facet_in_cache(idx::FacetIndex, cell, composite::CompositeSurfaceElementCache) =
     _any_facet_in_cache(idx, cell, composite.inner_caches)
 @unroll function _any_facet_in_cache(idx, cell, inner_caches)

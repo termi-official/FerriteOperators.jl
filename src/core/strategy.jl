@@ -267,6 +267,8 @@ Core fields:
 - `Ke`, `re`, `cell`, `ivh`: element matrix, element residual, `Ferrite.CellCache`, internal variable handler
 - `slot_buffers`: NamedTuple of element-local state buffers, one per declared slot
 - `element`, `boundary_element`: volumetric ([`AbstractVolumetricElementCache`](@ref)) and surface element caches
+- `facet_Ke`: `Ke`-shaped scratch the composed weighted facet route accumulates one slot's ∂F/∂s in
+  before folding it into `Ke` with that slot's weight; `nothing` where the subdomain carries no boundary terms
 - `sensitivity`: [`SensitivityBuffers`](@ref), or `nothing` for a family that never issues a sensitivity kind (bilinear, linear)
 - `dofs`: augmented dof vector `[celldofs(cell); the declared global dofs]` ([`global_dofs`](@ref)), or `nothing`
   where the integrator declares none. The tail is written once at construction, the head refreshed by
@@ -281,6 +283,7 @@ Core fields:
     ivh
     element
     boundary_element
+    facet_Ke
     sensitivity
     dofs
 end
@@ -332,14 +335,16 @@ function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::N
         needs_sensitivity::Bool = true, global_dofs = ()) where {N}
     n = length(global_dofs)
     slot_buffers = NamedTuple{slots}(ntuple(_ -> pad_element_vector(allocate_element_unknown_vector(element, sdh), n), N))
+    Ke = pad_element_matrix(allocate_element_matrix(element, sdh), n)
     return AssemblyWorkspace(
-        pad_element_matrix(allocate_element_matrix(element, sdh), n),
+        Ke,
         slot_buffers,
         pad_element_vector(allocate_element_residual_vector(element, sdh), n),
         CellCache(sdh),
         ivh,
         element,
         boundary_element,
+        boundary_element isa EmptySurfaceElementCache ? nothing : similar(Ke),
         needs_sensitivity ? create_sensitivity_buffers(element, sdh, n) : nothing,
         _augmented_dof_vector(sdh, global_dofs),
     )

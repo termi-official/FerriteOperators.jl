@@ -76,6 +76,11 @@ choice:
   and where condensed internal state makes the fused route inadmissible; its
   per-slot sweeps carry their own guards, so the weighted kind is servable
   exactly when every participating [`JacobianKind`](@ref) is.
+
+A boundary term riding the cell sweep routes per surface cache and
+independently of the above: its fused weighted facet kernel where declared,
+else the same fold over the per-slot facet Jacobians it declares (see
+[Boundary terms in a weighted sweep](@ref)).
 """
 function assemble_weighted_jacobian!(W::AbstractMatrix, op::LinearizedFerriteOperator, weights::NamedTuple, states::NamedTuple, p, ctx)
     kind = WeightedJacobianKind(weights)

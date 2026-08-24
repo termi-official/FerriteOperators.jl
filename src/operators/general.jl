@@ -212,7 +212,7 @@ Base.size(op::DiagonalOperator, axis) = length(op.values)
 
 get_matrix(op::DiagonalOperator) = spdiagm(op.values)
 
-update_operator!(::DiagonalOperator, p) = nothing
+update_operator!(::DiagonalOperator, p, ctx = nothing) = nothing
 
 """
     NullOperator <: AbstractBilinearOperator
@@ -229,7 +229,7 @@ Base.size(op::NullOperator{T,S1,S2}, axis) where {T,S1,S2} = axis == 1 ? S1 : (a
 
 get_matrix(op::NullOperator{T, SIN, SOUT}) where {T, SIN, SOUT} = spzeros(T,SIN,SOUT)
 
-update_operator!(::NullOperator, p) = nothing
+update_operator!(::NullOperator, p, ctx = nothing) = nothing
 
 #########################################################################################################################
 
@@ -251,7 +251,7 @@ Ferrite.add!(b::AbstractVector, op::LinearNullOperator) = b
 Base.eltype(op::LinearNullOperator{T,S}) where {T,S} = T
 Base.size(op::LinearNullOperator{T,S}) where {T,S} = S
 
-update_operator!(op::LinearNullOperator, p) = nothing
+update_operator!(op::LinearNullOperator, p, ctx = nothing) = nothing
 
 
 Ferrite.add!(b::AbstractVector, op::AbstractLinearOperator) = __add_to_vector!(b, op.b)
