@@ -83,7 +83,7 @@ end
 
 # The bilinear form induces a linear operator, so its residual is the element
 # matrix acting on the element vector.
-provides_analytic(::Type{<:SimpleBilinearMassElementCache}, ::JacobianKind) = true
+provides_analytic(::Type{<:SimpleBilinearMassElementCache}, ::JacobianKind{:u}) = true
 function assemble_cell!(req::JacobianRequest{:u}, cache::SimpleBilinearMassElementCache, args::CellArgs)
     (; cellvalues, ρ) = cache
     for qp in 1:getnquadpoints(cellvalues)

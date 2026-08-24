@@ -182,7 +182,7 @@ function get_number_of_internal_dofs_per_element(element_model, cache::SimpleCon
     return [nqp for i in sdh.cellset]
 end
 
-provides_analytic(::Type{<:SimpleCondensedPowerLawRelaxationCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
+provides_analytic(::Type{<:SimpleCondensedPowerLawRelaxationCache}, ::Union{JacobianKind{:u}, JacobianResidualKind}) = true
 provides_analytic(::Type{<:SimpleCondensedPowerLawRelaxationCache}, ::FerriteOperators.ParameterJacobianKind) = true
 has_internal_state(::Type{<:SimpleCondensedPowerLawRelaxationCache}) = true
 
@@ -355,7 +355,7 @@ assemble_cell!(req::JacobianResidualRequest{FrozenQ}, cache::SimpleCondensedPowe
     assemble_cell!(req::JacobianRequest{:q}, cache::SimpleCondensedPowerLawRelaxationCache, args) -> K
 
 ∂F/∂q, the LOCAL `ndofs × nqp` block a Schur-complement consumer or a generic
-corrector combination wants (see `condense_internal!`'s §6 payoff). A pure
+corrector combination wants. A pure
 function of `(u, q)` — no store needed, `Consistent` and `FrozenQ` coincide,
 since `q` is the seed itself. `K` is sized by the caller: this is a
 cell-local, never a global-sweep, quantity (`q`'s dofs are internal to the
@@ -422,8 +422,8 @@ end
 # Analytic ∂F/∂θ, θ = (α, η, n): the exchange term's own partial ∂r/∂α|_q
 # (κ and n never appear directly in the residual) plus the stored
 # ∂F/∂q · dq/dθ correction (∂r/∂q|_(u,θ) = -α·φ, the residual kernel's own
-# q-dependence). The payoff of a corrector store: this kind was inadmissible
-# for a condensed cache before it existed.
+# q-dependence). Carrying the correction here is what makes a condensed cache
+# admissible for this kind.
 function assemble_cell!(req::ParameterJacobianRequest, cache::SimpleCondensedPowerLawRelaxationCache, args::CellArgs)
     (; α) = _plr_params(cache, args.p)
     cv = cache.cv
@@ -467,8 +467,6 @@ function setup_element_cache(element_model::SimpleCondensedPowerLawRelaxation, s
     )
 end
 
-# The election, spent: `Stored()` allocates the two per-item stores,
-# `Recompute()` allocates neither.
 _plr_corrector_stores(::Stored, nqp, ncells) = (
     ItemStates{SVector{nqp, Float64}}(ncells),
     ItemStates{SVector{nqp, SVector{3, Float64}}}(ncells),

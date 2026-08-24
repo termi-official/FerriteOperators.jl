@@ -148,6 +148,7 @@ end
 
 """
     update_operator!(op::TransferFerriteOperator, p)
+    update_operator!(op::NestedTransferFerriteOperator, p)
 
 Reassemble the rectangular transfer matrix `op.P` from scratch.
 """

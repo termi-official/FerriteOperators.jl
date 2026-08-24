@@ -37,39 +37,35 @@ every domain — and the resolved [`FacetItem`](@ref)s.
     items
 end
 
-# The trait ↔ kernel check of a domain's cache, over the kernel entry point and
-# args record its item family uses.
-_assert_domain_trait_backed(domain, kind) =
-    _assert_trait_backed(typeof(domain.element), kind, assemble_cell!, CellArgs)
-_assert_domain_trait_backed(domain::AlgebraicDomain, kind) =
-    _assert_trait_backed(typeof(domain.element), kind, assemble_algebraic!, AlgebraicArgs)
-_assert_domain_trait_backed(domain::FacetItemDomain, kind) =
-    _assert_trait_backed(typeof(domain.element), kind, assemble_facet!, FacetArgs, (Int,))
+# The kernel entry point of a domain's item family: the kernel function, its
+# args record, and any trailing argument types — the one triple every
+# family-dispatched check varies. A new item family adds one method here and
+# both checks below follow.
+kernel_entry(domain) = (assemble_cell!, CellArgs, ())
+kernel_entry(::AlgebraicDomain) = (assemble_algebraic!, AlgebraicArgs, ())
+kernel_entry(::FacetItemDomain) = (assemble_facet!, FacetArgs, (Int,))
 
-# The call-time admissibility check ([`_check_sensitivity_supported`](@ref))
-# over a domain's cache, family-dispatched the same way: an algebraic domain's
-# error message must name `assemble_algebraic!`/`AlgebraicArgs`, not the cell
-# family's, and must not offer the cell-only `condensed_corrector` remedy.
+# The trait ↔ kernel check and the call-time admissibility check
+# ([`_check_sensitivity_supported`](@ref)) of a domain's cache, over its
+# family's entry: the error messages name the family's own kernel and args
+# record, and the admissibility remedies are family-aware.
+_assert_domain_trait_backed(domain, kind) =
+    _assert_trait_backed(typeof(domain.element), kind, kernel_entry(domain)...)
 _assert_domain_sensitivity_admissible(domain, kind) =
-    assert_sensitivity_admissible(typeof(domain.element), kind, assemble_cell!, CellArgs)
-_assert_domain_sensitivity_admissible(domain::AlgebraicDomain, kind) =
-    assert_sensitivity_admissible(typeof(domain.element), kind, assemble_algebraic!, AlgebraicArgs)
-_assert_domain_sensitivity_admissible(domain::FacetItemDomain, kind) =
-    assert_sensitivity_admissible(typeof(domain.element), kind, assemble_facet!, FacetArgs, (Int,))
+    assert_sensitivity_admissible(typeof(domain.element), kind, kernel_entry(domain)...)
 
 # Whether a subdomain can contribute to a reduction of the given kind at all —
 # the structural half of the reduction precondition, and structural per KIND:
 # a domain contributes to one reduction and not another. An
 # `EmptyVolumetricElementCache` returns no contribution to anything by
-# construction, and a facet item's traversal has no functional body at all
-# (see `execute_kind!(::FunctionalKind, …, ::FacetItemWorkspace)`).
+# construction. The facet family's answer lives in facet-task.jl, next to the
+# `execute_kind!` bodies it mirrors.
 #
 # An algebraic domain answers `true` for every kind: whether its cache
 # overrides `evaluate_algebraic_functional` is not decidable by `hasmethod`,
 # since the default method takes untyped arguments and answers for every cache.
 _may_contribute(domain, kind) = true
 _may_contribute(domain::AssemblyDomain, kind) = !(domain.element isa EmptyVolumetricElementCache)
-_may_contribute(domain::FacetItemDomain, ::FunctionalKind) = false
 
 @concrete struct SubdomainCache
     domain

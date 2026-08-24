@@ -13,7 +13,7 @@ first_workspace(op) = first(first(op.engine.subdomain_caches).device_cache)
 first_element_cache(op) = first(op.engine.subdomain_caches).domain.element
 
 "The element cache the engine holds, looked through its AD decoration."
-element_cache_under_decoration(op) = first_element_cache(op).inner
+element_cache_under_decoration(op) = FerriteOperators.unwrap(first_element_cache(op))
 
 "Whether `op`'s per-worker workspaces carry sensitivity buffers at all."
 carries_sensitivity_buffers(op) = first_workspace(op).sensitivity !== nothing
@@ -250,19 +250,19 @@ FerriteOperators.duplicate_for_device(device, c::TractionFacetCache{wpj, ws}) wh
 _traction_amplitude(::Nothing) = 1.0
 _traction_amplitude(ctx) = 1.0 + evaluation_time(ctx)
 
-# One quadrature loop for every request: which buffer it fills and by what
-# integrand is decided on the request TYPE, so the branches fold away per kernel.
+# One quadrature loop for every request; the integrand dispatches on the
+# request type, so a new request kind is an added method, not an edit here.
+_traction_integrand!(req::ResidualRequest, i, Nᵢ, a, p)          = req.r[i]    += p * a * Nᵢ
+_traction_integrand!(req::ParameterJacobianRequest, i, Nᵢ, a, p) = req.B[i, 1] += a * Nᵢ
+_traction_integrand!(req::ParameterVJPRequest, i, Nᵢ, a, p)      = req.g[1]    += a * Nᵢ * req.λₑ[i]
+_traction_integrand!(req::TimeSensitivityRequest, i, Nᵢ, a, p)   = req.g[i]    += p * Nᵢ
 function _traction_facet!(req, c::TractionFacetCache, args::FacetArgs, lfi::Int)
     reinit!(c.fv, args.cell, lfi)
     a = _traction_amplitude(args.ctx)
     for qp in 1:getnquadpoints(c.fv)
         dΓ = getdetJdV(c.fv, qp)
         for i in 1:getnbasefunctions(c.fv)
-            Nᵢ = shape_value(c.fv, qp, i) * dΓ
-            req isa ResidualRequest          && (req.r[i] += args.p * a * Nᵢ)
-            req isa ParameterJacobianRequest && (req.B[i, 1] += a * Nᵢ)
-            req isa ParameterVJPRequest      && (req.g[1] += a * Nᵢ * req.λₑ[i])
-            req isa TimeSensitivityRequest   && (req.g[i] += args.p * Nᵢ)
+            _traction_integrand!(req, i, shape_value(c.fv, qp, i) * dΓ, a, args.p)
         end
     end
     return nothing

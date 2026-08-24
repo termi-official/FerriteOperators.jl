@@ -114,8 +114,11 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, a
     # accumulate into req.r
 end
 
-# … and optional analytic kernels, declared via a trait
-FerriteOperators.provides_analytic(::Type{<:MyCache}, ::FerriteOperators.JacobianKind) = true
+# … and optional analytic kernels, declared via a trait. Declare per KIND
+# INSTANCE (`::JacobianKind{:u}`): a bare `::JacobianKind` claims every slot
+# and both correction modes — including `:q` — and setup validation holds the
+# claim against the kernels you actually implement.
+FerriteOperators.provides_analytic(::Type{<:MyCache}, ::FerriteOperators.JacobianKind{:u}) = true
 function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args::CellArgs)
     # accumulate into req.K
 end

@@ -91,9 +91,9 @@ same two pattern declarations:
   system stays with the caller, through Ferrite's `apply!`/`apply_assemble!`.
 
 !!! note "`algebraic_couplings` requires Ferrite's mesh-free algebraic variables"
-    The coupling descriptors' `algebraic_coupling` keyword, `AlgebraicCoupling`,
-    and the `algebraic_couplings` keyword of Ferrite's `add_sparsity_entries!`
-    are not in the registered Ferrite 1.6. FerriteOperators passes the keyword
+    See the canonical capability note under [Algebraic
+    terms](elements.md#Algebraic-terms-(items-with-no-mesh-support)).
+    FerriteOperators passes the keyword
     through only when something is declared, so an operator declaring no
     couplings — the default `()` — allocates its pattern exactly as before;
     declaring one on a Ferrite without the capability fails loudly at the

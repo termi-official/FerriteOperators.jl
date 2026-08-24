@@ -294,12 +294,9 @@ first cell — disjoint from `celldofs`, since a dof appearing in both head and
 tail would receive every contribution twice.
 
 !!! note "Requires Ferrite's mesh-free algebraic variables"
-    The declaration is spelled in Ferrite's `AlgebraicVariable` vocabulary
-    (`algebraic_dofs`, `AlgebraicValues`, and the `algebraic_coupling` keyword
-    of the coupling descriptors), which the registered Ferrite 1.6 does not
-    carry. There those names are undefined, so the Ferrite-side declaration
-    fails loudly at its own call site before any FerriteOperators surface is
-    reached. [`global_dofs`](@ref) defaults to `()`, so an operator declaring
+    See the canonical capability note under [Algebraic
+    terms](#Algebraic-terms-(items-with-no-mesh-support)); the same Ferrite
+    `AlgebraicVariable` vocabulary carries this declaration. [`global_dofs`](@ref) defaults to `()`, so an operator declaring
     none is unaffected.
 
 ## Facet items
@@ -406,11 +403,14 @@ all — the analogue of one element cache per `SubDofHandler` serving all its
 cells. It has no silent fallback: declaring items without it is a setup error.
 
 !!! note "Requires Ferrite's mesh-free algebraic variables"
-    An item's dofs are Ferrite `AlgebraicVariable` dofs, and its sparsity is
-    declared with `AlgebraicCoupling` — neither exists in the registered
-    Ferrite 1.6. There the declaration fails loudly at its own call site before
-    any FerriteOperators surface is reached. [`algebraic_items`](@ref) defaults
-    to `()`, so an operator declaring none is unaffected.
+    The whole vocabulary these features are spelled in — `AlgebraicVariable`,
+    `algebraic_dofs`, `AlgebraicValues`, `AlgebraicCoupling`, and the
+    `algebraic_coupling`/`algebraic_couplings` keywords — is not in the
+    registered Ferrite 1.6. There the declaration fails loudly at its own call
+    site before any FerriteOperators surface is reached; every FO-side
+    declaration defaults to `()`, so operators declaring none are unaffected.
+    This note is canonical — the global-dofs section and the operator
+    specifications point here.
 
 Kernels dispatch through [`assemble_algebraic!`](@ref), the family's own entry
 point next to `assemble_cell!` and `assemble_facet!`, and receive an

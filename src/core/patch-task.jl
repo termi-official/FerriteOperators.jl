@@ -824,9 +824,7 @@ function assemble_patches!(kind::PatchAssemblyKind, op, provider::PatchItems, st
             "the sink rides inside the shared kind. Drive the patches through `foreach_patch` and own the collectors."
         )
     )
-    sc = op.engine.subdomain_caches[_patch_subdomain(op, provider)]
-    inner = duplicate_for_device(op.engine.strategy.device, first(sc.device_cache))
-    ws = _patch_workspace(provider, inner)
+    ws = patch_workspace(op, provider)
     task = AssemblyTask(kind, nothing, states, p, ctx)
     execute_on_device!(task, op.engine.strategy.device, (ws,), compute_partition(op.engine.strategy, provider))
     return kind.sink
@@ -863,9 +861,7 @@ function foreach_patch(f, op, provider::PatchItems, states::NamedTuple, p, ctx =
             "Schedule the patches yourself with `patch_chunks` and `patch_workspace`."
         )
     )
-    sc = op.engine.subdomain_caches[_patch_subdomain(op, provider)]
-    inner = duplicate_for_device(op.engine.strategy.device, first(sc.device_cache))
-    ws = _patch_workspace(provider, inner)
+    ws = patch_workspace(op, provider)
     task = AssemblyTask(PatchCallbackKind(f), nothing, states, p, ctx)
     execute_on_device!(task, op.engine.strategy.device, (ws,), compute_partition(op.engine.strategy, provider))
     return nothing

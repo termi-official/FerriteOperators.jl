@@ -142,29 +142,19 @@ end
 # The same element with its FUSED claim withheld, so `decorate_element_cache`
 # resolves it into `FusedFromSplit` BEFORE the AD decorator sees it. The θ/t
 # route then depends on the hook probes looking through both wrappers.
-struct SplitTimedRelaxationCache{C} <: FerriteOperators.AbstractVolumetricElementCache
+# The decorator base forwards every mechanical hook; hand-written here are the
+# served-capability half only — the SPLIT analytic claims and their request
+# forwards — plus the type-reconstructing duplication.
+struct SplitTimedRelaxationCache{C} <: FerriteOperators.AbstractElementCacheDecorator{C}
     inner::C
 end
 FerriteOperators.duplicate_for_device(device, c::SplitTimedRelaxationCache) =
     SplitTimedRelaxationCache(FerriteOperators.duplicate_for_device(device, c.inner))
-FerriteOperators.reinit_values!(c::SplitTimedRelaxationCache, cell) = FerriteOperators.reinit_values!(c.inner, cell)
-FerriteOperators.reinit_values!(c::SplitTimedRelaxationCache, cell, kind) =
-    FerriteOperators.reinit_values!(c.inner, cell, kind)
-Ferrite.getnquadpoints(c::SplitTimedRelaxationCache) = getnquadpoints(c.inner)
-FerriteOperators.has_internal_state(::Type{<:SplitTimedRelaxationCache}) = true
-FerriteOperators.get_number_of_internal_dofs_per_element(m, c::SplitTimedRelaxationCache, sdh) =
-    FerriteOperators.get_number_of_internal_dofs_per_element(m, c.inner, sdh)
-FerriteOperators.condense_cell!(c::SplitTimedRelaxationCache, args, weights) =
-    FerriteOperators.condense_cell!(c.inner, args, weights)
-FerriteOperators.invalidate_correctors!(c::SplitTimedRelaxationCache) =
-    FerriteOperators.invalidate_correctors!(c.inner)
 FerriteOperators.provides_analytic(::Type{<:SplitTimedRelaxationCache}, ::JacobianKind{:u}) = true
 for R in (:ResidualRequest, :(JacobianRequest{:u, Consistent}))
     @eval FerriteOperators.assemble_cell!(req::$R, c::SplitTimedRelaxationCache, args::CellArgs) =
         FerriteOperators.assemble_cell!(req, c.inner, args)
 end
-FerriteOperators.local_conditions!(L, c::SplitTimedRelaxationCache, args::CellArgs) =
-    FerriteOperators.local_conditions!(L, c.inner, args)
 
 struct SplitTimedRelaxationIntegrator <: FerriteOperators.AbstractCondensedNonlinearIntegrator
     inner::TimedRelaxationIntegrator

@@ -83,7 +83,7 @@ function get_number_of_internal_dofs_per_element(element_model, cache::SimpleCon
     return [6nqp for i in sdh.cellset]
 end
 
-provides_analytic(::Type{<:SimpleCondensedLinearViscoelasticityCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
+provides_analytic(::Type{<:SimpleCondensedLinearViscoelasticityCache}, ::Union{JacobianKind{:u}, JacobianResidualKind}) = true
 has_internal_state(::Type{<:SimpleCondensedLinearViscoelasticityCache}) = true
 
 function FerriteOperators.invalidate_correctors!(cache::SimpleCondensedLinearViscoelasticityCache)
@@ -125,10 +125,8 @@ end
 end
 
 # The corrector ACCESS POINT the `Consistent` kernel calls, resolved once per
-# cell: `Stored()` hands back the retained factorizations, `Recompute()` hands
-# back `nothing` and the per-quadrature-point read below re-forms `A`. Only the
-# recomputing branch needs the stage scaling, so a `Stored()` sweep still runs
-# without a context.
+# cell. Only the recomputing branch needs the stage scaling, so a `Stored()`
+# sweep still runs without a context.
 _sls_correctors(cache::SimpleCondensedLinearViscoelasticityCache, args) =
     (FerriteOperators.item_state(cache.correctors, cellid(args.cell)), nothing)
 _sls_correctors(::_SLSRecomputing, args) = (nothing, _sls_stage_scaling(args.ctx))
@@ -136,11 +134,10 @@ _sls_correctors(::_SLSRecomputing, args) = (nothing, _sls_stage_scaling(args.ctx
 @inline _sls_factor(As::SVector, qp, cache, ℂ, γ̃) = As[qp]
 @inline _sls_factor(::Nothing, qp, cache, ℂ, γ̃) = _sls_local_operator(cache, ℂ, γ̃)
 
-# Corrector: consistent (algorithmic) tangent through the local solve, reading
-# the retained factorization `A` instead of receiving it from an inline solve.
+# Consistent (algorithmic) tangent through the local solve, formed from the
+# local operator `A`.
 @inline function _sls_consistent_tangent(cache::SimpleCondensedLinearViscoelasticityCache, ℂ, A)
     (; E₀, E₁, η₁) = cache.material_parameters
-    # FIXME non-allocating version by using state_cache nlsolver
     B = tomandel(SMatrix, E₁ / η₁ * ℂ)
     dqdε = frommandel(typeof(ℂ), A \ B)
     ∂σ∂q = -E₁ * ℂ
@@ -256,7 +253,5 @@ function setup_element_cache(element_model::SimpleCondensedLinearViscoelasticity
     )
 end
 
-# The election, spent: `Stored()` allocates the per-item store, `Recompute()`
-# allocates none.
 _sls_corrector_store(::Stored, nqp, ncells) = ItemStates{SVector{nqp, SMatrix{6, 6, Float64, 36}}}(ncells)
 _sls_corrector_store(::Recompute, nqp, ncells) = nothing

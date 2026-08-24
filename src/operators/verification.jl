@@ -64,15 +64,15 @@ solves, so the check validates the consistent condensed tangent.
 Supports [`LinearizedFerriteOperator`](@ref) only — the family with a
 Jacobian, a residual, and the sensitivity entry points this checks against.
 """
-function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
+check_derivatives(op, states::NamedTuple, p, ctx = nothing; kwargs...) = throw(ArgumentError(
+    "check_derivatives supports LinearizedFerriteOperator only (got $(typeof(op))): " *
+    "a bilinear or linear operator has no Jacobian/residual pair to cross-check against " *
+    "finite differences."))
+function check_derivatives(op::LinearizedFerriteOperator, states::NamedTuple, p, ctx = nothing;
         h::Float64 = cbrt(eps(Float64)),
         rtol::Float64 = 1e-5, atol::Float64 = 1e-8, nprobes::Int = 3,
         weights::Union{Nothing, NamedTuple} = nothing,
         correction::Type{<:CorrectionMode} = Consistent)
-    op isa LinearizedFerriteOperator || throw(ArgumentError(
-        "check_derivatives supports LinearizedFerriteOperator only (got $(typeof(op))): " *
-        "a bilinear or linear operator has no Jacobian/residual pair to cross-check against " *
-        "finite differences."))
     nres  = residual_size(op)
     ubase = copy(states.u)
     uw    = copy(states.u)

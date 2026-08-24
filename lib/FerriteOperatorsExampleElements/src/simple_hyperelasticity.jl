@@ -136,4 +136,4 @@ function setup_element_cache(element_model::SimpleHyperelasticityIntegrator, sdh
     return SimpleHyperelasticityElementCache(element_model.ψ, CellValues(qr, ip, ip_geo))
 end
 
-provides_analytic(::Type{<:SimpleHyperelasticityElementCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
+provides_analytic(::Type{<:SimpleHyperelasticityElementCache}, ::Union{JacobianKind{:u}, JacobianResidualKind}) = true

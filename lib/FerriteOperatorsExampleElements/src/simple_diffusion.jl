@@ -55,7 +55,7 @@ function setup_element_cache(element_model::SimpleBilinearDiffusionIntegrator, s
     return SimpleBilinearDiffusionElementCache(element_model.D, CellValues(qr, ip, ip_geo))
 end
 
-provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind) = true
+provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind{:u}) = true
 # The bilinear form induces a linear operator, so its residual is the element
 # matrix acting on the element vector — mandatory so the element composes
 # into nonlinear operators and AD-based sensitivities.

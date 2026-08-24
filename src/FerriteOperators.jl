@@ -174,7 +174,7 @@ export ItemStates, item_state, set_item_state!, has_item_state, invalidate_item_
 export provides_analytic
 export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
 export reinit_values!
-export ADElementCache, AbstractElementCacheDecorator, ForwardDiffAD, FusedFromSplit, condensed_corrector
+export ADElementCache, AbstractElementCacheDecorator, unwrap, ForwardDiffAD, FusedFromSplit, condensed_corrector
 export decorate_element_cache, needs_ad_decoration, fully_analytic
 
 export residual_size, unknown_size

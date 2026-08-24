@@ -245,6 +245,12 @@ execute_kind!(::JacobianKind{:q}, task, ws::FacetItemWorkspace) = nothing
 # the cell family's own sweep over that same cell already does.
 execute_kind!(::QuadratureEvaluationKind, task, ws::FacetItemWorkspace) = nothing
 
+# The structural-reduction answer mirrors the bodies above: for the kinds the
+# family declines, a facet domain can never contribute, so a reduction whose
+# every domain is facet-shaped (or otherwise empty) fails the structural
+# precondition instead of silently reducing over nothing.
+_may_contribute(::FacetItemDomain, ::Union{FunctionalKind, CondensationKind}) = false
+
 ####################################
 ## Setup
 ####################################
