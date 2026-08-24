@@ -43,7 +43,7 @@ function VTKQuadratureGrid(dh::AbstractDofHandler, qrc)
     end
 
     # Cache one geometry-only CellValues per SubDofHandler
-    cv_cache = Dict{Any, CellValues}()
+    cv_cache = Dict{eltype(dh.subdofhandlers), CellValues}()
     for sdh in dh.subdofhandlers
         ip_geo        = Ferrite.geometric_interpolation(typeof(get_first_cell(sdh)))
         qr            = getquadraturerule(qrc, sdh)

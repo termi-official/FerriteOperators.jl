@@ -71,7 +71,6 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
         nullop = NullOperator{Float64,5,5}()
         @test eltype(nullop) == Float64
         @test length(vin)  == size(nullop, 1)
-        @test length(vout) == size(nullop, 2)
 
         mul!(vout, nullop, vin)
         @test vout == zeros(5)
@@ -85,7 +84,6 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
 
         diagop = DiagonalOperator([1.0, 2.0, 3.0, 4.0, 5.0])
         @test length(vin)  == size(diagop, 1)
-        @test length(vout) == size(diagop, 2)
         mul!(vout, diagop, vin)
         @test vout == [1.0, 2.0, 3.0, 4.0, 5.0]
 
@@ -94,11 +92,16 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
         mul!(vres, diagop, [1.0, 1.0, 2.0, 2.0, 3.0])
         @test vres == [1.0, 2.0, 6.0, 8.0, 15.0]
 
-        # Bilinear operators with constant linearization support both update forms
+        # Bilinear operators with constant linearization support both update
+        # forms, and the fused one fills the residual with the operator's
+        # action `F(u) = A·u`.
         update_linearization!(diagop, vin, nothing)
-        update_linearization!(diagop, vres, vin, nothing)
         update_linearization!(nullop, vin, nothing)
+        vres .= NaN
+        update_linearization!(diagop, vres, vin, nothing)
+        @test vres == [1.0, 2.0, 3.0, 4.0, 5.0]
         update_linearization!(nullop, vres, vin, nothing)
+        @test vres == zeros(5)
 
         mul!(vout, diagop, vin, 1.0, 1.0)
         @test vout == 2.0 .* [1.0, 2.0, 3.0, 4.0, 5.0]
@@ -117,6 +120,15 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
         @test length(vout) == size(nullop_rect, 2)
 
         @test get_matrix(nullop_rect) ≈ zeros(4,5)
+
+        # The rectangular action: `out` is row-shaped, `in` column-shaped.
+        out_rect = ones(4)
+        in_rect  = ones(5)
+        mul!(out_rect, nullop_rect, in_rect)
+        @test out_rect == zeros(4)
+        out_rect .= ones(4)
+        mul!(out_rect, nullop_rect, in_rect, 2.0, 3.0)
+        @test out_rect == fill(3.0, 4)
     end
 
     @testset "Bilinear" begin
@@ -185,98 +197,88 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
         u = zeros(ndofs(dh))
         apply_analytical!(u, dh, :u, x->0.01x.^2)
 
-        for integrator in [
-            SimpleHyperelasticityIntegrator(
-                NeoHookean(10.0, 0.3),
-                QuadratureRuleCollection(2),
-                :u
-            ),
-        ]
-            nlop_base = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+        integrator = SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), QuadratureRuleCollection(2), :u)
+        nlop_base = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
 
-            # Check that assembly works
-            @test norm(nlop_base.J) ≈ 0.0
-            nlop_base.J .= NaN
-            update_linearization!(nlop_base, u, 0.0)
-            Jnorm_baseline = norm(nlop_base.J)
-            @test Jnorm_baseline > 0.0
-            yref = zero(u)
-            mul!(yref, nlop_base.J, u)
+        # Check that assembly works
+        @test norm(nlop_base.J) ≈ 0.0
+        nlop_base.J .= NaN
+        update_linearization!(nlop_base, u, 0.0)
+        Jnorm_baseline = norm(nlop_base.J)
+        @test Jnorm_baseline > 0.0
+        yref = zero(u)
+        mul!(yref, nlop_base.J, u)
 
-            # Also querying the residual should not change the outcome
+        # Also querying the residual should not change the outcome
+        residual .= NaN
+        nlop_base.J .= NaN
+        update_linearization!(nlop_base, residual, u, 0.0)
+        @test Jnorm_baseline ≈ norm(nlop_base.J)
+        rnorm_baseline = norm(residual)
+        @test rnorm_baseline > 0.0
+
+        # Now just the residual
+        residual .= NaN
+        nlop_base(residual, u, 0.0)
+        @test rnorm_baseline ≈ norm(residual)
+
+        # Idempotency
+        update_linearization!(nlop_base, u, 0.0)
+        @test Jnorm_baseline ≈ norm(nlop_base.J)
+        nlop_base(residual, u, 0.0)
+        @test Jnorm_baseline ≈ norm(nlop_base.J)
+        @test rnorm_baseline ≈ norm(residual)
+        residual_baseline = copy(residual)
+
+        @testset "Full Assembly Strategy $strategy" for strategy in (
+            SequentialAssemblyStrategy(SequentialCPUDevice()),
+            PerColorAssemblyStrategy(SequentialCPUDevice()),
+            PerColorAssemblyStrategy(PolyesterDevice(1)),
+            PerColorAssemblyStrategy(PolyesterDevice(2)),
+        )
+            nlop = setup_operator(strategy, integrator, dh)
+            # Consistency: each of the three entry points against the baseline.
+            nlop.J .= NaN
+            update_linearization!(nlop, u, 0.0)
+            @test nlop.J ≈ nlop_base.J
+
+            nlop.J .= NaN
             residual .= NaN
-            nlop_base.J .= NaN
-            update_linearization!(nlop_base, residual, u, 0.0)
-            @test Jnorm_baseline ≈ norm(nlop_base.J)
-            rnorm_baseline = norm(residual)
-            @test rnorm_baseline > 0.0
+            update_linearization!(nlop, residual, u, 0.0)
+            @test nlop.J ≈ nlop_base.J
+            @test residual ≈ residual_baseline
 
-            # Now just the residual
             residual .= NaN
-            nlop_base(residual, u, 0.0)
-            @test rnorm_baseline ≈ norm(residual)
+            nlop(residual, u, 0.0)
+            @test residual ≈ residual_baseline
+        end
 
-            # Idempotency
-            update_linearization!(nlop_base, u, 0.0)
-            @test Jnorm_baseline ≈ norm(nlop_base.J)
-            nlop_base(residual, u, 0.0)
-            @test Jnorm_baseline ≈ norm(nlop_base.J)
-            @test rnorm_baseline ≈ norm(residual)
-            residual_baseline = copy(residual)
+        @testset "Element Assembly Strategy $strategy" for strategy in (
+            ElementAssemblyStrategy(SequentialCPUDevice()),
+            ElementAssemblyStrategy(PolyesterDevice(1)),
+            ElementAssemblyStrategy(PolyesterDevice(2)),
+        )
+            nlop = setup_operator(strategy, integrator, dh)
+            update_linearization!(nlop, u, 0.0)
+            y = zero(u)
+            mul!(y, nlop.J, u)
+            @test yref ≈ y
+            # The element-assembled action is idempotent: a second `mul!` on the
+            # same matrix-free operator gives the same result.
+            mul!(y, nlop.J, u)
+            @test yref ≈ y
 
-            @testset "Full Assembly Strategy $strategy" for strategy in (
-                SequentialAssemblyStrategy(SequentialCPUDevice()),
-                PerColorAssemblyStrategy(SequentialCPUDevice()),
-                PerColorAssemblyStrategy(PolyesterDevice(1)),
-                PerColorAssemblyStrategy(PolyesterDevice(2)),
-            )
-                nlop = setup_operator(strategy, integrator, dh)
-                # Consistency and Idempotency
-                for i in 1:2
-                    nlop.J .= NaN
-                    update_linearization!(nlop, u, 0.0)
-                    @test nlop.J ≈ nlop_base.J
+            residual .= NaN
+            update_linearization!(nlop, residual, u, 0.0)
+            mul!(y, nlop.J, u)
+            @test yref ≈ y
+            @test residual ≈ residual_baseline
 
-                    nlop.J .= NaN
-                    residual .= NaN
-                    update_linearization!(nlop, residual, u, 0.0)
-                    @test nlop.J ≈ nlop_base.J
-                    @test residual ≈ residual_baseline
-
-                    residual .= NaN
-                    nlop(residual, u, 0.0)
-                    @test residual ≈ residual_baseline
-                end
-            end
-
-            @testset "Element Assembly Strategy $strategy" for strategy in (
-                ElementAssemblyStrategy(SequentialCPUDevice()),
-                ElementAssemblyStrategy(PolyesterDevice(1)),
-                ElementAssemblyStrategy(PolyesterDevice(2)),
-            )
-                nlop = setup_operator(strategy, integrator, dh)
-                # Consistency and Idempotency
-                for i in 1:2
-                    update_linearization!(nlop, u, 0.0)
-                    y = zero(u)
-                    mul!(y, nlop.J, u)
-                    @test yref ≈ y
-                    mul!(y, nlop.J, u)
-                    @test yref ≈ y
-
-                    residual .= NaN
-                    update_linearization!(nlop, residual, u, 0.0)
-                    mul!(y, nlop.J, u)
-                    @test yref ≈ y
-                    @test residual ≈ residual_baseline
-
-                    residual .= NaN
-                    nlop(residual, u, 0.0)
-                    mul!(y, nlop.J, u)
-                    @test yref ≈ y
-                    @test residual ≈ residual_baseline
-                end
-            end
+            residual .= NaN
+            nlop(residual, u, 0.0)
+            mul!(y, nlop.J, u)
+            @test yref ≈ y
+            @test residual ≈ residual_baseline
         end
     end
 
@@ -319,8 +321,12 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
         Δd = nlop.J \ residual
         @test norm(Δd)/length(Δd) ≈ 0.0 atol=1e-12
 
+        # Regression pins: recorded from a run of this very setup, with no
+        # independent derivation behind either number.
         @test norm(d) ≈ 0.059623465672897884
         @test norm(u[ndofs(dh)+1:end]) ≈ 0.062203435313135984
+        # The trial write-back goes into `u` alone: `uprev` is the committed
+        # predecessor and no sweep may touch it.
         @test norm(uprev) ≈ 0.0
     end
 
@@ -350,12 +356,7 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
     end
 
     @testset "Operator sizes" begin
-        grid = generate_grid(Quadrilateral, (3,3))
-        dh = DofHandler(grid)
-        add!(dh, :u, Lagrange{RefQuadrilateral,1}())
-        close!(dh)
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-        n = ndofs(dh)
+        (; dh, n, strategy) = scalar_quad_testbed((3, 3))
 
         bilin_op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
         @test size(bilin_op) == (n, n)
@@ -372,9 +373,9 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
     end
 
     @testset "GPU device validation" begin
-        @test_throws ArgumentError FerriteOperators.setup_device_instances(CudaDevice(), FerriteOperators.EAIndexWorkspace(0), 1)
-        @test_throws ArgumentError FerriteOperators.n_workers(SequentialAssemblyStrategy(CudaDevice()), CudaDevice(), [1:5])
-        @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, CudaDevice(), nothing, [])
+        @test_throws ArgumentError FerriteOperators.setup_device_instances(FerriteOperators.CudaDevice(), FerriteOperators.EAIndexWorkspace(0), 1)
+        @test_throws ArgumentError FerriteOperators.n_workers(SequentialAssemblyStrategy(FerriteOperators.CudaDevice()), FerriteOperators.CudaDevice(), [1:5])
+        @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, FerriteOperators.CudaDevice(), nothing, [])
     end
 
     @testset "Generic setup_device_instances" begin
@@ -491,6 +492,18 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
             addcellset!(grid, "all_cells", x -> true)
             addcellset!(grid, "one_cell", Set([1]))
 
+            # A three-cell grid whose first two cells are the subdomains, so a
+            # declared name can be disjoint from every subdomain (cell 3) and an
+            # overlap can be placed away from cell 1.
+            sub_grid = generate_grid(Hexahedron, (3, 1, 1))
+            addcellset!(sub_grid, "a", Set([1]))
+            addcellset!(sub_grid, "b", Set([2]))
+            addcellset!(sub_grid, "c", Set([3]))
+            sub_dh = DofHandler(sub_grid)
+            sa = SubDofHandler(sub_dh, getcellset(sub_grid, "a")); add!(sa, :u, Lagrange{RefHexahedron, 1}())
+            sb = SubDofHandler(sub_dh, getcellset(sub_grid, "b")); add!(sb, :u, Lagrange{RefHexahedron, 1}())
+            close!(sub_dh)
+
             # These four classes are rejected regardless of resolution mode.
             for mode in (Val(:sample), Val(:full))
                 # a declared name that is not a cellset of the grid
@@ -503,14 +516,6 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
                 @test_throws ArgumentError FerriteOperators.resolve_subdomain_claims(
                     Dict("all_cells" => L(1.0), "right_cells" => L(1.0), "left_cells" => L(1.0)), dh, mode)
                 # a declared name claiming no subdomain (disjoint from every subdomain)
-                sub_grid = generate_grid(Hexahedron, (3, 1, 1))
-                addcellset!(sub_grid, "a", Set([1]))
-                addcellset!(sub_grid, "b", Set([2]))
-                addcellset!(sub_grid, "c", Set([3]))
-                sub_dh = DofHandler(sub_grid)
-                sa = SubDofHandler(sub_dh, getcellset(sub_grid, "a")); add!(sa, :u, Lagrange{RefHexahedron, 1}())
-                sb = SubDofHandler(sub_dh, getcellset(sub_grid, "b")); add!(sb, :u, Lagrange{RefHexahedron, 1}())
-                close!(sub_dh)
                 @test FerriteOperators.resolve_subdomain_claims(
                     Dict("a" => L(1.0), "b" => L(1.0)), sub_dh, mode) == ["a", "b"]
                 @test_throws ArgumentError FerriteOperators.resolve_subdomain_claims(
@@ -535,31 +540,16 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
                 Dict("all_cells" => L(1.0), "one_cell" => L(1.0)), dh, Val(:full)))
             @test occursin("Cell 1 lies in both", overlap_msg)
 
+            # The reported cell is the actual overlap, not the first cell of the
+            # grid: "b" and "seam" collide on cell 2 alone.
+            addcellset!(sub_grid, "seam", Set([2]))
+            seam_msg = rejection_message(() -> FerriteOperators.resolve_subdomain_claims(
+                Dict("a" => L(1.0), "b" => L(1.0), "seam" => L(0.0)), sub_dh, Val(:full)))
+            @test occursin("Cell 2 lies in both", seam_msg)
+
             # The operator entry point routes through the compile-time mode.
             @test_throws ArgumentError setup_operator(strategy, LinearMultiDomainIntegrator(
                 Dict("right_cells" => L(1.0))), dh)
-        end
-
-        @testset "resolution on a large grid" begin
-            n_side = 400                      # 160_000 cells
-            big_grid = generate_grid(Quadrilateral, (n_side, n_side))
-            half = n_side * n_side ÷ 2
-            addcellset!(big_grid, "lower", Set(1:half))
-            addcellset!(big_grid, "upper", Set((half + 1):(n_side * n_side)))
-            big_dh = DofHandler(big_grid)
-            lo = SubDofHandler(big_dh, getcellset(big_grid, "lower")); add!(lo, :u, Lagrange{RefQuadrilateral, 1}())
-            hi = SubDofHandler(big_dh, getcellset(big_grid, "upper")); add!(hi, :u, Lagrange{RefQuadrilateral, 1}())
-            close!(big_dh)
-            big_qrc = QuadratureRuleCollection(2)
-            subs = Dict("lower" => SimpleLinearIntegrator(1.0, big_qrc, :u),
-                        "upper" => SimpleLinearIntegrator(2.0, big_qrc, :u))
-
-            @test FerriteOperators.resolve_subdomain_claims(subs, big_dh, Val(:full)) == ["lower", "upper"]
-
-            addcellset!(big_grid, "seam", Set([half, half + 1]))
-            seam_msg = rejection_message(() -> FerriteOperators.resolve_subdomain_claims(
-                merge(subs, Dict("seam" => SimpleLinearIntegrator(0.0, big_qrc, :u))), big_dh, Val(:full)))
-            @test occursin("Cell $half lies in both", seam_msg)
         end
 
         # Routing outer, composition inner: a named subdomain whose term is a

@@ -83,8 +83,7 @@ Ferrite.reinit!(ws::AlgebraicWorkspace, index::Int) = (ws.current[] = index; ws)
 # range, exactly like the cell family's `InternalSource` gather — empty for an
 # item owning none, which is what a stateless algebraic cache always reports
 # (`internal_variable_range` on the placeholder handler is `1:0` regardless of
-# item), so this reproduces the old unconditional-empty gather exactly for
-# every operator without a condensed algebraic cache.
+# item).
 function load_slot!(buf, src::InternalSource, ws::AlgebraicWorkspace)
     range = internal_variable_range(ws.ivh, current_item(ws))
     resize!(buf, length(range))
@@ -207,9 +206,8 @@ function functional_algebraic_sweep(kind, task, ws)
 end
 
 # Trait-gated: a stateless algebraic cache (the common case) owns no internal
-# dofs, so condensation contributes nothing and its slots are never gathered —
-# the exact no-op this dispatched to before condensed algebraic items existed.
-# A condensed cache reaches the real driver below.
+# dofs, so condensation contributes nothing and its slots are never gathered.
+# A condensed cache reaches the driver below.
 execute_kind!(kind::CondensationKind, task, ws::AlgebraicWorkspace) =
     has_internal_state(typeof(ws.element)) ? condensation_algebraic_sweep!(kind, task, ws) : nothing
 
@@ -283,11 +281,19 @@ There is no generic AD `Consistent` bootstrap for this family (see
 [`condense_algebraic!`](@ref)): an algebraic item has no cellid to key a
 corrector store by, so a condensed algebraic cache has only these two
 escapes, never `ADElementCache`'s `condensed_corrector` combination.
+
+Runs on the RAW cache, before [`decorate_algebraic_cache`](@ref): the two
+subjects the [`AbstractElementCacheDecorator`](@ref) convention distinguishes
+coincide for this family, because the generic routes a decorator would add are
+`CellArgs`-shaped and this family has none of them. The kernel probe still
+takes the [`unwrap`](@ref) fixpoint, so a hand-decorated cache handed to this
+entry point is probed on its author-written method set.
 """
 function validate_algebraic_cache(cache, declared_requests::Tuple = ())
     T = typeof(cache)
-    hasmethod(assemble_algebraic!, Tuple{ResidualRequest, T, AlgebraicArgs}) || throw(ArgumentError(
-        "$(T) implements no `assemble_algebraic!(::ResidualRequest, ::$(nameof(T)), " *
+    A = unwrap(T)
+    hasmethod(assemble_algebraic!, Tuple{ResidualRequest, A, AlgebraicArgs}) || throw(ArgumentError(
+        "$(A) implements no `assemble_algebraic!(::ResidualRequest, ::$(nameof(A)), " *
         "::AlgebraicArgs)` method. The residual kernel is mandatory: it is the basis for " *
         "AD-derived Jacobians and sensitivities."))
     for kind in _primal_validatable_kinds()

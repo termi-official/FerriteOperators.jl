@@ -69,9 +69,9 @@ protocol — [`FerriteOperators.functional_value_type`](@ref), required under a
 parallel device and described with the kernel hook in
 [Writing elements](@ref Functionals).
 
-Declaring stays a hint, never a capability restriction: an operator always
-builds what its own integrator family issues ([`mandatory_kinds`](@ref)).
-Undeclared kinds run their checks at the call-time entry points.
+Declaring stays a hint, never a capability restriction: undeclared kinds
+remain usable and simply run their checks at the call-time entry points
+instead of at setup.
 
 ## The assembled matrix
 
@@ -89,6 +89,15 @@ same two pattern declarations:
 - `constraint_handler`, which adds the constraint entries so condensation has
   room to write. Sparsity **only**: applying the constraints to the assembled
   system stays with the caller, through Ferrite's `apply!`/`apply_assemble!`.
+
+!!! note "`algebraic_couplings` requires Ferrite's mesh-free algebraic variables"
+    The coupling descriptors' `algebraic_coupling` keyword, `AlgebraicCoupling`,
+    and the `algebraic_couplings` keyword of Ferrite's `add_sparsity_entries!`
+    are not in the registered Ferrite 1.6. FerriteOperators passes the keyword
+    through only when something is declared, so an operator declaring no
+    couplings — the default `()` — allocates its pattern exactly as before;
+    declaring one on a Ferrite without the capability fails loudly at the
+    Ferrite call.
 
 ### Blocked matrices with CSR blocks
 
@@ -159,6 +168,13 @@ The differentiated slot must carry a plain vector source. An
 [`AffineRate`](@ref) slot is reconstructed at gather time and frozen under AD,
 so `JacobianKind{:du}()` against it is rejected — assemble the components
 against plain sources and let the reconstruction slope enter as a weight.
+
+A boundary term riding the cell sweep must serve every slot the components are
+assembled for. The facet driver hands the sweep's `JacobianRequest{:du}` to the
+surface cache with no AD fallback, so a cache implementing only
+`ResidualRequest` and `JacobianRequest{:u}` raises a `MethodError` on the first
+facet of a `:du` component sweep. Facet kernels are per-slot here exactly as
+they are per-weight for a fused weighted sweep.
 
 Fully implicit Runge-Kutta assembles `s` stage pairs and applies the s×s
 Newton block `δᵢⱼ Jdu⁽ⁱ⁾ + Δt aᵢⱼ Ju⁽ⁱ⁾` without ever building it:
@@ -239,16 +255,23 @@ residual kernel. The engine itself never forks between the two: it always
 calls `assemble_cell!` on the resolved cache, analytic-or-decorated.
 Sensitivity sweeps **never** write back into the caller's state.
 
-!!! warning "Boundary terms are not differentiated"
-    A sensitivity sweep runs the **volumetric** kernel only. Boundary
+!!! warning "Fused-route boundary terms are not differentiated"
+    A sensitivity sweep runs the **volumetric** kernel only where a boundary
+    term rides the cell sweep ([`setup_boundary_cache`](@ref)): those
     contributions are omitted from `∂F/∂θ`, `∂F/∂t` and the matrix-free state
-    products, so these results are correct exactly when the boundary terms are
-    independent of the seeded quantity — θ for the parameter kinds, `t` for the
-    time sensitivity, `u` for the state products. A θ-dependent traction or a
-    time-dependent flux therefore yields a silently incomplete sensitivity.
+    products, so the result is correct exactly when the fused boundary terms
+    are independent of the seeded quantity — θ for the parameter kinds, `t` for
+    the time sensitivity, `u` for the state products. A θ-dependent traction or
+    a time-dependent flux on that route therefore yields a silently incomplete
+    sensitivity.
+
+    A term declared through [`facet_items`](@ref) is its own traversal and
+    **does** enter the sensitivity sweeps — analytically only, since facet
+    kernels have no AD fallback (see
+    [Facet items](elements.md#Facet-items)).
 
     An operator declaring a sensitivity kind while carrying a non-empty
-    boundary cache warns once at `setup_operator`, and
+    fused-route boundary cache warns once at `setup_operator`, and
     [`check_derivatives`](@ref) detects the dependent case: its
     finite-difference referee evaluates the full residual *including* boundary
     terms, so a failing parameter, time, or state-product check on such an
@@ -322,10 +345,9 @@ differentiable/static split: only the entries exposed by
 [`parameter_vector`](@ref) are probed.
 
 The FD referee evaluates the operator's **full** residual, boundary terms
-included, while the sensitivity sweeps it is checking cover the volumetric
-kernel only. A parameter, time, or state-product check that fails on an
-operator with boundary terms is therefore the diagnostic for a boundary term
-that depends on the seeded quantity.
+included, which is what makes a failing parameter, time, or state-product check
+the diagnostic for the fused-route omission described under
+[Sensitivities](#Sensitivities).
 
 The time check runs only with a context and is recorded as a skip without one.
 Passing `weights = (u = …, du = …)` adds the two weighted-Jacobian checks: the
@@ -358,6 +380,5 @@ and their own integrators ([`MassProlongatorIntegrator`](@ref),
 CPU into a rectangular sparse matrix.
 
 !!! warning "Experimental surface"
-    Transfer operators are scheduled to be folded into the unified assembly
-    engine. The constructors and the operator types may change in a minor
-    release; the assembled matrix and its sparsity are not affected.
+    The transfer constructors and operator types may change in a minor release;
+    the assembled matrix and its sparsity are not affected.

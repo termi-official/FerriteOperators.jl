@@ -2,9 +2,8 @@
 ## Construction-time wrapping
 ####################################
 #
-# Split out of elements/ad_element.jl: this is setup_operator's own decision
-# (which element caches need ADElementCache/FusedFromSplit), not part of the
-# decorator types themselves.
+# Which element caches need ADElementCache/FusedFromSplit is setup_operator's
+# decision, not part of the decorator types themselves (elements/ad_element.jl).
 
 """
     needs_ad_decoration(integrator) -> Bool

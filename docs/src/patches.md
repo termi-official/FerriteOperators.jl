@@ -50,7 +50,7 @@ triplets for a rectangular assembly. A sink is three methods —
 downstream scatter mode is a new sink type, not a fork of the driver.
 
 Patch sweeps are pure evaluation: condensed element unknowns are gathered but
-never written back, unlike the global sweeps.
+never written back.
 
 ## Driving the patches yourself
 

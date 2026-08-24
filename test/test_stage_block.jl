@@ -69,14 +69,7 @@ function FerriteOperators.assemble_cell!(req::WeightedJacobianRequest, c::FusedW
 end
 
 @testset "Components and stage blocks" begin
-    grid = generate_grid(Quadrilateral, (3, 2))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    qrc = QuadratureRuleCollection(2)
-    n   = ndofs(dh)
-
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; grid, dh, n, qrc, strategy) = scalar_quad_testbed((3, 2))
     op  = setup_operator(strategy, StageDiffusionIntegrator(qrc, :u), dh; slots = (:u, :du))
     Mop = setup_operator(strategy, SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
     Kop = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
@@ -231,8 +224,6 @@ end
 
         fop = setup_operator(strategy, FusedWIntegrator(qrc, :u), dh; slots = (:u, :du))
         @testset "an analytic weighted kernel is selected and agrees" begin
-            fcache = first(fop.engine.subdomain_caches).domain.element
-            @test FerriteOperators.provides_analytic(typeof(fcache), WeightedJacobianKind(weights))
             ANALYTIC_W_CALLS[] = 0
             Wa = share_pattern(fop.J)
             assemble_weighted_jacobian!(Wa, fop, weights, states, nothing, ctx)

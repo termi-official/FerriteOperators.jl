@@ -123,10 +123,9 @@ _reduce_partials(a, b) = a + b
 Create a device scratch by duplicating `object` for `n_instances` parallel workers.
 For [`SequentialCPUDevice`](@ref), returns a 1-element tuple `(object,)`.
 For threaded CPU devices, returns a `Vector` of `n_instances` independent copies
-produced by [`duplicate_for_device`](@ref).
+produced by `duplicate_for_device`.
 For GPU devices this should return a struct of arrays variant of `object`.
 """
-
 function setup_device_instances(device::AbstractDevice, obj, n_instances)
     throw(ArgumentError(
         "Device cache setup is not yet implemented for $(typeof(device)). " *
@@ -190,7 +189,8 @@ PolyesterDevice(i::Int) = PolyesterDevice{Float64, Int}(i)
 """
     CudaDevice(threads, blocks)
 
-GPU device using CUDA.jl. Load CUDA.jl to activate this device.
+Placeholder for a future GPU device axis. Not implemented: no CUDA extension
+is declared, and every entry point throws `ArgumentError`.
 """
 struct CudaDevice{ValueType, IndexType} <: AbstractGPUDevice{ValueType, IndexType}
     threads::Union{IndexType, Nothing}

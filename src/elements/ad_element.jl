@@ -1,11 +1,85 @@
 ####################################
+## Element cache decorators — the shared forwarding layer
+####################################
+
+"""
+    AbstractElementCacheDecorator{Inner} <: AbstractVolumetricElementCache
+
+Supertype of the caches this package wraps around a user's element cache
+([`ADElementCache`](@ref), [`FusedFromSplit`](@ref)). A decorator holds the
+wrapped cache in a field named `inner`, and the MECHANICAL half of the element
+contract — everything whose decorated behaviour simply IS the inner's — is
+forwarded once here rather than per decorator. Traits describing what a
+decorator SERVES ([`provides_analytic`](@ref)) genuinely differ between
+decorators and stay with them.
+
+Probes against a decorated cache take one of two subjects, and which one is
+the whole convention:
+
+- a probe about an AUTHOR-WRITTEN method — the mandatory-kernel checks, the
+  trait ↔ kernel check, the `condensed_corrector`/`local_conditions!` hook
+  probes — runs on the [`unwrap`](@ref) fixpoint. The forwarding methods below
+  answer `hasmethod` for every inner, so probing the wrapper would pass a
+  cache that implements nothing.
+- a probe about SERVED CAPABILITY — [`provides_analytic`](@ref),
+  [`assert_sensitivity_admissible`](@ref) — runs on the DECORATED type. That is
+  the cache the engine calls, and a decorator serves kinds its inner does not.
+"""
+abstract type AbstractElementCacheDecorator{Inner} <: AbstractVolumetricElementCache end
+
+"""
+    unwrap(cache) -> cache
+    unwrap(T::Type) -> Type
+
+The cache an author wrote: `cache` itself, or the innermost cache a chain of
+[`AbstractElementCacheDecorator`](@ref)s wraps. Defined on values and on types,
+since the probes needing it come in both shapes.
+"""
+unwrap(cache) = cache
+unwrap(d::AbstractElementCacheDecorator) = unwrap(d.inner)
+unwrap(::Type{<:AbstractElementCacheDecorator{Inner}}) where {Inner} = unwrap(Inner)
+
+query_cell_parameters(d::AbstractElementCacheDecorator, cell, p) = query_cell_parameters(d.inner, cell, p)
+query_facet_parameters(d::AbstractElementCacheDecorator, cell, local_facet_index, p) =
+    query_facet_parameters(d.inner, cell, local_facet_index, p)
+Ferrite.getnquadpoints(d::AbstractElementCacheDecorator) = getnquadpoints(d.inner)
+reinit_values!(d::AbstractElementCacheDecorator, cell) = reinit_values!(d.inner, cell)
+reinit_values!(d::AbstractElementCacheDecorator, cell, kind) = reinit_values!(d.inner, cell, kind)
+allocate_element_matrix(d::AbstractElementCacheDecorator, sdh) = allocate_element_matrix(d.inner, sdh)
+allocate_element_unknown_vector(d::AbstractElementCacheDecorator, sdh) = allocate_element_unknown_vector(d.inner, sdh)
+allocate_element_residual_vector(d::AbstractElementCacheDecorator, sdh) = allocate_element_residual_vector(d.inner, sdh)
+evaluate_cell_functional(kind, d::AbstractElementCacheDecorator, args) = evaluate_cell_functional(kind, d.inner, args)
+evaluate_algebraic_functional(kind, d::AbstractElementCacheDecorator, args) =
+    evaluate_algebraic_functional(kind, d.inner, args)
+query_element_quadrature_data(d::AbstractElementCacheDecorator, cell, ivh, q::QVector) =
+    query_element_quadrature_data(d.inner, cell, ivh, q)
+store_quadrature_data!(q::QVector, qe, cell, ivh, d::AbstractElementCacheDecorator) =
+    store_quadrature_data!(q, qe, cell, ivh, d.inner)
+has_internal_state(::Type{<:AbstractElementCacheDecorator{Inner}}) where {Inner} = has_internal_state(Inner)
+internal_state_insensitive(::Type{<:AbstractElementCacheDecorator{Inner}}, kind) where {Inner} =
+    internal_state_insensitive(Inner, kind)
+get_number_of_internal_dofs_per_element(model, d::AbstractElementCacheDecorator, sdh) =
+    get_number_of_internal_dofs_per_element(model, d.inner, sdh)
+get_number_of_internal_dofs_per_algebraic_item(model, d::AbstractElementCacheDecorator, items) =
+    get_number_of_internal_dofs_per_algebraic_item(model, d.inner, items)
+condense_cell!(d::AbstractElementCacheDecorator, args, weights) = condense_cell!(d.inner, args, weights)
+condense_algebraic!(d::AbstractElementCacheDecorator, args, weights) = condense_algebraic!(d.inner, args, weights)
+condensed_corrector(d::AbstractElementCacheDecorator, args) = condensed_corrector(d.inner, args)
+local_conditions!(L, d::AbstractElementCacheDecorator, args) = local_conditions!(L, d.inner, args)
+invalidate_correctors!(d::AbstractElementCacheDecorator) = invalidate_correctors!(d.inner)
+# Patch assembly (experimental) is a separate protocol with no AD fallback of
+# its own — pass through to whatever the inner implements.
+assemble_patch_cell!(req, d::AbstractElementCacheDecorator, args, data) =
+    assemble_patch_cell!(req, d.inner, args, data)
+
+####################################
 ## AD decorator (ForwardDiff over the residual kernel)
 ####################################
 #
 # Limitations:
-# - AD sweeps cover the volumetric kernel only; boundary contributions flow
-#   through the analytic facet path, so sensitivities of parameter- or
-#   time-dependent boundary terms are NOT captured.
+# - AD sweeps cover the volumetric kernel only. A boundary term riding the cell
+#   sweep is therefore NOT captured by a sensitivity sweep; a `facet_items`
+#   term is, through its own traversal's analytic facet kernel.
 # - State sweeps (∂F/∂u Jacobian, JVP, VJP, ∂F/∂t) run over per-worker
 #   preallocated ForwardDiff configs, owned by this decorator. The parameter
 #   sweeps build their configs per call: their seed dimension nθ is call-time
@@ -186,7 +260,7 @@ count alone, for an item family that has no `SubDofHandler` to allocate against.
 `setup_operator` wraps automatically (`ad_backend = nothing` opts out);
 hand-constructing an instance wraps a specific cache or tests the decorator.
 """
-struct ADElementCache{Inner, Backend, Buffers} <: AbstractVolumetricElementCache
+struct ADElementCache{Inner, Backend, Buffers} <: AbstractElementCacheDecorator{Inner}
     inner::Inner
     backend::Backend
     buffers::Buffers
@@ -207,7 +281,7 @@ function _reject_condensed_global_dofs(inner, n_global_dofs::Int)
     (n_global_dofs == 0 || !has_internal_state(typeof(inner))) && return nothing
     provides_analytic(typeof(inner), JacobianKind{:u, Consistent}()) && return nothing
     throw(ArgumentError(
-        "$(nameof(_display_cache_type(typeof(inner)))) carries condensed internal state and sits " *
+        "$(nameof(unwrap(typeof(inner)))) carries condensed internal state and sits " *
         "on a subdomain declaring $(n_global_dofs) `global_dofs`. Its `Consistent` Jacobian " *
         "would go through the generic combination `∂F/∂ū|_q + ∂F/∂q · dq/dū`, whose corrector " *
         "block spans the FIELD space while the AD partials span the augmented system — the " *
@@ -218,25 +292,6 @@ end
 
 duplicate_for_device(device, ad::ADElementCache) =
     ADElementCache(duplicate_for_device(device, ad.inner), ad.backend, duplicate_for_device(device, ad.buffers))
-
-query_cell_parameters(ad::ADElementCache, cell, p) = query_cell_parameters(ad.inner, cell, p)
-query_facet_parameters(ad::ADElementCache, cell, local_facet_index, p) =
-    query_facet_parameters(ad.inner, cell, local_facet_index, p)
-Ferrite.getnquadpoints(ad::ADElementCache) = getnquadpoints(ad.inner)
-reinit_values!(ad::ADElementCache, cell) = reinit_values!(ad.inner, cell)
-reinit_values!(ad::ADElementCache, cell, kind) = reinit_values!(ad.inner, cell, kind)
-evaluate_cell_functional(kind, ad::ADElementCache, args) = evaluate_cell_functional(kind, ad.inner, args)
-
-has_internal_state(::Type{<:ADElementCache{Inner}}) where {Inner} = has_internal_state(Inner)
-internal_state_insensitive(::Type{<:ADElementCache{Inner}}, kind) where {Inner} = internal_state_insensitive(Inner, kind)
-get_number_of_internal_dofs_per_element(model, ad::ADElementCache, sdh) =
-    get_number_of_internal_dofs_per_element(model, ad.inner, sdh)
-condense_cell!(ad::ADElementCache, args, weights) = condense_cell!(ad.inner, args, weights)
-condense_algebraic!(ad::ADElementCache, args, weights) = condense_algebraic!(ad.inner, args, weights)
-invalidate_correctors!(ad::ADElementCache) = invalidate_correctors!(ad.inner)
-# Patch assembly (experimental) is a separate protocol with no AD fallback of
-# its own — pass through to whatever `inner` implements.
-assemble_patch_cell!(req, ad::ADElementCache, args, data) = assemble_patch_cell!(req, ad.inner, args, data)
 
 """
     condensed_corrector(cache, args) -> AbstractMatrix
@@ -256,7 +311,7 @@ combination `∂F/∂ū|_q + ∂F/∂q · dq/dū` is the same either way.
 function condensed_corrector end
 
 # Capability: plain AD-from-residual is exact for every kind whose fallback
-# does not differentiate through a condensed inner's (now pure) local state —
+# does not differentiate through a condensed inner's local state —
 # same rule `requires_admissibility_check` names. The ONE kind this decorator
 # ALSO covers generically for a condensed inner is the state Consistent
 # Jacobian, given the inner's stored corrector block.
@@ -280,14 +335,18 @@ _ad_covers(Inner, ::JacobianKind{:u, Consistent}) =
 _ad_covers(Inner, ::JacobianResidualKind{Consistent}) =
     !has_internal_state(Inner) || internal_state_insensitive(Inner, JacobianResidualKind{Consistent}()) || _has_condensed_corrector(Inner)
 
+# Author-written-method probes, so the subject is the `unwrap` fixpoint —
+# `Inner` is itself a decorator whenever a split-analytic cache was fused
+# first, and the shared forwarding layer answers for any inner.
+#
 # Probed against `CellArgs` specifically: the generic combination needs the
 # `:q` Jacobian config, which only the cell-sized buffer constructor builds
 # (`supports_q_bootstrap`), so an algebraic cache's method — written against
 # `AlgebraicArgs` — must not be read as coverage. Same reasoning for the
 # local-conditions hook, whose `L` argument is Dual-valued under the sweeps
 # that differentiate it and so can be typed no tighter than `AbstractVector`.
-_has_condensed_corrector(Inner) = hasmethod(condensed_corrector, Tuple{Inner, CellArgs})
-_has_local_conditions(Inner) = hasmethod(local_conditions!, Tuple{AbstractVector, Inner, CellArgs})
+_has_condensed_corrector(Inner) = hasmethod(condensed_corrector, Tuple{unwrap(Inner), CellArgs})
+_has_local_conditions(Inner) = hasmethod(local_conditions!, Tuple{AbstractVector, unwrap(Inner), CellArgs})
 
 # `true` for every kind `inner` serves analytically (forwarded), plus every
 # kind this decorator's own AD path covers — every kind except the
@@ -303,24 +362,6 @@ provides_analytic(::Type{<:ADElementCache{Inner}}, kind) where {Inner} =
 # nothing needs this decorator to also claim coverage here.
 provides_analytic(::Type{<:ADElementCache{Inner}}, kind::WeightedJacobianKind) where {Inner} =
     provides_analytic(Inner, kind)
-
-# The decorator ALWAYS has a matching `assemble_cell!` method (generic over
-# every slot/request), so `hasmethod` on the wrapped type can never catch an
-# author's `provides_analytic` claim without a kernel — the check that
-# validates a claim must therefore run against `Inner`, the only type whose
-# method set is author-written. Framework-provided decorator methods need no
-# such check: they are what this package verifies by construction.
-_assert_trait_backed(::Type{<:ADElementCache{Inner}}, kind, entry, ::Type{Args}, trailing::Tuple = ()) where {Inner, Args} =
-    _assert_trait_backed(Inner, kind, entry, Args, trailing)
-_display_cache_type(::Type{<:ADElementCache{Inner}}) where {Inner} = _display_cache_type(Inner)
-
-# Validation unwraps for the same reason: the decorator's forwarding methods
-# (`assemble_cell!` over every request, `reinit_values!`) answer `hasmethod`
-# for ANY inner, so probing the wrapper would pass a cache that implements
-# nothing. Recursing on `inner` also reaches the leaves of a wrapped
-# sub-composite through the composite method.
-validate_element_cache(ad::ADElementCache, declared_requests::Tuple = ()) =
-    validate_element_cache(ad.inner, declared_requests)
 
 ####################################
 ## The seeding entries
@@ -364,7 +405,7 @@ end
 # failing inside ForwardDiff. The branch is on a field TYPE and folds away.
 _require_slot_config(cfg, ::Val, ad) = cfg
 _require_slot_config(::Nothing, ::Val{slot}, ad::ADElementCache{Inner}) where {slot, Inner} = throw(ArgumentError(
-    "$(nameof(_display_cache_type(Inner))) has no ForwardDiff configuration for the `:$slot` " *
+    "$(nameof(unwrap(Inner))) has no ForwardDiff configuration for the `:$slot` " *
     "slot. `:q` configurations are sized from `getnquadpoints`, a CELL-cache contract, so an " *
     "item family described by a dof count alone (an algebraic item) has none: serve " *
     "`JacobianKind{:$slot}` with the analytic `assemble_algebraic!` kernel instead."))
@@ -659,26 +700,11 @@ residual analytically but not the fused `JacobianResidualKind`: issues the two
 split analytic kernels back to back instead of falling back to AD. Chosen
 once, at construction (`decorate_element_cache`).
 """
-struct FusedFromSplit{Inner} <: AbstractVolumetricElementCache
+struct FusedFromSplit{Inner} <: AbstractElementCacheDecorator{Inner}
     inner::Inner
 end
 
 duplicate_for_device(device, f::FusedFromSplit) = FusedFromSplit(duplicate_for_device(device, f.inner))
-query_cell_parameters(f::FusedFromSplit, cell, p) = query_cell_parameters(f.inner, cell, p)
-query_facet_parameters(f::FusedFromSplit, cell, local_facet_index, p) =
-    query_facet_parameters(f.inner, cell, local_facet_index, p)
-Ferrite.getnquadpoints(f::FusedFromSplit) = getnquadpoints(f.inner)
-reinit_values!(f::FusedFromSplit, cell) = reinit_values!(f.inner, cell)
-reinit_values!(f::FusedFromSplit, cell, kind) = reinit_values!(f.inner, cell, kind)
-evaluate_cell_functional(kind, f::FusedFromSplit, args) = evaluate_cell_functional(kind, f.inner, args)
-has_internal_state(::Type{<:FusedFromSplit{Inner}}) where {Inner} = has_internal_state(Inner)
-internal_state_insensitive(::Type{<:FusedFromSplit{Inner}}, kind) where {Inner} = internal_state_insensitive(Inner, kind)
-get_number_of_internal_dofs_per_element(model, f::FusedFromSplit, sdh) =
-    get_number_of_internal_dofs_per_element(model, f.inner, sdh)
-condense_cell!(f::FusedFromSplit, args, weights) = condense_cell!(f.inner, args, weights)
-condense_algebraic!(f::FusedFromSplit, args, weights) = condense_algebraic!(f.inner, args, weights)
-invalidate_correctors!(f::FusedFromSplit) = invalidate_correctors!(f.inner)
-assemble_patch_cell!(req, f::FusedFromSplit, args, data) = assemble_patch_cell!(req, f.inner, args, data)
 
 assemble_cell!(req::AbstractAssemblyRequest, f::FusedFromSplit, args) = assemble_cell!(req, f.inner, args)
 assemble_algebraic!(req::AbstractAssemblyRequest, f::FusedFromSplit, args) = assemble_algebraic!(req, f.inner, args)
@@ -697,14 +723,6 @@ function _split_into_fused!(req::JacobianResidualRequest{C}, inner, args) where 
 end
 provides_analytic(::Type{<:FusedFromSplit{Inner}}, kind) where {Inner} = provides_analytic(Inner, kind)
 provides_analytic(::Type{<:FusedFromSplit{Inner}}, ::JacobianResidualKind{C}) where {Inner, C <: CorrectionMode} = true
-# Same reasoning as `ADElementCache`: the blanket catch-all method means
-# `hasmethod` on the wrapper can never distinguish a backed claim from an
-# author's overclaim, so the check runs against `Inner`.
-_assert_trait_backed(::Type{<:FusedFromSplit{Inner}}, kind, entry, ::Type{Args}, trailing::Tuple = ()) where {Inner, Args} =
-    _assert_trait_backed(Inner, kind, entry, Args, trailing)
-_display_cache_type(::Type{<:FusedFromSplit{Inner}}) where {Inner} = _display_cache_type(Inner)
-validate_element_cache(f::FusedFromSplit, declared_requests::Tuple = ()) =
-    validate_element_cache(f.inner, declared_requests)
 
 # Construction-time wrapping (`decorate_element_cache`, `needs_ad_decoration`,
 # `fully_analytic`) lives in operators/ad_decoration.jl — it is setup_operator's

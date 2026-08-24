@@ -7,6 +7,7 @@ CurrentModule = FerriteOperators
 ```@autodocs
 Modules = [FerriteOperators]
 Pages = [
+    "FerriteOperators.jl",
     "core/requests.jl",
     "core/element_interface.jl",
     "core/utils.jl",

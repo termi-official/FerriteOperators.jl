@@ -43,17 +43,59 @@ include("core/qvector.jl")           # Flat per-cell quadrature data storage
 
 # These are
 #   1. addons to make life with Ferrite easier
-#   2. potentially missing dispatches which will be temporarily pirated before upstreamed into Ferrite.jl
+#   2. dispatches missing from Ferrite.jl, pirated here
 include("core/ferrite-addons/collections.jl")
 include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
 include("core/ferrite-addons/internal_variable_handler.jl")
 
-# Some generic integrator types
+"""
+    AbstractBilinearIntegrator
+
+Supertype of integrators describing a **bilinear form** `a(u, v)`: the element
+kernel fills an element matrix that does not depend on the state. The operator
+that form induces is a linear one, so its assembled matrix IS that operator's
+Jacobian — linearizing is assembling — and its residual is the action
+`F(u) = A·u`.
+
+The family is a structural declaration and not a performance hint: an operator
+built for a bilinear integrator issues no sensitivity kind, so it carries
+neither the [`ADElementCache`](@ref) decoration nor the per-worker
+[`SensitivityBuffers`](@ref), whatever its element caches implement
+analytically ([`needs_ad_decoration`](@ref)).
+"""
 abstract type AbstractBilinearIntegrator end
+
+"""
+    AbstractNonlinearIntegrator
+
+Supertype of integrators describing a state-dependent residual form — the
+general case, and the only family whose operators carry differentiation
+machinery. The residual kernel is mandatory; every other request is served
+analytically where [`provides_analytic`](@ref) declares it and by
+differentiating the residual kernel otherwise, which is what the
+[`ADElementCache`](@ref) decoration and the per-worker
+[`SensitivityBuffers`](@ref) exist for.
+
+A bilinear sub-integrator composes into this family (the operator its form
+induces scatters into the same matrix and residual); a linear one does not,
+its sink being a vector alone.
+"""
 abstract type AbstractNonlinearIntegrator end
+
 abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
+
+"""
+    AbstractLinearIntegrator
+
+Supertype of integrators describing a **linear form** `l(v)`: the element
+kernel fills the load vector of that form, and the operator holds that vector
+and no matrix. The form has no state to depend on, so this family too carries
+no AD or sensitivity machinery, and a [`BlockedOperatorSpecification`](@ref) on
+such an operator is rejected at `setup_operator` — there is no matrix to lay
+out.
+"""
 abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
@@ -96,7 +138,7 @@ export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, 
 
 export setup_operator, update_operator!, update_linearization!, evaluate!
 export AbstractSchemeProtocol, DefaultProtocol
-export get_declared_slots, get_declared_kinds, mandatory_kinds
+export get_declared_slots, get_declared_kinds
 export assemble_slot_jacobian!, assemble_weighted_jacobian!
 export allocate_components, share_pattern, combine!
 export StageBlockOperator, assemble_stages!
@@ -105,7 +147,7 @@ export ADSensitivity, FiniteDifferenceSensitivity, has_internal_state, internal_
 export state_jvp!, state_vjp!, StateJVPRequest, StateVJPRequest
 export check_derivatives
 export parameter_vector, rebuild_parameters
-export TimeIntegrationContext, evaluation_time, stage_scaling, CellArgs, FacetArgs, assemble_cell!
+export TimeIntegrationContext, evaluation_time, with_time, stage_scaling, CellArgs, FacetArgs, assemble_cell!
 export AffineRate, InternalSource
 export CorrectionMode, Consistent, FrozenQ
 export CondensationReport, condense_internal!, condense_cell!, condense_algebraic!, CondensationKind
@@ -132,14 +174,14 @@ export ItemStates, item_state, set_item_state!, has_item_state, invalidate_item_
 export provides_analytic
 export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
 export reinit_values!
-export ADElementCache, ForwardDiffAD, FusedFromSplit, condensed_corrector
+export ADElementCache, AbstractElementCacheDecorator, ForwardDiffAD, FusedFromSplit, condensed_corrector
 export decorate_element_cache, needs_ad_decoration, fully_analytic
 
 export residual_size, unknown_size
 
 export NullOperator, DiagonalOperator
 
-export SequentialCPUDevice, PolyesterDevice, CudaDevice
+export SequentialCPUDevice, PolyesterDevice
 export SequentialAssemblyStrategy, ElementAssemblyStrategy, PerColorAssemblyStrategy
 export AssemblyStrategy, AbstractAssemblyForm, FullAssembly, ElementAssembly
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling

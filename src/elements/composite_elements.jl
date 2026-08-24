@@ -77,8 +77,9 @@ function _all_stateful_insensitive(::Type{T}, kind) where {T <: Tuple}
 end
 
 # The composite's blanket fan-out method would satisfy any hasmethod check,
-# so validation must recurse into the inner caches.
-function validate_element_cache(composite::CompositeVolumetricElementCache, declared_requests::Tuple = ())
+# so validation must recurse into the inner caches — each inner is its own
+# validation subject, kernels and admissibility alike.
+function _validate_element_kernels(composite::CompositeVolumetricElementCache, declared_requests::Tuple)
     stateful = filter(inner -> has_internal_state(typeof(inner)), composite.inner_caches)
     isempty(stateful) || throw(ArgumentError(
         "Composing condensed elements is not supported yet, but $(_cache_names(stateful)) " *
@@ -101,7 +102,7 @@ function assert_sensitivity_admissible(::Type{CompositeVolumetricElementCache{CT
     throw(ArgumentError(
         "A composite carrying condensed internal state is inadmissible for $(typeof(kind)) " *
         "unless every inner serves that kind analytically, but $(missing_kind) do(es) not. " *
-        "AD-from-residual on the (now pure) residual kernel would compute only the frozen-q " *
+        "AD-from-residual on the pure residual kernel would compute only the frozen-q " *
         "partial, silently missing the ∂F/∂q·dq/d· correction this kind's total needs. " *
         "Implement the analytic kernel on the listed inner(s), declare " *
         "`internal_state_insensitive` where the local equations do not depend on the seeded " *
@@ -205,8 +206,7 @@ is_facet_in_cache(idx::FacetIndex, cell, composite::CompositeSurfaceElementCache
     return false
 end
 
-# Interface composition is not implemented; DG support will follow the same
-# request fan-out pattern as cells and facets.
+# Interface composition (facet pairs) is not implemented.
 
 ####################################
 ## Composition of element caches
@@ -262,10 +262,11 @@ operator terms, not inners.
 Nested composite integrators are flattened at construction. Composition is
 rejected loudly at construction for an empty tuple, for any sub-integrator
 carrying condensed internal state, and for cross-sink mixes. A **bilinear**
-sub-integrator inside a nonlinear composite is legitimate — a bilinear form
-induces a linear operator whose residual is the element matrix acting on the
-element vector — but a linear (load) form has a different sink and never
-composes into a nonlinear or bilinear operator.
+sub-integrator inside a nonlinear composite is legitimate — the operator its
+form induces scatters into the same matrix and residual, its residual being
+the element matrix acting on the element vector — whereas an
+[`AbstractLinearIntegrator`](@ref) describes a load form, whose sink is a
+vector alone, and never composes into a nonlinear or bilinear operator.
 
 Routing and composition compose in one order: a `*MultiDomainIntegrator` whose
 values are composite integrators. A composite of routers is not supported.

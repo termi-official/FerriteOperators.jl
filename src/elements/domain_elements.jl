@@ -40,9 +40,9 @@ nothing, or a mistyped name silently contributing nothing, is precisely what
 setup-time validation exists to catch.
 
 Sub-integrators must share the operator's sink: a nonlinear router accepts
-nonlinear *and* bilinear sub-integrators (a bilinear form induces a linear
-operator whose residual is the element matrix acting on the element vector),
-while the bilinear and linear routers accept only their own kind.
+nonlinear *and* bilinear sub-integrators — the operator a bilinear form induces
+has the same sink, its residual being the element matrix acting on the element
+vector — while the bilinear and linear routers accept only their own kind.
 """
 struct NonlinearMultiDomainIntegrator{DictType <: Dict{String, <:Union{AbstractNonlinearIntegrator, AbstractBilinearIntegrator}}} <: AbstractNonlinearIntegrator
     subintegrators::DictType

@@ -10,14 +10,69 @@ defaults it to `Consistent` — see [`JacobianKind`](@ref).
 """
 struct JacobianResidualKind{C <: CorrectionMode} end
 JacobianResidualKind() = JacobianResidualKind{Consistent}()
-struct ResidualKind end             # state-dependent r(u)
+"""
+    ResidualKind()
+
+Assembly of the state-dependent residual `r(u)` into the operator's vector.
+The kernel it reaches is [`ResidualRequest`](@ref) — the one kernel every
+element must implement, and the one every AD fallback differentiates.
+"""
+struct ResidualKind end
+
 struct BilinearKind end             # u-independent matrix
 struct LinearKind end               # u-independent vector
-struct ParameterJacobianKind end                # ∂F/∂θ, materialized
-struct ParameterVJPKind{L}; λ::L; end          # (∂F/∂θ)ᵀλ, adjoint pullback
-struct TimeSensitivityKind end                 # ∂F/∂t, seeded through the sweep's ctx
-struct StateJVPKind{V}; v::V; end              # (∂F/∂u)·v, matrix-free J action
-struct StateVJPKind{L}; λ::L; end              # (∂F/∂u)ᵀλ, matrix-free Jᵀ action
+
+"""
+    ParameterJacobianKind()
+
+Assembly of `∂F/∂θ` into a dense `residual_size × nθ` target, θ being the flat
+view [`parameter_vector`](@ref) defines. Issued by
+[`update_parameter_jacobian!`](@ref); served by an analytic
+[`ParameterJacobianRequest`](@ref) kernel or by ForwardDiff over the residual
+kernel. The seed dimension arrives with `p`, so the sweep builds its
+differentiation configuration per call.
+"""
+struct ParameterJacobianKind end
+
+"""
+    ParameterVJPKind(λ)
+
+The matrix-free pullback `(∂F/∂θ)ᵀλ` — the adjoint gradient, without ever
+materializing `∂F/∂θ`. `λ` is the global adjoint vector, gathered per item.
+Issued by [`parameter_vjp!`](@ref); the kernel is
+[`ParameterVJPRequest`](@ref).
+"""
+struct ParameterVJPKind{L}; λ::L; end
+
+"""
+    TimeSensitivityKind()
+
+Assembly of `∂F/∂t` at [`evaluation_time`](@ref)`(ctx)`. Time reaches elements
+through the context alone, so this kind seeds through that channel: the AD
+sweep hands the kernel a Dual-timed context, and
+[`FiniteDifferenceSensitivity`](@ref) evaluates the primal residual at
+perturbed context times instead. A kernel reading its time from `args.p` gets
+a silently zero result. Issued by [`time_sensitivity!`](@ref).
+"""
+struct TimeSensitivityKind end
+
+"""
+    StateJVPKind(v)
+
+The matrix-free action `(∂F/∂u)·v` — one directional-Dual sweep per item under
+the AD fallback, no matrix anywhere. Issued by [`state_jvp!`](@ref); the
+kernel is [`StateJVPRequest`](@ref).
+"""
+struct StateJVPKind{V}; v::V; end
+
+"""
+    StateVJPKind(λ)
+
+The matrix-free pullback `(∂F/∂u)ᵀλ` — the action adjoint time stepping
+applies, computed per item as the gradient of `λₑ·rₑ` under the AD fallback.
+Issued by [`state_vjp!`](@ref); the kernel is [`StateVJPRequest`](@ref).
+"""
+struct StateVJPKind{L}; λ::L; end
 
 """
     JacobianKind{slot, C <: CorrectionMode}
@@ -388,8 +443,8 @@ reason, there being no cell to name it by.
 # global dofs, fixed per subdomain), `AffineRate` reconstructs over that same
 # gather, and `InternalSource` restricts to the cell's condensed internal-dof
 # range, resizing the buffer to fit (a per-cell size, not `ndofs_per_cell`). A
-# reconstructed slot's source is therefore structurally the field space: it
-# cannot touch `q` any more.
+# reconstructed slot's source is therefore structurally the field space and
+# cannot reach `q`.
 function load_slots!(ws, states::NamedTuple{names}) where {names}
     return map(NamedTuple{names}(ws.slot_buffers), states) do buf, src
         load_slot!(buf, src, ws)
@@ -437,8 +492,8 @@ only writer of `q`, so a primal sweep is a pure evaluation at whatever `q` is
 currently stored.
 """
 function primal_cell_sweep!(kind, task, ws)
-    assembles_matrix(kind) && fill!(ws.Ke, 0.0)
-    assembles_vector(kind) && fill!(ws.re, 0.0)
+    assembles_matrix(kind) && fill!(ws.Ke, zero(eltype(ws.Ke)))
+    assembles_vector(kind) && fill!(ws.re, zero(eltype(ws.re)))
     reinit_values!(ws.element, ws.cell, kind)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     if depends_on_unknowns(kind)
@@ -597,8 +652,8 @@ end
 # A weighted sweep differentiates SEVERAL slots at once, so every participating
 # slot must be present. Under the AD route the same `AffineRate` rejection as
 # for `JacobianKind` applies; an analytic weighted kernel is exempt because it
-# forms the combination itself (the MLN/Newmark design intent). The exemption
-# is engine-wide: one cache falling back to AD makes the whole sweep AD-seeded.
+# forms the combination itself. The exemption is engine-wide: one cache falling
+# back to AD makes the whole sweep AD-seeded.
 function _check_differentiated_slot(kind::WeightedJacobianKind{slots}, engine, states::NamedTuple{names}) where {slots, names}
     all(w -> w isa Real, values(kind.weights)) || throw(ArgumentError(
         "A weighted Jacobian sweep accumulates into the operator's real element matrix and " *
@@ -674,11 +729,12 @@ function _check_reduction_domain(kind, engine)
         "$(nameof(typeof(kind))) reduces over an empty item set: the operator's " *
         "$(length(caches)) subdomain partition(s) carry no items between them, so there is " *
         "nothing to integrate over."))
-    all(sc -> !_may_contribute(sc.domain), caches) && throw(ArgumentError(
-        "No subdomain can contribute to $(nameof(typeof(kind))): every subdomain's element " *
-        "cache is an `EmptyVolumetricElementCache`, which returns no contribution by " *
-        "construction. Set the operator up with an integrator whose caches implement " *
-        "`evaluate_cell_functional`."))
+    all(sc -> !_may_contribute(sc.domain, kind), caches) && throw(ArgumentError(
+        "No subdomain can contribute to $(nameof(typeof(kind))): every subdomain either " *
+        "carries an `EmptyVolumetricElementCache`, which returns no contribution by " *
+        "construction, or belongs to an item family whose traversal has no body for this kind " *
+        "(a facet item contributes to no functional). Set the operator up with an integrator " *
+        "whose caches implement `evaluate_cell_functional`."))
     return nothing
 end
 
@@ -698,7 +754,12 @@ of the per-cell contributions returned by
 Contributions fold per worker in item order and the per-worker partials reduce
 in a fixed order — results are deterministic for a fixed worker count. Nothing
 is written into the operator, so an operator declaring no functional kind
-serves one just as well. Volumetric contributions only.
+serves one just as well.
+
+Cell items contribute through [`evaluate_cell_functional`](@ref) and algebraic
+items through [`evaluate_algebraic_functional`](@ref); the facet item family
+contributes nothing, a surface functional being a hook this package does not
+have.
 
 Two failure modes are kept apart. STRUCTURAL emptiness — no items in the
 operator's partitions, or no subdomain whose element cache can contribute — is

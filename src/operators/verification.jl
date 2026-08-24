@@ -48,10 +48,11 @@ are complex (the FD referee is real), or when a participating slot carries an
 [`AffineRate`](@ref) source (nothing to difference against).
 
 The FD referee evaluates the operator's FULL residual, boundary terms
-included, while the sensitivity sweeps it checks run the volumetric kernel
-only. On an operator with boundary terms, a failing parameter, time, or
-state-product check is therefore the diagnostic for a boundary term that
-depends on the seeded quantity — see the sensitivity limitation.
+included, while the sensitivity sweeps it checks skip a boundary term that
+rides the cell sweep (a [`facet_items`](@ref) term is its own traversal and
+does enter them). On an operator carrying a fused-route boundary cache, a
+failing parameter, time, or state-product check is therefore the diagnostic
+for a boundary term that depends on the seeded quantity.
 
 `checks` holds one `(passed, err, skipped)` entry per check; inadmissible or
 unsupported checks are skipped with the reason recorded, and `passed` is the
@@ -59,12 +60,19 @@ conjunction of all non-skipped checks. The caller's vectors are never
 mutated. Condensed operators (`unknown_size(op) > residual_size(op)`) are
 probed along the field dofs only; the FD evaluations exercise the full local
 solves, so the check validates the consistent condensed tangent.
+
+Supports [`LinearizedFerriteOperator`](@ref) only — the family with a
+Jacobian, a residual, and the sensitivity entry points this checks against.
 """
 function check_derivatives(op, states::NamedTuple, p, ctx = nothing;
         h::Float64 = cbrt(eps(Float64)),
         rtol::Float64 = 1e-5, atol::Float64 = 1e-8, nprobes::Int = 3,
         weights::Union{Nothing, NamedTuple} = nothing,
         correction::Type{<:CorrectionMode} = Consistent)
+    op isa LinearizedFerriteOperator || throw(ArgumentError(
+        "check_derivatives supports LinearizedFerriteOperator only (got $(typeof(op))): " *
+        "a bilinear or linear operator has no Jacobian/residual pair to cross-check against " *
+        "finite differences."))
     nres  = residual_size(op)
     ubase = copy(states.u)
     uw    = copy(states.u)

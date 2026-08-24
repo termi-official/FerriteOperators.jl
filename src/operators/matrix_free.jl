@@ -27,7 +27,8 @@ Base.fill!(v::GenericIndexedData, val) = fill!(v.data, val)
 end
 EAVector(dh::DofHandler) = EAVector(Float64, Int, dh)
 function EAVector(::Type{ValueType}, ::Type{IndexType}, dh::DofHandler) where {ValueType, IndexType}
-    @assert length(dh.field_names) == 1
+    length(dh.field_names) == 1 || throw(ArgumentError(
+        "ElementAssembly supports single-field DofHandlers only, got $(length(dh.field_names)) fields."))
     map  = create_dof_to_element_map(dh)
     grid = get_grid(dh)
 
@@ -147,44 +148,6 @@ function read_data(indexed_data::GenericIndexedData{<:GenericEAVectorIndex}, dat
     vₑ = @view data[indices]
     return vₑ
 end
-
-function store_data!(A::AbstractMatrix, Aₑ::AbstractMatrix, indexed_data::GenericIndexedData{<:GenericEAMatrixIndex}, i::Integer, device_cache::EAViewCache)
-    return nothing
-end
-
-function store_data!(out::AbstractVector, outₑ::AbstractVector, indexed_data::GenericIndexedData{<:GenericEAVectorIndex}, i::Integer, device_cache::EAViewCache)
-    return nothing
-end
-
-
-@concrete struct PerInstanceEACache
-    inₑs
-    outₑs
-end
-
-function read_data(indexed_data::GenericIndexedData{<:GenericEAMatrixIndex}, i::Integer, device_cache::PerInstanceEACache)
-    error("Not implemented")
-end
-
-function read_data(indexed_data::GenericIndexedData{<:GenericEAVectorIndex}, i::Integer, device_cache::PerInstanceEACache)
-    error("Not implemented")
-end
-
-
-
-@concrete struct EARecomputeCache
-    # TODO more info about assembly
-end
-
-function read_data(indexed_data::GenericIndexedData{<:GenericEAMatrixIndex}, i::Integer, device_cache::EARecomputeCache)
-    error("Not implemented")
-end
-
-function read_data(indexed_data::GenericIndexedData{<:GenericEAVectorIndex}, i::Integer, device_cache::EARecomputeCache)
-    error("Not implemented")
-end
-
-
 
 @concrete struct EAOperatorAssembler{T, DeviceType <: AbstractDevice{T}} <: Ferrite.AbstractAssembler{T}
     device::DeviceType

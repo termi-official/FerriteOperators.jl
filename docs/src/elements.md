@@ -40,18 +40,15 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, a
 end
 ```
 
-This alone buys the assembled Jacobian, the fused Newton path, and all
-sensitivities: `setup_operator` wraps a cache lacking analytic coverage of a
-kind in [`ADElementCache`](@ref) automatically, and the engine calls
-`assemble_cell!` on the resolved cache unconditionally — it never forks
-between an analytic kernel and the AD fallback itself.
+`setup_operator` wraps a cache lacking analytic coverage of a kind in
+[`ADElementCache`](@ref) automatically, and the engine calls `assemble_cell!`
+on the resolved cache unconditionally — it never forks between an analytic
+kernel and the AD fallback itself.
 
 The residual kernel must be eltype-generic in `eltype(args.states.*)`,
 `eltype(args.p)`, and the context time — that is the entire AD contract.
 Kernels never write global state; the geometry cache in `args.cell` is
-read-only. Kernels select on the `(request, cache)` pair alone, never on
-`args`, so annotating the parameter (`args::CellArgs`) is permitted; leaving
-it unannotated works exactly the same.
+read-only.
 
 An element is a scheme-agnostic integrand: it reads slot *values* and never
 encodes a time discretization. [The layer contract](devdocs/design.md) states
@@ -203,89 +200,6 @@ weighted sweep therefore implements `assemble_facet!` for
 [`WeightedJacobianRequest`](@ref); per-slot facet kernels are not composed
 behind the driver's back.
 
-## Facet items
-
-The loop above is the **fused route**: the boundary term rides the cell sweep,
-and every cell's every facet is tested against
-[`is_facet_in_cache`](@ref). A term supported on a small fraction of the
-boundary — a tying constraint on an endocardial surface, a contact patch — pays
-that (cells × facets) rediscovery on every Newton iterate to find a set it
-already knows. Such a term declares its facets instead, and gets its own
-traversal:
-
-```julia
-FerriteOperators.facet_items(m::MyIntegrator, sdh::SubDofHandler) = getfacetset(get_grid(sdh.dh), "endocardium")
-FerriteOperators.setup_facet_item_cache(m::MyIntegrator, sdh::SubDofHandler) = MyFacetCache(...)
-```
-
-**Same kernels, two routes.** [`setup_facet_item_cache`](@ref) returns the same
-kind of object [`setup_boundary_cache`](@ref) does, and the driver calls the
-same `assemble_facet!(req, cache, args::FacetArgs, lfi)` methods over the same
-[`FacetArgs`](@ref). There is no second kernel entry point and no second args
-record: moving a term between the two routes is a change of *declaration*, with
-zero element edits. The two coexist — one operator can carry a whole-boundary
-Neumann term on the fused route and a facet-set term as items.
-
-Which route to use:
-
-| | fused route ([`setup_boundary_cache`](@ref)) | facet items ([`facet_items`](@ref)) |
-|---|---|---|
-| term supported on most cells (whole-boundary Neumann) | fine | no gain |
-| term supported on few facets of many cells | pays the per-facet gate | the declared set is the traversal |
-| sensitivity coverage (∂F/∂θ, ∂F/∂t, state products) | **omitted** | **included** |
-| scheduling | the cell sweep's | its own partition |
-
-**The declared set IS the gate.** [`is_facet_in_cache`](@ref) is *not* consulted
-on this route. That gate exists so the fused sweep can rediscover membership
-while walking; here membership is the item list, so a cache whose gate and
-declaration disagree contributes on what was declared. A facet whose cell is
-not in `sdh.cellset`, a local facet index the cell does not have, and a facet
-declared twice are all setup errors.
-
-**One item is one owning cell with all of its declared facets** — never one
-facet. Two facets of a cell therefore share one local system, are assembled
-against one geometry cache and scatter once, and can never land on different
-workers. Both partitions follow from the owning cells:
-[`SequentialScheduling`](@ref) hands out one chunk and lets the atomic scatter
-resolve the dofs neighbouring cells' facets share; [`ColoredScheduling`](@ref)
-colors the owning cells with Ferrite's cell coloring restricted to that set,
-which makes the barrier promise hold for facet items exactly as it holds for
-cells.
-
-The local system is **owning-cell-shaped**: `Ke`, `re` and the slot buffers are
-sized like the cell family's, including the [`global_dofs`](@ref) padding. That
-is what makes the tying shape work — a facet term whose local system is
-`[celldofs(cell); one lumped pressure dof]` writes its coupling rows and
-columns through the augmented tail, and the engine scatters through the
-augmented dof vector:
-
-```julia
-FerriteOperators.global_dofs(m::MyTyingIntegrator, sdh::SubDofHandler) = algebraic_dofs(sdh.dh, :p)
-
-function FerriteOperators.assemble_facet!(req::JacobianResidualRequest, c::MyTyingCache, args::FacetArgs, lfi::Int)
-    reinit!(c.fv, args.cell, lfi)
-    P = first(c.range_p)                       # `global_dof_range`, resolved at setup
-    p = args.states.u[P]
-    # ... req.r[I] += p * ∫Nᵢ ; req.K[I, P] += ∫Nᵢ ; req.K[P, I] += ∫Nᵢ ...
-end
-```
-
-**Sensitivities.** A facet-item term *does* enter the sensitivity sweeps — the
-fused route's omission (see the warning `setup_operator` raises for a boundary
-cache under a declared sensitivity kind) does not apply here. It stays
-**analytic-only**, because facet kernels have no automatic-differentiation
-fallback in any sweep: the cache must implement `assemble_facet!` for the
-sensitivity request itself. Declaring the kind
-(`setup_operator(...; requests = (ParameterJacobianKind,))`) makes setup demand
-that kernel loudly, instead of letting a sweep reach a missing method.
-
-Two things a facet item deliberately does not do. It never calls
-[`reinit_values!`](@ref) — a facet kernel reinitializes its own `FacetValues`
-for the local facet index it was handed, on this route exactly as on the fused
-one. And it contributes nothing to [`evaluate_functional`](@ref): a facet
-functional is a surface integral over the declared set and needs its own
-element hook, an additive capability this family does not have yet.
-
 ## Elements with global dofs
 
 Some unknowns belong to no cell: the macroscopic strain of a stress-driven RVE,
@@ -363,22 +277,113 @@ strategy = AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), Sequenti
 A missing descriptor is not silent: it surfaces as Ferrite's
 missing-sparsity-entry error on the first assembly.
 
-Two restrictions are raised at setup. [`ColoredScheduling`](@ref) is rejected —
-coloring works by giving no two items of a color a shared dof, and a declared
-global dof is shared by *every* item of its subdomain, so no coloring isolates
-it; the parallel route is the atomic scatter of [`SequentialScheduling`](@ref)
-under a parallel device. The [`ElementAssembly`](@ref) form is rejected too,
-its per-element dof maps being built from `celldofs`. The declaration itself is
-validated at setup as well: in bounds, without duplicates, and — sampled on the
-subdomain's first cell — disjoint from `celldofs`, since a dof appearing in both
-head and tail would receive every contribution twice.
-
-Patch assembly is rejected on a subdomain that declares global dofs: a patch's
-dof map is built from `celldofs`, so the declared tail would have no patch-local
-number and be dropped. A condensed element cache without an analytic
-`Consistent` Jacobian kernel is rejected too — the generic combination
+Setup raises the restrictions this layout implies. [`ColoredScheduling`](@ref)
+is rejected — coloring works by giving no two items of a color a shared dof,
+and a declared global dof is shared by *every* item of its subdomain, so no
+coloring isolates it; the parallel route is the atomic scatter of
+[`SequentialScheduling`](@ref) under a parallel device. The
+[`ElementAssembly`](@ref) form is rejected too, its per-element dof maps being
+built from `celldofs`, and so is patch assembly, whose patch-local dof map is
+built the same way: the declared tail would have no patch-local number and be
+dropped. A condensed element cache without an analytic `Consistent` Jacobian
+kernel is rejected as well — the generic combination
 `∂F/∂ū|_q + ∂F/∂q · dq/dū` reads a corrector block spanning the field space
-while the AD partials span the augmented system.
+while the AD partials span the augmented system. The declaration itself is
+validated too: in bounds, without duplicates, and — sampled on the subdomain's
+first cell — disjoint from `celldofs`, since a dof appearing in both head and
+tail would receive every contribution twice.
+
+!!! note "Requires Ferrite's mesh-free algebraic variables"
+    The declaration is spelled in Ferrite's `AlgebraicVariable` vocabulary
+    (`algebraic_dofs`, `AlgebraicValues`, and the `algebraic_coupling` keyword
+    of the coupling descriptors), which the registered Ferrite 1.6 does not
+    carry. There those names are undefined, so the Ferrite-side declaration
+    fails loudly at its own call site before any FerriteOperators surface is
+    reached. [`global_dofs`](@ref) defaults to `()`, so an operator declaring
+    none is unaffected.
+
+## Facet items
+
+The [facet loop](#Facets) is the **fused route**: the boundary term rides the
+cell sweep, and every cell's every facet is tested against
+[`is_facet_in_cache`](@ref). A term supported on a small fraction of the
+boundary — a tying constraint on an endocardial surface, a contact patch — pays
+that (cells × facets) rediscovery on every Newton iterate to find a set it
+already knows. Such a term declares its facets instead, and gets its own
+traversal:
+
+```julia
+FerriteOperators.facet_items(m::MyIntegrator, sdh::SubDofHandler) = getfacetset(get_grid(sdh.dh), "endocardium")
+FerriteOperators.setup_facet_item_cache(m::MyIntegrator, sdh::SubDofHandler) = MyFacetCache(...)
+```
+
+**Same kernels, two routes.** [`setup_facet_item_cache`](@ref) returns the same
+kind of object [`setup_boundary_cache`](@ref) does, and the driver calls the
+same `assemble_facet!(req, cache, args::FacetArgs, lfi)` methods over the same
+[`FacetArgs`](@ref). There is no second kernel entry point and no second args
+record: moving a term between the two routes is a change of *declaration*, with
+zero element edits. The two coexist — one operator can carry a whole-boundary
+Neumann term on the fused route and a facet-set term as items.
+
+Which route to use:
+
+| | fused route ([`setup_boundary_cache`](@ref)) | facet items ([`facet_items`](@ref)) |
+|---|---|---|
+| term supported on most cells (whole-boundary Neumann) | fine | no gain |
+| term supported on few facets of many cells | pays the per-facet gate | the declared set is the traversal |
+| sensitivity coverage (∂F/∂θ, ∂F/∂t, state products) | **omitted** | **included** |
+| scheduling | the cell sweep's | its own partition |
+
+**The declared set IS the gate.** [`is_facet_in_cache`](@ref) is *not* consulted
+on this route. That gate exists so the fused sweep can rediscover membership
+while walking; here membership is the item list, so a cache whose gate and
+declaration disagree contributes on what was declared. A facet whose cell is
+not in `sdh.cellset`, a local facet index the cell does not have, and a facet
+declared twice are all setup errors.
+
+**One item is one owning cell with all of its declared facets** — never one
+facet. Two facets of a cell therefore share one local system, are assembled
+against one geometry cache and scatter once, and can never land on different
+workers. Both partitions follow from the owning cells:
+[`SequentialScheduling`](@ref) hands out one chunk and lets the atomic scatter
+resolve the dofs neighbouring cells' facets share; [`ColoredScheduling`](@ref)
+colors the owning cells with Ferrite's cell coloring restricted to that set,
+which makes the barrier promise hold for facet items exactly as it holds for
+cells.
+
+The local system is **owning-cell-shaped**: `Ke`, `re` and the slot buffers are
+sized like the cell family's, including the [`global_dofs`](@ref) padding. That
+is what makes the tying shape work — a facet term whose local system is
+`[celldofs(cell); one lumped pressure dof]` writes its coupling rows and
+columns through the augmented tail, and the engine scatters through the
+augmented dof vector:
+
+```julia
+FerriteOperators.global_dofs(m::MyTyingIntegrator, sdh::SubDofHandler) = algebraic_dofs(sdh.dh, :p)
+
+function FerriteOperators.assemble_facet!(req::JacobianResidualRequest, c::MyTyingCache, args::FacetArgs, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    P = first(c.range_p)                       # `global_dof_range`, resolved at setup
+    p = args.states.u[P]
+    # ... req.r[I] += p * ∫Nᵢ ; req.K[I, P] += ∫Nᵢ ; req.K[P, I] += ∫Nᵢ ...
+end
+```
+
+**Sensitivities.** A facet-item term *does* enter the sensitivity sweeps — the
+fused route's omission (see [Sensitivities](operators.md#Sensitivities)) does
+not apply here. The no-AD-fallback rule of [Facets](#Facets) still holds, so
+the cache must implement `assemble_facet!` for the sensitivity request itself.
+Declaring the kind (`setup_operator(...; requests = (ParameterJacobianKind,))`)
+makes setup demand that kernel loudly, instead of letting a sweep reach a
+missing method.
+
+Two things a facet item deliberately does not do. It never calls
+[`reinit_values!`](@ref) — a facet kernel reinitializes its own `FacetValues`
+for the local facet index it was handed, on this route exactly as on the fused
+one. And it contributes nothing to [`evaluate_functional`](@ref): a facet
+functional is a surface integral over the declared set, which needs a facet
+hook of its own next to [`evaluate_cell_functional`](@ref); the family has
+none.
 
 ## Algebraic terms (items with no mesh support)
 
@@ -400,6 +405,13 @@ system uses; [`setup_algebraic_cache`](@ref) builds **one** cache serving them
 all — the analogue of one element cache per `SubDofHandler` serving all its
 cells. It has no silent fallback: declaring items without it is a setup error.
 
+!!! note "Requires Ferrite's mesh-free algebraic variables"
+    An item's dofs are Ferrite `AlgebraicVariable` dofs, and its sparsity is
+    declared with `AlgebraicCoupling` — neither exists in the registered
+    Ferrite 1.6. There the declaration fails loudly at its own call site before
+    any FerriteOperators surface is reached. [`algebraic_items`](@ref) defaults
+    to `()`, so an operator declaring none is unaffected.
+
 Kernels dispatch through [`assemble_algebraic!`](@ref), the family's own entry
 point next to `assemble_cell!` and `assemble_facet!`, and receive an
 [`AlgebraicArgs`](@ref) — the same four fields as `CellArgs` with the
@@ -416,11 +428,9 @@ end
 
 `args.item` carries `index` and `dofs`; the local buffers are `n × n` and `n`
 for an item of `n` dofs, and `args.states` gathers through the item's dofs like
-any other item's gather. Only the [`ResidualRequest`](@ref) kernel is mandatory
-— every other request is served analytically where
-[`provides_analytic`](@ref) declares it and by ForwardDiff over the residual
-kernel otherwise, so ∂F/∂θ of a 0D model comes out of the same seeding the cell
-family uses.
+any other item's gather. The mandatory-residual rule and the analytic/AD
+resolution are the cell family's, so ∂F/∂θ of a 0D model comes out of the same
+ForwardDiff seeding.
 
 Items of one declaration must be **uniformly sized**, which is what keeps a
 worker's local buffers fixed-size; the check is a setup error naming the
@@ -497,6 +507,17 @@ declaring [`internal_state_insensitive`](@ref) — `setup_operator` rejects
 anything else at setup, naming `assemble_algebraic!` and the remedy. That is
 this family's standing limitation.
 
+## The three item families side by side
+
+| | cell items | facet items ([`facet_items`](@ref)) | algebraic items ([`algebraic_items`](@ref)) |
+|---|---|---|---|
+| an item is | one cell of the subdomain | one owning cell with all of its declared facets | one vector of global dofs, no mesh support |
+| local system | `[celldofs(cell); global dofs]` | the same, owning-cell-shaped | `n × n` over the item's own `n` dofs |
+| [`ColoredScheduling`](@ref) | Ferrite's cell coloring; rejected once [`global_dofs`](@ref) are declared | the owning cells' coloring, restricted to the declared set | derived as one item per barrier |
+| sensitivities | analytic kernel or the [`ADElementCache`](@ref) fallback | included, but **analytic-only** | analytic kernel or the [`ADElementCache`](@ref) fallback |
+| functional hook | [`evaluate_cell_functional`](@ref) | none — the family contributes nothing | [`evaluate_algebraic_functional`](@ref) |
+| condensation | [`condense_cell!`](@ref) | not supported: `q` belongs to the cell family's item for that same cell | [`condense_algebraic!`](@ref) |
+
 ## Condensed elements (internal variables)
 
 Elements with per-quadrature-point internal state append their unknowns after
@@ -510,8 +531,8 @@ update_linearization!(op, r, states, p, ctx)                # pure evaluation at
 
 [`condense_internal!`](@ref) is the ONLY writer of `q`: it runs once over the
 whole domain, solves each quadrature point's local problem in
-[`condense_cell!`](@ref) — the element hook that replaces the local solve
-elements used to run inside every kernel — writes the trial `q` into the
+[`condense_cell!`](@ref) — the one element hook allowed to evolve internal
+state — writes the trial `q` into the
 `[ū; q]` tail, and stores a corrector (an element-allocated
 [`ItemStates`](@ref) cache field) that the `Consistent` correction mode reads.
 Every evaluation sweep afterwards is a PURE function of `(ū, q, p, t)` at
@@ -536,11 +557,18 @@ corrector is a closed form in that pair. Elect `Recompute()` for memory-bound
 ASSEMBLED sweeps and `Stored()` for action-style use, where every operator
 application would otherwise re-derive the same corrector. Write the element so
 the election is invisible to its kernels: read the corrector through ONE
-access point that either reads the store or recomputes. The two elections then
-differ only in memory, and under `Recompute()` the corrector staleness class
-disappears with the store — but the q contract does not, and nothing detects a
-missing [`condense_internal!`](@ref) any more, since there is no stamp to
-check.
+access point that either reads the store or recomputes.
+
+What the election costs beyond memory is the freshness guard and, possibly,
+the kernel's input requirements. Under `Recompute()` there is no stamp, so
+nothing detects a missing [`condense_internal!`](@ref) — the q-ordering
+contract is unchanged, only its enforcement is gone. And a recomputing access
+point reads whatever the closed form needs: a corrector re-derived from
+`(u, q)` and the stage scaling makes `stage_scaling(args.ctx)` a requirement
+of every Jacobian sweep, where the stored election reads the retained block and
+needs no context at all — which is exactly what the shipped
+`SimpleCondensedLinearViscoelasticity` does (see the
+[example element reference](example-elements.md)).
 
 A Jacobian-shaped kind's [`CorrectionMode`](@ref) (`Consistent`, the default,
 or `FrozenQ`) selects the total `∂F/∂·|_q + ∂F/∂q · dq/d·` or the partial
@@ -557,15 +585,15 @@ Newton loop calls once per trial point.
 Declare [`has_internal_state`](@ref) for such caches — it governs the
 sensitivity admissibility rules in
 [Sensitivities](operators.md#Sensitivities): a kind with no `CorrectionMode`
-is always the total, so a plain AD fallback (which computes only the
-frozen-`q` partial, now that the kernel is pure) is missing the correction
-unless the cache serves the kind analytically or declares it
+is always the total, so a plain AD fallback — which differentiates a pure
+kernel and therefore computes only the frozen-`q` partial — is missing the
+correction unless the cache serves the kind analytically or declares it
 [`internal_state_insensitive`](@ref).
 
 A condensed cache still gets wrapped in [`ADElementCache`](@ref) when it lacks
 some kind's analytic coverage, and the decorator's `Consistent` state
 Jacobian/JacobianResidual then has a GENERIC path: it AD-differentiates the
-(now pure) residual seeding `ū` and `q` separately and combines them with the
+pure residual seeding `ū` and `q` separately and combines them with the
 `dq/dū` block, read through [`condensed_corrector`](@ref) — `Jₑ =
 ∂F/∂ū|_q + ∂F/∂q · dq/dū`. This is the getting-started path (bigger than the
 compact Tier-1 corrector most analytic kernels read, since the framework needs
@@ -612,11 +640,9 @@ The algebraic-item family ([Algebraic terms](#Algebraic-terms-(items-with-no-mes
 condenses through the same [`condense_internal!`](@ref) sweep and the same
 `[ū | q_cells | q_items]` tail, via its own hook
 ([`condense_algebraic!`](@ref)), and its items ride the same `∂F/∂q` target,
-their column block sitting after the cell block. It has none of the generic AD
-routes above, though: an item's buffers are sized from a dof count, which
-builds no `:q` differentiation configuration, so a condensed algebraic cache
-is analytic-first for `Consistent` kinds AND for `JacobianKind{:q}` — no
-exceptions.
+their column block sitting after the cell block. None of the generic routes of
+this section reach it, for the reason that section states, and `JacobianKind{:q}`
+is analytic-first there too.
 
 ## Composition
 
@@ -644,10 +670,17 @@ concern.
 
 Construction is rejected loudly for an empty tuple, for a sub-integrator with
 condensed internal state (composing condensed elements is not supported), and
-for cross-sink mixes. A *bilinear* inner inside a nonlinear composite is
-legitimate; a *linear* (load) form has a different sink and never composes
-into a nonlinear or bilinear operator. Nested composites are flattened at
-construction.
+for cross-sink mixes. A **bilinear** inner inside a nonlinear composite is
+legitimate — the operator a bilinear form induces scatters into the same
+matrix and residual — whereas an [`AbstractLinearIntegrator`](@ref) describes a
+load form, whose sink is a vector alone, and never composes into a nonlinear or
+bilinear operator. Nested composites are flattened at construction.
+
+The inners share one local system, so they share its tail: a composite's
+[`global_dofs`](@ref) are what its inners declare. Silent inners (the default
+`()`) read the tail a declaring inner puts there; two inners declaring
+*different* dofs is an `ArgumentError` at setup, there being no unambiguous
+tail for the composed local system to have.
 
 [`CompositeVolumetricElementCache`](@ref) and
 [`CompositeSurfaceElementCache`](@ref) are the caches these integrators build,
@@ -683,7 +716,9 @@ FerriteOperators.functional_value_type(::FunctionalKind{:energy}) = Float64
 Global reductions (energies for line searches, dissipation, quantities of
 interest) are request kinds whose kernels *return* their cell contribution;
 the engine sums per worker and reduces in a fixed order, so results are
-deterministic for a fixed worker count. Volumetric contributions only.
+deterministic for a fixed worker count. Cell items contribute through the hook
+above and algebraic items through [`evaluate_algebraic_functional`](@ref);
+facet items contribute nothing.
 
 [`FerriteOperators.functional_value_type`](@ref) declares the type the
 reduction accumulates in. It is **required under a parallel device** — the
@@ -693,21 +728,15 @@ the trait. Sequentially it is optional: without it the first contributing cell
 fixes the accumulator's type.
 
 With the declaration each worker's fold starts at `zero(T)` — the reduction's
-additive identity, so a worker that sees no contribution adds nothing — and a
-kernel returning some other type fails loudly instead of widening the
-accumulator.
-
-Two kinds of "nothing came back" are kept apart, and the difference decides
-whether you get a value or an error:
+additive identity — and a kernel returning some other type fails loudly
+instead of widening the accumulator. That identity is also what makes an empty
+sum well-defined, which is why the two kinds of "nothing came back" resolve
+differently:
 
 | situation | when it is decided | result |
 |---|---|---|
 | the operator's partitions carry no items, or every subdomain's cache is an `EmptyVolumetricElementCache` | **structural**, checked before any cell runs | `ArgumentError` — misconfiguration, whatever the kind declares |
 | the sweep runs and every kernel returns `nothing` | **data-dependent** | `zero(T)` when the value type is declared; `ArgumentError` when it is not |
-
-The second row is the consistency rule: an all-quiet sweep is an empty sum, and
-an empty sum only has a value once its type is known. Declaring
-`functional_value_type` is what makes it well-defined.
 
 ## Unit-testing a kernel
 

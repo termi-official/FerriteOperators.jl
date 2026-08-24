@@ -14,6 +14,52 @@ else
 
     sequential_strategy() = SequentialAssemblyStrategy(SequentialCPUDevice())
 
+    # A condensed algebraic cache that records the local tolerance its
+    # condensation was asked for and reports the convergence verdict a test
+    # dictates. Its local problem is a closed-form assignment; only what
+    # reaches `condense_algebraic!` and what leaves it in the report matter.
+    struct ProbeItemCache
+        seen::Base.RefValue{Any}
+        converged::Base.RefValue{Bool}
+    end
+    ProbeItemCache(; converged = true) = ProbeItemCache(Ref{Any}(:unset), Ref(converged))
+    FerriteOperators.duplicate_for_device(device, c::ProbeItemCache) = c
+    FerriteOperators.has_internal_state(::Type{ProbeItemCache}) = true
+    FerriteOperators.internal_state_insensitive(::Type{ProbeItemCache}, kind) = true
+    FerriteOperators.get_number_of_internal_dofs_per_algebraic_item(m, ::ProbeItemCache, items) =
+        fill(1, length(items))
+    function FerriteOperators.assemble_algebraic!(req::ResidualRequest, ::ProbeItemCache, args::AlgebraicArgs)
+        req.r[1] += args.states.u[1] - args.states.q[1]
+        return nothing
+    end
+    function FerriteOperators.condense_algebraic!(c::ProbeItemCache, args::AlgebraicArgs, weights::NamedTuple)
+        c.seen[] = local_solve_tolerance(args.ctx)
+        args.states.q[1] = stage_scaling(args.ctx) * args.states.u[1]
+        return CondensationReport(c.converged[], 1, 0, 0, -args.item.index, 0, 0.0, 1.0)
+    end
+
+    struct ProbeItemIntegrator{C} <: AbstractNonlinearIntegrator
+        cell_integrator::C
+        cache::ProbeItemCache
+    end
+    FerriteOperators.setup_element_cache(m::ProbeItemIntegrator, sdh::SubDofHandler) =
+        FerriteOperators.setup_element_cache(m.cell_integrator, sdh)
+    FerriteOperators.algebraic_items(::ProbeItemIntegrator, dh::DofHandler) =
+        [[only(algebraic_dofs(dh, :p1))]]
+    FerriteOperators.setup_algebraic_cache(m::ProbeItemIntegrator, dh::DofHandler) = m.cache
+
+    function probe_item_testbed(strategy, cell_integrator, cache)
+        grid = generate_grid(Quadrilateral, (2, 2))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        add!(dh, :p1, AlgebraicVariable())
+        close!(dh)
+        op = setup_operator(strategy, ProbeItemIntegrator(cell_integrator, cache), dh; slots = (:u, :q, :qprev))
+        u  = zeros(unknown_size(op))
+        view(u, 1:ndofs(dh)) .= 0.4
+        return (; op, dh, states = condensed_states(u, zeros(unknown_size(op))))
+    end
+
     @testset "Condensed algebraic item alone" begin
         strategy = sequential_strategy()
         qrc      = QuadratureRuleCollection(2)
@@ -84,37 +130,18 @@ else
 
     @testset "Freshness: never-condensed item throws, rollback invalidates, re-condense heals" begin
         strategy = sequential_strategy()
-        qrc      = QuadratureRuleCollection(2)
-        tb       = chamber_testbed(strategy, qrc)
+        tb       = chamber_testbed(strategy, QuadratureRuleCollection(2))
         op, dh   = tb.op, tb.dh
         n        = unknown_size(op)
-        ctx      = TimeIntegrationContext(0.0, 0.4, 0.4)
 
         u = zeros(n)
         view(u, 1:ndofs(dh)) .= 0.1 .* sin.(1:ndofs(dh))
         u[tb.item_dofs] .= (0.2, -0.1)
-        uprev = zeros(n)
-        states = condensed_states(u, uprev)
-        r = zeros(residual_size(op))
 
-        # The residual reads whatever is in the q slot (zero, uncondensed), so
-        # it does not throw — only a `Consistent` Jacobian read of the
-        # (unstamped) corrector does, naming the item.
-        evaluate!(op, r, states, nothing, ctx)
-        err = @test_throws ArgumentError update_linearization!(op, r, states, nothing, ctx)
-        @test occursin("item 1", err.value.msg)
-
-        condense_internal!(op, states, nothing, ctx)
-        update_linearization!(op, r, states, nothing, ctx)   # fine now
-
-        committed = zeros(n)
-        rollback_state!(op, u, committed)
-        @test u == committed
-        @test_throws ArgumentError update_linearization!(op, r, states, nothing, ctx)
-
-        condense_internal!(op, states, nothing, ctx)
-        commit_state!(op, u, committed)
-        update_linearization!(op, r, states, nothing, ctx)   # commit does not invalidate
+        # The same four-step contract the condensed CELL family carries, with
+        # the rejection naming the item instead of the cell.
+        check_freshness_contract(op, condensed_states(u, zeros(n)), u,
+                                 TimeIntegrationContext(0.0, 0.4, 0.4); names = "item 1")
     end
 
     @testset "The layout-collision proof: condensed cell AND condensed item in one operator" begin
@@ -228,15 +255,7 @@ else
 
         # Columns of the assembled block difference the residual w.r.t. the
         # tail, whichever family owns the entry.
-        h = 1e-6
-        rp = zeros(residual_size(op)); rm = zeros(residual_size(op))
-        for j in (1, ndofs(ivh))
-            up = copy(u); up[residual_size(op)+j] += h
-            evaluate!(op, rp, condensed_states(up, uprev), nothing, ctx)
-            um = copy(u); um[residual_size(op)+j] -= h
-            evaluate!(op, rm, condensed_states(um, uprev), nothing, ctx)
-            @test Vector(Kq[:, j]) ≈ (rp .- rm) ./ 2h rtol = 1e-6
-        end
+        check_internal_jacobian_columns(Kq, op, u, uprev, nothing, ctx)
     end
 
     @testset "Admissibility: condensed algebraic cache without analytic coverage" begin
@@ -319,6 +338,47 @@ else
         # A uniform declaration passes the same route.
         @test setup_operator(sequential_strategy(), RaggedChamberIntegrator([2, 2]), dh) isa
             FerriteOperators.AbstractNonlinearOperator
+    end
+
+    @testset "The sweep's context reaches condense_algebraic! undecorated" begin
+        strategy = sequential_strategy()
+        qrc      = QuadratureRuleCollection(2)
+        base     = TimeIntegrationContext(0.0, 0.5, 0.5)
+
+        cache = ProbeItemCache()
+        tb = probe_item_testbed(strategy, PlainPoissonIntegrator(qrc, :u), cache)
+
+        @test condense_internal!(tb.op, tb.states, nothing, base).converged
+        @test cache.seen[] === nothing   # a plain context requests no tolerance
+
+        cache.seen[] = :unset
+        @test condense_internal!(tb.op, tb.states, nothing, InexactLocalSolveContext(base, 1.0e-3)).converged
+        @test cache.seen[] == 1.0e-3
+    end
+
+    @testset "CondensationReport.converged merges across the two families" begin
+        strategy = sequential_strategy()
+        qrc      = QuadratureRuleCollection(2)
+        mat      = NortonRelaxationParameters()
+        ctx      = TimeIntegrationContext(0.0, 0.5, 0.5)
+
+        converging = SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q)
+        # An iteration budget of zero: the local problem is left at its start
+        # value and reported as not converged, never thrown.
+        stalling = SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q;
+                                                     local_solver = LocalNewtonSettings(max_iterations = 0))
+
+        both_ok = probe_item_testbed(strategy, converging, ProbeItemCache())
+        @test condense_internal!(both_ok.op, both_ok.states, mat, ctx).converged
+
+        # The item family alone fails …
+        item_fails = probe_item_testbed(strategy, converging, ProbeItemCache(; converged = false))
+        @test !condense_internal!(item_fails.op, item_fails.states, mat, ctx).converged
+
+        # … and the cell family alone fails: the merge is not one family's
+        # verdict overwriting the other's.
+        cell_fails = probe_item_testbed(strategy, stalling, ProbeItemCache())
+        @test !condense_internal!(cell_fails.op, cell_fails.states, mat, ctx).converged
     end
 
 end

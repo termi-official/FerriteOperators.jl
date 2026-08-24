@@ -248,8 +248,9 @@ function setup_facet_item_cache(integrator, sdh)
 end
 
 """
-Supertype for all caches to integrate over interfaces (facet pairs). Reserved
-for the DG work; concrete interface caches and their setup hook land with it.
+Supertype for all caches to integrate over interfaces (facet pairs). It carries
+no subtypes and no setup hook: nothing in this package traverses interfaces
+yet, so the type names the seam and nothing more.
 """
 abstract type AbstractInterfaceElementCache end
 

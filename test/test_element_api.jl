@@ -52,9 +52,6 @@ end
 
     grid = generate_grid(Hexahedron, (1, 1, 1))
     qrc  = QuadratureRuleCollection(3)
-    qr   = QuadratureRule{RefHexahedron}(3)
-    qrcf = QuadratureRuleCollection(3)
-    qrf  = FacetQuadratureRule{RefHexahedron}(3)
     ip   = Lagrange{RefHexahedron, 1}()
 
     dhs = DofHandler(grid)
@@ -65,78 +62,33 @@ end
     Ferrite.reinit!(cell_cache_s, 1)
     uₑs = [-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0] .* 1e-4
 
-    ipv = ip^3
-    dhv = DofHandler(grid)
-    add!(dhv, :u, ipv)
-    close!(dhv)
-    sdhv = first(dhv.subdofhandlers)
-    cell_cache_v = Ferrite.CellCache(sdhv)
-    Ferrite.reinit!(cell_cache_v, 1)
-    uₑv =
-        [
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            -1.0,
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-        ] .* 1e-4
-
     # We check for pairwise consistency of the assembly operations
     # First we check if the empty caches work correctly
     @testset "Empty caches" begin
-        rₑ¹ = zeros(ndofs(dhs))
-        rₑ² = zeros(ndofs(dhs))
-        Kₑ¹ = zeros(ndofs(dhs), ndofs(dhs))
-        Kₑ² = zeros(ndofs(dhs), ndofs(dhs))
+        K = zeros(ndofs(dhs), ndofs(dhs))
+        r = zeros(ndofs(dhs))
+        args  = CellArgs((u = uₑs,), cell_cache_s, 0.0, nothing)
+        fargs = FacetArgs((u = uₑs,), cell_cache_s, 0.0, nothing)
 
-        args = CellArgs((u = uₑs,), cell_cache_s, 0.0, nothing)
-
-        # Volume
-        assemble_cell!(JacobianResidualRequest(Kₑ¹, rₑ¹), FerriteOperators.EmptyVolumetricElementCache(), args)
-        @test iszero(Kₑ¹)
-        @test iszero(rₑ¹)
-
-        assemble_cell!(ResidualRequest(rₑ²), FerriteOperators.EmptyVolumetricElementCache(), args)
-        @test iszero(rₑ²)
-
-        assemble_cell!(JacobianRequest{:u}(Kₑ²), FerriteOperators.EmptyVolumetricElementCache(), args)
-        @test iszero(Kₑ²)
-
-        # Surface: the empty cache never claims a facet …
+        # The empty cache never claims a facet …
         for local_facet_index = 1:nfacets(cell_cache_s)
             @test !FerriteOperators.is_facet_in_cache(FacetIndex(1, local_facet_index), cell_cache_s, FerriteOperators.EmptySurfaceElementCache())
         end
 
-        # … and its kernels are no-ops, whichever facet they are handed
-        fargs = FacetArgs((u = uₑs,), cell_cache_s, 0.0, nothing)
-        assemble_facet!(JacobianResidualRequest(Kₑ¹, rₑ¹), FerriteOperators.EmptySurfaceElementCache(), fargs, 1)
-        @test iszero(Kₑ¹)
-        @test iszero(rₑ¹)
-
-        assemble_facet!(ResidualRequest(rₑ²), FerriteOperators.EmptySurfaceElementCache(), fargs, 1)
-        @test iszero(rₑ²)
-
-        assemble_facet!(JacobianRequest{:u}(Kₑ²), FerriteOperators.EmptySurfaceElementCache(), fargs, 1)
-        @test iszero(Kₑ²)
+        # … and both empty caches are null objects: whichever request they are
+        # handed, the buffers it names come back as they went in.
+        @testset "$route" for (route, run!) in (
+            ("volumetric", req -> assemble_cell!(req, FerriteOperators.EmptyVolumetricElementCache(), args)),
+            ("surface",    req -> assemble_facet!(req, FerriteOperators.EmptySurfaceElementCache(), fargs, 1)),
+        )
+            for (req, buffers) in ((JacobianResidualRequest(K, r), (K, r)),
+                                   (ResidualRequest(r), (r,)),
+                                   (JacobianRequest{:u}(K), (K,)))
+                fill!(K, 0.0); fill!(r, 0.0)
+                run!(req)
+                @test all(iszero, buffers)
+            end
+        end
     end
 
     @testset "Scalar volumetric bilinear composite elements: $model" for model in (
@@ -364,14 +316,12 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
     end
 end
 
-# `has_internal_state` caches without an analytic Jacobian/JacobianResidual
-# kernel used to slip past `setup_operator`: JacobianKind/JacobianResidualKind
-# were absent from `requires_admissibility_check`, so a stateful cache with no
-# analytic kernel took the AD-from-residual fallback THROUGH its local solve
-# instead of being rejected. That fallback differentiates correctly, but the
-# driver's trial write-back only runs on the non-AD path, so the local state
-# stored afterward is stale. `StatefulProbeCache` (defined above) is exactly
-# such a cache; wiring it to an integrator reaches it through `setup_operator`.
+# A `has_internal_state` cache serving neither JacobianKind nor
+# JacobianResidualKind analytically is inadmissible: the AD-from-residual
+# fallback would differentiate through the local solve, and the driver's trial
+# write-back runs only on the non-AD path, so the state stored afterwards would
+# be stale. `StatefulProbeCache` (defined above) is exactly such a cache; wiring
+# it to an integrator reaches it through `setup_operator`.
 struct StaleQIntegrator <: AbstractNonlinearIntegrator end
 FerriteOperators.setup_element_cache(::StaleQIntegrator, ::SubDofHandler) = StatefulProbeCache()
 
@@ -393,7 +343,7 @@ Ferrite.getnquadpoints(::StatelessNoAnalyticCache) = 0
 struct StatelessNoAnalyticIntegrator <: AbstractNonlinearIntegrator end
 FerriteOperators.setup_element_cache(::StatelessNoAnalyticIntegrator, ::SubDofHandler) = StatelessNoAnalyticCache()
 
-@testset "Stale-q admissibility hole: JacobianKind/JacobianResidualKind" begin
+@testset "Stateful caches need an analytic JacobianKind/JacobianResidualKind kernel" begin
     grid = generate_grid(Hexahedron, (1, 1, 1))
     dh = DofHandler(grid)
     add!(dh, :u, Lagrange{RefHexahedron, 1}())
@@ -413,6 +363,35 @@ FerriteOperators.setup_element_cache(::StatelessNoAnalyticIntegrator, ::SubDofHa
     @test setup_operator(strategy, InsensitiveStaleQIntegrator(), dh) isa FerriteOperators.LinearizedFerriteOperator
 
     # Stateless cache without analytic kernels: the AD fallback is legitimate,
-    # this fix must not gate anything but `has_internal_state` caches.
+    # so the gate closes on `has_internal_state` caches and on nothing else.
     @test setup_operator(strategy, StatelessNoAnalyticIntegrator(), dh) isa FerriteOperators.LinearizedFerriteOperator
+end
+
+# A condensed cache whose internal-dof count hook is written with every
+# argument annotated — the shape an author naturally reaches for, and the one
+# an `Any`-argument `hasmethod` probe does not match.
+struct AnnotatedHookCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.has_internal_state(::Type{AnnotatedHookCache}) = true
+FerriteOperators.internal_state_insensitive(::Type{AnnotatedHookCache}, kind) = true
+FerriteOperators.assemble_cell!(::ResidualRequest, ::AnnotatedHookCache, args) = nothing
+FerriteOperators.reinit_values!(::AnnotatedHookCache, cell) = nothing
+Ferrite.getnquadpoints(::AnnotatedHookCache) = 0
+
+struct AnnotatedHookIntegrator <: AbstractNonlinearIntegrator end
+FerriteOperators.setup_element_cache(::AnnotatedHookIntegrator, ::SubDofHandler) = AnnotatedHookCache()
+FerriteOperators.get_number_of_internal_dofs_per_element(
+    ::AnnotatedHookIntegrator, ::AnnotatedHookCache, sdh::SubDofHandler) = [2 for _ in sdh.cellset]
+
+@testset "An annotated internal-dof hook gets its internal block" begin
+    grid = generate_grid(Hexahedron, (2, 1, 1))
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefHexahedron, 1}())
+    close!(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+    op  = setup_operator(strategy, AnnotatedHookIntegrator(), dh)
+    ivh = op.engine.ivh
+    @test ndofs(ivh) == 2 * getncells(grid)
+    @test internal_variable_range(ivh, 1) == (ndofs(dh) + 1):(ndofs(dh) + 2)
+    @test unknown_size(op) == ndofs(dh) + 2 * getncells(grid)
 end

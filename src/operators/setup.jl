@@ -21,10 +21,9 @@ solver data, not declarations — and nothing term-shaped: no per-term contexts,
 no domain algebra, no weight symbolism. Term-shaped data belongs to
 integrators; anything needing its own context or sink is its own sweep.
 
-Declaring is a hint, not a capability restriction: an operator always builds
-what its own family issues ([`mandatory_kinds`](@ref)), so an undeclared kind
-stays usable and a declaration only ever adds eager machinery and eager
-checks.
+Declaring is a hint, not a capability restriction: an undeclared kind stays
+usable and simply runs its checks at the call-time entry points instead of at
+setup; a declaration only ever adds eager machinery and eager checks.
 """
 abstract type AbstractSchemeProtocol end
 
@@ -72,20 +71,6 @@ _kind_type(r) = Base.typename(r isa Type ? r : typeof(r)).wrapper
 
 get_declared_slots(::DefaultProtocol{slots}) where {slots} = slots
 get_declared_kinds(protocol::DefaultProtocol) = protocol.kinds
-
-"""
-    mandatory_kinds(integrator) -> Tuple of request-kind types
-
-The kinds an operator of this integrator's family ALWAYS issues, independent
-of the protocol. Unioned with [`get_declared_kinds`](@ref) when the engine selects
-per-worker sweep-state families, which is what keeps a declaration additive:
-the family's own kinds are served whether or not a protocol names them. The
-default is the nonlinear set, so an unknown integrator type is served
-conservatively.
-"""
-mandatory_kinds(integrator) = (JacobianResidualKind, JacobianKind, ResidualKind)
-mandatory_kinds(::AbstractBilinearIntegrator) = (BilinearKind, ResidualKind)
-mandatory_kinds(::AbstractLinearIntegrator) = (LinearKind, ResidualKind)
 
 # A sensitivity sweep over the CELL family runs the volumetric kernel only, so
 # a boundary term riding that sweep contributes nothing to the result. That is
@@ -177,13 +162,17 @@ end
 # internal-dof block allocated: a cache may declare it purely to opt into the
 # sensitivity-admissibility rules (served by `internal_state_insensitive`,
 # never actually condensing anything — the "Stale-q admissibility hole" test
-# double is exactly this) without implementing the count hook at all. Probing
-# `hasmethod` against the DECORATED type would always see `ADElementCache`'s
-# own blanket forwarding method and say nothing about whether the wrapped
-# cache actually implements it, so the probe runs against `_display_cache_type`
-# — the type an author would actually have written the hook on.
-_declares_internal_dofs(T::Type, hook) =
-    has_internal_state(T) && hasmethod(hook, Tuple{Any, _display_cache_type(T), Any})
+# double is exactly this) without implementing the count hook at all.
+#
+# The probe is an author-written-method one, so its subject is the `unwrap`
+# fixpoint — a decorator's forwarding method answers for every inner. Its
+# ARGUMENT types are the concrete ones the later call passes, since a method
+# an author annotated (`(::MyIntegrator, ::MyCache, ::SubDofHandler)`) is not
+# matched by an `Any` probe, and missing it hands the operator a placeholder
+# internal-variable handler that fails inside `condense_cell!` instead.
+_declares_internal_dofs(hook, integrator, cache, arg) =
+    has_internal_state(typeof(cache)) &&
+    hasmethod(hook, Tuple{typeof(integrator), typeof(unwrap(cache)), typeof(arg)})
 
 """
     setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
@@ -201,9 +190,11 @@ plain algebraic cache, and either or both blocks can be real at once (the
 layout-collision case).
 """
 function setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
-    needs_cells = any(c -> _declares_internal_dofs(typeof(c), get_number_of_internal_dofs_per_element), element_caches)
-    needs_items = algebraic_domain !== nothing &&
-        _declares_internal_dofs(typeof(algebraic_domain[1]), get_number_of_internal_dofs_per_algebraic_item)
+    needs_cells = any(zip(dh.subdofhandlers, element_caches)) do (sdh, cache)
+        _declares_internal_dofs(get_number_of_internal_dofs_per_element, integrator, cache, sdh)
+    end
+    needs_items = algebraic_domain !== nothing && _declares_internal_dofs(
+        get_number_of_internal_dofs_per_algebraic_item, integrator, algebraic_domain[1], algebraic_domain[2])
     (needs_cells || needs_items) && return _build_internal_variable_handler(
         integrator, element_caches, algebraic_domain, dh, needs_cells, needs_items)
     return InternalVariableHandler(nothing, nothing, 0, 0)
@@ -416,6 +407,33 @@ function init_transfer_sparsity_pattern(dh_row::DofHandler, dh_col::DofHandler)
     return sp
 end
 
+# Shared by `setup_transfer_operator`/`setup_nested_transfer_operator`: both
+# restrict to sequential full assembly, only the error label differs.
+function _validate_transfer_strategy(strategy, label)
+    (strategy isa AssemblyStrategy && strategy.form isa FullAssembly && strategy.scheduling isa SequentialScheduling) ||
+        throw(ArgumentError("$label currently only support sequential full-assembly strategies (got $(typeof(strategy)))"))
+    strategy.device isa SequentialCPUDevice ||
+        throw(ArgumentError("$label currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"))
+    return nothing
+end
+
+# One `SubdomainCache` per `(sdh_a, sdh_b)` pair; `tc_builder` is the one thing
+# a same-grid vs. nested-grid transfer operator disagrees on.
+function _build_transfer_subdomain_caches(strategy, integrator, pairs, tc_builder)
+    device = strategy.device
+    subdomain_caches = SubdomainCache[]
+    for (sdh_a, sdh_b) in pairs
+        element = setup_transfer_element_cache(integrator, sdh_a, sdh_b)
+        partition = compute_partition(strategy, sdh_a)
+        n = n_workers(strategy, device, partition)
+        tc = tc_builder(sdh_a, sdh_b)
+        ws = TransferWorkspace(element, allocate_transfer_element_matrix(element, sdh_a, sdh_b), tc)
+        dc = setup_device_instances(device, ws, n)
+        push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_a, sdh_b), dc, partition))
+    end
+    return subdomain_caches
+end
+
 """
     setup_transfer_operator(strategy, integrator, dh_row, dh_col)
 
@@ -430,9 +448,8 @@ correspond 1-to-1 (same length, same cellsets at each index).
 subdomain pair.
 
 !!! warning "Experimental surface"
-    Transfer operators are scheduled to be folded into the unified assembly
-    engine. The constructors and the operator types may change in a minor
-    release; the assembled matrix and its sparsity are not affected.
+    The transfer constructors and operator types may change in a minor release;
+    the assembled matrix and its sparsity are not affected.
 """
 function setup_transfer_operator(
         strategy::AbstractAssemblyStrategy,
@@ -440,8 +457,7 @@ function setup_transfer_operator(
         dh_row::DofHandler,
         dh_col::DofHandler,
     )
-    (strategy isa AssemblyStrategy && strategy.form isa FullAssembly && strategy.scheduling isa SequentialScheduling) || throw(ArgumentError("Transfer operators currently only support sequential full-assembly strategies (got $(typeof(strategy)))"))
-    strategy.device isa SequentialCPUDevice || throw(ArgumentError("Transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"))
+    _validate_transfer_strategy(strategy, "Transfer operators")
     @assert get_grid(dh_row) === get_grid(dh_col) "Both DofHandlers must share the same grid"
     @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) "Mismatch in number of subdomains"
 
@@ -450,18 +466,8 @@ function setup_transfer_operator(
     sp = init_transfer_sparsity_pattern(dh_row, dh_col)
     P  = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
 
-    # Build per-subdomain caches (one per SubDofHandler pair)
-    device = strategy.device
-    subdomain_caches = SubdomainCache[]
-    for (sdh_row, sdh_col) in zip(dh_row.subdofhandlers, dh_col.subdofhandlers)
-        element = setup_transfer_element_cache(integrator, sdh_row, sdh_col)
-        partition = compute_partition(strategy, sdh_row)
-        n = n_workers(strategy, device, partition)
-        tc = SameGridCellCache(sdh_row, sdh_col)
-        ws = TransferWorkspace(element, allocate_transfer_element_matrix(element, sdh_row, sdh_col), tc)
-        dc = setup_device_instances(device, ws, n)
-        push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_row, sdh_col), dc, partition))
-    end
+    subdomain_caches = _build_transfer_subdomain_caches(
+        strategy, integrator, zip(dh_row.subdofhandlers, dh_col.subdofhandlers), SameGridCellCache)
 
     return TransferFerriteOperator(P, strategy, subdomain_caches, dh_row, dh_col, integrator)
 end
@@ -508,9 +514,8 @@ matrix of size `(ndofs(dh_fine) × ndofs(dh_coarse))`.
 child of exactly one coarse cell, as encoded by `fine2coarse` and `child_ref_coords`.
 
 !!! warning "Experimental surface"
-    Transfer operators are scheduled to be folded into the unified assembly
-    engine. The constructors and the operator types may change in a minor
-    release; the assembled matrix and its sparsity are not affected.
+    The transfer constructors and operator types may change in a minor release;
+    the assembled matrix and its sparsity are not affected.
 """
 function setup_nested_transfer_operator(
         strategy::AbstractAssemblyStrategy,
@@ -520,23 +525,14 @@ function setup_nested_transfer_operator(
         fine2coarse::AbstractVector{Int},
         child_ref_coords::AbstractVector,
     )
-    (strategy isa AssemblyStrategy && strategy.form isa FullAssembly && strategy.scheduling isa SequentialScheduling) || throw(ArgumentError("Nested transfer operators currently only support sequential full-assembly strategies (got $(typeof(strategy)))"))
-    strategy.device isa SequentialCPUDevice || throw(ArgumentError("Nested transfer operators currently only support SequentialCPUDevice (got $(typeof(strategy.device)))"))
+    _validate_transfer_strategy(strategy, "Nested transfer operators")
     Tv  = value_type(strategy.device)
     sp  = init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)
     P   = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
 
-    device = strategy.device
-    subdomain_caches = SubdomainCache[]
-    for (sdh_fine, sdh_coarse) in zip(dh_fine.subdofhandlers, dh_coarse.subdofhandlers)
-        element = setup_transfer_element_cache(integrator, sdh_fine, sdh_coarse)
-        partition = compute_partition(strategy, sdh_fine)
-        n = n_workers(strategy, device, partition)
-        tc = NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords)
-        ws = TransferWorkspace(element, allocate_transfer_element_matrix(element, sdh_fine, sdh_coarse), tc)
-        dc = setup_device_instances(device, ws, n)
-        push!(subdomain_caches, SubdomainCache(TransferDomain(sdh_fine, sdh_coarse), dc, partition))
-    end
+    subdomain_caches = _build_transfer_subdomain_caches(
+        strategy, integrator, zip(dh_fine.subdofhandlers, dh_coarse.subdofhandlers),
+        (sdh_fine, sdh_coarse) -> NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords))
 
     return NestedTransferFerriteOperator(P, strategy, subdomain_caches, dh_fine, dh_coarse, integrator)
 end

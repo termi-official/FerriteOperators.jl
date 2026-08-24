@@ -39,6 +39,14 @@ else
     FerriteOperators.reinit_values!(::CondensedProbeCache, cell) = nothing
     Ferrite.getnquadpoints(::CondensedProbeCache) = 2
 
+    # A functional BOTH item families contribute to, under its own tag so the
+    # reservoir fixture's `nothing`-contributing tag stays what it is.
+    FerriteOperators.functional_value_type(::FunctionalKind{:reservoir_mixed}) = Float64
+    FerriteOperators.evaluate_cell_functional(::FunctionalKind{:reservoir_mixed}, c::ReservoirCellCache, args) =
+        FerriteOperators.evaluate_cell_functional(FunctionalKind(:reservoir_volume), c, args)
+    FerriteOperators.evaluate_algebraic_functional(::FunctionalKind{:reservoir_mixed}, ::ReservoirItemCache, args) =
+        10.0 * args.item.index
+
     @testset "Algebraic items" begin
         testbed = reservoir_testbed((2, 2))
         (; dh, cell_coupling, item_coupling, item_dofs) = testbed
@@ -145,6 +153,17 @@ else
             @test evaluate_functional(op, FunctionalKind(:reservoir_volume), (u = u,), θ) ≈ 4.0
         end
 
+        @testset "an algebraic contribution folds with the cell sum, decorated or not" begin
+            decorated   = setup_operator(sequential_strategy(spec), m, dh)
+            undecorated = setup_operator(sequential_strategy(spec), m, dh; ad_backend = nothing)
+            @test last(decorated.engine.subdomain_caches).domain.element isa ADElementCache
+            @test !(last(undecorated.engine.subdomain_caches).domain.element isa ADElementCache)
+
+            expected = 4.0 + 10.0 * 1 + 10.0 * 2   # grid area + both items
+            @test evaluate_functional(decorated, FunctionalKind(:reservoir_mixed), (u = u,), θ) ≈ expected
+            @test evaluate_functional(undecorated, FunctionalKind(:reservoir_mixed), (u = u,), θ) ≈ expected
+        end
+
         @testset "declaration validation" begin
             strategy = sequential_strategy(spec)
             # No `setup_algebraic_cache` for a declaration that has items.
@@ -163,15 +182,26 @@ else
         end
 
         @testset "AffineRate slots reconstruct over the item's dofs" begin
-            op = setup_operator(sequential_strategy(spec), m, dh; slots = (:u, :du))
+            # The 0D rows READ the rate slot here, so the reconstruction is
+            # visible in the residual and not only in a workspace buffer.
+            op = setup_operator(sequential_strategy(spec), ReservoirIntegrator(; reads_du = true), dh;
+                                slots = (:u, :du))
             uprev = 0.05 .* cos.(1:n)
-            r = zeros(n)
-            update_linearization!(op, r, (u = u, du = AffineRate(2.0, uprev)), θ, nothing)
-            # The kernels read `:u` only, so the result is unchanged; what the
-            # slot exercises is the gather, which addresses the item's dofs.
-            @test r ≈ rref
-            ws = first(last(op.engine.subdomain_caches).device_cache)
-            @test ws.slot_buffers.du ≈ 2.0 .* (u[item_dofs] .- uprev[item_dofs])
+
+            rate = zeros(n)
+            update_linearization!(op, rate, (u = u, du = AffineRate(2.0, uprev)), θ, nothing)
+            materialized = zeros(n)
+            update_linearization!(op, materialized, (u = u, du = 2.0 .* (u .- uprev)), θ, nothing)
+            @test rate ≈ materialized
+
+            # Negative control: a different slope is a different residual, so
+            # the agreement above is the reconstruction and not a slot the
+            # kernels quietly ignore.
+            other = zeros(n)
+            update_linearization!(op, other, (u = u, du = AffineRate(3.0, uprev)), θ, nothing)
+            @test !(rate ≈ other)
+            # …and the rate reaches the item rows specifically.
+            @test rate[item_dofs] ≉ rref[item_dofs]
         end
 
         @testset "InternalSource slots gather empty on an algebraic item" begin

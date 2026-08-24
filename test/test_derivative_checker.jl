@@ -62,13 +62,8 @@ FerriteOperators.parameter_vector(p::SplitParams) = [p.E]
 FerriteOperators.rebuild_parameters(p::SplitParams, θ) = SplitParams(p.field, θ[1])
 
 function setup_checker_operator(jac_scale)
-    grid = generate_grid(Quadrilateral, (4, 3))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-    op = setup_operator(strategy, CheckerDiffusionIntegrator(QuadratureRuleCollection(2), :u, jac_scale), dh)
-    return op, dh
+    (; dh, qrc, strategy) = scalar_quad_testbed()
+    return setup_operator(strategy, CheckerDiffusionIntegrator(qrc, :u, jac_scale), dh), dh
 end
 
 # Same diffusion element, but with the source scaled by the evaluation time —
@@ -119,17 +114,19 @@ function FerriteOperators.assemble_cell!(req::WeightedJacobianRequest, cache::We
 end
 
 function setup_weighted_checker_operator(w_scale)
-    grid = generate_grid(Quadrilateral, (4, 3))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-    op = setup_operator(strategy, WeightedCheckerIntegrator(QuadratureRuleCollection(2), :u, w_scale), dh;
-                        slots = (:u, :du))
+    (; dh, qrc, strategy) = scalar_quad_testbed()
+    op = setup_operator(strategy, WeightedCheckerIntegrator(qrc, :u, w_scale), dh; slots = (:u, :du))
     return op, dh
 end
 
 @testset "Derivative checker" begin
+    @testset "only LinearizedFerriteOperator is supported" begin
+        (; dh, qrc, strategy) = scalar_quad_testbed()
+        bop = setup_operator(strategy, SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
+        u = sin.(0.3 .* (1:ndofs(dh)))
+        @test_throws ArgumentError check_derivatives(bop, u, nothing)
+    end
+
     @testset "correct analytic Jacobian and AD sensitivities pass" begin
         op, dh = setup_checker_operator(1.0)
         u = sin.(0.3 .* (1:ndofs(dh)))
@@ -146,12 +143,8 @@ end
     end
 
     @testset "the time check runs with a context" begin
-        grid = generate_grid(Quadrilateral, (4, 3))
-        dh   = DofHandler(grid)
-        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-        close!(dh)
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
-        op = setup_operator(strategy, TimedCheckerIntegrator(QuadratureRuleCollection(2), :u), dh)
+        (; dh, qrc, strategy) = scalar_quad_testbed()
+        op = setup_operator(strategy, TimedCheckerIntegrator(qrc, :u), dh)
         u = sin.(0.3 .* (1:ndofs(dh)))
         res = check_derivatives(op, (u = u,), 1.7, TimeIntegrationContext(0.9, 0.1, 0.1))
         @test res.passed

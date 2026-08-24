@@ -86,9 +86,9 @@ generic combination would need (Tier 2). Under [`Recompute`](@ref) nothing is
 stored and the corrector is re-derived at every point of use. `weights` are
 the solver's chain-rule scalars for reconstructed slots participating in the
 local model (e.g. a rate slot under Newmark), chained into the corrector
-INSIDE the local inverse — see the design's Newmark/multilevel-Newton witness.
-They are per-sweep solver data rather than item data, so a recomputing element
-retains them per cache.
+INSIDE the local inverse, where post-hoc weighting of separated partial
+Jacobians cannot put them. They are per-sweep solver data rather than item
+data, so a recomputing element retains them per cache.
 
 This is the only hook allowed to EVOLVE a condensed element's state:
 `assemble_cell!` kernels are pure evaluations at the `q` this hook wrote and
@@ -229,11 +229,10 @@ end
 """
     condensation_cell_sweep!(kind::CondensationKind, task, ws) -> CondensationReport
 
-The fourth driver body: value-returning WITH write-back. Gathers the declared
-slots, hands them to [`condense_cell!`](@ref), and copies the element-local
-`q` buffer it filled into the item's slice of the `:q` slot's global vector —
-exactly where the pre-phase per-kernel trial write-back used to write, from
-exactly the same data.
+The cell family's condensation driver body: value-returning WITH write-back.
+Gathers the declared slots, hands them to [`condense_cell!`](@ref), and copies
+the element-local `q` buffer it filled into the item's slice of the `:q` slot's
+global vector, through the cell's [`internal_variable_range`](@ref).
 """
 function condensation_cell_sweep!(kind::CondensationKind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
@@ -263,18 +262,19 @@ Under `Stored()`, reading a never-condensed or invalidated
 [`item_state`](@ref)'s own freshness contract on the element's corrector
 store. This catches "never condensed" and "invalidated since"; it does NOT
 catch the same vector mutated in place without going through
-[`rollback_state!`](@ref) — see the design's staleness concession, §10.2.
-Under [`Recompute`](@ref) there is no store to stamp, so none of these are
-detected and the ordering requirement is the caller's alone.
+[`rollback_state!`](@ref) — see [what the phase
+concedes](devdocs/rationale.md#What-the-phase-concedes). Under
+[`Recompute`](@ref) there is no store to stamp, so none of these are detected
+and the ordering requirement is the caller's alone.
 
 `weights` are the solver's chain-rule scalars passed through to
 [`condense_cell!`](@ref); `condense_internal!(op, states, p, ctx)` defaults to
 `(u = 1.0,)`.
 
-Value-returning WITH write-back — reuses [`fold_items`](@ref)/
-[`reduce_on_device`](@ref)/[`reduce_on_subdomains`](@ref) unchanged, riding
-`FunctionalFamily` so the existing deterministic fold order and
-`_check_reduction_domain` structural checks apply as they stand.
+Value-returning WITH write-back: it rides `FunctionalFamily` through
+[`fold_items`](@ref)/[`reduce_on_device`](@ref)/[`reduce_on_subdomains`](@ref),
+so the deterministic fold order and the `_check_reduction_domain` structural
+checks hold for it too.
 
 Unconditionally its own domain traversal, run before the evaluation sweeps it
 feeds.
@@ -317,8 +317,9 @@ Discard a rejected trial: copy the committed solution back into `u` and
 invalidate every condensation corrector the operator's element caches carry —
 they were computed for the discarded trial `q`, which `u` no longer carries.
 The next `Consistent` sweep needs [`condense_internal!`](@ref) again. This is
-the one mutation FO itself sees: the solver's own `u .+= Δu` outside FO is
-invisible to it (see the design's staleness concession, §10.2).
+the one mutation FerriteOperators itself sees: the solver's own `u .+= Δu`
+happens outside the package and is invisible to it (see [what the phase
+concedes](devdocs/rationale.md#What-the-phase-concedes)).
 
 A [`Recompute`](@ref) cache carries no correctors, so the invalidation pass is
 a no-op for it: `u` and its `q` tail are restored together, and a corrector
@@ -572,4 +573,5 @@ without silently accepting a selection the element cannot honor.
 """
 corrector_election_error(election) = throw(ArgumentError(
     "$(nameof(typeof(election))) correctors are not implemented by this integrator; construct " *
-    "it with `corrector = Stored()` (the default)."))
+    "it with an election it implements — `Stored()` (the default) or `Recompute()`, which " *
+    "both shipped condensed elements accept."))

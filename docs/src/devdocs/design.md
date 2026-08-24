@@ -120,10 +120,24 @@ FerriteOperators.materialize_request(::MyKind, ws) = MyRequest(ws.Ke)
 FerriteOperators.assembles_matrix(::MyKind) = true
 # assembles_vector / depends_on_unknowns default to `false` for a new kind.
 
-# 3. The driver. Reuse a provided body, or write a bespoke one.
-FerriteOperators.execute_kind!(kind::MyKind, task, ws) =
+# 3. The driver, per ITEM FAMILY. Annotate the workspace: `execute_kind!` is
+#    looked up as `(kind, task, workspace)`, so an unannotated method also
+#    catches the facet and algebraic workspaces, which a cell body cannot drive.
+FerriteOperators.execute_kind!(kind::MyKind, task, ws::FerriteOperators.AssemblyWorkspace) =
     FerriteOperators.primal_cell_sweep!(kind, task, ws)
 ```
+
+The annotation is not optional on an operator carrying facet or algebraic
+items. `execute_single_task!` dispatches on the workspace, and the built-in
+kinds get away with unannotated cell methods only because the facet and
+algebraic methods are more specific *on the kind argument*
+(`execute_kind!(::PrimalKind, task, ws::FacetItemWorkspace)`). A downstream
+kind is outside those unions, so it has no such method to lose to: an
+unannotated `execute_kind!(::MyKind, task, ws)` is the only candidate for every
+family and hands a `FacetItemWorkspace` to `primal_cell_sweep!`. Give the kind
+one method per family it must serve, and an explicit `= nothing` for each
+family it deliberately does not — which is exactly how the built-in kinds
+declare that facet items contribute to no functional.
 
 A kind whose sweep needs per-worker scratch beyond `ws.Ke`/`ws.re` reads
 [`SensitivityBuffers`](@ref) through `ws.sensitivity` — structurally present
@@ -143,7 +157,7 @@ assembler, and no workspace state at either end.
 struct MyFunctionalKind end
 FerriteOperators.sweep_family(::Type{<:MyFunctionalKind}) = FerriteOperators.FunctionalFamily()
 FerriteOperators.has_cell_request(::Type{<:MyFunctionalKind}) = false
-FerriteOperators.execute_kind!(kind::MyFunctionalKind, task, ws) =
+FerriteOperators.execute_kind!(kind::MyFunctionalKind, task, ws::FerriteOperators.AssemblyWorkspace) =
     FerriteOperators.functional_cell_sweep(kind, task, ws)
 
 # The type the reduction accumulates in. Optional on a sequential device, where
@@ -175,16 +189,17 @@ Declaring it (`setup_operator(...; requests = (MyKind,))`, or a protocol whose
 `get_declared_kinds` names it) selects its sweep-state family and runs its
 setup-time trait ↔ kernel validation.
 
-Four provided bodies exist: [`primal_cell_sweep!`](@ref) (buffer zeroing, slot
-gather, cell and facet kernels, scatter — no write-back: [`condense_internal!`](@ref)
-is the only writer of `q`), [`sensitivity_cell_sweep!`](@ref) (trial gather, no
-write-back, dispatch to `sensitivity_kernel!`), [`functional_cell_sweep`](@ref)
-(slot gather, no write-back, RETURN what the kernel hook gives), and
-[`condensation_cell_sweep!`](@ref) (slot gather, dispatch to
-[`condense_cell!`](@ref), RETURN the [`CondensationReport`](@ref) AND write the
-trial `q` back — the one combination the other three don't have). A kind
-riding `primal_cell_sweep!` without its own `cell_kernel!` method gets the
-plain analytic route.
+Twelve provided bodies exist, across the four workspace types:
+
+| item family | workspace | provided bodies |
+|---|---|---|
+| cells | `AssemblyWorkspace` | [`primal_cell_sweep!`](@ref) (buffer zeroing, values reinit, slot gather, cell and facet kernels, scatter — no write-back: [`condense_internal!`](@ref) is the only writer of `q`); [`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to `sensitivity_kernel!`); [`functional_cell_sweep`](@ref) (slot gather, no write-back, RETURN what the kernel hook gives); [`condensation_cell_sweep!`](@ref) (slot gather, dispatch to [`condense_cell!`](@ref), RETURN the [`CondensationReport`](@ref) AND write the trial `q` back — the one combination the others don't have); [`internal_jacobian_cell_sweep!`](@ref) (the rectangular ∂F/∂q block) |
+| facet items | `FacetItemWorkspace` | [`primal_facet_item_sweep!`](@ref); [`sensitivity_facet_item_sweep!`](@ref). Functionals, condensation, `JacobianKind{:q}` and quadrature evaluation are explicit `nothing` methods — the family has no body for them |
+| algebraic items | `AlgebraicWorkspace` | [`primal_algebraic_sweep!`](@ref); [`sensitivity_algebraic_sweep!`](@ref); [`functional_algebraic_sweep`](@ref); [`condensation_algebraic_sweep!`](@ref); [`internal_jacobian_algebraic_sweep!`](@ref) |
+| patches | `PatchAssemblyWorkspace` | the `PatchAssemblyKind` and `PatchCallbackKind` bodies, reached through [`assemble_patches!`](@ref) / [`foreach_patch`](@ref) rather than the operator entry points |
+
+A kind riding `primal_cell_sweep!` without its own `cell_kernel!` method gets
+the plain analytic route.
 
 Declarations carry kind *types*, normalized to their `UnionAll` base, while
 sweeps carry instances. Two hooks bridge that for validation:
@@ -209,11 +224,6 @@ ordinary cache field, duplicated per worker by its own `duplicate_for_device`
 its own buffer struct plus the same eight `assemble_cell!` methods for its own
 backend marker type, activated via `setup_operator(...; ad_backend =
 MyBackend())`.
-
-**New operator families** — [`mandatory_kinds`](@ref) states the kinds an
-integrator family always issues regardless of what a protocol declares, which
-is what keeps declarations additive: an operator is never *less* capable for
-having declared nothing.
 
 **New devices and scheduling** — `execute_on_device!`,
 `setup_device_instances` and `compute_partition` are the three hooks a device

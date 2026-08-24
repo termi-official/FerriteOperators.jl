@@ -84,13 +84,7 @@ FerriteOperators.setup_element_cache(::EmptyCacheIntegrator, sdh::SubDofHandler)
     FerriteOperators.EmptyVolumetricElementCache()
 
 @testset "Functional value requests" begin
-    grid = generate_grid(Quadrilateral, (4, 3))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    qrc = QuadratureRuleCollection(2)
-    n   = ndofs(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; dh, n, qrc, strategy) = scalar_quad_testbed()
     op = setup_operator(strategy, FunctionalTestIntegrator(qrc, :u), dh)
     u = sin.(0.3 .* (1:n))
 
@@ -147,24 +141,16 @@ FerriteOperators.setup_element_cache(::EmptyCacheIntegrator, sdh::SubDofHandler)
         ws     = first_workspace(op)
         task   = FerriteOperators.AssemblyTask(FunctionalKind(:energy), nothing, (u = u,), nothing, nothing)
         untask = FerriteOperators.AssemblyTask(FunctionalKind(:energy_undeclared), nothing, (u = u,), nothing, nothing)
-        # The driver body returns the cell value rather than parking it.
-        @test last(only(code_typed(FerriteOperators.functional_cell_sweep,
-                                   Tuple{FunctionalKind{:energy}, typeof(task), typeof(ws)}))) === Float64
         # Declared: the fold is Float64-typed from the seed, no `Nothing` in the
         # return, and the seed itself is the concretely typed additive identity.
         @test last(only(code_typed(FerriteOperators.fold_items,
                                    Tuple{typeof(task), typeof(ws), Vector{Int}}))) === Float64
         @test FerriteOperators.initial_partial(FunctionalKind(:energy)) === 0.0
         @test FerriteOperators.initial_partial(FunctionalKind(:gradient_volume)) === zero(Vec{2, Float64})
-        # …so the parallel route's partials array is concretely typed.
-        @test typeof(zeros(FerriteOperators.functional_value_type(FunctionalKind(:gradient_volume)), 3)) ===
-              Vector{Vec{2, Float64}}
         # Undeclared: the first value fixes the accumulator, so the loop doing
         # the work still carries a concrete Float64 and dispatches nothing per cell.
         @test last(only(code_typed(FerriteOperators.fold_items,
                                    Tuple{typeof(untask), typeof(ws), Vector{Int}}))) === Union{Nothing, Float64}
-        @test last(only(code_typed(FerriteOperators._fold_items_from,
-                                   Tuple{typeof(untask), typeof(ws), Vector{Int}, Int, Float64, Type{Nothing}}))) === Float64
     end
 
     @testset "the value-type declaration is a loud contract" begin

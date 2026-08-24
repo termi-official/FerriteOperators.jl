@@ -399,10 +399,14 @@ must have a matching kernel method. Runs once per subdomain at
 `setup_operator` time — a typo'd port fails loudly here instead of silently
 assembling through the wrong path.
 
-Decorators ([`ADElementCache`](@ref), [`FusedFromSplit`](@ref)) unwrap to
-their inner cache, and composites recurse into theirs: the mandatory-method
-probes must reach the author-written method set, which a decorator's
-forwarding methods would otherwise answer for unconditionally.
+The two halves take different subjects, per the
+[`AbstractElementCacheDecorator`](@ref) convention. The KERNEL half — the
+mandatory-method probes and the trait ↔ kernel check — runs on the
+[`unwrap`](@ref) fixpoint (and a composite recurses into its inners from
+there), since a decorator's forwarding methods would answer those probes
+unconditionally. The ADMISSIBILITY half runs on `cache` as the engine will
+call it, decoration included, so a decorator's generic routes count as the
+coverage they are.
 
 The trait ↔ kernel check always covers the primal kinds (the operator will
 issue them). Every kind [`requires_admissibility_check`](@ref) names
@@ -415,6 +419,12 @@ non-primal kinds stay usable — their checks simply run at the call-time entry
 points.
 """
 function validate_element_cache(cache, declared_requests::Tuple = ())
+    _validate_element_kernels(unwrap(cache), declared_requests)
+    _assert_admissible_kinds(typeof(cache), declared_requests)
+    return nothing
+end
+
+function _validate_element_kernels(cache, declared_requests::Tuple)
     T = typeof(cache)
     hasmethod(assemble_cell!, Tuple{ResidualRequest, T, CellArgs}) || throw(ArgumentError(
         "$(T) implements no `assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::CellArgs)` " *
@@ -426,12 +436,21 @@ function validate_element_cache(cache, declared_requests::Tuple = ())
         "kernels are pure evaluation and must not rely on reinit inside them."))
     for kind in _primal_validatable_kinds()
         _assert_trait_backed(T, kind)
+    end
+    for K in declared_requests
+        has_cell_request(K) || continue
+        _assert_trait_backed(T, validation_instance(K))
+    end
+    return nothing
+end
+
+function _assert_admissible_kinds(T::Type, declared_requests::Tuple)
+    for kind in _primal_validatable_kinds()
         requires_admissibility_check(kind) && assert_sensitivity_admissible(T, kind)
     end
     for K in declared_requests
         has_cell_request(K) || continue
         kind = validation_instance(K)
-        _assert_trait_backed(T, kind)
         requires_admissibility_check(kind) && assert_sensitivity_admissible(T, kind)
     end
     return nothing
@@ -489,13 +508,18 @@ requires_admissibility_check(kind) = false
 # volumetric cache, `assemble_algebraic!`/`AlgebraicArgs` for an algebraic one,
 # `assemble_facet!`/`FacetArgs` plus the trailing local facet index for a
 # surface one.
+#
+# A claim is backed by an AUTHOR-WRITTEN method, so the subject is the
+# `unwrap` fixpoint: a decorator's blanket kernel methods answer `hasmethod`
+# for every inner and would make the check pass vacuously.
 _assert_trait_backed(T, kind) = _assert_trait_backed(T, kind, assemble_cell!, CellArgs)
 function _assert_trait_backed(T, kind, entry, ::Type{Args}, trailing::Tuple = ()) where {Args}
+    A = unwrap(T)
     ReqT = request_type(kind)
-    if provides_analytic(T, kind) && !hasmethod(entry, Tuple{ReqT, T, Args, trailing...})
+    if provides_analytic(A, kind) && !hasmethod(entry, Tuple{ReqT, A, Args, trailing...})
         throw(ArgumentError(
-            "$(T) declares `provides_analytic` for $(typeof(kind)) but implements no " *
-            "matching `$(nameof(entry))(::$(ReqT), ::$(nameof(T)), ::$(nameof(Args))" *
+            "$(A) declares `provides_analytic` for $(typeof(kind)) but implements no " *
+            "matching `$(nameof(entry))(::$(ReqT), ::$(nameof(A)), ::$(nameof(Args))" *
             "$(_trailing_signature(trailing)))` method."))
     end
     return nothing
@@ -511,47 +535,38 @@ _trailing_signature(trailing::Tuple) = mapreduce(T -> ", ::$(T)", *, trailing; i
 # only the type matters for the trait query.
 _primal_validatable_kinds() = (JacobianKind{:u}(), JacobianResidualKind())
 
-# Post-phase (condense_internal!/CondensationReport) a condensed cache's
-# residual kernel is PURE — it reads the frozen `q` a prior condensation
-# wrote, no local solve inside it. AD-from-residual is therefore no longer
-# wrong in principle; what it computes is the FROZEN-q PARTIAL. The rejection
-# survives with a different subject: these kinds carry no `CorrectionMode`
-# (they are always the total, see `CorrectionMode`), so a partial-only AD
-# fallback would be a silently MISSING ∂F/∂q·dq/d· correction, not an invalid
-# derivative through an iteration. The rejection is PER CACHE and PER KIND: a
-# cache with internal state is admissible when the requested kind is served
-# analytically (the author carries the correction, like the consistent
-# tangent), or when the author asserts the local equations are insensitive to
-# the seeded quantity (`dq/∂seed ≡ 0`, making the partial exact — there is
-# nothing to correct). Only the would-be AD fallback is rejected.
-"""
-    _display_cache_type(T) -> Type
-
-The cache type an admissibility error should NAME: `T` itself, or the
-innermost cache a decorator ([`ADElementCache`](@ref), [`FusedFromSplit`](@ref))
-wraps — an author never wrote `T` when `T` is a decorator, so naming it would
-send them looking at the wrong type. One root method; decorators override it.
-"""
-_display_cache_type(T::Type) = T
-
+# A condensed cache's residual kernel is pure, so AD-from-residual computes the
+# frozen-q PARTIAL, while these kinds carry no `CorrectionMode` and are always
+# the total — the partial silently misses ∂F/∂q·dq/d·. The rejection is PER
+# CACHE and PER KIND and hits only the would-be AD fallback: an analytic kernel
+# carries the correction, and `internal_state_insensitive` asserts there is
+# none to carry.
 """
     assert_sensitivity_admissible(T::Type, kind)
-    assert_sensitivity_admissible(T::Type, kind, entry, ::Type{Args})
+    assert_sensitivity_admissible(T::Type, kind, entry, ::Type{Args}, trailing = ())
 
 The internal-state admissibility check itself: throws unless a `has_internal_state`
-cache `T` serves `kind` analytically, declares it
-[`internal_state_insensitive`](@ref), or — for the parameter and time kinds of
-a CELL cache — declares [`local_conditions!`](@ref), which lets the decorator
-derive the missing `dq/dseed` itself. `entry`/`Args` name which item family's
-kernel entry point and args record the error message should point authors at
-— the 2-arg form defaults to `assemble_cell!`/`CellArgs` (a volumetric cache);
+cache `T` serves `kind` analytically or declares it
+[`internal_state_insensitive`](@ref). `entry`/`Args`/`trailing` name which item
+family's kernel entry point, args record and signature tail the error message
+should point authors at — the 2-arg form defaults to
+`assemble_cell!`/`CellArgs` (a volumetric cache);
 [`validate_algebraic_cache`](@ref) passes `assemble_algebraic!`/`AlgebraicArgs`
-for the algebraic-item family, whose remedies differ (see below).
+for the algebraic-item family, whose remedies differ (see below), and the
+facet-item family passes its trailing `::Int` local facet index.
+
+`T` is a SERVED-CAPABILITY subject, so it is the cache the engine calls —
+decorated where the engine decorated it. That is what admits the generic
+routes [`ADElementCache`](@ref) builds from [`condensed_corrector`](@ref) and
+[`local_conditions!`](@ref): the decorator's [`provides_analytic`](@ref)
+already reports them as covered, and an undecorated cache has no such route to
+report.
 """
-function assert_sensitivity_admissible(T::Type, kind, entry = assemble_cell!, ::Type{Args} = CellArgs) where {Args}
+function assert_sensitivity_admissible(T::Type, kind, entry = assemble_cell!, ::Type{Args} = CellArgs,
+        trailing::Tuple = ()) where {Args}
     if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
-        name = nameof(_display_cache_type(T))
-        wrapping_note = _display_cache_type(T) === T ? "" :
+        name = nameof(unwrap(T))
+        wrapping_note = unwrap(T) === T ? "" :
             " — automatically wrapped in `$(nameof(T))` because it lacks analytic coverage of " *
             "some request kind, which does not by itself supply this correction"
         # FiniteDifferenceSensitivity, `local_conditions!` and
@@ -586,9 +601,11 @@ function assert_sensitivity_admissible(T::Type, kind, entry = assemble_cell!, ::
         end
         throw(ArgumentError(
             "$(name) carries condensed internal state$(wrapping_note), and AD-from-residual " *
-            "through its (now pure) residual kernel would compute only the frozen-q partial, " *
+            "through its pure residual kernel would compute only the frozen-q partial, " *
             "missing the ∂F/∂q·dq/d· correction this kind's total needs. Either implement the " *
-            "analytic `$(nameof(entry))` kernel for $(typeof(kind)) (declared via `provides_analytic`), or " *
+            "analytic `$(nameof(entry))` kernel for $(typeof(kind)) — " *
+            "`$(nameof(entry))(::$(request_type(kind)), ::$(name), ::$(nameof(Args))" *
+            "$(_trailing_signature(trailing)))`, declared via `provides_analytic` — or " *
             remedy))
     end
     return nothing
@@ -600,8 +617,8 @@ end
 `true` iff the element cache carries condensed per-item internal state `q`
 with a corrector store ([`condense_internal!`](@ref)). Governs the
 sensitivity admissibility check: a kind with no [`CorrectionMode`](@ref) is
-always the total, so a plain AD-from-residual fallback — which computes only
-the frozen-q partial now that the kernel is pure — is missing the correction
+always the total, so a plain AD-from-residual fallback — which differentiates a
+pure kernel and therefore computes only the frozen-q partial — is missing the correction
 unless the cache serves the kind analytically or declares it
 [`internal_state_insensitive`](@ref); time sensitivities alone admit a
 finite-difference method as a further escape.
@@ -614,8 +631,8 @@ has_internal_state(::Type) = false
 Author-asserted declaration that the element-local internal-state equations
 do NOT depend on the quantity the sensitivity `kind` seeds (`∂L/∂seed ≡ 0`).
 When true, `dq/∂seed = 0`, so the total collapses to the frozen-q partial
-plain AD-from-residual already computes on the (now pure) residual kernel —
-there is nothing left for the ∂F/∂q·dq/∂seed correction to add. The framework
+plain AD-from-residual already computes on the pure residual kernel — there is
+nothing left for the ∂F/∂q·dq/∂seed correction to add. The framework
 CANNOT verify this claim; a wrong assertion produces a silently wrong
 sensitivity. Same trust model as [`provides_analytic`](@ref).
 """

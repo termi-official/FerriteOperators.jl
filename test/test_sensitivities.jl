@@ -94,14 +94,7 @@ end
 stationary_ctx(t) = TimeIntegrationContext(t, 1.0, 1.0)
 
 @testset "Sensitivities" begin
-    grid = generate_grid(Quadrilateral, (4, 3))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    qrc  = QuadratureRuleCollection(2)
-    n    = ndofs(dh)
-
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; grid, dh, n, qrc, strategy) = scalar_quad_testbed()
     op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
 
     u = sin.(0.3 .* (1:n))
@@ -238,8 +231,6 @@ stationary_ctx(t) = TimeIntegrationContext(t, 1.0, 1.0)
     end
 end
 
-# --- Sensitivity admissibility refinements and method selection ---
-
 # Condensed admissibility: analytic parameter kernel on the viscoelastic cache
 # (trivially zero — the material is parameter-independent), and an
 # insensitivity declaration for the VJP kind.
@@ -248,13 +239,7 @@ FerriteOperators.assemble_cell!(req::ParameterJacobianRequest, ::FerriteOperator
 FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperatorsExampleElements.SimpleCondensedLinearViscoelasticityCache}, ::FerriteOperators.ParameterVJPKind) = true
 
 @testset "Sensitivity admissibility and methods" begin
-    grid = generate_grid(Quadrilateral, (4, 3))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    qrc = QuadratureRuleCollection(2)
-    n   = ndofs(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; grid, dh, n, qrc, strategy) = scalar_quad_testbed()
     op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
     aop = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u, true), dh)
     dop = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
@@ -313,13 +298,7 @@ FerriteOperators.internal_state_insensitive(::Type{<:FerriteOperatorsExampleElem
 end
 
 @testset "State JVP/VJP actions" begin
-    grid = generate_grid(Quadrilateral, (4, 3))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    qrc = QuadratureRuleCollection(2)
-    n   = ndofs(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; dh, n, qrc, strategy) = scalar_quad_testbed()
     op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
     u = sin.(0.3 .* (1:n))
     p = 1.7
@@ -404,13 +383,7 @@ FerriteOperators.reinit_values!(::BogusClaimCache, cell) = nothing
 FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianKind) = true
 
 @testset "Declared request kinds" begin
-    grid = generate_grid(Quadrilateral, (4, 3))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    qrc = QuadratureRuleCollection(2)
-    n   = ndofs(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; dh, n, qrc, strategy) = scalar_quad_testbed()
 
     @testset "trait check is scoped to declared kinds" begin
         @test isnothing(FerriteOperators.validate_element_cache(BogusClaimCache()))
@@ -445,10 +418,7 @@ end
 # --- The boundary limitation of sensitivity sweeps ---
 
 @testset "Boundary terms are not differentiated" begin
-    grid = generate_grid(Quadrilateral, (2, 2))
-    dh = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
-    qrc = QuadratureRuleCollection(2)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; grid, dh, qrc, strategy) = scalar_quad_testbed((2, 2))
     right = Set(getfacetset(grid, "right"))
     # The volumetric element of `SourceDiffusionIntegrator` plus a real constant
     # Neumann term, so an operator can carry a non-empty boundary cache.
@@ -521,11 +491,7 @@ end
     end
 
     @testset "state and time sweeps do not allocate per cell" begin
-        grid = generate_grid(Quadrilateral, (4, 3))
-        dh = DofHandler(grid)
-        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-        close!(dh)
-        n = ndofs(dh)
+        (; dh, n) = scalar_quad_testbed()
         op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh)
         # ctx-seeded ∂F/∂t: the context rebuild per cell must stay on the stack
         top = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)

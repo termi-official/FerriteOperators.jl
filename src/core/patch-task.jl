@@ -33,6 +33,13 @@ struct CellGroup
     id::Int
 end
 
+"""
+    patch_term_active(restriction, group::Int) -> Bool
+
+Whether a term carrying `restriction` contributes on a patch cell tagged
+`group`: always for [`WholePatch`](@ref), only on a matching tag for
+[`CellGroup`](@ref). A downstream restriction type is a method here.
+"""
 @inline patch_term_active(::WholePatch, group::Int) = true
 @inline patch_term_active(r::CellGroup, group::Int) = r.id == group
 
@@ -63,6 +70,13 @@ const WHOLE_PATCH_TERMS = (PatchTerm(WholePatch(), nothing),)
 # Tuple recursions; the compiler unrolls them (terms are short, concrete tuples)
 # so each term is dispatched monomorphically and no term value ever enters a
 # kernel as a `Union`.
+"""
+    any_patch_term_active(terms::Tuple, group::Int) -> Bool
+
+Whether any term of a patch request contributes on a cell tagged `group` — the
+gate that lets the single pass over the patch's cells skip a cell no term
+touches, without giving up the ascending cell order.
+"""
 @inline any_patch_term_active(::Tuple{}, group::Int) = false
 @inline any_patch_term_active(terms::Tuple, group::Int) =
     patch_term_active(first(terms).restriction, group) || any_patch_term_active(Base.tail(terms), group)
@@ -120,7 +134,7 @@ Keyword arguments:
 - `field`: the field the partition and [`patch_vertex_dofs`](@ref) resolve
   against. Defaults to the `sdh`'s only field.
 
-Experimental: the patch item surface may change with the local-BVP work.
+Experimental: the patch item surface may change in a minor release.
 """
 struct PatchItems{SDH <: SubDofHandler}
     sdh::SDH
@@ -810,7 +824,9 @@ function assemble_patches!(kind::PatchAssemblyKind, op, provider::PatchItems, st
             "the sink rides inside the shared kind. Drive the patches through `foreach_patch` and own the collectors."
         )
     )
-    ws = _patch_workspace(provider, first(op.engine.subdomain_caches[_patch_subdomain(op, provider)].device_cache))
+    sc = op.engine.subdomain_caches[_patch_subdomain(op, provider)]
+    inner = duplicate_for_device(op.engine.strategy.device, first(sc.device_cache))
+    ws = _patch_workspace(provider, inner)
     task = AssemblyTask(kind, nothing, states, p, ctx)
     execute_on_device!(task, op.engine.strategy.device, (ws,), compute_partition(op.engine.strategy, provider))
     return kind.sink
@@ -847,7 +863,9 @@ function foreach_patch(f, op, provider::PatchItems, states::NamedTuple, p, ctx =
             "Schedule the patches yourself with `patch_chunks` and `patch_workspace`."
         )
     )
-    ws = _patch_workspace(provider, first(op.engine.subdomain_caches[_patch_subdomain(op, provider)].device_cache))
+    sc = op.engine.subdomain_caches[_patch_subdomain(op, provider)]
+    inner = duplicate_for_device(op.engine.strategy.device, first(sc.device_cache))
+    ws = _patch_workspace(provider, inner)
     task = AssemblyTask(PatchCallbackKind(f), nothing, states, p, ctx)
     execute_on_device!(task, op.engine.strategy.device, (ws,), compute_partition(op.engine.strategy, provider))
     return nothing

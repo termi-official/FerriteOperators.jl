@@ -40,11 +40,7 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::WrapDiffus
 end
 
 @testset "Construction-time wrapping" begin
-    grid = generate_grid(Quadrilateral, (3, 3))
-    dh   = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
-    qrc  = QuadratureRuleCollection(2)
-    n    = ndofs(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; dh, n, qrc, strategy) = scalar_quad_testbed((3, 3))
 
     @testset "auto-wrapped Jacobian equals the analytic reference" begin
         op = setup_operator(strategy, WrapDiffusionIntegrator(2.3, qrc, :u), dh)
@@ -125,11 +121,11 @@ end
 end
 
 @testset "Condensed generic Consistent bootstrap (power-law) vs its analytic kernel" begin
-    # A wrapper around the power-law cache that hides its analytic Jacobian
-    # (forcing the decorator's generic AD+corrector-block path) and completes
-    # the Tier-2 `dq/dū` block (§5.1) from the inner's own Tier-1 scalar
-    # store, `dq_qp/du_j = dq_qp/du_qp · φⱼ(qp)` — the element already
-    # computes `dq_qp/du_qp`; this just finishes the chain rule to nodal dofs.
+    # A wrapper around the power-law cache that hides its analytic Jacobian, so
+    # the decorator's generic AD+corrector-block path is what serves the
+    # `Consistent` tangent. Its `condensed_corrector` is the nodal-dof block
+    # `dq_qp/du_j = dq_qp/du_qp · φⱼ(qp)`, finished here from the scalar
+    # per-quadrature-point slope the inner element already stores.
     struct GenericBootstrapCache{C} <: FerriteOperators.AbstractVolumetricElementCache
         inner::C
         blocks::Vector{Matrix{Float64}}   # per-cell nq × ndofs, filled by condense_cell!
@@ -163,11 +159,8 @@ end
     end
     FerriteOperators.condensed_corrector(c::GenericBootstrapCache, args) = c.blocks[cellid(args.cell)]
 
-    mat  = NortonRelaxationParameters()
-    qrc  = QuadratureRuleCollection(2)
-    integ = SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q)
-    grid = generate_grid(Quadrilateral, (1, 1))
-    dh   = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
+    (; grid, dh, qrc) = scalar_quad_testbed((1, 1))
+    integ = SimpleCondensedPowerLawRelaxation(NortonRelaxationParameters(), qrc, :u, :q)
     sdh  = dh.subdofhandlers[1]
 
     reference_cache = FerriteOperators.setup_element_cache(integ, sdh)
@@ -179,7 +172,6 @@ end
         [zeros(nq, nd) for _ in 1:getncells(grid)],
     )
     ad = ADElementCache(bootstrap_cache, sdh)
-    @test provides_analytic(FerriteOperatorsExampleElements.SimpleCondensedPowerLawRelaxationCache, JacobianKind{:u}())  # sanity: reference IS analytic
     @test !provides_analytic(GenericBootstrapCache, JacobianKind{:u, Consistent}())   # wrapper is NOT
     @test provides_analytic(typeof(ad), JacobianKind{:u, Consistent}())               # the DECORATOR covers it generically
 
@@ -225,9 +217,7 @@ FerriteOperators.setup_element_cache(::NoReinitIntegrator, ::SubDofHandler) = No
 FerriteOperators.assemble_cell!(req::ResidualRequest, ::NoReinitCache, args::CellArgs) = nothing
 
 @testset "setup validation reaches through the decorator" begin
-    grid = generate_grid(Quadrilateral, (2, 2))
-    dh   = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; dh, qrc, strategy) = scalar_quad_testbed((2, 2))
 
     @test_throws "NoResidualCache implements no `assemble_cell!(::ResidualRequest" setup_operator(
         strategy, NoResidualIntegrator(), dh)
@@ -236,7 +226,6 @@ FerriteOperators.assemble_cell!(req::ResidualRequest, ::NoReinitCache, args::Cel
 
     # A decorated composite recurses to its leaves: the bad inner is named
     # even when it sits inside the wrapped sub-composite.
-    qrc = QuadratureRuleCollection(2)
     bad_composite = NonlinearCompositeIntegrator(WrapDiffusionIntegrator(1.0, qrc, :u), NoResidualIntegrator())
     @test_throws "NoResidualCache implements no `assemble_cell!(::ResidualRequest" setup_operator(
         strategy, bad_composite, dh)

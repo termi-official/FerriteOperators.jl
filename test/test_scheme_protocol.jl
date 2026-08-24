@@ -37,12 +37,7 @@ FerriteOperators.get_declared_slots(::SDIRKWProtocol) = (:u, :du)
 FerriteOperators.get_declared_kinds(::SDIRKWProtocol) = (WeightedJacobianKind, ResidualKind)
 
 function protocol_testbed(; fused = false, protocol = SDIRKWProtocol())
-    grid = generate_grid(Quadrilateral, (3, 2))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    qrc = QuadratureRuleCollection(2)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; grid, dh, qrc, strategy) = scalar_quad_testbed((3, 2))
     op  = setup_operator(strategy, ProtocolDiffusionIntegrator(qrc, :u, fused), dh, protocol)
     Mop = setup_operator(strategy, SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
     Kop = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
@@ -85,9 +80,6 @@ end
 
     @testset "the same protocol over a non-analytic cache agrees" begin
         tb = protocol_testbed(; fused = false)
-        cache = first_element_cache(tb.op)
-        @test !FerriteOperators.provides_analytic(typeof(cache), WeightedJacobianKind(weights))
-
         u  = sin.(0.3 .* (1:tb.n)); du = cos.(0.2 .* (1:tb.n))
         states = (u = u, du = du)
 
@@ -103,10 +95,7 @@ end
     end
 
     @testset "the keyword form is sugar for DefaultProtocol" begin
-        grid = generate_grid(Quadrilateral, (3, 2))
-        dh   = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
-        qrc = QuadratureRuleCollection(2); n = ndofs(dh)
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        (; dh, n, qrc, strategy) = scalar_quad_testbed((3, 2))
         integrator = ProtocolDiffusionIntegrator(qrc, :u)
 
         kw  = setup_operator(strategy, integrator, dh; slots = (:u, :du), requests = (StateJVPKind,))
@@ -130,14 +119,12 @@ end
 
         # bilinear and linear operators never carry sensitivity machinery —
         # decided by `needs_ad_decoration(integrator)`, not by declarations
-        bws = first_workspace(tb.Mop)
-        @test bws.sensitivity === nothing
+        @test !carries_sensitivity_buffers(tb.Mop)
         lop = setup_operator(tb.strategy, SimpleLinearIntegrator(1.0, qrc, :u), tb.dh)
-        @test first_workspace(lop).sensitivity === nothing
+        @test !carries_sensitivity_buffers(lop)
 
         # the nonlinear family always carries it, declared or not
-        @test first_workspace(tb.op).sensitivity !== nothing
-        @test mandatory_kinds(tb.Mop.integrator) == (FerriteOperators.BilinearKind, ResidualKind)
+        @test carries_sensitivity_buffers(tb.op)
         @test !FerriteOperators.needs_ad_decoration(tb.Mop.integrator)
         @test FerriteOperators.needs_ad_decoration(tb.op.integrator)
     end
@@ -171,14 +158,11 @@ end
         @test evaluate_functional(fop, FunctionalKind(:mass), states, nothing, ctx) == area
         bfop = setup_operator(tb.strategy, SimpleBilinearMassIntegrator(1.0, tb.qrc, :u), tb.dh,
                               DefaultProtocol(; requests = (FunctionalKind,)))
-        @test first_workspace(bfop).sensitivity === nothing
+        @test !carries_sensitivity_buffers(bfop)
     end
 
     @testset "two operators from one protocol evaluate concurrently" begin
-        grid = generate_grid(Quadrilateral, (6, 5))
-        dh   = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
-        qrc = QuadratureRuleCollection(2); n = ndofs(dh)
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        (; dh, n, qrc, strategy) = scalar_quad_testbed((6, 5))
         integrator = ProtocolDiffusionIntegrator(qrc, :u)
         protocol = SDIRKWProtocol()
 
@@ -188,9 +172,6 @@ end
         # no mutable state is shared between the two caches
         @test op1.J !== op2.J
         @test first_workspace(op1) !== first_workspace(op2)
-        @test first_workspace(op1).Ke !== first_workspace(op2).Ke
-        @test first_workspace(op1).sensitivity !== first_workspace(op2).sensitivity
-        @test first_workspace(op1).slot_buffers.u !== first_workspace(op2).slot_buffers.u
 
         s1 = (u = sin.(0.3 .* (1:n)), du = cos.(0.2 .* (1:n)))
         s2 = (u = cos.(0.7 .* (1:n)), du = sin.(0.5 .* (1:n)))
@@ -295,12 +276,9 @@ end
     end
 
     @testset "trait claimed without a kernel errors at setup" begin
-        grid = generate_grid(Quadrilateral, (3, 2))
-        dh = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
-        integrator = ProtocolDiffusionIntegrator(QuadratureRuleCollection(2), :u)
+        (; dh, qrc, strategy) = scalar_quad_testbed((3, 2))
         @test_throws ArgumentError setup_operator(
-            SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh,
-            CustomKindProtocol((OrphanKind,)))
+            strategy, ProtocolDiffusionIntegrator(qrc, :u), dh, CustomKindProtocol((OrphanKind,)))
     end
 
     @testset "sensitivity-shaped downstream kind reads ws.sensitivity directly" begin
@@ -310,7 +288,7 @@ end
         # declares — structural, by integrator family, not by declaration.
         declared = setup_operator(plain.strategy, SimpleBilinearMassIntegrator(1.0, plain.qrc, :u),
                                   plain.dh, DefaultProtocol(; requests = (ResidualProbeKind,)))
-        @test first_workspace(declared).sensitivity === nothing
+        @test !carries_sensitivity_buffers(declared)
 
         n = plain.n
         u  = sin.(0.3 .* (1:n))

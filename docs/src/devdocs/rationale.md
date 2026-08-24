@@ -276,8 +276,9 @@ task-owned bag. Outputs instead live per worker on the workspace as
 [`SensitivityBuffers`](@ref), because `AssemblyTask` is reused across subdomains
 of differing `ndofs_per_cell` while `AssemblyWorkspace` is correctly
 per-subdomain-per-worker. A task-owned output bag would be sized for the wrong
-subdomain. The workspace therefore lands at eight fields, not the seven the
-draft predicts.
+subdomain. The workspace therefore lands at nine fields, not the seven the
+draft predicts — the ninth being `dofs`, the augmented dof vector a
+[`global_dofs`](@ref) declaration needs.
 
 **The decorator does not broaden [`provides_analytic`](@ref) for every kind it
 serves.** `WeightedJacobianKind` and `TimeSensitivityKind` carry explicit
@@ -527,6 +528,14 @@ is the freshness guard: with no store there is no stamp, so a `Consistent`
 sweep on a never-condensed item silently uses whatever `q` the tail holds
 instead of throwing. The q-ordering contract is unchanged and the detection of
 its violation is what is traded away, alongside the memory.
+
+The election is not invisible to a kernel's *inputs* either. A recomputing
+access point evaluates the closed form, so whatever that form reads becomes a
+requirement of every sweep that reads the corrector: the viscoelastic element's
+`Recompute()` Jacobian needs `stage_scaling(args.ctx)` and therefore a context,
+where its `Stored()` Jacobian reads the retained factorization and runs without
+one. The election is a construction-time choice with a call-time consequence,
+which is why it lives on the integrator rather than on the sweep.
 
 **The phase is a global barrier.** It must complete over the whole domain before
 any evaluation sweep begins. On a shared-memory engine that is one join; on a

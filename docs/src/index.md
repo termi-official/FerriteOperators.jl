@@ -64,32 +64,16 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, a
 end
 ```
 
-## The pipeline
+## The assembly strategy
 
-1. **Requests** encode *what a kernel computes* for one work item: the
-   residual, a Jacobian, a fused Jacobian+residual, a weighted Jacobian, or a
-   sensitivity (`∂F/∂θ`, adjoint pullbacks, `∂F/∂t`). Elements implement
-   request-typed kernels; solvers and operators speak in buffer-less request
-   *kinds*.
-2. **The assembly strategy** is the composition of three orthogonal axes:
-   the *operator form* ([`FullAssembly`](@ref) / [`ElementAssembly`](@ref) —
-   the MFEM assembly level), the *scheduling policy*
-   ([`SequentialScheduling`](@ref) / [`ColoredScheduling`](@ref) — how
-   parallel work is made race-safe), and the *device* (sequential CPU,
-   threaded via Polyester, GPUs in the future). The names
-   `SequentialAssemblyStrategy(device)`, `PerColorAssemblyStrategy(device)`
-   and `ElementAssemblyStrategy(device)` are convenience constructors for the
-   common compositions.
-3. **The scheme protocol** carries the setup-time declarations — slot names
-   and request kinds.
-4. **The assembly engine** ([`AssemblyEngine`](@ref)) holds the strategy, the
-   per-subdomain caches (workspaces + partitions), the dof handler, and the
-   protocol. Operators are a payload (matrix/vector) plus an engine plus their
-   integrator.
-5. **Workspaces** hold pre-allocated per-worker data: a fixed core of local
-   matrices and residuals, one state buffer per declared slot, the geometry
-   cache and the element caches — plus the sweep-state families the
-   declarations call for.
+Which machinery an operator is built on is one composite choice, and the three
+axes are orthogonal: the *operator form* ([`FullAssembly`](@ref) /
+[`ElementAssembly`](@ref) — the MFEM assembly level), the *scheduling policy*
+([`SequentialScheduling`](@ref) / [`ColoredScheduling`](@ref) — how parallel
+work is made race-safe), and the *device* (sequential CPU, threaded via
+Polyester). `SequentialAssemblyStrategy(device)`,
+`PerColorAssemblyStrategy(device)` and `ElementAssemblyStrategy(device)` are
+convenience constructors for the common compositions.
 
 All operator entry points funnel into one task body executed by a shared
 device loop:
@@ -97,12 +81,15 @@ device loop:
 ```
 for chunk in partition
     parfor item in chunk
-        reinit!(workspace, item)               # geometry cache
-        reinit_values!(element, item, kind)    # element values, once per sweep
+        reinit!(workspace, item)                # geometry cache
+        reinit_values!(cache, cell, kind)       # element values, once per sweep
         execute_single_task!(task, workspace)
     end
 end
 ```
+
+[The layer contract](devdocs/design.md) has the layer table that names who owns
+what along that path — requests, protocols, engines and workspaces included.
 
 ## Where to read on
 
@@ -117,6 +104,19 @@ end
   (experimental).
 - [Migrating from 0.3.x](migration.md) — the map from the old element and
   operator API to the current one.
+
+API reference:
+
+- [Element API reference](element-api.md) — the contracts an element cache
+  implements, and the request types its kernels take.
+- [Provided integrators and caches](provided-elements.md) — composition,
+  multi-domain routing, the AD decorator, the transfer prolongators.
+- [Example elements](example-elements.md) — the worked implementations in
+  `FerriteOperatorsExampleElements`.
+- [Operator API reference](operator-api.md) — the operator types and every
+  assembly, sensitivity and condensation entry point.
+- [Assembly engine API reference](engine-api.md) — kinds, drivers, strategies,
+  devices, workspaces and the quadrature layer.
 
 Developer documentation:
 

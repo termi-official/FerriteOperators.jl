@@ -67,7 +67,11 @@ struct FullAssembly{Spec} <: AbstractAssemblyForm
 end
 FullAssembly() = FullAssembly(StandardOperatorSpecification())
 
-"ELEMENT level: store per-element matrices; the operator acts matrix-free."
+"""
+ELEMENT level: store per-element matrices; the operator acts matrix-free.
+Single-field `DofHandler`s only — `EAVector`'s per-cell dof layout assumes one
+field per cell.
+"""
 struct ElementAssembly <: AbstractAssemblyForm end
 
 "ELEMENT level after setup: carries the per-element storage layout."
@@ -127,8 +131,33 @@ struct AssemblyStrategy{F <: AbstractAssemblyForm, S <: AbstractSchedulingPolicy
     device::D
 end
 
+"""
+    SequentialAssemblyStrategy(device)
+
+[`FullAssembly`](@ref) into a global matrix, scheduled by
+[`SequentialScheduling`](@ref) — one chunk, races resolved by the atomic
+scatter under a parallel `device`. The default composition, and the only one
+that admits [`global_dofs`](@ref) and the algebraic item family.
+"""
 SequentialAssemblyStrategy(device) = AssemblyStrategy(FullAssembly(), SequentialScheduling(), device)
+
+"""
+    PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream)
+
+[`FullAssembly`](@ref) scheduled by [`ColoredScheduling`](@ref): items of one
+color share no dof, so a color is a barrier a parallel `device` runs without
+atomics. `alg` is the Ferrite coloring algorithm.
+"""
 PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = AssemblyStrategy(FullAssembly(), ColoredScheduling(alg), device)
+
+"""
+    ElementAssemblyStrategy(device)
+
+[`ElementAssembly`](@ref) — element matrices kept per element instead of
+scattered into a global one (the matrix-free/partial-assembly level) — under
+[`SequentialScheduling`](@ref). Its per-element dof maps come from `celldofs`,
+so an element declaring [`global_dofs`](@ref) is rejected at setup.
+"""
 ElementAssemblyStrategy(device) = AssemblyStrategy(ElementAssembly(), SequentialScheduling(), device)
 
 function setup_operator_strategy_cache(strategy::AssemblyStrategy{ElementAssembly, <:AbstractSchedulingPolicy, <:AbstractCPUDevice}, integrator, dh)

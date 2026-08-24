@@ -139,35 +139,70 @@ function timed_relaxation_testbed(strategy, qrc, dims = (2, 2); params = TimedRe
     return (; op, dh, grid)
 end
 
+# The same element with its FUSED claim withheld, so `decorate_element_cache`
+# resolves it into `FusedFromSplit` BEFORE the AD decorator sees it. The θ/t
+# route then depends on the hook probes looking through both wrappers.
+struct SplitTimedRelaxationCache{C} <: FerriteOperators.AbstractVolumetricElementCache
+    inner::C
+end
+FerriteOperators.duplicate_for_device(device, c::SplitTimedRelaxationCache) =
+    SplitTimedRelaxationCache(FerriteOperators.duplicate_for_device(device, c.inner))
+FerriteOperators.reinit_values!(c::SplitTimedRelaxationCache, cell) = FerriteOperators.reinit_values!(c.inner, cell)
+FerriteOperators.reinit_values!(c::SplitTimedRelaxationCache, cell, kind) =
+    FerriteOperators.reinit_values!(c.inner, cell, kind)
+Ferrite.getnquadpoints(c::SplitTimedRelaxationCache) = getnquadpoints(c.inner)
+FerriteOperators.has_internal_state(::Type{<:SplitTimedRelaxationCache}) = true
+FerriteOperators.get_number_of_internal_dofs_per_element(m, c::SplitTimedRelaxationCache, sdh) =
+    FerriteOperators.get_number_of_internal_dofs_per_element(m, c.inner, sdh)
+FerriteOperators.condense_cell!(c::SplitTimedRelaxationCache, args, weights) =
+    FerriteOperators.condense_cell!(c.inner, args, weights)
+FerriteOperators.invalidate_correctors!(c::SplitTimedRelaxationCache) =
+    FerriteOperators.invalidate_correctors!(c.inner)
+FerriteOperators.provides_analytic(::Type{<:SplitTimedRelaxationCache}, ::JacobianKind{:u}) = true
+for R in (:ResidualRequest, :(JacobianRequest{:u, Consistent}))
+    @eval FerriteOperators.assemble_cell!(req::$R, c::SplitTimedRelaxationCache, args::CellArgs) =
+        FerriteOperators.assemble_cell!(req, c.inner, args)
+end
+FerriteOperators.local_conditions!(L, c::SplitTimedRelaxationCache, args::CellArgs) =
+    FerriteOperators.local_conditions!(L, c.inner, args)
+
+struct SplitTimedRelaxationIntegrator <: FerriteOperators.AbstractCondensedNonlinearIntegrator
+    inner::TimedRelaxationIntegrator
+end
+FerriteOperators.setup_element_cache(m::SplitTimedRelaxationIntegrator, sdh::SubDofHandler) =
+    SplitTimedRelaxationCache(FerriteOperators.setup_element_cache(m.inner, sdh))
+
 # The test-only wrapper pattern: everything of the power-law cache forwarded
-# EXCEPT its analytic `ParameterJacobianKind` claim, plus the local conditions
-# it never needed. The wrapper's ∂F/∂θ therefore has to come out of the
-# generic route, and the element it wraps is the reference for what that route
-# must produce.
-struct HiddenAnalyticCache{C} <: FerriteOperators.AbstractVolumetricElementCache
+# EXCEPT its analytic `ParameterJacobianKind` claim. `with_hook = true` supplies
+# the local conditions the element never needed, so the wrapper's ∂F/∂θ has to
+# come out of the generic route and the element it wraps is the reference for
+# what that route must produce; `with_hook = false` is the case the
+# admissibility rule must refuse, since no other branch applies either.
+struct ForwardingCache{with_hook, C} <: FerriteOperators.AbstractVolumetricElementCache
     inner::C
     ncalls::Base.RefValue{Int}
 end
-FerriteOperators.duplicate_for_device(device, c::HiddenAnalyticCache) =
-    HiddenAnalyticCache(FerriteOperators.duplicate_for_device(device, c.inner), c.ncalls)
-FerriteOperators.query_cell_parameters(c::HiddenAnalyticCache, cell, p) =
+ForwardingCache{h}(inner, ncalls) where {h} = ForwardingCache{h, typeof(inner)}(inner, ncalls)
+FerriteOperators.duplicate_for_device(device, c::ForwardingCache{h}) where {h} =
+    ForwardingCache{h}(FerriteOperators.duplicate_for_device(device, c.inner), c.ncalls)
+FerriteOperators.query_cell_parameters(c::ForwardingCache, cell, p) =
     FerriteOperators.query_cell_parameters(c.inner, cell, p)
-FerriteOperators.reinit_values!(c::HiddenAnalyticCache, cell) = FerriteOperators.reinit_values!(c.inner, cell)
-FerriteOperators.reinit_values!(c::HiddenAnalyticCache, cell, kind) = FerriteOperators.reinit_values!(c.inner, cell, kind)
-Ferrite.getnquadpoints(c::HiddenAnalyticCache) = getnquadpoints(c.inner)
-FerriteOperators.has_internal_state(::Type{<:HiddenAnalyticCache}) = true
-FerriteOperators.get_number_of_internal_dofs_per_element(m, c::HiddenAnalyticCache, sdh) =
+FerriteOperators.reinit_values!(c::ForwardingCache, cell) = FerriteOperators.reinit_values!(c.inner, cell)
+FerriteOperators.reinit_values!(c::ForwardingCache, cell, kind) = FerriteOperators.reinit_values!(c.inner, cell, kind)
+Ferrite.getnquadpoints(c::ForwardingCache) = getnquadpoints(c.inner)
+FerriteOperators.has_internal_state(::Type{<:ForwardingCache}) = true
+FerriteOperators.get_number_of_internal_dofs_per_element(m, c::ForwardingCache, sdh) =
     FerriteOperators.get_number_of_internal_dofs_per_element(m, c.inner, sdh)
-FerriteOperators.condense_cell!(c::HiddenAnalyticCache, args, weights) =
+FerriteOperators.condense_cell!(c::ForwardingCache, args, weights) =
     FerriteOperators.condense_cell!(c.inner, args, weights)
-FerriteOperators.invalidate_correctors!(c::HiddenAnalyticCache) = FerriteOperators.invalidate_correctors!(c.inner)
-FerriteOperators.provides_analytic(::Type{<:HiddenAnalyticCache}, ::JacobianKind{:u}) = true
-FerriteOperators.provides_analytic(::Type{<:HiddenAnalyticCache}, ::JacobianResidualKind) = true
+FerriteOperators.invalidate_correctors!(c::ForwardingCache) = FerriteOperators.invalidate_correctors!(c.inner)
+FerriteOperators.provides_analytic(::Type{<:ForwardingCache}, ::JacobianKind{:u}) = true
+FerriteOperators.provides_analytic(::Type{<:ForwardingCache}, ::JacobianResidualKind) = true
 for R in (:ResidualRequest, :(JacobianRequest{:u, Consistent}), :(JacobianResidualRequest{Consistent}))
-    @eval FerriteOperators.assemble_cell!(req::$R, c::HiddenAnalyticCache, args::CellArgs) =
+    @eval FerriteOperators.assemble_cell!(req::$R, c::ForwardingCache, args::CellArgs) =
         FerriteOperators.assemble_cell!(req, c.inner, args)
 end
-function FerriteOperators.local_conditions!(L, c::HiddenAnalyticCache, args::CellArgs)
+function FerriteOperators.local_conditions!(L, c::ForwardingCache{true}, args::CellArgs)
     mat = args.p === nothing ? c.inner.material_parameters : args.p
     cv, γ̃ = c.inner.cv, stage_scaling(args.ctx)
     c.ncalls[] += 1
@@ -179,43 +214,14 @@ function FerriteOperators.local_conditions!(L, c::HiddenAnalyticCache, args::Cel
     return L
 end
 
-struct HiddenAnalyticIntegrator{I} <: FerriteOperators.AbstractCondensedNonlinearIntegrator
+struct ForwardingIntegrator{with_hook, I} <: FerriteOperators.AbstractCondensedNonlinearIntegrator
     inner::I
     ncalls::Base.RefValue{Int}
 end
-FerriteOperators.setup_element_cache(m::HiddenAnalyticIntegrator, sdh::SubDofHandler) =
-    HiddenAnalyticCache(FerriteOperators.setup_element_cache(m.inner, sdh), m.ncalls)
-
-# The same wrapper WITHOUT the hook — the case the admissibility rule still
-# has to refuse, since neither of the other two branches applies either.
-struct NoHookCache{C} <: FerriteOperators.AbstractVolumetricElementCache
-    inner::C
-end
-FerriteOperators.duplicate_for_device(device, c::NoHookCache) =
-    NoHookCache(FerriteOperators.duplicate_for_device(device, c.inner))
-FerriteOperators.query_cell_parameters(c::NoHookCache, cell, p) =
-    FerriteOperators.query_cell_parameters(c.inner, cell, p)
-FerriteOperators.reinit_values!(c::NoHookCache, cell) = FerriteOperators.reinit_values!(c.inner, cell)
-FerriteOperators.reinit_values!(c::NoHookCache, cell, kind) = FerriteOperators.reinit_values!(c.inner, cell, kind)
-Ferrite.getnquadpoints(c::NoHookCache) = getnquadpoints(c.inner)
-FerriteOperators.has_internal_state(::Type{<:NoHookCache}) = true
-FerriteOperators.get_number_of_internal_dofs_per_element(m, c::NoHookCache, sdh) =
-    FerriteOperators.get_number_of_internal_dofs_per_element(m, c.inner, sdh)
-FerriteOperators.condense_cell!(c::NoHookCache, args, weights) =
-    FerriteOperators.condense_cell!(c.inner, args, weights)
-FerriteOperators.invalidate_correctors!(c::NoHookCache) = FerriteOperators.invalidate_correctors!(c.inner)
-FerriteOperators.provides_analytic(::Type{<:NoHookCache}, ::JacobianKind{:u}) = true
-FerriteOperators.provides_analytic(::Type{<:NoHookCache}, ::JacobianResidualKind) = true
-for R in (:ResidualRequest, :(JacobianRequest{:u, Consistent}), :(JacobianResidualRequest{Consistent}))
-    @eval FerriteOperators.assemble_cell!(req::$R, c::NoHookCache, args::CellArgs) =
-        FerriteOperators.assemble_cell!(req, c.inner, args)
-end
-
-struct NoHookIntegrator{I} <: FerriteOperators.AbstractCondensedNonlinearIntegrator
-    inner::I
-end
-FerriteOperators.setup_element_cache(m::NoHookIntegrator, sdh::SubDofHandler) =
-    NoHookCache(FerriteOperators.setup_element_cache(m.inner, sdh))
+ForwardingIntegrator{h}(inner, ncalls = Ref(0)) where {h} =
+    ForwardingIntegrator{h, typeof(inner)}(inner, ncalls)
+FerriteOperators.setup_element_cache(m::ForwardingIntegrator{h}, sdh::SubDofHandler) where {h} =
+    ForwardingCache{h}(FerriteOperators.setup_element_cache(m.inner, sdh), m.ncalls)
 
 @testset "Condensed element with a nonlinear local solve" begin
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
@@ -223,16 +229,10 @@ FerriteOperators.setup_element_cache(m::NoHookIntegrator, sdh::SubDofHandler) =
     mat      = NortonRelaxationParameters(κ = 1.0, α = 1.0, η = 1.0, n = 3.0)
 
     @testset "condense_internal! hits the root and the pure assembly is exact" begin
-        tb  = relaxation_testbed(strategy, qrc; material = mat)
-        op, dh, grid = tb.op, tb.dh, tb.grid
-        γ̃   = 0.5
-        ctx = TimeIntegrationContext(0.0, γ̃, γ̃)
-
         # A constant field has the same value at every quadrature point, so
         # every local problem has the same known root.
-        u = zeros(unknown_size(op)); view(u, 1:ndofs(dh)) .= 1.0
-        uprev = zeros(unknown_size(op))
-        states = condensed_states(u, uprev)
+        γ̃ = 0.5
+        (; op, dh, n, u, states, ctx) = relaxation_case(strategy, qrc; material = mat, field = 1.0, γ̃)
         r = zeros(residual_size(op))
 
         report = condense_internal!(op, states, nothing, ctx)
@@ -240,20 +240,14 @@ FerriteOperators.setup_element_cache(m::NoHookIntegrator, sdh::SubDofHandler) =
         evaluate!(op, r, states, nothing, ctx)   # pure: reads the q condense_internal! wrote
 
         qref = reference_internal_state(mat, 1.0, 0.0, γ̃)
-        q    = view(u, (ndofs(dh)+1):unknown_size(op))   # the [ū; q] tail write-back
+        q    = view(u, (ndofs(dh)+1):n)   # the [ū; q] tail write-back
         @test all(qi -> isapprox(qi, qref; atol = 1e-11), q)
         # ∇u ≡ 0, so the residual is the exchange term only and sums to α(u−q)|Ω|.
         @test sum(r) ≈ mat.α * (1.0 - qref) * 4.0 rtol = 1e-12
     end
 
     @testset "consistent tangent through the local solve" begin
-        tb = relaxation_testbed(strategy, qrc; material = mat)
-        op = tb.op
-        n  = unknown_size(tb.op)
-        u  = 0.3 .* sin.(0.7 .* (1:n))
-        uprev = zeros(n)
-        states = condensed_states(u, uprev)
-        ctx = TimeIntegrationContext(0.0, 0.4, 0.4)
+        (; op, states, ctx) = relaxation_case(strategy, qrc; material = mat)
 
         # check_derivatives condenses internally at every trial point it
         # probes, so the FD referee is a total — exactly what the analytic
@@ -267,26 +261,21 @@ FerriteOperators.setup_element_cache(m::NoHookIntegrator, sdh::SubDofHandler) =
     @testset "outer → inner: the requested tolerance changes local iteration counts" begin
         # A stiff local problem, so the iteration count is tolerance-sensitive.
         stiff = NortonRelaxationParameters(κ = 1.0, α = 1.0, η = 1.0, n = 3.0)
-        tb    = relaxation_testbed(strategy, qrc; material = stiff,
-                                   local_solver = LocalNewtonSettings(max_iterations = 40, tolerance = 1e-12))
-        op    = tb.op
-        n     = unknown_size(op)
-        uprev = zeros(n)
-        base  = TimeIntegrationContext(0.0, 1.0e3, 1.0e3)
+        case  = relaxation_case(strategy, qrc; material = stiff, field = 2.0, γ̃ = 1.0e3,
+                                local_solver = LocalNewtonSettings(max_iterations = 40, tolerance = 1e-12))
+        (; op, dh, n, uprev) = case
+        base = case.ctx
+        # Every solve starts from the same trial ū and an uncondensed q tail.
+        trial() = (v = zeros(n); view(v, 1:ndofs(dh)) .= 2.0; condensed_states(v, uprev))
 
-        u = zeros(n); view(u, 1:ndofs(tb.dh)) .= 2.0
-        tight = condense_internal!(op, condensed_states(u, uprev), nothing, base)
-
-        u2 = zeros(n); view(u2, 1:ndofs(tb.dh)) .= 2.0
-        loose = condense_internal!(op, condensed_states(u2, uprev), nothing, InexactLocalSolveContext(base, 1.0e-2))
-
+        tight = condense_internal!(op, trial(), nothing, base)
+        loose = condense_internal!(op, trial(), nothing, InexactLocalSolveContext(base, 1.0e-2))
         @test tight.solves == loose.solves
         @test loose.iterations < tight.iterations
         @test loose.worst_iterations < tight.worst_iterations
 
         # A requested tolerance tighter than the element's own floor is ignored.
-        u3 = zeros(n); view(u3, 1:ndofs(tb.dh)) .= 2.0
-        floored = condense_internal!(op, condensed_states(u3, uprev), nothing, InexactLocalSolveContext(base, 1.0e-30))
+        floored = condense_internal!(op, trial(), nothing, InexactLocalSolveContext(base, 1.0e-30))
         @test floored.iterations == tight.iterations
 
         # The decoration survives the framework's context handling.
@@ -296,23 +285,19 @@ FerriteOperators.setup_element_cache(m::NoHookIntegrator, sdh::SubDofHandler) =
         # ∂F/∂t of a time-independent element, through a custom context type —
         # the FD method condenses internally, so it needs no prior condensation.
         g = zeros(residual_size(op))
-        time_sensitivity!(g, op, condensed_states(u, uprev), nothing, InexactLocalSolveContext(base, 1.0e-2);
+        time_sensitivity!(g, op, case.states, nothing, InexactLocalSolveContext(base, 1.0e-2);
                           method = FiniteDifferenceSensitivity())
         @test norm(g) < 1e-8
     end
 
     @testset "inner → outer: the report aggregates per condensation and merges over workers" begin
-        tb  = relaxation_testbed(strategy, qrc; material = mat)
-        op  = tb.op
-        n   = unknown_size(op)
-        u   = 0.5 .* sin.(0.9 .* (1:n))
-        uprev = zeros(n)
-        ctx = TimeIntegrationContext(0.0, 1.0, 1.0)
+        spread = (material = mat, γ̃ = 1.0, amplitude = 0.5, frequency = 0.9)
+        (; op, grid, states, ctx) = relaxation_case(strategy, qrc; spread...)
 
         nqp    = getnquadpoints(first_element_cache(op))
-        ncells = getncells(tb.grid)
+        ncells = getncells(grid)
 
-        report = condense_internal!(op, condensed_states(u, uprev), nothing, ctx)
+        report = condense_internal!(op, states, nothing, ctx)
         @test report.solves == ncells * nqp
         @test report.iterations ≥ report.solves
         @test report.worst_iterations ≥ 1
@@ -323,31 +308,24 @@ FerriteOperators.setup_element_cache(m::NoHookIntegrator, sdh::SubDofHandler) =
         # Per-worker partials fold to the same totals under PolyesterDevice(2)
         # — CondensationReport is a monoid (& / + / max-with-argmax / max /
         # min componentwise), so this is a report merge, not a stats reset.
-        ptb = relaxation_testbed(PerColorAssemblyStrategy(PolyesterDevice(2)), qrc; material = mat)
-        pu  = 0.5 .* sin.(0.9 .* (1:unknown_size(ptb.op)))
-        puprev = zeros(unknown_size(ptb.op))
-        preport = condense_internal!(ptb.op, condensed_states(pu, puprev), nothing, ctx)
+        par = relaxation_case(PerColorAssemblyStrategy(PolyesterDevice(2)), qrc; spread...)
+        preport = condense_internal!(par.op, par.states, nothing, par.ctx)
         @test preport.solves == report.solves
         @test preport.iterations == report.iterations
         @test preport.converged == report.converged
     end
 
     @testset "non-convergence is reported as data, not thrown" begin
-        budget = LocalNewtonSettings(max_iterations = 2, tolerance = 1e-12)
-        tb  = relaxation_testbed(strategy, qrc; material = mat, local_solver = budget)
-        n   = unknown_size(tb.op)
-        uprev = zeros(n)
-        ctx = TimeIntegrationContext(0.0, 1.0e3, 1.0e3)
-
-        u = zeros(n); view(u, 1:ndofs(tb.dh)) .= 2.0
-        report = condense_internal!(tb.op, condensed_states(u, uprev), nothing, ctx)
+        stalled = (material = mat, field = 2.0, γ̃ = 1.0e3)
+        capped  = relaxation_case(strategy, qrc; stalled...,
+                                  local_solver = LocalNewtonSettings(max_iterations = 2, tolerance = 1e-12))
+        report = condense_internal!(capped.op, capped.states, nothing, capped.ctx)
         @test report.converged == false
         @test report.worst_iterations == 2
 
         # The same problem within the default budget converges.
-        tb2 = relaxation_testbed(strategy, qrc; material = mat)
-        u2  = zeros(n); view(u2, 1:ndofs(tb2.dh)) .= 2.0
-        report2 = condense_internal!(tb2.op, condensed_states(u2, uprev), nothing, ctx)
+        budgeted = relaxation_case(strategy, qrc; stalled...)
+        report2 = condense_internal!(budgeted.op, budgeted.states, nothing, budgeted.ctx)
         @test report2.converged
         @test report2.worst_iterations > 2
     end
@@ -356,76 +334,20 @@ end
 @testset "Condensation freshness" begin
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
-    mat      = NortonRelaxationParameters()
-
-    @testset "uncondensed Consistent Jacobian throws, naming the cell" begin
-        tb = relaxation_testbed(strategy, qrc; material = mat)
-        op = tb.op
-        n  = unknown_size(op)
-        u  = 0.3 .* sin.(0.7 .* (1:n))
-        uprev = zeros(n)
-        states = condensed_states(u, uprev)
-        ctx = TimeIntegrationContext(0.0, 0.4, 0.4)
-
-        # The residual reads whatever is in the q slot, so it does not throw —
-        # only a `Consistent` Jacobian read of the (unstamped) corrector does.
-        r = zeros(residual_size(op))
-        evaluate!(op, r, states, nothing, ctx)
-        @test_throws ArgumentError update_linearization!(op, r, states, nothing, ctx)
-
-        report = condense_internal!(op, states, nothing, ctx)
-        @test report.converged
-        update_linearization!(op, r, states, nothing, ctx)   # fine now
-    end
-
-    @testset "rollback_state! invalidates; commit_state! does not" begin
-        tb = relaxation_testbed(strategy, qrc; material = mat)
-        op = tb.op
-        n  = unknown_size(op)
-        u  = 0.3 .* sin.(0.7 .* (1:n))
-        uprev = zeros(n)
-        states = condensed_states(u, uprev)
-        ctx = TimeIntegrationContext(0.0, 0.4, 0.4)
-        r = zeros(residual_size(op))
-
-        condense_internal!(op, states, nothing, ctx)
-        update_linearization!(op, r, states, nothing, ctx)   # fine
-
-        committed = zeros(n)
-        rollback_state!(op, u, committed)
-        @test u == committed
-        @test_throws ArgumentError update_linearization!(op, r, states, nothing, ctx)
-
-        condense_internal!(op, states, nothing, ctx)
-        commit_state!(op, u, committed)
-        update_linearization!(op, r, states, nothing, ctx)   # commit does not invalidate
-    end
+    (; op, u, states, ctx) = relaxation_case(strategy, qrc; material = NortonRelaxationParameters())
+    check_freshness_contract(op, states, u, ctx)
 end
 
 @testset "FrozenQ election" begin
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
-    mat      = NortonRelaxationParameters()
-    tb = relaxation_testbed(strategy, qrc; material = mat)
-    op = tb.op
-    n  = unknown_size(op)
-    u  = 0.3 .* sin.(0.7 .* (1:n))
-    uprev = zeros(n)
-    states = condensed_states(u, uprev)
-    ctx = TimeIntegrationContext(0.0, 0.4, 0.4)
+    (; op, states, ctx) = relaxation_case(strategy, qrc; material = NortonRelaxationParameters())
     condense_internal!(op, states, nothing, ctx)
 
     @testset "refused at construction for the sensitivity kinds" begin
-        # ParameterJacobianKind/TimeSensitivityKind carry no type parameter at
-        # all — `{FrozenQ}` is an immediate type-application error, so there
-        # is no way to even write the election: `CorrectionMode` is a
-        # parameter these kinds structurally do not have. (ParameterVJPKind/
-        # StateJVPKind/StateVJPKind carry a PAYLOAD parameter instead — λ/v —
-        # which is not a CorrectionMode slot either, so the same "no such
-        # election" holds; it just isn't a `{FrozenQ}` type-application error
-        # for them specifically, since their one parameter is unconstrained.)
+        # `ParameterJacobianKind` carries no `CorrectionMode` parameter, so the
+        # election cannot even be written for it.
         @test_throws Exception FerriteOperators.ParameterJacobianKind{FerriteOperators.FrozenQ}
-        @test_throws Exception FerriteOperators.TimeSensitivityKind{FerriteOperators.FrozenQ}
     end
 
     @testset "accepted for the Newton matrix and produces the partial" begin
@@ -447,14 +369,10 @@ end
 @testset "Corrector election is a construction-time seam" begin
     qrc = QuadratureRuleCollection(2)
     mat = NortonRelaxationParameters()
-    vmat = MaxwellParameters()
 
-    @test SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q) isa FerriteOperators.AbstractCondensedNonlinearIntegrator
+    # Without a request an element elects `Stored()`; what the other election
+    # buys is pinned behaviourally below.
     @test FerriteOperators.corrector_election(SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q)) isa Stored
-    @test FerriteOperators.corrector_election(
-        SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q; corrector = Recompute())) isa Recompute
-    @test FerriteOperators.corrector_election(
-        SimpleCondensedLinearViscoelasticity(vmat, qrc, :u, :εᵛ; corrector = Recompute())) isa Recompute
 
     # An integrator serving only some elections rejects the rest through the
     # shared, self-naming helper.
@@ -470,35 +388,50 @@ end
 
     stored    = relaxation_testbed(strategy, qrc; material = mat)
     recompute = relaxation_testbed(strategy, qrc; material = mat, corrector = Recompute())
-
-    # Structural: the recomputing cache allocates neither corrector store.
-    scache = first_element_cache(stored.op).inner
-    rcache = first_element_cache(recompute.op).inner
-    @test scache.correctors isa FerriteOperators.ItemStates
-    @test rcache.correctors === nothing
-    @test rcache.param_correctors === nothing
-
-    n = unknown_size(stored.op)
+    n  = unknown_size(stored.op)
     us = 0.3 .* sin.(0.6 .* (1:n)); ur = copy(us)
     uprev = zeros(n)
+
+    # The viscoelastic element makes the same election over a retained Mandel
+    # factorization instead of a scalar slope, and it is the same arithmetic
+    # there too — `A` is a closed form in the `ℂ` and `γ̃` the kernel already
+    # has.
+    vstored    = visco_testbed(strategy, qrc)
+    vrecompute = visco_testbed(strategy, qrc; corrector = Recompute())
+    m  = unknown_size(vstored.op)
+    vs = 1.0e-3 .* sin.(0.4 .* (1:m)); vr = copy(vs)
+    vprev = zeros(m)
+
+    @testset "$name" for (name, sop, rop, utrial, urecomputed, uzero, p, c) in (
+        ("power-law relaxation", stored.op, recompute.op, us, ur, uprev, mat, ctx),
+        ("linear viscoelasticity", vstored.op, vrecompute.op, vs, vr, vprev, nothing,
+         TimeIntegrationContext(0.0, 0.5, 0.5)),
+    )
+        # Structural: the recomputing cache allocates no corrector store.
+        @test element_cache_under_decoration(sop).correctors isa FerriteOperators.ItemStates
+        @test element_cache_under_decoration(rop).correctors === nothing
+
+        ss = condensed_states(utrial, uzero); sr = condensed_states(urecomputed, uzero)
+        rs = condense_internal!(sop, ss, p, c)
+        rr = condense_internal!(rop, sr, p, c)
+        @test rs.converged && rr.converged
+        @test rs.iterations == rr.iterations
+        @test utrial == urecomputed                  # the same trial q in the tail
+
+        # The recomputed slopes are the SAME arithmetic on the same converged
+        # pair — the closed-form `∂R/∂q` at `(u, q)` — so the assembled
+        # matrices agree bitwise, not merely to round-off.
+        Ks = zeros(residual_size(sop)); Kr = similar(Ks)
+        update_linearization!(sop, Ks, ss, p, c)
+        update_linearization!(rop, Kr, sr, p, c)
+        @test sop.J.nzval == rop.J.nzval
+        @test Ks == Kr
+    end
+
+    # Only the power-law element carries a parameter corrector, so the ∂F/∂θ
+    # half of the election is its alone.
+    @test element_cache_under_decoration(recompute.op).param_correctors === nothing
     ss = condensed_states(us, uprev); sr = condensed_states(ur, uprev)
-
-    rs = condense_internal!(stored.op, ss, mat, ctx)
-    rr = condense_internal!(recompute.op, sr, mat, ctx)
-    @test rs.converged && rr.converged
-    @test rs.iterations == rr.iterations
-    @test us == ur                                   # the same trial q in the tail
-
-    # The recomputed slopes are the SAME arithmetic on the same converged pair
-    # — the closed-form `∂R/∂q` at `(u, q)` — so the assembled matrices agree
-    # bitwise, not merely to round-off.
-    Ks = zeros(residual_size(stored.op)); Kr = similar(Ks)
-    update_linearization!(stored.op, Ks, ss, mat, ctx)
-    update_linearization!(recompute.op, Kr, sr, mat, ctx)
-    @test stored.op.J.nzval == recompute.op.J.nzval
-    @test Ks == Kr
-
-    # …and so does the parameter Jacobian, which reads the other corrector.
     nθ = length(parameter_vector(mat))
     Bs = zeros(residual_size(stored.op), nθ); Br = similar(Bs)
     update_parameter_jacobian!(Bs, stored.op, ss, mat, ctx)
@@ -510,42 +443,13 @@ end
     @test res.passed
     @test res.checks.jacobian.passed
     @test res.checks.parameter_jacobian.passed
-
-    # The viscoelastic element makes the same election over a retained Mandel
-    # factorization instead of a scalar slope, and it is the same arithmetic
-    # there too — `A` is a closed form in the `ℂ` and `γ̃` the kernel already
-    # has.
-    vstored    = visco_testbed(strategy, qrc)
-    vrecompute = visco_testbed(strategy, qrc; corrector = Recompute())
-    @test first_element_cache(vstored.op).inner.correctors isa FerriteOperators.ItemStates
-    @test first_element_cache(vrecompute.op).inner.correctors === nothing
-
-    m = unknown_size(vstored.op)
-    vs = 1.0e-3 .* sin.(0.4 .* (1:m)); vr = copy(vs)
-    vprev = zeros(m)
-    vctx = TimeIntegrationContext(0.0, 0.5, 0.5)
-    condense_internal!(vstored.op, condensed_states(vs, vprev), nothing, vctx)
-    condense_internal!(vrecompute.op, condensed_states(vr, vprev), nothing, vctx)
-    @test vs == vr
-    rvs = zeros(residual_size(vstored.op)); rvr = similar(rvs)
-    update_linearization!(vstored.op, rvs, condensed_states(vs, vprev), nothing, vctx)
-    update_linearization!(vrecompute.op, rvr, condensed_states(vr, vprev), nothing, vctx)
-    @test vstored.op.J.nzval == vrecompute.op.J.nzval
-    @test rvs == rvr
 end
 
 @testset "Recompute() freshness: the q contract survives, the corrector class does not" begin
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
-    mat      = NortonRelaxationParameters()
-    ctx      = TimeIntegrationContext(0.0, 0.4, 0.4)
-
-    tb = relaxation_testbed(strategy, qrc; material = mat, corrector = Recompute())
-    op = tb.op
-    n  = unknown_size(op)
-    u  = 0.3 .* sin.(0.7 .* (1:n))
-    uprev  = zeros(n)
-    states = condensed_states(u, uprev)
+    (; op, n, u, states, ctx) = relaxation_case(strategy, qrc;
+                                                material = NortonRelaxationParameters(), corrector = Recompute())
     r = zeros(residual_size(op))
 
     # There is no corrector store to be unstamped, so an uncondensed
@@ -586,10 +490,8 @@ end
     # for it (q's dofs are internal to the cell) — so it is exercised at the
     # kernel level, the supported way to unit-test a kernel without an
     # operator (elements.md, "Unit-testing a kernel").
-    qrc  = QuadratureRuleCollection(2)
+    (; dh, qrc) = scalar_quad_testbed((1, 1))
     integ = SimpleCondensedPowerLawRelaxation(NortonRelaxationParameters(), qrc, :u, :q)
-    grid = generate_grid(Quadrilateral, (1, 1))
-    dh   = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
     sdh  = dh.subdofhandlers[1]
     cache = FerriteOperators.setup_element_cache(integ, sdh)
 
@@ -631,14 +533,9 @@ end
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     mat      = NortonRelaxationParameters(κ = 1.3, α = 0.8, η = 1.4, n = 2.5)
-    tb  = relaxation_testbed(strategy, qrc, (2, 2); material = mat)
-    op, dh, grid = tb.op, tb.dh, tb.grid
+    (; op, dh, grid, u, uprev, states, ctx) =
+        relaxation_case(strategy, qrc; material = mat, frequency = 0.6)
     ivh = op.engine.ivh
-    n   = unknown_size(op)
-    u   = 0.3 .* sin.(0.6 .* (1:n))
-    uprev  = zeros(n)
-    states = condensed_states(u, uprev)
-    ctx = TimeIntegrationContext(0.0, 0.4, 0.4)
     condense_internal!(op, states, mat, ctx)
 
     Kq = allocate_internal_jacobian(op)
@@ -647,7 +544,7 @@ end
 
     # Dense hand-rolled reference: the per-cell kernel output scattered by
     # (celldofs, internal range) — the assembly the sweep automates.
-    cache = first_element_cache(op).inner
+    cache = element_cache_under_decoration(op)
     cc    = Ferrite.CellCache(dh)
     nd    = ndofs_per_cell(dh.subdofhandlers[1])
     ref   = zeros(residual_size(op), ndofs(ivh))
@@ -664,17 +561,7 @@ end
     # The pattern carries exactly the cell-local couplings and nothing else.
     @test nnz(Kq) == getncells(grid) * nd * getnquadpoints(cache.cv)
 
-    # The block is the ∂F/∂q of the residual, so it differences the residual
-    # w.r.t. the tail — the property a Schur-complement consumer relies on.
-    h = 1e-6
-    rp = zeros(residual_size(op)); rm = zeros(residual_size(op))
-    for j in (1, ndofs(ivh))
-        up = copy(u); up[residual_size(op)+j] += h
-        evaluate!(op, rp, condensed_states(up, uprev), mat, ctx)
-        um = copy(u); um[residual_size(op)+j] -= h
-        evaluate!(op, rm, condensed_states(um, uprev), mat, ctx)
-        @test Vector(Kq[:, j]) ≈ (rp .- rm) ./ 2h rtol = 1e-6
-    end
+    check_internal_jacobian_columns(Kq, op, u, uprev, mat, ctx)
 
     # A non-condensed operator has no column space for it.
     vdh = DofHandler(generate_grid(Quadrilateral, (2, 2)))
@@ -690,20 +577,15 @@ end
 @testset "q as a slot" begin
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
-    mat      = NortonRelaxationParameters()
-    tb = relaxation_testbed(strategy, qrc; material = mat)
-    op, dh = tb.op, tb.dh
-    n  = unknown_size(op)
-    u  = zeros(n); view(u, 1:ndofs(dh)) .= 1.0
-    uprev = zeros(n)
-    ctx = TimeIntegrationContext(0.0, 0.5, 0.5)
+    (; op, dh, grid, n, u, states, ctx) =
+        relaxation_case(strategy, qrc; material = NortonRelaxationParameters(), field = 1.0, γ̃ = 0.5)
 
-    condense_internal!(op, condensed_states(u, uprev), nothing, ctx)
+    condense_internal!(op, states, nothing, ctx)
     qtail = view(u, (ndofs(dh)+1):n)
 
     # InternalSource gathers exactly the cell's internal_variable_range.
     ivh = op.engine.ivh
-    for cellid in 1:getncells(tb.grid)
+    for cellid in 1:getncells(grid)
         range = internal_variable_range(ivh, cellid)
         gathered = u[range]
         @test gathered == qtail[range .- ndofs(dh)]
@@ -718,7 +600,7 @@ end
         params = TimedRelaxationParameters(α = 0.8, τ = 1.3)
         tb = timed_relaxation_testbed(strategy, qrc; params)
         op = tb.op
-        cache = first_element_cache(op).inner
+        cache = element_cache_under_decoration(op)
         n = unknown_size(op)
         u = 0.3 .* sin.(0.6 .* (1:n))
         uprev  = zeros(n)
@@ -750,16 +632,62 @@ end
         @test norm(g) > 1e-3
     end
 
+    @testset "a split-analytic condensed element keeps its θ/t route" begin
+        params = TimedRelaxationParameters(α = 0.8, τ = 1.3)
+        ctx = TimeIntegrationContext(0.7, 0.4, 0.4)
+        ref = timed_relaxation_testbed(strategy, qrc; params)
+
+        dh = scalar_quad_testbed((2, 2)).dh
+        split_op = setup_operator(strategy,
+            SplitTimedRelaxationIntegrator(TimedRelaxationIntegrator(params, qrc, :u)),
+            dh; slots = (:u, :q, :qprev))
+
+        # Both wrappers are really there — the θ/t hook sits two levels down.
+        outer = first_element_cache(split_op)
+        @test outer isa ADElementCache
+        @test outer.inner isa FusedFromSplit
+        @test FerriteOperators.provides_analytic(typeof(outer), ParameterJacobianKind())
+        @test FerriteOperators.provides_analytic(typeof(outer), TimeSensitivityKind())
+
+        n = unknown_size(ref.op)
+        u_ref = 0.3 .* sin.(0.6 .* (1:n)); u_split = copy(u_ref)
+        uprev = zeros(n)
+        s_ref = condensed_states(u_ref, uprev); s_split = condensed_states(u_split, uprev)
+        condense_internal!(ref.op, s_ref, params, ctx)
+        condense_internal!(split_op, s_split, params, ctx)
+        @test u_ref ≈ u_split
+
+        nθ = length(parameter_vector(params))
+        Bref = zeros(residual_size(ref.op), nθ); Bsplit = similar(Bref)
+        update_parameter_jacobian!(Bref, ref.op, s_ref, params, ctx)
+        update_parameter_jacobian!(Bsplit, split_op, s_split, params, ctx)
+        @test Bsplit ≈ Bref rtol = 1e-10
+        @test norm(Bsplit[:, 2]) > 1e-3   # the correction the hook supplies
+
+        gref = zeros(residual_size(ref.op)); gsplit = similar(gref)
+        time_sensitivity!(gref, ref.op, s_ref, params, ctx)
+        time_sensitivity!(gsplit, split_op, s_split, params, ctx)
+        @test gsplit ≈ gref rtol = 1e-10
+        @test norm(gsplit) > 1e-3
+
+        # The fused Jacobian+residual request runs the two split kernels back
+        # to back, so the split operator's linearization matches too.
+        rref = zeros(residual_size(ref.op)); rsplit = similar(rref)
+        update_linearization!(ref.op, rref, s_ref, params, ctx)
+        update_linearization!(split_op, rsplit, s_split, params, ctx)
+        @test rsplit ≈ rref rtol = 1e-12
+        @test Matrix(split_op.J) ≈ Matrix(ref.op.J) rtol = 1e-12
+    end
+
     @testset "hidden analytic kernels: the hook reproduces what they compute" begin
         mat = NortonRelaxationParameters(κ = 1.3, α = 0.8, η = 1.4, n = 2.5)
         ctx = TimeIntegrationContext(0.0, 0.4, 0.4)
         ref = relaxation_testbed(strategy, qrc; material = mat)
 
         counter = Ref(0)
-        grid = generate_grid(Quadrilateral, (2, 2))
-        dh = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
+        dh = scalar_quad_testbed((2, 2)).dh
         hidden_op = setup_operator(strategy,
-            HiddenAnalyticIntegrator(SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q), counter),
+            ForwardingIntegrator{true}(SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q), counter),
             dh; slots = (:u, :q, :qprev))
 
         n = unknown_size(ref.op)
@@ -790,15 +718,14 @@ end
         @test_throws ArgumentError parameter_vjp!(zeros(nθ), ref.op, λ, s_ref, mat, ctx)
     end
 
-    @testset "neither analytic kernels nor the hook: today's rejection, unchanged" begin
+    @testset "neither analytic kernels nor the hook: the parameter kinds stay refused" begin
         # The power-law cache wrapped WITHOUT `local_conditions!`: the frozen-q
-        # AD partial is all the decorator could produce, so the parameter kinds
-        # stay refused with the message they have always carried.
+        # AD partial is all the decorator can produce, so the parameter kinds
+        # are refused with a message naming every route that would admit them.
         mat = NortonRelaxationParameters()
-        grid = generate_grid(Quadrilateral, (2, 2))
-        dh = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
+        dh = scalar_quad_testbed((2, 2)).dh
         op = setup_operator(strategy,
-            NoHookIntegrator(SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q)),
+            ForwardingIntegrator{false}(SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q)),
             dh; slots = (:u, :q, :qprev))
         n = unknown_size(op)
         states = condensed_states(0.1 .* sin.(1:n), zeros(n))
@@ -808,7 +735,7 @@ end
         err = @test_throws ArgumentError update_parameter_jacobian!(
             zeros(residual_size(op), 3), op, states, mat, ctx)
         msg = err.value.msg
-        @test occursin("NoHookCache carries condensed internal state", msg)
+        @test occursin("ForwardingCache carries condensed internal state", msg)
         @test occursin("would compute only the frozen-q partial, missing the ∂F/∂q·dq/d· correction", msg)
         @test occursin("implement the analytic `assemble_cell!` kernel", msg)
         @test occursin("declare `internal_state_insensitive`", msg)
@@ -822,19 +749,12 @@ end
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     mat      = NortonRelaxationParameters(κ = 1.3, α = 0.8, η = 1.4, n = 2.5)
-    tb = relaxation_testbed(strategy, qrc; material = mat)
-    op = tb.op
-    n  = unknown_size(op)
-    u  = 0.3 .* sin.(0.6 .* (1:n))
-    uprev = zeros(n)
-    states = condensed_states(u, uprev)
-    ctx = TimeIntegrationContext(0.0, 0.4, 0.4)
+    (; op, states, ctx) = relaxation_case(strategy, qrc; material = mat, frequency = 0.6)
 
-    # A condensed cache with a corrector store, migrated to serve
-    # ParameterJacobianKind analytically — inadmissible before the phase
-    # (AD-from-residual through a local solve), generic-shaped now: the
-    # partial (∂F/∂θ|_q, from the pure residual) plus ∂F/∂q·dq/dθ, dq/dθ
-    # computed and stored by `condense_cell!` alongside dq/du.
+    # A condensed cache with a corrector store serving ParameterJacobianKind
+    # analytically: the partial (∂F/∂θ|_q, from the pure residual) plus
+    # ∂F/∂q·dq/dθ, dq/dθ computed and stored by `condense_cell!` alongside
+    # dq/du.
     θ = collect(parameter_vector(mat))
     nθ = length(θ)
     B = zeros(residual_size(op), nθ)

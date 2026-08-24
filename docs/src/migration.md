@@ -293,11 +293,36 @@ local problems](elements.md)).
 - Admissibility with internal state is per cache and per kind: analytic
   kernel, `internal_state_insensitive` declaration, or FD — never a silent
   wrong adjoint, never a blanket rejection.
+- **Elements with global dofs**: `global_dofs(integrator, sdh)` appends dofs
+  that belong to no cell — an RVE's macroscopic strain, a lumped pressure — to
+  the local system as `[celldofs(cell); global dofs]`, resolved through
+  `global_dof_range`. Everything the engine sizes follows the declaration, AD
+  seeds included; the coupling's sparsity is declared on the operator
+  specification (see [Elements with global dofs](elements.md#Elements-with-global-dofs)).
+- **Facet items**: `facet_items` + `setup_facet_item_cache` give a term
+  supported on a facet *set* its own traversal instead of the per-cell
+  `is_facet_in_cache` gate, over the same `assemble_facet!` kernels — a change
+  of declaration, not an element rewrite — and unlike the fused route those
+  contributions enter the sensitivity sweeps.
+- **Algebraic items**: `algebraic_items` + `setup_algebraic_cache` +
+  `assemble_algebraic!` carry terms with no mesh support at all (0D circulation
+  rows, lumped balances) as first-class items of the same operator.
+- **Operator specifications**: `FullAssembly(spec)` decides what the global
+  matrix *is* — `StandardOperatorSpecification` for the monolithic
+  `SparseMatrixCSC`, `BlockedOperatorSpecification` for a `BlockMatrix` whose
+  block type the caller names (CSR blocks, fieldwise preconditioners). Both
+  take the `algebraic_couplings` and `constraint_handler` pattern declarations.
+- **∂F/∂q as a target**: `allocate_internal_jacobian(op)` +
+  `update_internal_jacobian!(Kq, op, states, p, ctx)` hand a Schur-complement
+  consumer the rectangular residual × internal-dof block, which is neither a
+  slot Jacobian nor part of the square system matrix.
+- **Condensation on algebraic items**: `condense_algebraic!` eliminates an
+  algebraic item's own internal state through the same `condense_internal!`
+  sweep and the same `[ū | q_cells | q_items]` tail as a condensed cell.
 - **Transfer operators are an experimental surface**: `setup_transfer_operator`,
-  `setup_nested_transfer_operator` and their operator types are scheduled to be
-  folded into the unified assembly engine and may change in a minor release.
-  Port against them if you need them today — the assembled matrix and its
-  sparsity are contract — but expect the constructors to move.
+  `setup_nested_transfer_operator` and their operator types may change in a
+  minor release. Port against them if you need them today — the assembled
+  matrix and its sparsity are contract — but expect the constructors to move.
 
 ## Porting checklist
 

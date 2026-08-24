@@ -120,9 +120,8 @@ Construct via [`setup_transfer_operator`](@ref) and update via [`update_operator
 apply the operator (matrix-vector product).
 
 !!! warning "Experimental surface"
-    Transfer operators are scheduled to be folded into the unified assembly
-    engine. The constructors and the operator types may change in a minor
-    release; the assembled matrix and its sparsity are not affected.
+    The transfer constructors and operator types may change in a minor release;
+    the assembled matrix and its sparsity are not affected.
 """
 @concrete struct TransferFerriteOperator
     P
@@ -133,12 +132,7 @@ apply the operator (matrix-vector product).
     integrator
 end
 
-"""
-    update_operator!(op::TransferFerriteOperator, p)
-
-Reassemble the rectangular transfer matrix `op.P` from scratch.
-"""
-function update_operator!(op::TransferFerriteOperator, p)
+function _reassemble_transfer!(op, p)
     (; P, strategy, subdomain_caches) = op
 
     n_row = maximum(sc -> ndofs_per_cell(sc.domain.sdh_row), subdomain_caches; init = 0)
@@ -151,6 +145,13 @@ function update_operator!(op::TransferFerriteOperator, p)
 
     return op
 end
+
+"""
+    update_operator!(op::TransferFerriteOperator, p)
+
+Reassemble the rectangular transfer matrix `op.P` from scratch.
+"""
+update_operator!(op::TransferFerriteOperator, p) = _reassemble_transfer!(op, p)
 
 mul!(out::AbstractVector, op::TransferFerriteOperator, x::AbstractVector) =
     mul!(out, op.P, x)
@@ -175,9 +176,8 @@ coarse DofHandlers live on different grids connected via `fine2coarse` mappings.
 Construct via [`setup_nested_transfer_operator`](@ref); update via [`update_operator!`](@ref).
 
 !!! warning "Experimental surface"
-    Transfer operators are scheduled to be folded into the unified assembly
-    engine. The constructors and the operator types may change in a minor
-    release; the assembled matrix and its sparsity are not affected.
+    The transfer constructors and operator types may change in a minor release;
+    the assembled matrix and its sparsity are not affected.
 """
 @concrete struct NestedTransferFerriteOperator
     P
@@ -188,19 +188,7 @@ Construct via [`setup_nested_transfer_operator`](@ref); update via [`update_oper
     integrator
 end
 
-function update_operator!(op::NestedTransferFerriteOperator, p)
-    (; P, strategy, subdomain_caches) = op
-
-    n_row = maximum(sc -> ndofs_per_cell(sc.domain.sdh_row), subdomain_caches; init = 0)
-    n_col = maximum(sc -> ndofs_per_cell(sc.domain.sdh_col), subdomain_caches; init = 0)
-    assembler = start_assemble(P; fillzero = true, maxcelldofs_hint = max(n_row, n_col))
-
-    task = AssembleTransferTerm(assembler, p)
-
-    execute_on_subdomains!(task, strategy, subdomain_caches)
-
-    return op
-end
+update_operator!(op::NestedTransferFerriteOperator, p) = _reassemble_transfer!(op, p)
 
 mul!(out::AbstractVector, op::NestedTransferFerriteOperator, x::AbstractVector) =
     mul!(out, op.P, x)

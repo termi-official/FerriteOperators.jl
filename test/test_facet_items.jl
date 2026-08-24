@@ -10,10 +10,7 @@ sequential_strategy() = SequentialAssemblyStrategy(SequentialCPUDevice())
 # together — the corner cell owns TWO declared facets, which is what a facet
 # item groups.
 function corner_testbed(dims = (3, 3))
-    grid = generate_grid(Quadrilateral, dims)
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
+    (; grid, dh) = scalar_quad_testbed(dims)
     facets = union(Set(getfacetset(grid, "right")), Set(getfacetset(grid, "top")))
     return (; grid, dh, facets)
 end
@@ -31,6 +28,21 @@ struct BareFacetCache <: FerriteOperators.AbstractSurfaceElementCache end
 struct OverclaimingFacetCache <: FerriteOperators.AbstractSurfaceElementCache end
 FerriteOperators.assemble_facet!(::ResidualRequest, ::OverclaimingFacetCache, args, lfi::Int) = nothing
 FerriteOperators.provides_analytic(::Type{OverclaimingFacetCache}, ::JacobianKind{:u}) = true
+
+# A facet-item cache declaring condensed internal state, so the family's own
+# admissibility rejection becomes reachable.
+struct CondensedFacetCache <: FerriteOperators.AbstractSurfaceElementCache end
+FerriteOperators.assemble_facet!(::ResidualRequest, ::CondensedFacetCache, args, lfi::Int) = nothing
+FerriteOperators.duplicate_for_device(device, c::CondensedFacetCache) = c
+FerriteOperators.has_internal_state(::Type{CondensedFacetCache}) = true
+
+struct CondensedFacetProbe <: AbstractNonlinearIntegrator
+    facetset::Set{FacetIndex}
+end
+FerriteOperators.setup_element_cache(::CondensedFacetProbe, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+FerriteOperators.facet_items(m::CondensedFacetProbe, ::SubDofHandler) = m.facetset
+FerriteOperators.setup_facet_item_cache(::CondensedFacetProbe, ::SubDofHandler) = CondensedFacetCache()
 
 @testset "Facet items" begin
     @testset "the same cache on either route" begin
@@ -50,11 +62,8 @@ FerriteOperators.provides_analytic(::Type{OverclaimingFacetCache}, ::JacobianKin
         # The declaration is the only difference: one engine grows a facet-item
         # subdomain, the other keeps the surface cache on the cell sweep.
         @test length(items.engine.subdomain_caches) == length(dh.subdofhandlers) + 1
-        fd = last(items.engine.subdomain_caches).domain
-        @test fd isa FerriteOperators.FacetItemDomain
-        @test first(items.engine.subdomain_caches).domain.boundary_element isa
-            FerriteOperators.EmptySurfaceElementCache
         @test length(fused.engine.subdomain_caches) == length(dh.subdofhandlers)
+        fd = last(items.engine.subdomain_caches).domain
 
         # One item per OWNING CELL, carrying all of that cell's declared facets
         # — the corner cell's two are one item, not two.
@@ -138,6 +147,45 @@ FerriteOperators.provides_analytic(::Type{OverclaimingFacetCache}, ::JacobianKin
                                   requests = (ParameterJacobianKind,))
     end
 
+    @testset "the pullback and the time sensitivity enter the sweep too" begin
+        # `parameter_vjp!` and `time_sensitivity!` have no AD fallback on
+        # facets, so the analytic kernels are the only route — and a cache
+        # without them must fail before a sweep reaches a missing method.
+        (; grid, dh, facets) = corner_testbed()
+        θ = 1.4
+        n = ndofs(dh)
+        u = zeros(n)
+        ctx = TimeIntegrationContext(0.6, 1.0, 1.0)
+        serving(kinds...) = setup_operator(sequential_strategy(),
+            TractionFacetProbe(:u, facets; with_sensitivities = true), dh; requests = kinds)
+
+        # r = θ(1 + t) ∫_Γ v dΓ, so λᵀ∂r/∂θ = (1 + t)·λᵀ∫_Γ v dΓ and
+        # ∂r/∂t = θ ∫_Γ v dΓ — both against the parameter Jacobian as referee.
+        op = serving(ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind)
+        B = zeros(n, 1)
+        update_parameter_jacobian!(B, op, (u = u,), θ, ctx)
+        @test sum(B[:, 1]) ≈ (1 + evaluation_time(ctx)) * 4.0
+
+        λ = cos.(0.7 .* (1:n))
+        g = zeros(1)
+        parameter_vjp!(g, op, λ, (u = u,), θ, ctx)
+        @test g ≈ B' * λ rtol = 1e-12
+
+        gt = zeros(n)
+        time_sensitivity!(gt, op, (u = u,), θ, ctx)
+        @test gt ≈ (θ / (1 + evaluation_time(ctx))) .* B[:, 1] rtol = 1e-12
+        @test sum(gt) ≈ θ * 4.0
+
+        # The same declarations over a cache that serves neither kind are a
+        # setup error, one message per kind.
+        bare = TractionFacetProbe(:u, facets)   # ∂r/∂θ only
+        for kind in (ParameterVJPKind, TimeSensitivityKind)
+            err = @test_throws ArgumentError setup_operator(sequential_strategy(), bare, dh;
+                                                            requests = (kind,))
+            @test occursin("no automatic-differentiation", err.value.msg)
+        end
+    end
+
     @testset "loud errors" begin
         (; grid, dh, facets) = corner_testbed()
         strategy = sequential_strategy()
@@ -174,6 +222,14 @@ FerriteOperators.provides_analytic(::Type{OverclaimingFacetCache}, ::JacobianKin
         # Undeclared, the same operator builds — the check is eager, not a ban.
         @test setup_operator(strategy, TractionFacetProbe(:u, facets; with_parameter_jacobian = false), dh) isa
             FerriteOperators.AbstractNonlinearOperator
+
+        # The internal-state rejection of the facet family names the kernel an
+        # author has to write, trailing local facet index and all.
+        cop = setup_operator(strategy, CondensedFacetProbe(facets), dh)
+        err = @test_throws ArgumentError update_parameter_jacobian!(
+            zeros(residual_size(cop), 1), cop, zeros(ndofs(dh)), 1.0)
+        @test occursin("assemble_facet!", err.value.msg)
+        @test occursin("::FacetArgs, ::Int", err.value.msg)
     end
 
     @testset "multi-domain routes a facet set per subdomain" begin

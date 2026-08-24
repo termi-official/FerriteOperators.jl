@@ -4,12 +4,33 @@
 
 using FerriteOperators
 using FerriteOperatorsExampleElements
+using Test
 
 # The per-worker workspace and the element cache the engine holds for the first
-# subdomain. Assertions reaching for these read engine internals; the two
-# spellings live here so the tests that need them read the same way.
+# subdomain. Assertions reaching for these read engine internals; the spellings
+# live here so the tests that need them read the same way.
 first_workspace(op) = first(first(op.engine.subdomain_caches).device_cache)
 first_element_cache(op) = first(op.engine.subdomain_caches).domain.element
+
+"The element cache the engine holds, looked through its AD decoration."
+element_cache_under_decoration(op) = first_element_cache(op).inner
+
+"Whether `op`'s per-worker workspaces carry sensitivity buffers at all."
+carries_sensitivity_buffers(op) = first_workspace(op).sensitivity !== nothing
+
+####################################
+## Scalar-field testbed on a quadrilateral grid
+####################################
+# Grid, DofHandler, quadrature collection and sequential strategy of the scalar
+# Q1-on-quads problem most test files stand an operator on.
+function scalar_quad_testbed(dims = (4, 3); order = 2)
+    grid = generate_grid(Quadrilateral, dims)
+    dh   = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    return (; grid, dh, n = ndofs(dh), qrc = QuadratureRuleCollection(order),
+              strategy = SequentialAssemblyStrategy(SequentialCPUDevice()))
+end
 
 # Compressible Neo-Hookean strain energy, the material the bundled
 # hyperelasticity integrator is exercised with.
@@ -194,57 +215,72 @@ FerriteOperators.setup_facet_item_cache(m::FacetItemProbe, sdh::SubDofHandler) =
 ####################################
 ## Parameter-scaled facet traction — the facet-item sensitivity double
 ####################################
-# r(v) = θ ∫_Γ v dΓ over the declared facets, plus the ANALYTIC ∂r/∂θ a facet
-# sensitivity sweep needs — facet kernels have no AD fallback, so the cache
-# serves the request itself or the term cannot be differentiated at all.
-# `with_parameter_jacobian = false` drops that kernel; declaring
-# `ParameterJacobianKind` over it is what setup must reject.
+# r(v) = θ·a(t) ∫_Γ v dΓ over the declared facets, with a(t) = 1 + t through the
+# context (and a(t) ≡ 1 where a sweep carries none), plus the ANALYTIC ∂r/∂θ,
+# λᵀ∂r/∂θ and ∂r/∂t a facet sensitivity sweep needs — facet kernels have no AD
+# fallback, so the cache serves each request itself or the term cannot be
+# differentiated at all. `with_parameter_jacobian = false` drops the ∂r/∂θ
+# kernel and `with_sensitivities = false` the other two; declaring the matching
+# kind over a cache that dropped it is what setup must reject.
 
-struct TractionFacetCache{with_parameter_jacobian, FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+struct TractionFacetCache{with_parameter_jacobian, with_sensitivities, FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
     fv::FV
 end
-TractionFacetCache{wpj}(fv) where {wpj} = TractionFacetCache{wpj, typeof(fv)}(fv)
+TractionFacetCache{wpj, ws}(fv) where {wpj, ws} = TractionFacetCache{wpj, ws, typeof(fv)}(fv)
 
-struct TractionFacetProbe{with_parameter_jacobian} <: AbstractNonlinearIntegrator
+struct TractionFacetProbe{with_parameter_jacobian, with_sensitivities} <: AbstractNonlinearIntegrator
     field_name::Symbol
     facetset::Set{FacetIndex}
 end
-TractionFacetProbe(field_name, facetset; with_parameter_jacobian = true) =
-    TractionFacetProbe{with_parameter_jacobian}(field_name, facetset)
+TractionFacetProbe(field_name, facetset; with_parameter_jacobian = true, with_sensitivities = false) =
+    TractionFacetProbe{with_parameter_jacobian, with_sensitivities}(field_name, facetset)
 
 FerriteOperators.setup_element_cache(::TractionFacetProbe, ::SubDofHandler) =
     FerriteOperators.EmptyVolumetricElementCache()
 FerriteOperators.facet_items(m::TractionFacetProbe, ::SubDofHandler) = m.facetset
-function FerriteOperators.setup_facet_item_cache(m::TractionFacetProbe{wpj}, sdh::SubDofHandler) where {wpj}
+function FerriteOperators.setup_facet_item_cache(m::TractionFacetProbe{wpj, ws}, sdh::SubDofHandler) where {wpj, ws}
     ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
     ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
     fqr    = FacetQuadratureRule{Ferrite.getrefshape(ip)}(2)
-    return TractionFacetCache{wpj}(FacetValues(fqr, ip, ip_geo))
+    return TractionFacetCache{wpj, ws}(FacetValues(fqr, ip, ip_geo))
 end
-FerriteOperators.duplicate_for_device(device, c::TractionFacetCache{wpj}) where {wpj} =
-    TractionFacetCache{wpj}(FerriteOperators.duplicate_for_device(device, c.fv))
+FerriteOperators.duplicate_for_device(device, c::TractionFacetCache{wpj, ws}) where {wpj, ws} =
+    TractionFacetCache{wpj, ws}(FerriteOperators.duplicate_for_device(device, c.fv))
 
-function FerriteOperators.assemble_facet!(req::ResidualRequest, c::TractionFacetCache, args::FacetArgs, lfi::Int)
+_traction_amplitude(::Nothing) = 1.0
+_traction_amplitude(ctx) = 1.0 + evaluation_time(ctx)
+
+# One quadrature loop for every request: which buffer it fills and by what
+# integrand is decided on the request TYPE, so the branches fold away per kernel.
+function _traction_facet!(req, c::TractionFacetCache, args::FacetArgs, lfi::Int)
     reinit!(c.fv, args.cell, lfi)
+    a = _traction_amplitude(args.ctx)
     for qp in 1:getnquadpoints(c.fv)
         dΓ = getdetJdV(c.fv, qp)
         for i in 1:getnbasefunctions(c.fv)
-            req.r[i] += args.p * shape_value(c.fv, qp, i) * dΓ
+            Nᵢ = shape_value(c.fv, qp, i) * dΓ
+            req isa ResidualRequest          && (req.r[i] += args.p * a * Nᵢ)
+            req isa ParameterJacobianRequest && (req.B[i, 1] += a * Nᵢ)
+            req isa ParameterVJPRequest      && (req.g[1] += a * Nᵢ * req.λₑ[i])
+            req isa TimeSensitivityRequest   && (req.g[i] += args.p * Nᵢ)
         end
     end
+    return nothing
 end
+
+FerriteOperators.assemble_facet!(req::ResidualRequest, c::TractionFacetCache, args::FacetArgs, lfi::Int) =
+    _traction_facet!(req, c, args, lfi)
 
 FerriteOperators.provides_analytic(::Type{<:TractionFacetCache{true}}, ::FerriteOperators.ParameterJacobianKind) = true
-function FerriteOperators.assemble_facet!(req::ParameterJacobianRequest, c::TractionFacetCache{true}, args::FacetArgs, lfi::Int)
-    reinit!(c.fv, args.cell, lfi)
-    for qp in 1:getnquadpoints(c.fv)
-        dΓ = getdetJdV(c.fv, qp)
-        for i in 1:getnbasefunctions(c.fv)
-            req.B[i, 1] += shape_value(c.fv, qp, i) * dΓ
-        end
-    end
-    return req.B
-end
+FerriteOperators.assemble_facet!(req::ParameterJacobianRequest, c::TractionFacetCache{true}, args::FacetArgs, lfi::Int) =
+    _traction_facet!(req, c, args, lfi)
+
+FerriteOperators.provides_analytic(::Type{<:TractionFacetCache{<:Any, true}},
+                                   ::Union{FerriteOperators.ParameterVJPKind, FerriteOperators.TimeSensitivityKind}) = true
+FerriteOperators.assemble_facet!(req::ParameterVJPRequest, c::TractionFacetCache{<:Any, true}, args::FacetArgs, lfi::Int) =
+    _traction_facet!(req, c, args, lfi)
+FerriteOperators.assemble_facet!(req::TimeSensitivityRequest, c::TractionFacetCache{<:Any, true}, args::FacetArgs, lfi::Int) =
+    _traction_facet!(req, c, args, lfi)
 
 ####################################
 ## Condensed-viscoelasticity testbed
@@ -287,6 +323,79 @@ function relaxation_testbed(strategy, qrc, dims = (2, 2);
     integrator = SimpleCondensedPowerLawRelaxation(material, qrc, :u, :q; local_solver, corrector)
     op = setup_operator(strategy, integrator, dh; slots = (:u, :q, :qprev), kwargs...)
     return (; op, dh, grid)
+end
+
+"""
+    relaxation_case(strategy, qrc, dims = (2, 2); t, γ̃, field, amplitude, frequency, kwargs...)
+
+[`relaxation_testbed`](@ref) plus the trial point the condensed-solver tests
+stand on: a smooth `u` over the whole unknown vector (or a `field`-valued `ū`
+with a zero q tail, the shape whose local problems all share one known root), a
+zero `uprev`, their states NamedTuple and a stage context of scaling `γ̃` at
+time `t`. `kwargs` reach the testbed's integrator configuration.
+"""
+function relaxation_case(strategy, qrc, dims = (2, 2); t = 0.0, γ̃ = 0.4, field = nothing,
+                         amplitude = 0.3, frequency = 0.7, kwargs...)
+    tb = relaxation_testbed(strategy, qrc, dims; kwargs...)
+    n  = unknown_size(tb.op)
+    u  = zeros(n)
+    if field === nothing
+        u .= amplitude .* sin.(frequency .* (1:n))
+    else
+        view(u, 1:ndofs(tb.dh)) .= field
+    end
+    uprev = zeros(n)
+    return (; op = tb.op, dh = tb.dh, grid = tb.grid, n, u, uprev,
+              states = condensed_states(u, uprev), ctx = TimeIntegrationContext(t, γ̃, γ̃))
+end
+
+"""
+    check_freshness_contract(op, states, u, ctx; names = nothing)
+
+The corrector freshness contract of a `Stored()` operator, in four steps: the
+residual reads whatever the `q` slot holds and does not throw on an unstamped
+corrector, a `Consistent` Jacobian does (naming `names`, if given),
+`rollback_state!` invalidates a stamped corrector, and `commit_state!` does not.
+Leaves `op` condensed and linearized at `states`.
+"""
+function check_freshness_contract(op, states, u, ctx; names = nothing)
+    r = zeros(residual_size(op))
+    evaluate!(op, r, states, nothing, ctx)
+    err = @test_throws ArgumentError update_linearization!(op, r, states, nothing, ctx)
+    names === nothing || @test occursin(names, err.value.msg)
+
+    condense_internal!(op, states, nothing, ctx)
+    update_linearization!(op, r, states, nothing, ctx)      # fine now
+
+    committed = zeros(length(u))
+    rollback_state!(op, u, committed)
+    @test u == committed
+    @test_throws ArgumentError update_linearization!(op, r, states, nothing, ctx)
+
+    condense_internal!(op, states, nothing, ctx)
+    commit_state!(op, u, committed)
+    update_linearization!(op, r, states, nothing, ctx)      # commit does not invalidate
+    return nothing
+end
+
+"""
+    check_internal_jacobian_columns(Kq, op, u, uprev, p, ctx; columns)
+
+The assembled ∂F/∂q block differences the residual w.r.t. the internal tail —
+the property a Schur-complement consumer relies on. Central differences of the
+named `columns` against `Kq`.
+"""
+function check_internal_jacobian_columns(Kq, op, u, uprev, p, ctx; columns = (1, size(Kq, 2)))
+    h = 1e-6
+    rp = zeros(residual_size(op)); rm = zeros(residual_size(op))
+    for j in columns
+        up = copy(u); up[residual_size(op) + j] += h
+        evaluate!(op, rp, condensed_states(up, uprev), p, ctx)
+        um = copy(u); um[residual_size(op) + j] -= h
+        evaluate!(op, rm, condensed_states(um, uprev), p, ctx)
+        @test Vector(Kq[:, j]) ≈ (rp .- rm) ./ 2h rtol = 1e-6
+    end
+    return nothing
 end
 
 ####################################
@@ -541,9 +650,11 @@ if isdefined(Ferrite, :AlgebraicVariable)
     # `analytic` picks whether the algebraic cache provides the Jacobian kernel
     # or leaves it to AD; `coupled` whether the cell term touches `p1` at all,
     # an uncoupled cell term declaring no global dofs and therefore admitting
-    # a colored partition.
+    # a colored partition; `reads_du` whether the 0D rows read the `:du` slot,
+    # which makes a slot reconstruction over the item's dofs observable in the
+    # residual instead of only in the workspace buffer.
 
-    struct ReservoirIntegrator{analytic, coupled} <: AbstractNonlinearIntegrator
+    struct ReservoirIntegrator{analytic, coupled, reads_du} <: AbstractNonlinearIntegrator
         order::Int
         field_name::Symbol
         variable_names::Tuple{Symbol, Symbol}
@@ -551,10 +662,10 @@ if isdefined(Ferrite, :AlgebraicVariable)
         conductances::Vector{Float64}
         sources::Vector{Float64}
     end
-    ReservoirIntegrator(; analytic = true, coupled = true, order = 2, field_name = :u,
+    ReservoirIntegrator(; analytic = true, coupled = true, reads_du = false, order = 2, field_name = :u,
                         variable_names = (:p1, :p2), α = 0.7,
                         conductances = [1.5, -0.4], sources = [0.25, 0.6]) =
-        ReservoirIntegrator{analytic, coupled}(order, field_name, variable_names, α, conductances, sources)
+        ReservoirIntegrator{analytic, coupled, reads_du}(order, field_name, variable_names, α, conductances, sources)
 
     struct ReservoirCellCache{CV} <: AbstractVolumetricElementCache
         cv::CV
@@ -623,8 +734,9 @@ if isdefined(Ferrite, :AlgebraicVariable)
 
     # The 0D rows. Item `k` exchanges between `p₁` and `p₂` with a cubic
     # characteristic and a parameter-scaled source, so the kernel needs both the
-    # item's index and the sweep's parameter.
-    struct ReservoirItemCache{analytic}
+    # item's index and the sweep's parameter. Under `reads_du` the rate of `p₁`
+    # enters the exchange as well.
+    struct ReservoirItemCache{analytic, reads_du}
         conductances::Vector{Float64}
         sources::Vector{Float64}
     end
@@ -633,15 +745,19 @@ if isdefined(Ferrite, :AlgebraicVariable)
         [[only(algebraic_dofs(dh, m.variable_names[1])), only(algebraic_dofs(dh, m.variable_names[2]))]
          for _ in eachindex(m.conductances)]
 
-    FerriteOperators.setup_algebraic_cache(m::ReservoirIntegrator{analytic}, dh::DofHandler) where {analytic} =
-        ReservoirItemCache{analytic}(m.conductances, m.sources)
+    FerriteOperators.setup_algebraic_cache(m::ReservoirIntegrator{analytic, coupled, reads_du},
+                                           dh::DofHandler) where {analytic, coupled, reads_du} =
+        ReservoirItemCache{analytic, reads_du}(m.conductances, m.sources)
 
     FerriteOperators.duplicate_for_device(device, c::ReservoirItemCache) = c
+
+    _reservoir_rate(::ReservoirItemCache{<:Any, false}, args) = zero(eltype(args.states.u))
+    _reservoir_rate(::ReservoirItemCache{<:Any, true}, args) = args.states.du[1]
 
     function FerriteOperators.assemble_algebraic!(req::ResidualRequest, c::ReservoirItemCache, args::AlgebraicArgs)
         k    = args.item.index
         Δ    = args.states.u[1] - args.states.u[2]
-        flux = c.conductances[k] * Δ^3 - args.p * c.sources[k]
+        flux = c.conductances[k] * Δ^3 - args.p * c.sources[k] + _reservoir_rate(c, args)
         req.r[1] += flux
         req.r[2] -= flux
     end

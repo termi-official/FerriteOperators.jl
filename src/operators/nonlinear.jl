@@ -199,8 +199,8 @@ Matrix-free action of the state Jacobian: `Jv = (∂F/∂u)·v` at the trial
 state, computed kernel-level (one directional-Dual sweep per cell for the AD
 fallback; analytic [`StateJVPRequest`](@ref) kernels win per cache) — no
 matrix is materialized anywhere. Never writes back into the caller's state.
-Restricted to operators without condensed unknowns for now
-(`unknown_size == residual_size`).
+Requires an operator without condensed unknowns
+(`unknown_size(op) == residual_size(op)`); anything else is an `ArgumentError`.
 """
 function state_jvp!(Jv::AbstractVector, op::LinearizedFerriteOperator, v::AbstractVector, states::NamedTuple, p, ctx)
     unknown_size(op) == residual_size(op) || throw(ArgumentError(
@@ -223,8 +223,8 @@ state_jvp!(Jv::AbstractVector, op::LinearizedFerriteOperator, v::AbstractVector,
 Matrix-free pullback of the state Jacobian: `g = (∂F/∂u)ᵀλ` at the trial
 state — the action adjoint time stepping applies. Kernel-level (per-cell
 gradient of `λₑ·rₑ` for the AD fallback; analytic [`StateVJPRequest`](@ref)
-kernels win per cache). Never writes back into the caller's state. Restricted
-to operators without condensed unknowns for now.
+kernels win per cache). Never writes back into the caller's state. Requires an
+operator without condensed unknowns, like [`state_jvp!`](@ref).
 """
 function state_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, states::NamedTuple, p, ctx)
     unknown_size(op) == residual_size(op) || throw(ArgumentError(
@@ -343,5 +343,17 @@ Base.eltype(op::LinearizedFerriteOperator) = eltype(op.J)
 Base.size(op::LinearizedFerriteOperator) = size(op.J)
 Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)
 
+"""
+    residual_size(op) -> Int
+    unknown_size(op) -> Int
+
+The two lengths an operator's entry points size their arguments by:
+`residual_size` is the number of FE dofs (rows of `F`, length of a residual or
+adjoint vector), `unknown_size` adds the condensed internal tail
+(`[ū; q]`, length of a solution vector). They coincide exactly when the
+operator carries no condensed element.
+"""
 residual_size(op::LinearizedFerriteOperator) = ndofs(op.engine.dh)
+
+@doc (@doc residual_size)
 unknown_size(op::LinearizedFerriteOperator)  = ndofs(op.engine.dh) + ndofs(op.engine.ivh)

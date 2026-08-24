@@ -73,7 +73,18 @@ end
 Ferrite.cellid(tc::SameGridCellCache)      = tc.cellid
 Ferrite.getnodes(tc::SameGridCellCache)    = tc.nodes
 Ferrite.getcoordinates(tc::SameGridCellCache) = tc.coords
+"""
+    getrowdofs(tc) -> Vector{Int}
+    getcolumndofs(tc) -> Vector{Int}
+
+The two dof vectors of a transfer cell cache, in the order the rectangular
+element matrix is indexed: rows from the test-space (row) DofHandler, columns
+from the trial-space (column) one. For a nested cache the rows are the fine
+cell's dofs and the columns the parent coarse cell's.
+"""
 getrowdofs(tc::SameGridCellCache)  = tc.rdofs
+
+@doc (@doc getrowdofs)
 getcolumndofs(tc::SameGridCellCache) = tc.cdofs
 
 duplicate_for_device(device::AbstractCPUDevice, tc::SameGridCellCache) = SameGridCellCache(tc.dh_row, tc.dh_col)
@@ -256,7 +267,17 @@ Ferrite.cellid(tc::NestedGridCellCache)              = tc.fine_cellid
 coarse_cellid(tc::NestedGridCellCache)       = tc.coarse_cellid
 get_fine_nodes(tc::NestedGridCellCache)      = tc.fine_nodes
 get_coarse_nodes(tc::NestedGridCellCache)    = tc.coarse_nodes
+"""
+    get_fine_coordinates(tc) -> Vector{<:Vec}
+    get_coarse_coordinates(tc) -> Vector{<:Vec}
+
+The node coordinates of the current fine cell and of its parent coarse cell,
+the two geometries a nested transfer kernel maps between. Both are refreshed by
+`Ferrite.reinit!` on the [`NestedGridCellCache`](@ref).
+"""
 get_fine_coordinates(tc::NestedGridCellCache)   = tc.fine_coords
+
+@doc (@doc get_fine_coordinates)
 get_coarse_coordinates(tc::NestedGridCellCache) = tc.coarse_coords
 getrowdofs(tc::NestedGridCellCache)          = tc.fine_dofs
 getcolumndofs(tc::NestedGridCellCache)       = tc.coarse_dofs

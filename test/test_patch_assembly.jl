@@ -137,12 +137,7 @@ function reference_patch_columns!(sink, provider, pid, cache, dh, u, p, ncols)
 end
 
 @testset "Patch assembly" begin
-    grid = generate_grid(Quadrilateral, (4, 4))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    qrc = QuadratureRuleCollection(2)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; grid, dh, qrc, strategy) = scalar_quad_testbed((4, 4))
 
     # two overlapping interior patches plus one touching the boundary
     cellsets = [[1, 2, 5, 6], [6, 7, 10, 11], [13, 14]]
@@ -195,9 +190,7 @@ end
         op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
         u = zeros(ndofs(dh))
         @test_throws DimensionMismatch assemble_patch_matrices!([zeros(1, 1)], op, provider, u, nothing)
-        odh = DofHandler(generate_grid(Quadrilateral, (2, 2)))
-        add!(odh, :u, Lagrange{RefQuadrilateral, 1}())
-        close!(odh)
+        odh = scalar_quad_testbed((2, 2)).dh
         foreign = PatchItems(odh.subdofhandlers[1], [[1]])
         dest = [zeros(patch_ndofs(foreign, 1), patch_ndofs(foreign, 1))]
         @test_throws ArgumentError assemble_patch_matrices!(dest, op, foreign, u, nothing)

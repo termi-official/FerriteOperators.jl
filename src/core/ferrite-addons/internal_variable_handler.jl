@@ -82,26 +82,3 @@ Ferrite.close!(lvh::InternalVariableHandler) = nothing
 
 # Offsets are shared read-only data, so duplication just returns the same instance.
 duplicate_for_device(device, ivh::InternalVariableHandler) = ivh
-
-# # Utils to distribute and visualize local variables
-# struct QuadratureInterpolation{RefShape, QR <: QuadratureRule{RefShape}} <:
-#        Ferrite.ScalarInterpolation{RefShape, -1}
-#     qr::QR
-# end
-
-# Ferrite.getnbasefunctions(ip::QuadratureInterpolation) = getnquadpoints(ip.qr)
-# Ferrite.n_components(ip::QuadratureInterpolation) = 1
-# Ferrite.n_dbc_components(::QuadratureInterpolation) = 0
-# Ferrite.adjust_dofs_during_distribution(::QuadratureInterpolation) = false
-# Ferrite.volumedof_interior_indices(ip::QuadratureInterpolation) =
-#     ntuple(i->i, getnbasefunctions(ip))
-# # conformity is only used for VTK export and updating the constraint handler. This is not needed since the internal variables are not constrained.
-# Ferrite.conformity(::QuadratureInterpolation) = Ferrite.L2Conformity()
-
-# function Ferrite.reference_coordinates(ip::QuadratureInterpolation)
-#     return [qp for i = 1:ip.num_components for qp in getpoints(ip.qr)]
-# end
-
-# function Ferrite.reference_shape_value(ip::QuadratureInterpolation, ::Vec, i::Int)
-#     throw(ArgumentError("shape function evaluation for interpolation $ip not implemented yet"))
-# end

@@ -4,12 +4,11 @@
 #
 # A term restricted to a facet SET gets its own item family instead of riding
 # the cell sweep: one work item is one owning cell together with all of that
-# cell's declared facets, and the declared set IS the traversal. The fused
-# route (`boundary_kernel!`) stays exactly as it is — both coexist, and
-# which one a term takes is a declaration, not an element rewrite: the kernels
-# are the same `assemble_facet!(req, cache, args::FacetArgs, lfi)` methods over
-# the same [`FacetArgs`](@ref), and one surface cache serves either route
-# unchanged.
+# cell's declared facets, and the declared set IS the traversal. It coexists
+# with the fused route (`boundary_kernel!`), and which one a term takes is a
+# declaration rather than an element rewrite: the kernels are the same
+# `assemble_facet!(req, cache, args::FacetArgs, lfi)` methods over the same
+# [`FacetArgs`](@ref), and one surface cache serves either route.
 #
 # The element-facing half of the family (`facet_items`,
 # `setup_facet_item_cache`) lives with the other element contracts, in
@@ -226,12 +225,11 @@ function sensitivity_facet_item_sweep!(kind, task, ws)
     return nothing
 end
 
-# A facet functional would reduce a surface integral over the declared set —
-# an additive capability of its own (a `evaluate_facet_functional` hook next to
-# `evaluate_cell_functional`), not something the volumetric reduction can
-# stand in for. Until it exists the family contributes nothing, so
-# `evaluate_functional` over an operator carrying facet items keeps summing the
-# cell contributions alone.
+# A facet functional is a surface integral over the declared set, which needs
+# a facet hook of its own next to `evaluate_cell_functional`; the volumetric
+# reduction cannot stand in for it. The family therefore contributes nothing,
+# and `evaluate_functional` over an operator carrying facet items sums the cell
+# contributions alone.
 execute_kind!(::FunctionalKind, task, ws::FacetItemWorkspace) = nothing
 
 # Condensed internal state on facet items is not supported: `q` is per owning
@@ -305,13 +303,13 @@ automatic-differentiation fallback, so there is nothing behind a missing
 sensitivity kernel to compute the term — unlike a volumetric cache, whose
 [`ADElementCache`](@ref) decoration would serve it from the residual.
 
-The probes run against [`_display_cache_type`](@ref), the type an author would
-have written the kernel on: a decorator's forwarding methods answer `hasmethod`
-for everyone and would make every probe pass vacuously.
+The probes run against [`unwrap`](@ref), the type an author would have written
+the kernel on: a decorator's forwarding methods answer `hasmethod` for everyone
+and would make every probe pass vacuously.
 """
 function validate_facet_item_cache(cache, declared_requests::Tuple = ())
     T = typeof(cache)
-    D = _display_cache_type(T)
+    D = unwrap(T)
     hasmethod(assemble_facet!, Tuple{ResidualRequest, D, FacetArgs, Int}) || throw(ArgumentError(
         "$(T) implements no `assemble_facet!(::ResidualRequest, ::$(nameof(D)), ::FacetArgs, " *
         "::Int)` method. The residual kernel is mandatory on the facet-item route, as it is " *

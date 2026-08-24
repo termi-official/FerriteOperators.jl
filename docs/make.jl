@@ -19,7 +19,9 @@ makedocs(;
         size_threshold = nothing,
         size_threshold_warn = nothing,
     ),
-    warnonly=true,
+    # Broken `@ref`s are fatal; the remaining checks (missing docstrings above
+    # all) stay warnings.
+    warnonly = Documenter.except(:cross_references),
     pages=[
         "Home" => "index.md",
         "Writing elements" => "elements.md",

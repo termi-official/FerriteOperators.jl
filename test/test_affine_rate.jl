@@ -15,14 +15,7 @@ function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::TransientD
 end
 
 @testset "AffineRate slots" begin
-    grid = generate_grid(Quadrilateral, (4, 3))
-    dh   = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    qrc = QuadratureRuleCollection(2)
-    n   = ndofs(dh)
-
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    (; dh, n, qrc, strategy) = scalar_quad_testbed()
     op = setup_operator(strategy, TransientDiffusionIntegrator(qrc, :u), dh; slots = (:u, :du))
 
     # Reference mass and stiffness from the bundled bilinear integrators.
