@@ -268,17 +268,65 @@ struct FacetArgs{States <: NamedTuple, Cell, P, Ctx}
     ctx::Ctx
 end
 
+"""
+    AlgebraicItem(index, dofs)
+
+The item an algebraic kernel is positioned on: its `index` into the
+[`algebraic_items`](@ref) declaration, and the global `dofs` its local system
+maps onto. This is the whole geometry an item of this family has — a cache
+serving several 0D rows selects its model by `args.item.index`.
+"""
+struct AlgebraicItem{D <: AbstractVector{Int}}
+    index::Int
+    dofs::D
+end
+
+"""
+    AlgebraicArgs(states, item, p, ctx)
+
+The argument bundle an algebraic kernel's third parameter receives — the
+[`CellArgs`](@ref) analogue with the [`AlgebraicItem`](@ref) where the geometry
+cache sits.
+
+| field | owner / lifetime |
+|---|---|
+| `states` | the engine; one item-local slot buffer per slot declared at setup, refreshed every sweep |
+| `item` | the engine; the [`AlgebraicItem`](@ref) the sweep stands on — READ-ONLY for kernels |
+| `p` | the cache; the item-local parameter view from [`query_cell_parameters`](@ref), queried on the item |
+| `ctx` | the solver; the per-sweep scalars — the [`TimeIntegrationContext`](@ref), or `nothing` for stationary sweeps |
+
+Kernels select on the `(request, cache)` pair, never on `args`, so annotating
+the parameter (`args::AlgebraicArgs`) is permitted. This record shares no
+supertype with `CellArgs`/`FacetArgs`: a cell kernel and an algebraic kernel
+never meet at the same dispatch site.
+
+Hand-constructing an instance is the supported way to unit-test a kernel
+without an operator:
+
+    args = AlgebraicArgs((u = uₑ,), AlgebraicItem(1, [17]), p, nothing)
+    assemble_algebraic!(ResidualRequest(rₑ), cache, args)
+"""
+struct AlgebraicArgs{States <: NamedTuple, I, P, Ctx}
+    states::States
+    item::I
+    p::P
+    ctx::Ctx
+end
+
 "Rebuild `args` with the slot buffers replaced."
 with_states(args::CellArgs, states::NamedTuple) = CellArgs(states, args.cell, args.p, args.ctx)
 with_states(args::FacetArgs, states::NamedTuple) = FacetArgs(states, args.cell, args.p, args.ctx)
+with_states(args::AlgebraicArgs, states::NamedTuple) = AlgebraicArgs(states, args.item, args.p, args.ctx)
 
 "Rebuild `args` with the element-local parameter view replaced."
 with_parameters(args::CellArgs, p) = CellArgs(args.states, args.cell, p, args.ctx)
 with_parameters(args::FacetArgs, p) = FacetArgs(args.states, args.cell, p, args.ctx)
+with_parameters(args::AlgebraicArgs, p) = AlgebraicArgs(args.states, args.item, p, args.ctx)
 
 "Rebuild `args` with the per-sweep context replaced — the ∂F/∂t seeding seam."
 with_context(args::CellArgs, ctx) = CellArgs(args.states, args.cell, args.p, ctx)
 with_context(args::FacetArgs, ctx) = FacetArgs(args.states, args.cell, args.p, ctx)
+with_context(args::AlgebraicArgs, ctx) = AlgebraicArgs(args.states, args.item, args.p, ctx)
 
 """
     assemble_cell!(req::AbstractAssemblyRequest, cache, args)
@@ -431,12 +479,16 @@ is `false`, so a downstream kind opts in.
 """
 requires_admissibility_check(kind) = false
 
-function _assert_trait_backed(T, kind)
+# The trait ↔ kernel check, over the kernel entry point and args record of the
+# item family the cache belongs to: `assemble_cell!`/`CellArgs` for a
+# volumetric cache, `assemble_algebraic!`/`AlgebraicArgs` for an algebraic one.
+_assert_trait_backed(T, kind) = _assert_trait_backed(T, kind, assemble_cell!, CellArgs)
+function _assert_trait_backed(T, kind, entry, ::Type{Args}) where {Args}
     ReqT = request_type(kind)
-    if provides_analytic(T, kind) && !hasmethod(assemble_cell!, Tuple{ReqT, T, CellArgs})
+    if provides_analytic(T, kind) && !hasmethod(entry, Tuple{ReqT, T, Args})
         throw(ArgumentError(
             "$(T) declares `provides_analytic` for $(typeof(kind)) but implements no " *
-            "matching `assemble_cell!(::$(ReqT), ::$(nameof(T)), ::CellArgs)` method."))
+            "matching `$(nameof(entry))(::$(ReqT), ::$(nameof(T)), ::$(nameof(Args)))` method."))
     end
     return nothing
 end

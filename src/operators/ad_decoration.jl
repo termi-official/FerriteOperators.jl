@@ -36,7 +36,7 @@ _needs_fused_from_split(::Type{T}) where {T} =
 _maybe_fuse_split(cache) = _needs_fused_from_split(typeof(cache)) ? FusedFromSplit(cache) : cache
 
 """
-    decorate_element_cache(cache, sdh, ad_backend)
+    decorate_element_cache(cache, sdh, ad_backend, n_global_dofs = 0)
 
 Resolve `cache` into the form the engine calls unconditionally:
 [`FusedFromSplit`](@ref) where it provides split analytic kernels but not the
@@ -46,21 +46,26 @@ coverage of some AD-decorator kind. `ad_backend === nothing` opts out of the
 its non-analytic inners as ONE sub-composite (the maximal-sub-composite
 policy) — wrapping each individually costs one full seeding pass per inner,
 worse than not wrapping at all once two or more need it.
+
+`n_global_dofs` is the subdomain's [`global_dofs`](@ref) count and pads the AD
+buffers, so an AD fallback differentiates the augmented local system rather
+than its field-space head.
 """
-function decorate_element_cache(cache, sdh, ad_backend)
+function decorate_element_cache(cache, sdh, ad_backend, n_global_dofs::Int = 0)
     fused = _maybe_fuse_split(cache)
     ad_backend === nothing && return fused
-    return fully_analytic(typeof(fused)) ? fused : ADElementCache(fused, sdh; backend = ad_backend)
+    return fully_analytic(typeof(fused)) ? fused :
+        ADElementCache(fused, sdh; backend = ad_backend, n_global_dofs)
 end
 
-function decorate_element_cache(cache::CompositeVolumetricElementCache, sdh, ad_backend)
+function decorate_element_cache(cache::CompositeVolumetricElementCache, sdh, ad_backend, n_global_dofs::Int = 0)
     inners = map(_maybe_fuse_split, cache.inner_caches)
     ad_backend === nothing && return CompositeVolumetricElementCache(inners)
     analytic = filter(inner -> fully_analytic(typeof(inner)), inners)
     needs_ad = filter(inner -> !fully_analytic(typeof(inner)), inners)
     isempty(needs_ad) && return CompositeVolumetricElementCache(inners)
     wrapped = length(needs_ad) == 1 ?
-        ADElementCache(only(needs_ad), sdh; backend = ad_backend) :
-        ADElementCache(CompositeVolumetricElementCache(needs_ad), sdh; backend = ad_backend)
+        ADElementCache(only(needs_ad), sdh; backend = ad_backend, n_global_dofs) :
+        ADElementCache(CompositeVolumetricElementCache(needs_ad), sdh; backend = ad_backend, n_global_dofs)
     return isempty(analytic) ? wrapped : CompositeVolumetricElementCache((analytic..., wrapped))
 end

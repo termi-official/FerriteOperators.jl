@@ -65,11 +65,17 @@ const AnyMultiDomainIntegrator = Union{NonlinearMultiDomainIntegrator, BilinearM
 # instead of once per subdomain and hook. Decoration is per-subdomain — a
 # subdomain's own sub-integrator may or may not need it, independent of its
 # neighbours.
-function setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler, ad_backend)
-    resolved = zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers)
-    needs_ad_decoration(integrator) || return [setup_element_cache(sub, sdh) for (sub, sdh) in resolved]
-    return [decorate_element_cache(setup_element_cache(sub, sdh), sdh, ad_backend) for (sub, sdh) in resolved]
+function setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler, ad_backend, n_global_dofs)
+    resolved = zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers, n_global_dofs)
+    needs_ad_decoration(integrator) || return [setup_element_cache(sub, sdh) for (sub, sdh, _) in resolved]
+    return [decorate_element_cache(setup_element_cache(sub, sdh), sdh, ad_backend, n) for (sub, sdh, n) in resolved]
 end
+
+# A subdomain's global dofs are its sub-integrator's, like its element and its
+# boundary cache.
+global_dofs(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
+    global_dofs(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
+
 setup_boundaries(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler) =
     [setup_boundary_cache(sub, sdh) for (sub, sdh) in zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers)]
 

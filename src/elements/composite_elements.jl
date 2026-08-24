@@ -323,6 +323,22 @@ setup_element_cache(element_model::LinearCompositeIntegrator, sdh::SubDofHandler
 setup_boundary_cache(element_model::LinearCompositeIntegrator, sdh::SubDofHandler) =
     compose_boundary_caches(map(sub -> setup_boundary_cache(sub, sdh), element_model.subintegrators))
 
+# The inners share one local system, so they share its tail: a composite
+# declares what its inners declare. Silent inners (the default `()`) simply
+# read the tail an inner that declares one puts there.
+function global_dofs(integrator::AnyCompositeIntegrator, sdh::SubDofHandler)
+    declared = filter(!isempty, map(sub -> global_dofs(sub, sdh), integrator.subintegrators))
+    isempty(declared) && return ()
+    reference = first(declared)
+    all(d -> length(d) == length(reference) && all(d .== reference), declared) || throw(ArgumentError(
+        "The sub-integrators of $(nameof(typeof(integrator))) declare different `global_dofs` " *
+        "for this subdomain ($(map(collect, declared))). Composed terms fill ONE local system, " *
+        "whose tail is `[celldofs(cell); global dofs]` — with two different declarations there " *
+        "is no unambiguous tail. Declare the same dofs in the same order, or assemble the " *
+        "terms as separate operators."))
+    return reference
+end
+
 flatten_subintegrators(::Tuple{}) = ()
 flatten_subintegrators(subintegrators::Tuple) =
     (_flatten_head(first(subintegrators))..., flatten_subintegrators(Base.tail(subintegrators))...)

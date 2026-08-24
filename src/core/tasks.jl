@@ -273,7 +273,7 @@ function materialize_request(::ParameterJacobianKind, ws, task)
 end
 function materialize_request(kind::ParameterVJPKind, ws, task)
     s = ws.sensitivity
-    λₑ = _gather_residual_dofs!(s.λₑ, kind.λ, ws.cell)
+    λₑ = _gather_residual_dofs!(s.λₑ, kind.λ, item_dofs(ws))
     parameter_sweep_buffers!(s, length(parameter_vector(task.p)))
     fill!(s.gθ, zero(eltype(s.gθ)))
     return ParameterVJPRequest(s.gθ, λₑ, task.p)
@@ -284,29 +284,30 @@ function materialize_request(::TimeSensitivityKind, ws, task)
 end
 function materialize_request(kind::StateJVPKind, ws, task)
     s = ws.sensitivity
-    s.vₑ .= @view kind.v[celldofs(ws.cell)]
+    s.vₑ .= @view kind.v[item_dofs(ws)]
     fill!(s.Jvₑ, zero(eltype(s.Jvₑ)))
     return StateJVPRequest(s.Jvₑ, s.vₑ)
 end
 function materialize_request(kind::StateVJPKind, ws, task)
     s = ws.sensitivity
-    λₑ = _gather_residual_dofs!(s.λₑ, kind.λ, ws.cell)
+    λₑ = _gather_residual_dofs!(s.λₑ, kind.λ, item_dofs(ws))
     fill!(s.gu, zero(eltype(s.gu)))
     return StateVJPRequest(s.gu, λₑ)
 end
 
 """
-    scatter_request!(req, assembler, cell)
+    scatter_request!(req, assembler, address)
 
 Hand a sensitivity request's payload to the assembler — the sensitivity
 counterpart of [`scatter_local!`](@ref), dispatching on the request type
 instead of the kind since the destination buffer IS the request's own field.
+`address` is what [`scatter_address`](@ref) resolved for the item.
 """
-scatter_request!(req::ParameterJacobianRequest, assembler, cell) = assemble!(assembler, cell, req.B)
-scatter_request!(req::ParameterVJPRequest, assembler, cell)      = assemble!(assembler, cell, req.g)
-scatter_request!(req::TimeSensitivityRequest, assembler, cell)   = assemble!(assembler, cell, req.g)
-scatter_request!(req::StateJVPRequest, assembler, cell)          = assemble!(assembler, cell, req.Jv)
-scatter_request!(req::StateVJPRequest, assembler, cell)          = assemble!(assembler, cell, req.g)
+scatter_request!(req::ParameterJacobianRequest, assembler, address) = assemble!(assembler, address, req.B)
+scatter_request!(req::ParameterVJPRequest, assembler, address)      = assemble!(assembler, address, req.g)
+scatter_request!(req::TimeSensitivityRequest, assembler, address)   = assemble!(assembler, address, req.g)
+scatter_request!(req::StateJVPRequest, assembler, address)          = assemble!(assembler, address, req.Jv)
+scatter_request!(req::StateVJPRequest, assembler, address)          = assemble!(assembler, address, req.g)
 
 """
     AssemblyTask(kind, inner_assembler, states, p, ctx)
@@ -350,12 +351,59 @@ function _check_rate_slots(states::NamedTuple{names}) where {names}
     return nothing
 end
 
+# An `InternalSource` gathers a cell's condensed internal-dof range. An
+# algebraic item has neither a cell nor a range in the internal-variable
+# handler, so such a slot has nothing to restrict to and the sweep says so
+# before any item runs.
+function _check_algebraic_slots(engine, states::NamedTuple)
+    any(sc -> sc.domain isa AlgebraicDomain, engine.subdomain_caches) || return nothing
+    for (name, src) in pairs(states)
+        src isa InternalSource && throw(ArgumentError(
+            "Slot `:$name` carries an `InternalSource`, which restricts the gather to a cell's " *
+            "condensed internal-dof range, and this operator carries algebraic items — items " *
+            "with no cell and no such range. Assemble the condensed physics on an operator " *
+            "without algebraic items."))
+    end
+    return nothing
+end
+
+"""
+    item_dofs(ws) -> AbstractVector{Int}
+
+The global dof indices of the current item's local system: `celldofs(cell)`
+returned directly where the integrator declares no [`global_dofs`](@ref), and
+the augmented `[celldofs(cell); global dofs]` vector the workspace carries
+otherwise. Every gather of a sweep addresses through this, so the augmented
+tail reaches the slot buffers and the adjoint payloads. On an
+[`AlgebraicWorkspace`](@ref) it is the current item's own dof vector, an item
+of that family having no cell dofs to start from.
+"""
+@inline item_dofs(ws) = _item_dofs(ws.dofs, ws.cell)
+@inline _item_dofs(::Nothing, cell) = celldofs(cell)
+@inline _item_dofs(dofs, cell) = dofs
+
+"""
+    scatter_address(ws)
+
+What a scatter of the current item addresses. Without declared
+[`global_dofs`](@ref) it is the geometry cache, which every assembler in the
+package takes — the element-indexed [`ElementAssembly`](@ref) one reads
+`cellid` from it, the dof-scattered ones read `celldofs`. With them the local
+system spans dofs no cell owns, so the augmented dof vector is the only
+address that describes it; `ElementAssembly` is rejected at setup for exactly
+that reason. An algebraic item is addressed by its dof vector for the same
+reason, there being no cell to name it by.
+"""
+@inline scatter_address(ws) = _scatter_address(ws.dofs, ws.cell)
+@inline _scatter_address(::Nothing, cell) = cell
+@inline _scatter_address(dofs, cell) = dofs
+
 # Gather every task slot into the workspace's slot buffers, returning the
 # element-local states NamedTuple. A slot's SOURCE decides how it gathers — a
-# plain vector reads `celldofs(cell)` (the field space, `ndofs_per_cell`
-# fixed), `AffineRate` reconstructs over that same field-space gather, and
-# `InternalSource` restricts to the cell's condensed internal-dof range,
-# resizing the buffer to fit (a per-cell size, not `ndofs_per_cell`). A
+# plain vector reads [`item_dofs`](@ref) (the field space plus the declared
+# global dofs, fixed per subdomain), `AffineRate` reconstructs over that same
+# gather, and `InternalSource` restricts to the cell's condensed internal-dof
+# range, resizing the buffer to fit (a per-cell size, not `ndofs_per_cell`). A
 # reconstructed slot's source is therefore structurally the field space: it
 # cannot touch `q` any more.
 function load_slots!(ws, states::NamedTuple{names}) where {names}
@@ -365,7 +413,7 @@ function load_slots!(ws, states::NamedTuple{names}) where {names}
     end
 end
 function load_slot!(buf, src::AbstractVector, ws)
-    dofs = celldofs(ws.cell)
+    dofs = item_dofs(ws)
     resize!(buf, length(dofs))
     buf .= @view src[dofs]
     return buf
@@ -373,7 +421,7 @@ end
 # The anchor lands in the slot's own buffer first, then the buffer becomes the
 # reconstruction against the already-gathered `:u` buffer.
 function load_slot!(buf, src::AffineRate, ws)
-    dofs = celldofs(ws.cell)
+    dofs = item_dofs(ws)
     resize!(buf, length(dofs))
     buf .= @view src.anchor[dofs]
     buf .= src.slope .* (ws.slot_buffers.u .- buf)
@@ -485,12 +533,12 @@ sensitivity-family kind's own `execute_kind!` (via
 function sensitivity_kernel!(kind, task, ws, args)
     req = materialize_request(kind, ws, task)
     assemble_cell!(req, ws.element, args)
-    scatter_request!(req, task.inner_assembler, ws.cell)
+    scatter_request!(req, task.inner_assembler, scatter_address(ws))
 end
 
-# Residual-shaped gather (plain celldofs slice — adjoint vectors carry no
-# condensed tail, unlike the slot gathers).
-_gather_residual_dofs!(dest, src, cell) = dest .= @view src[celldofs(cell)]
+# Residual-shaped gather (plain [`item_dofs`](@ref) slice — adjoint vectors
+# carry no condensed tail, unlike the slot gathers).
+_gather_residual_dofs!(dest, src, dofs) = dest .= @view src[dofs]
 
 execute_kind!(kind::FunctionalKind, task, ws) = functional_cell_sweep(kind, task, ws)
 
@@ -521,15 +569,17 @@ end
 Hand the local buffers a sweep of `kind` filled to the assembler. Which
 buffers those are is [`assembles_matrix`](@ref)/[`assembles_vector`](@ref), so
 the three routes are selected at compile time and a downstream kind is
-scattered by the same body.
+scattered by the same body. The item is addressed through
+[`scatter_address`](@ref).
 """
 function scatter_local!(kind, assembler, ws)
+    address = scatter_address(ws)
     if assembles_matrix(kind) && assembles_vector(kind)
-        assemble!(assembler, ws.cell, ws.Ke, ws.re)
+        assemble!(assembler, address, ws.Ke, ws.re)
     elseif assembles_matrix(kind)
-        assemble!(assembler, ws.cell, ws.Ke)
+        assemble!(assembler, address, ws.Ke)
     elseif assembles_vector(kind)
-        assemble!(assembler, ws.cell, ws.re)
+        assemble!(assembler, address, ws.re)
     end
     return nothing
 end
@@ -554,7 +604,7 @@ function _check_differentiated_slot(kind::JacobianKind{slot}, engine, states::Na
     # already covered by the setup-time validation.
     if slot !== :u
         for sc in engine.subdomain_caches
-            _assert_trait_backed(typeof(sc.domain.element), kind)
+            _assert_domain_trait_backed(sc.domain, kind)
         end
     end
     return nothing
@@ -583,7 +633,7 @@ function _check_differentiated_slot(kind::WeightedJacobianKind{slots}, engine, s
             "since it forms the combination itself), or pass plain vector sources."))
     end
     for sc in engine.subdomain_caches
-        _assert_trait_backed(typeof(sc.domain.element), kind)
+        _assert_domain_trait_backed(sc.domain, kind)
     end
     return nothing
 end
@@ -595,6 +645,7 @@ end
 function run_sweep!(kind, assembler, op, states::NamedTuple, p, ctx)
     _check_declared_slots(op.engine, states)
     _check_rate_slots(states)
+    _check_algebraic_slots(op.engine, states)
     _check_differentiated_slot(kind, op.engine, states)
     task = AssemblyTask(kind, assembler, states, p, ctx)
     execute_on_subdomains!(task, op.engine)
@@ -623,6 +674,7 @@ run_reduction(kind, op, states::NamedTuple, p, ctx) =
 function run_reduction(::FunctionalFamily, kind, op, states::NamedTuple, p, ctx)
     _check_declared_slots(op.engine, states)
     _check_rate_slots(states)
+    _check_algebraic_slots(op.engine, states)
     _check_reduction_domain(kind, op.engine)
     return reduce_on_subdomains(AssemblyTask(kind, nothing, states, p, ctx), op.engine)
 end
@@ -640,7 +692,7 @@ function _check_reduction_domain(kind, engine)
         "$(nameof(typeof(kind))) reduces over an empty item set: the operator's " *
         "$(length(caches)) subdomain partition(s) carry no items between them, so there is " *
         "nothing to integrate over."))
-    all(sc -> sc.domain.element isa EmptyVolumetricElementCache, caches) && throw(ArgumentError(
+    all(sc -> !_may_contribute(sc.domain), caches) && throw(ArgumentError(
         "No subdomain can contribute to $(nameof(typeof(kind))): every subdomain's element " *
         "cache is an `EmptyVolumetricElementCache`, which returns no contribution by " *
         "construction. Set the operator up with an integrator whose caches implement " *

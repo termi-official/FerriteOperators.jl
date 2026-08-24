@@ -46,9 +46,18 @@ ends up analytic or decorated.
     Kq         # ndofs × nqp scratch for the condensed generic Consistent combination, or `nothing`
 end
 
-function create_ad_element_buffers(inner, sdh)
-    vₑ  = allocate_element_unknown_vector(inner, sdh)
-    re  = allocate_element_residual_vector(inner, sdh)
+function create_ad_element_buffers(inner, sdh, n_global_dofs::Int = 0)
+    vₑ = pad_element_vector(allocate_element_unknown_vector(inner, sdh), n_global_dofs)
+    re = pad_element_vector(allocate_element_residual_vector(inner, sdh), n_global_dofs)
+    return _create_ad_element_buffers(inner, vₑ, re)
+end
+
+# The size-based path: an item family whose local system is described by a dof
+# count alone (an algebraic item) has no `SubDofHandler` to allocate against.
+create_ad_element_buffers(inner, ndofs::Int, ::Type{T}) where {T} =
+    _create_ad_element_buffers(inner, zeros(T, ndofs), zeros(T, ndofs))
+
+function _create_ad_element_buffers(inner, vₑ, re)
     T   = eltype(re)
     tag       = ForwardDiff.Tag{FerriteOperatorsADTag, T}()
     chunk     = ForwardDiff.Chunk(vₑ)
@@ -109,18 +118,27 @@ _jac_config_for(buf::ADElementBuffers, ::Val{slot}) where {slot} = buf.jac_cfg
 
 """
     ADElementCache{Inner, Backend, Buffers} <: AbstractVolumetricElementCache
-    ADElementCache(inner, sdh; backend = ForwardDiffAD())
+    ADElementCache(inner, sdh; backend = ForwardDiffAD(), n_global_dofs = 0)
+    ADElementCache(inner, ndofs::Int, ::Type{T} = Float64; backend = ForwardDiffAD())
 
 Decorates `inner`'s mandatory residual kernel with automatic differentiation,
 serving every request `inner` does not provide analytically — per request,
 `inner`'s own kernel where declared ([`provides_analytic`](@ref) forwards) or
-ForwardDiff otherwise; the engine never forks between the two itself.
+ForwardDiff otherwise; the engine never forks between the two itself. Which
+kernel is differentiated follows from the args record: `assemble_cell!` for a
+[`CellArgs`](@ref), `assemble_algebraic!` for an [`AlgebraicArgs`](@ref), so one
+decorator serves both item families.
 
 For a condensed `inner` ([`has_internal_state`](@ref)) the `Consistent`
 Jacobian/JacobianResidual has a generic path: `∂F/∂ū|_q` and `∂F/∂q` by AD,
 combined with the stored `dq/dū` block from [`condensed_corrector`](@ref) —
 `Jₑ = ∂F/∂ū|_q + ∂F/∂q · dq/dū`. Without an analytic kernel or
 `condensed_corrector`, admissibility rejects it, naming the missing correction.
+
+`n_global_dofs` pads the seeds and configs by the subdomain's
+[`global_dofs`](@ref) count, so the differentiated system is the FULL augmented
+one — `setup_operator` passes it. The `ndofs` form sizes the buffers from a dof
+count alone, for an item family that has no `SubDofHandler` to allocate against.
 
 `setup_operator` wraps automatically (`ad_backend = nothing` opts out);
 hand-constructing an instance wraps a specific cache or tests the decorator.
@@ -130,8 +148,30 @@ struct ADElementCache{Inner, Backend, Buffers} <: AbstractVolumetricElementCache
     backend::Backend
     buffers::Buffers
 end
-ADElementCache(inner, sdh; backend = ForwardDiffAD()) =
-    ADElementCache(inner, backend, create_ad_element_buffers(inner, sdh))
+function ADElementCache(inner, sdh; backend = ForwardDiffAD(), n_global_dofs::Int = 0)
+    _reject_condensed_global_dofs(inner, n_global_dofs)
+    return ADElementCache(inner, backend, create_ad_element_buffers(inner, sdh, n_global_dofs))
+end
+ADElementCache(inner, ndofs::Int, ::Type{T} = Float64; backend = ForwardDiffAD()) where {T} =
+    ADElementCache(inner, backend, create_ad_element_buffers(inner, ndofs, T))
+
+# The generic `Consistent` combination multiplies the padded ∂F/∂q block by the
+# `nq × ndofs_per_cell` corrector `condensed_corrector` returns — the FIELD
+# space, while the padded partials span the augmented system, so the product is
+# not even conformable. Rejected where the decorator is built rather than as a
+# `DimensionMismatch` deep inside a sweep.
+function _reject_condensed_global_dofs(inner, n_global_dofs::Int)
+    (n_global_dofs == 0 || !has_internal_state(typeof(inner))) && return nothing
+    provides_analytic(typeof(inner), JacobianKind{:u, Consistent}()) && return nothing
+    throw(ArgumentError(
+        "$(nameof(_display_cache_type(typeof(inner)))) carries condensed internal state and sits " *
+        "on a subdomain declaring $(n_global_dofs) `global_dofs`. Its `Consistent` Jacobian " *
+        "would go through the generic combination `∂F/∂ū|_q + ∂F/∂q · dq/dū`, whose corrector " *
+        "block spans the FIELD space while the AD partials span the augmented system — the " *
+        "combination is not defined for this pair. Implement the analytic " *
+        "`assemble_cell!(::JacobianRequest{:u, Consistent}, …)` kernel (declared through " *
+        "`provides_analytic`), or drop the `global_dofs` declaration on this subdomain."))
+end
 
 duplicate_for_device(device, ad::ADElementCache) =
     ADElementCache(duplicate_for_device(device, ad.inner), ad.backend, duplicate_for_device(device, ad.buffers))
@@ -203,25 +243,43 @@ provides_analytic(::Type{<:ADElementCache{Inner}}, kind::WeightedJacobianKind) w
 # validates a claim must therefore run against `Inner`, the only type whose
 # method set is author-written. Framework-provided decorator methods need no
 # such check: they are what this package verifies by construction.
-_assert_trait_backed(::Type{<:ADElementCache{Inner}}, kind) where {Inner} = _assert_trait_backed(Inner, kind)
+_assert_trait_backed(::Type{<:ADElementCache{Inner}}, kind, entry, ::Type{Args}) where {Inner, Args} =
+    _assert_trait_backed(Inner, kind, entry, Args)
 _display_cache_type(::Type{<:ADElementCache{Inner}}) where {Inner} = _display_cache_type(Inner)
 
 ####################################
-## The eight `assemble_cell!` entries
+## The seeding entries
 ####################################
 
-# A downstream request type outside the eight this decorator knows how to
+# The decorator differentiates a residual kernel, and WHICH kernel that is
+# follows from the args record: a cell item reaches `inner` through
+# `assemble_cell!`, an algebraic item through `assemble_algebraic!`. Routing the
+# inner call here is what makes one set of AD paths serve both item families.
+_inner_kernel!(req, cache, args::CellArgs) = assemble_cell!(req, cache, args)
+_inner_kernel!(req, cache, args::AlgebraicArgs) = assemble_algebraic!(req, cache, args)
+
+# What `query_cell_parameters` is keyed on: the geometry cache of a cell item,
+# the item record of an algebraic one.
+_parameter_subject(args::CellArgs) = args.cell
+_parameter_subject(args::AlgebraicArgs) = args.item
+
+# The two public entry points of the decorator, one per item family; both
+# resolve into the same seeding bodies below.
+assemble_cell!(req::AbstractAssemblyRequest, ad::ADElementCache, args) = _ad_assemble!(req, ad, args)
+assemble_algebraic!(req::AbstractAssemblyRequest, ad::ADElementCache, args) = _ad_assemble!(req, ad, args)
+
+# A downstream request type outside the ones this decorator knows how to
 # differentiate (e.g. a custom kind riding `primal_cell_sweep!`) has no AD
 # fallback here — forward to `inner`, exactly like the mandatory residual
 # kernel. `Inner`'s own `provides_analytic` is what setup-time validation
 # checks (`_assert_trait_backed` redirects to `Inner`), so an unbacked claim
 # still fails loudly there rather than as an opaque `MethodError` here.
-assemble_cell!(req::AbstractAssemblyRequest, ad::ADElementCache, args) = assemble_cell!(req, ad.inner, args)
+_ad_assemble!(req::AbstractAssemblyRequest, ad::ADElementCache, args) = _inner_kernel!(req, ad.inner, args)
 
-# Evaluate the volumetric local residual for `args`, overwriting `r`.
-function evaluate_cell_residual!(r, cache, args)
+# Evaluate the item's local residual for `args`, overwriting `r`.
+function evaluate_item_residual!(r, cache, args)
     fill!(r, zero(eltype(r)))
-    assemble_cell!(ResidualRequest(r), cache, args)
+    _inner_kernel!(ResidualRequest(r), cache, args)
     return r
 end
 
@@ -233,7 +291,7 @@ end
 function ad_state_jacobian!(K, y, ad::ADElementCache, args, ::Val{slot} = Val(:u)) where {slot}
     cfg = _jac_config_for(ad.buffers, Val(slot))
     inner = ad.inner
-    f! = (r, x) -> evaluate_cell_residual!(
+    f! = (r, x) -> evaluate_item_residual!(
         r, inner, with_states(args, merge(args.states, NamedTuple{(slot,)}((x,)))))
     ForwardDiff.jacobian!(K, f!, y, args.states[slot], cfg, Val{false}())
     return K
@@ -250,9 +308,9 @@ function _condensed_consistent_jacobian!(K, y, ad::ADElementCache, args)
     return K
 end
 
-function assemble_cell!(req::JacobianRequest{:u, Consistent}, ad::ADElementCache{Inner}, args) where {Inner}
+function _ad_assemble!(req::JacobianRequest{:u, Consistent}, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, JacobianKind{:u, Consistent}())
-        assemble_cell!(req, ad.inner, args)
+        _inner_kernel!(req, ad.inner, args)
     elseif has_internal_state(Inner)
         _condensed_consistent_jacobian!(req.K, ad.buffers.re, ad, args)
     else
@@ -260,18 +318,18 @@ function assemble_cell!(req::JacobianRequest{:u, Consistent}, ad::ADElementCache
     end
     return req.K
 end
-function assemble_cell!(req::JacobianRequest{slot, C}, ad::ADElementCache{Inner}, args) where {Inner, slot, C <: CorrectionMode}
+function _ad_assemble!(req::JacobianRequest{slot, C}, ad::ADElementCache{Inner}, args) where {Inner, slot, C <: CorrectionMode}
     if provides_analytic(Inner, JacobianKind{slot, C}())
-        assemble_cell!(req, ad.inner, args)
+        _inner_kernel!(req, ad.inner, args)
     else
         ad_state_jacobian!(req.K, ad.buffers.re, ad, args, Val(slot))
     end
     return req.K
 end
 
-function assemble_cell!(req::JacobianResidualRequest{Consistent}, ad::ADElementCache{Inner}, args) where {Inner}
+function _ad_assemble!(req::JacobianResidualRequest{Consistent}, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, JacobianResidualKind{Consistent}())
-        assemble_cell!(req, ad.inner, args)
+        _inner_kernel!(req, ad.inner, args)
     elseif has_internal_state(Inner)
         _condensed_consistent_jacobian!(req.K, req.r, ad, args)
     else
@@ -279,9 +337,9 @@ function assemble_cell!(req::JacobianResidualRequest{Consistent}, ad::ADElementC
     end
     return req
 end
-function assemble_cell!(req::JacobianResidualRequest{C}, ad::ADElementCache{Inner}, args) where {Inner, C <: CorrectionMode}
+function _ad_assemble!(req::JacobianResidualRequest{C}, ad::ADElementCache{Inner}, args) where {Inner, C <: CorrectionMode}
     if provides_analytic(Inner, JacobianResidualKind{C}())
-        assemble_cell!(req, ad.inner, args)
+        _inner_kernel!(req, ad.inner, args)
     else
         ad_state_jacobian!(req.K, req.r, ad, args, Val(:u))
     end
@@ -293,10 +351,10 @@ end
 # w.r.t. `x` at `x = 0` is exactly the weighted combination. Slots outside
 # `weights` (including `AffineRate` reconstructions) stay at their primal
 # value, matching the frozen-slot contract of `JacobianKind`.
-function assemble_cell!(req::WeightedJacobianRequest{C}, ad::ADElementCache{Inner}, args) where {C, Inner}
+function _ad_assemble!(req::WeightedJacobianRequest{C}, ad::ADElementCache{Inner}, args) where {C, Inner}
     kind = WeightedJacobianKind{keys(req.weights), C}(req.weights)
     if provides_analytic(Inner, kind)
-        return assemble_cell!(req, ad.inner, args)
+        return _inner_kernel!(req, ad.inner, args)
     end
     buf   = ad.buffers
     slots = keys(req.weights)
@@ -308,7 +366,7 @@ function assemble_cell!(req::WeightedJacobianRequest{C}, ad::ADElementCache{Inne
     weights = req.weights
     f! = (r, x) -> begin
         map((b, sₑ, w) -> (@. b = sₑ + w * x), duals, prim, weights)
-        evaluate_cell_residual!(r, inner, dargs)
+        evaluate_item_residual!(r, inner, dargs)
     end
     ForwardDiff.jacobian!(req.K, f!, buf.re, buf.wseed, buf.jac_cfg, Val{false}())
     return req.K
@@ -317,26 +375,26 @@ end
 # ∂F/∂θ — dense local parameter Jacobian. The parameter sweep re-queries the
 # element parameters from the Dual-rebuilt global `p` (`req.p`, NOT `args.p` —
 # already the element-local view) so wrappers forward Duals transparently.
-function assemble_cell!(req::ParameterJacobianRequest, ad::ADElementCache{Inner}, args) where {Inner}
+function _ad_assemble!(req::ParameterJacobianRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, ParameterJacobianKind())
-        return assemble_cell!(req, ad.inner, args)
+        return _inner_kernel!(req, ad.inner, args)
     end
     buf = ad.buffers
     inner = ad.inner
     p = req.p
     θ = copyto!(_theta!(buf, size(req.B, 2)), parameter_vector(p))
     f! = (r, θᵢ) -> begin
-        pₑ = query_cell_parameters(inner, args.cell, rebuild_parameters(p, θᵢ))
-        evaluate_cell_residual!(r, inner, with_parameters(args, pₑ))
+        pₑ = query_cell_parameters(inner, _parameter_subject(args), rebuild_parameters(p, θᵢ))
+        evaluate_item_residual!(r, inner, with_parameters(args, pₑ))
     end
     ForwardDiff.jacobian!(req.B, f!, buf.re, θ)
     return req.B
 end
 
 # (∂F/∂θ)ᵀλₑ — adjoint pullback as the gradient of the scalar λₑ·rₑ(θ).
-function assemble_cell!(req::ParameterVJPRequest, ad::ADElementCache{Inner}, args) where {Inner}
+function _ad_assemble!(req::ParameterVJPRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, ParameterVJPKind(nothing))
-        return assemble_cell!(req, ad.inner, args)
+        return _inner_kernel!(req, ad.inner, args)
     end
     buf = ad.buffers
     inner = ad.inner
@@ -344,9 +402,9 @@ function assemble_cell!(req::ParameterVJPRequest, ad::ADElementCache{Inner}, arg
     λₑ = req.λₑ
     θ = copyto!(_theta!(buf, length(parameter_vector(p))), parameter_vector(p))
     fscalar = θᵢ -> begin
-        pₑ = query_cell_parameters(inner, args.cell, rebuild_parameters(p, θᵢ))
+        pₑ = query_cell_parameters(inner, _parameter_subject(args), rebuild_parameters(p, θᵢ))
         r = zeros(eltype(θᵢ), length(λₑ))
-        evaluate_cell_residual!(r, inner, with_parameters(args, pₑ))
+        evaluate_item_residual!(r, inner, with_parameters(args, pₑ))
         return dot(λₑ, r)
     end
     ForwardDiff.gradient!(req.g, fscalar, θ)
@@ -358,15 +416,15 @@ end
 # `evaluation_time(args.ctx)` differentiates exactly. The preallocated config
 # is typed for the residual eltype; exotic time types fall back to a per-call
 # config.
-function assemble_cell!(req::TimeSensitivityRequest, ad::ADElementCache{Inner}, args) where {Inner}
+function _ad_assemble!(req::TimeSensitivityRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, TimeSensitivityKind())
-        return assemble_cell!(req, ad.inner, args)
+        return _inner_kernel!(req, ad.inner, args)
     end
     buf = ad.buffers
     inner = ad.inner
     ctx = args.ctx
     t = evaluation_time(ctx)
-    f! = (r, t̃) -> evaluate_cell_residual!(r, inner, with_context(args, with_time(ctx, t̃)))
+    f! = (r, t̃) -> evaluate_item_residual!(r, inner, with_context(args, with_time(ctx, t̃)))
     if t isa eltype(buf.re)
         ForwardDiff.derivative!(req.g, f!, buf.re, t, buf.deriv_cfg, Val{false}())
     else
@@ -378,9 +436,9 @@ end
 # (∂F/∂u)·v — one directional-Dual sweep through the residual kernel: the
 # MFEM NONE level, no matrices anywhere. The perturbed state is written into
 # the per-worker Dual buffer instead of allocating per cell.
-function assemble_cell!(req::StateJVPRequest, ad::ADElementCache{Inner}, args) where {Inner}
+function _ad_assemble!(req::StateJVPRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, StateJVPKind(nothing))
-        return assemble_cell!(req, ad.inner, args)
+        return _inner_kernel!(req, ad.inner, args)
     end
     buf = ad.buffers
     inner = ad.inner
@@ -388,7 +446,7 @@ function assemble_cell!(req::StateJVPRequest, ad::ADElementCache{Inner}, args) w
     vₑ = req.vₑ
     f! = (r, s) -> begin
         @. ud = args.states.u + s * vₑ
-        evaluate_cell_residual!(r, inner, with_states(args, merge(args.states, (u = ud,))))
+        evaluate_item_residual!(r, inner, with_states(args, merge(args.states, (u = ud,))))
     end
     ForwardDiff.derivative!(req.Jv, f!, buf.re, zero(eltype(vₑ)), buf.deriv_cfg, Val{false}())
     return req.Jv
@@ -396,16 +454,16 @@ end
 
 # (∂F/∂u)ᵀλₑ — gradient of the scalar λₑ·rₑ(u) w.r.t. the element state, with
 # the Dual residual evaluated into the per-worker buffer.
-function assemble_cell!(req::StateVJPRequest, ad::ADElementCache{Inner}, args) where {Inner}
+function _ad_assemble!(req::StateVJPRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, StateVJPKind(nothing))
-        return assemble_cell!(req, ad.inner, args)
+        return _inner_kernel!(req, ad.inner, args)
     end
     buf = ad.buffers
     inner = ad.inner
     λₑ = req.λₑ
     rd = buf.re_dual
     fscalar = u -> begin
-        evaluate_cell_residual!(rd, inner, with_states(args, merge(args.states, (u = u,))))
+        evaluate_item_residual!(rd, inner, with_states(args, merge(args.states, (u = u,))))
         return dot(λₑ, rd)
     end
     ForwardDiff.gradient!(req.g, fscalar, args.states.u, buf.grad_cfg, Val{false}())
@@ -445,9 +503,18 @@ invalidate_correctors!(f::FusedFromSplit) = invalidate_correctors!(f.inner)
 assemble_patch_cell!(req, f::FusedFromSplit, args, data) = assemble_patch_cell!(req, f.inner, args, data)
 
 assemble_cell!(req::AbstractAssemblyRequest, f::FusedFromSplit, args) = assemble_cell!(req, f.inner, args)
+assemble_algebraic!(req::AbstractAssemblyRequest, f::FusedFromSplit, args) = assemble_algebraic!(req, f.inner, args)
 function assemble_cell!(req::JacobianResidualRequest{C}, f::FusedFromSplit, args) where {C <: CorrectionMode}
-    assemble_cell!(JacobianRequest{:u, C}(req.K), f.inner, args)
-    assemble_cell!(ResidualRequest(req.r), f.inner, args)
+    _split_into_fused!(req, f.inner, args)
+    return req
+end
+function assemble_algebraic!(req::JacobianResidualRequest{C}, f::FusedFromSplit, args) where {C <: CorrectionMode}
+    _split_into_fused!(req, f.inner, args)
+    return req
+end
+function _split_into_fused!(req::JacobianResidualRequest{C}, inner, args) where {C <: CorrectionMode}
+    _inner_kernel!(JacobianRequest{:u, C}(req.K), inner, args)
+    _inner_kernel!(ResidualRequest(req.r), inner, args)
     return req
 end
 provides_analytic(::Type{<:FusedFromSplit{Inner}}, kind) where {Inner} = provides_analytic(Inner, kind)
@@ -455,7 +522,8 @@ provides_analytic(::Type{<:FusedFromSplit{Inner}}, ::JacobianResidualKind{C}) wh
 # Same reasoning as `ADElementCache`: the blanket catch-all method means
 # `hasmethod` on the wrapper can never distinguish a backed claim from an
 # author's overclaim, so the check runs against `Inner`.
-_assert_trait_backed(::Type{<:FusedFromSplit{Inner}}, kind) where {Inner} = _assert_trait_backed(Inner, kind)
+_assert_trait_backed(::Type{<:FusedFromSplit{Inner}}, kind, entry, ::Type{Args}) where {Inner, Args} =
+    _assert_trait_backed(Inner, kind, entry, Args)
 _display_cache_type(::Type{<:FusedFromSplit{Inner}}) where {Inner} = _display_cache_type(Inner)
 
 # Construction-time wrapping (`decorate_element_cache`, `needs_ad_decoration`,

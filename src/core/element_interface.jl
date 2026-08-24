@@ -19,9 +19,78 @@ slot sourced by [`InternalSource`](@ref) (see [`condense_internal!`](@ref)).
 """
 abstract type AbstractVolumetricElementCache end
 
+"""
+    allocate_element_matrix(element_cache, sdh)
+    allocate_element_unknown_vector(element_cache, sdh)
+    allocate_element_residual_vector(element_cache, sdh)
+
+The element-local buffers of one item, sized in the FIELD SPACE — the
+`ndofs_per_cell(sdh)` dofs `celldofs` carries. Where the integrator declares
+[`global_dofs`](@ref) the engine PADS what these return by the declared count,
+so an element that overrides them states the field-space size and never the
+augmented one.
+"""
 allocate_element_matrix(element_cache, sdh)          = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
-allocate_element_unknown_vector(element_cache, sdh)  = zeros(ndofs_per_cell(sdh))
-allocate_element_residual_vector(element_cache, sdh) = zeros(ndofs_per_cell(sdh))
+@doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh)  = zeros(ndofs_per_cell(sdh))
+@doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh) = zeros(ndofs_per_cell(sdh))
+
+# The padding itself: `similar` keeps whatever array type the element chose.
+function pad_element_matrix(Ke, n::Int)
+    n == 0 && return Ke
+    m = size(Ke, 1) + n
+    return fill!(similar(Ke, m, m), zero(eltype(Ke)))
+end
+function pad_element_vector(v, n::Int)
+    n == 0 && return v
+    return fill!(similar(v, length(v) + n), zero(eltype(v)))
+end
+
+"""
+    global_dofs(integrator, sdh) -> AbstractVector{Int}
+
+The GLOBAL dofs an element of `sdh` carries in its local system beyond
+`celldofs` — dofs of `sdh.dh` that belong to no cell (Ferrite's
+`algebraic_dofs(sdh.dh, :name)`) or that are shared by every item of the
+subdomain (a lumped chamber pressure). Ordered; resolved once at setup.
+Defaults to `()`, "no global dofs".
+
+The declaration lives on the INTEGRATOR, one per subdomain, and is shared by
+the volumetric AND the boundary kernel of that subdomain. The local system is
+then, by contract,
+
+    [ celldofs(cell) ; the declared global dofs, in declaration order ]
+
+so the tail occupies [`global_dof_range`](@ref) — an element cache resolves
+that range once in `setup_element_cache` and stores it, since the framework
+passes no extra channel and `CellArgs`/`FacetArgs` stay at their four fields.
+The engine sizes `Ke`/`re`/the slot buffers to the augmented length and
+scatters through the augmented dof vector; the AD fallback differentiates the
+full augmented system.
+
+Two restrictions, both raised at setup: a declaration excludes
+[`ColoredScheduling`](@ref) (a dof shared by every item cannot be isolated by
+coloring — the parallel route is atomic scatter under
+[`SequentialScheduling`](@ref)) and the [`ElementAssembly`](@ref) form (its dof
+maps are celldofs-based).
+
+The sparsity entries for the coupling this creates are NOT inferred from the
+declaration: which items couple to the dofs is the user's Ferrite coupling
+descriptor, passed through
+[`StandardOperatorSpecification`](@ref)/[`BlockedOperatorSpecification`](@ref).
+A missing descriptor surfaces as Ferrite's missing-sparsity-entry error on the
+first assembly.
+"""
+global_dofs(integrator, sdh) = ()
+
+"""
+    global_dof_range(integrator, sdh) -> UnitRange{Int}
+
+Where the dofs [`global_dofs`](@ref) declares sit in the element-local system:
+`ndofs_per_cell(sdh) .+ (1:length(global_dofs(integrator, sdh)))`. An element
+cache resolves this at setup and stores it — the local layout is a contract, so
+this is the one place that spells it.
+"""
+global_dof_range(integrator, sdh) = ndofs_per_cell(sdh) .+ (1:length(global_dofs(integrator, sdh)))
 
 """
     reinit_values!(cache, cell)
@@ -139,3 +208,80 @@ Supertype for all caches to integrate over interfaces (facet pairs). Reserved
 for the DG work; concrete interface caches and their setup hook land with it.
 """
 abstract type AbstractInterfaceElementCache end
+
+####################################
+## Algebraic items — terms with no mesh support
+####################################
+
+"""
+    algebraic_items(integrator, dh) -> collection of dof vectors
+
+The items of the algebraic family: one vector of GLOBAL dof indices of `dh` per
+term that lives on no cell — a 0D model's own rows, an `AlgebraicCoupling`-only
+block, a lumped balance equation. An item's local system is exactly those dofs
+in declaration order, so a circulation model contributing one row per chamber
+declares one single-dof item per chamber. Defaults to `()`, "no algebraic
+terms".
+
+All items of one declaration carry the SAME number of dofs — that is what keeps
+a worker's local buffers fixed-size — validated at setup, as are the dofs
+themselves (in bounds, and unique within an item). Dofs shared BETWEEN items
+are the normal case; [`AlgebraicItems`](@ref) derives the partition from that.
+
+The sparsity entries the items need are not inferred from this declaration:
+which dofs couple is the caller's Ferrite coupling descriptor
+(`AlgebraicCoupling`), passed through
+[`StandardOperatorSpecification`](@ref)/[`BlockedOperatorSpecification`](@ref),
+exactly as for [`global_dofs`](@ref).
+"""
+algebraic_items(integrator, dh) = ()
+
+"""
+    setup_algebraic_cache(integrator, dh) -> cache
+
+The cache serving every item [`algebraic_items`](@ref) declares. ONE cache
+serves the whole declaration — the analogue of one element cache per
+`SubDofHandler` serving all of its cells: items are positioned per sweep, and
+the kernel reads which item it stands on from `args.item`
+([`AlgebraicItem`](@ref)).
+
+There is deliberately no silent fallback: an integrator declaring items without
+this method is a loud setup error, not an operator whose algebraic rows quietly
+assemble nothing.
+"""
+function setup_algebraic_cache(integrator, dh)
+    throw(ArgumentError(
+        "$(typeof(integrator)) declares `algebraic_items` but implements no " *
+        "`setup_algebraic_cache(integrator, dh)` method. One cache serves every declared item; " *
+        "the item a kernel stands on arrives as `args.item`."))
+end
+
+"""
+    assemble_algebraic!(req::AbstractAssemblyRequest, cache, args)
+
+The kernel entry point of the algebraic item family — one entry point per
+integration domain kind, alongside [`assemble_cell!`](@ref) and
+[`assemble_facet!`](@ref). Accumulate the current item's contribution into
+`req`'s buffers, which are sized by the item's dof count.
+
+The [`ResidualRequest`](@ref) method is mandatory and validated at setup: it is
+the basis of the AD-derived Jacobians and sensitivities, exactly as for a
+volumetric cache. Every other request is served by the cache's own kernel where
+[`provides_analytic`](@ref) declares one, and by ForwardDiff over the residual
+kernel otherwise.
+
+`args` is an [`AlgebraicArgs`](@ref); annotating the parameter is permitted.
+"""
+function assemble_algebraic! end
+
+"""
+    evaluate_algebraic_functional(kind::FunctionalKind, cache, args) -> value
+
+The [`evaluate_cell_functional`](@ref) counterpart of the algebraic family:
+this item's contribution to the functional named by `kind`, or `nothing` for no
+contribution. The default IS `nothing` — a term with no mesh support carries no
+volume, so it enters a domain integral only where its author says otherwise —
+which is what keeps [`evaluate_functional`](@ref) working on an operator that
+has algebraic items.
+"""
+evaluate_algebraic_functional(kind, cache, args) = nothing

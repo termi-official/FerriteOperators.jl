@@ -111,12 +111,45 @@ function _warn_boundary_sensitivity(requests::Tuple, boundary_caches)
     return nothing
 end
 
-create_system_matrix(strategy, dh) = allocate_matrix(matrix_type(strategy), dh)
+"""
+    create_system_matrix(strategy, dh)
+
+Allocate the operator's global matrix over the sparsity pattern the strategy's
+operator specification declares: the pattern is initialized
+([`StandardOperatorSpecification`](@ref) → `SparsityPattern`,
+[`BlockedOperatorSpecification`](@ref) → `BlockSparsityPattern`), the entries
+are added by Ferrite's `add_sparsity_entries!` from the specification's
+`algebraic_couplings` and `constraint_handler`, and the result is allocated as
+`matrix_type(strategy)`.
+
+The constraint handler contributes SPARSITY ENTRIES only; applying the
+constraints to the assembled system remains the caller's, through Ferrite's
+`apply!`/`apply_assemble!`.
+"""
+create_system_matrix(strategy, dh) = _create_system_matrix(strategy, strategy.form.operator_specification, dh)
 create_system_vector(strategy, dh) = allocate_vector(vector_type(strategy), dh)
 
-function setup_elements(integrator, dh, ad_backend)
+function _create_system_matrix(strategy, spec, dh)
+    sp = init_operator_sparsity_pattern(spec, dh)
+    couplings = spec.algebraic_couplings
+    # The `algebraic_couplings` keyword only exists on Ferrite versions
+    # carrying mesh-free algebraic variables, so it is passed only when
+    # something is declared.
+    if isempty(couplings)
+        add_sparsity_entries!(sp, dh, spec.constraint_handler)
+    else
+        add_sparsity_entries!(sp, dh, spec.constraint_handler; algebraic_couplings = couplings)
+    end
+    return allocate_matrix(matrix_type(strategy), sp)
+end
+
+init_operator_sparsity_pattern(::StandardOperatorSpecification, dh) = Ferrite.init_sparsity_pattern(dh)
+init_operator_sparsity_pattern(spec::BlockedOperatorSpecification, dh) = BlockSparsityPattern(spec.block_sizes)
+
+function setup_elements(integrator, dh, ad_backend, n_global_dofs)
     needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
-    return [decorate_element_cache(setup_element_cache(integrator, sdh), sdh, ad_backend) for sdh in dh.subdofhandlers]
+    return [decorate_element_cache(setup_element_cache(integrator, sdh), sdh, ad_backend, n)
+            for (sdh, n) in zip(dh.subdofhandlers, n_global_dofs)]
 end
 
 function setup_boundaries(integrator, dh)
@@ -142,15 +175,68 @@ function setup_internal_variable_handler(integrator, element_caches, dh)
 end
 
 function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh;
-        slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool)
+        slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, global_dof_sets)
     device = strategy.device
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(strategy, device, partition)
-        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots; needs_sensitivity)
+        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots;
+                                       needs_sensitivity, global_dofs = gdofs)
         dc = setup_device_instances(device, ws, n)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
-    end for (sdh, element_cache, boundary_cache) in zip(dh.subdofhandlers, element_caches, boundary_caches)]
+    end for (sdh, element_cache, boundary_cache, gdofs) in
+        zip(dh.subdofhandlers, element_caches, boundary_caches, global_dof_sets)]
+end
+
+# The `global_dofs` declaration is resolved once per subdomain, before any
+# cache exists, and validated here rather than as an out-of-bounds scatter or a
+# doubly assembled entry later on.
+function resolve_global_dof_sets(strategy, integrator, dh)
+    sets = [global_dofs(integrator, sdh) for sdh in dh.subdofhandlers]
+    all(isempty, sets) && return sets
+    _reject_unsupported_global_dof_strategy(strategy)
+    for (index, (sdh, gdofs)) in enumerate(zip(dh.subdofhandlers, sets))
+        _validate_global_dofs(index, sdh, gdofs, ndofs(dh))
+    end
+    return sets
+end
+
+function _reject_unsupported_global_dof_strategy(strategy::AssemblyStrategy)
+    strategy.scheduling isa ColoredScheduling && throw(ArgumentError(
+        "An element declaring `global_dofs` cannot be assembled under `ColoredScheduling`: " *
+        "coloring makes a scatter race-free by giving no two items of a color a shared dof, " *
+        "and a declared global dof is shared by every item of its subdomain, so no coloring " *
+        "isolates it. Use `SequentialScheduling`, whose parallel route is the atomic scatter."))
+    strategy.form isa Union{ElementAssembly, ElementAssemblyData} && throw(ArgumentError(
+        "An element declaring `global_dofs` cannot be assembled in the `ElementAssembly` " *
+        "form: its per-element storage and dof maps are built from `celldofs`, which by " *
+        "construction never contains a global dof. Use `FullAssembly`."))
+    return nothing
+end
+
+function _validate_global_dofs(index, sdh, gdofs, ndofs_total)
+    for d in gdofs
+        1 <= d <= ndofs_total || throw(ArgumentError(
+            "Subdomain $index declares the global dof $d, which is out of bounds for a " *
+            "DofHandler with $ndofs_total dofs."))
+    end
+    allunique(gdofs) || throw(ArgumentError(
+        "Subdomain $index declares the global dofs $(collect(gdofs)), which are not unique. " *
+        "The declaration is the ordered tail of the element-local system, so a repeated dof " *
+        "would receive the same contribution twice."))
+    # Cheap sample: a global dof that is ALSO a cell dof would be assembled
+    # once through the head and once through the tail. The first cell of the
+    # subdomain witnesses the overlap for the uniform-field case this covers.
+    isempty(sdh.cellset) && return nothing
+    cdofs = celldofs(sdh.dh, first(sdh.cellset))
+    for d in gdofs
+        d in cdofs && throw(ArgumentError(
+            "Subdomain $index declares the global dof $d, which is also a cell dof (found on " *
+            "cell $(first(sdh.cellset))). The local system is `[celldofs(cell); global dofs]`, " *
+            "so such a dof would receive every contribution twice. Only the first cell of the " *
+            "subdomain is sampled."))
+    end
+    return nothing
 end
 
 """
@@ -167,19 +253,32 @@ every kind the integrator might issue, not only declared ones — decided
 STRUCTURALLY by [`needs_ad_decoration`](@ref): a bilinear or linear operator
 carries no AD/sensitivity machinery whatever an element does or does not
 implement analytically. `ad_backend = nothing` opts out of wrapping.
+
+The caches of the algebraic item family ([`algebraic_items`](@ref)) are
+appended after the cell subdomains, so a sweep's traversal order is fixed by
+the declaration and does not depend on which families are present.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol;
         ad_backend = ForwardDiffAD())
     requests          = get_declared_kinds(protocol)
+    global_dof_sets   = resolve_global_dof_sets(strategy, integrator, dh)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
-    element_caches    = setup_elements(integrator, dh, ad_backend)
+    element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
     foreach(cache -> validate_element_cache(cache, requests), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
     ivh               = setup_internal_variable_handler(integrator, element_caches, dh)
     _warn_boundary_sensitivity(requests, boundary_caches)
-    subdomain_caches  = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
+    needs_sensitivity = needs_ad_decoration(integrator)
+    cell_caches       = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
                                                slots = get_declared_slots(protocol),
-                                               needs_sensitivity = needs_ad_decoration(integrator))
+                                               needs_sensitivity,
+                                               global_dof_sets)
+    algebraic_caches  = setup_algebraic_caches(operator_strategy, integrator, dh, protocol, ad_backend, needs_sensitivity)
+    # The two families carry different domain types, so the combined vector is
+    # only widened where something is declared — an operator without algebraic
+    # items keeps the element type it has today.
+    subdomain_caches  = isempty(algebraic_caches) ? cell_caches :
+        vcat(Vector{SubdomainCache}(cell_caches), algebraic_caches)
     return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, protocol)
 end
 
@@ -203,6 +302,19 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
     return BilinearFerriteOperator(A, engine, integrator)
 end
 
+# A matrix specification on an operator that holds no matrix is a
+# misconfiguration, not a degraded mode: the layout would be declared and then
+# silently dropped.
+function _reject_blocked_specification(strategy::AssemblyStrategy{<:FullAssembly})
+    strategy.form.operator_specification isa BlockedOperatorSpecification || return nothing
+    throw(ArgumentError(
+        "A linear operator assembles a vector and holds no matrix, so a " *
+        "`BlockedOperatorSpecification` has nothing to lay out. Use a " *
+        "`StandardOperatorSpecification`, or build the blocked matrix on the bilinear or " *
+        "nonlinear operator it belongs to."))
+end
+_reject_blocked_specification(strategy) = nothing
+
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractNonlinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
     engine = setup_engine(strategy, integrator, dh, protocol; ad_backend)
     J      = create_system_matrix(engine.strategy, dh)
@@ -210,6 +322,7 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 end
 
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractLinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
+    _reject_blocked_specification(strategy)
     engine = setup_engine(strategy, integrator, dh, protocol; ad_backend)
     b      = create_system_vector(engine.strategy, dh)
     return LinearFerriteOperator(b, engine, integrator)

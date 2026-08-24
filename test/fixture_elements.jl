@@ -201,3 +201,388 @@ function relaxation_testbed(strategy, qrc, dims = (2, 2);
     op = setup_operator(strategy, integrator, dh; slots = (:u, :q, :qprev), kwargs...)
     return (; op, dh, grid)
 end
+
+####################################
+## Stress-driven homogenization testbed
+####################################
+# Linear elasticity on an RVE whose macroscopic strain ε̄ is an unknown living
+# in no cell (Ferrite's `AlgebraicVariable`), so the element's local system is
+# `[celldofs(cell); the algebraic dofs of ε̄]`. The problem is the reference for
+# elements with global dofs; it is defined only where Ferrite carries algebraic
+# variables, and the consuming test files skip themselves otherwise.
+#
+# `analytic` picks the element that provides the Jacobian kernel or the one
+# that provides only the residual, so the same problem exercises both routes.
+if isdefined(Ferrite, :AlgebraicVariable)
+
+    struct StressDrivenIntegrator{analytic, V} <: AbstractNonlinearIntegrator
+        variable::V
+        order::Int
+        field_name::Symbol
+        variable_name::Symbol
+        E::SymmetricTensor{4, 2, Float64, 9}
+        σ̄::SymmetricTensor{2, 2, Float64, 3}
+    end
+    StressDrivenIntegrator(variable, E, σ̄; analytic = true, order = 2,
+                           field_name = :u, variable_name = :εbar) =
+        StressDrivenIntegrator{analytic, typeof(variable)}(variable, order, field_name, variable_name, E, σ̄)
+
+    struct StressDrivenCache{analytic, CV, AV} <: AbstractVolumetricElementCache
+        cv::CV
+        av::AV
+        E::SymmetricTensor{4, 2, Float64, 9}
+        σ̄::SymmetricTensor{2, 2, Float64, 3}
+        range_u::UnitRange{Int}
+        range_ε::UnitRange{Int}
+    end
+    StressDrivenCache{a}(cv, av, E, σ̄, ru, rε) where {a} =
+        StressDrivenCache{a, typeof(cv), typeof(av)}(cv, av, E, σ̄, ru, rε)
+
+    FerriteOperators.global_dofs(m::StressDrivenIntegrator, sdh::SubDofHandler) =
+        algebraic_dofs(sdh.dh, m.variable_name)
+
+    function FerriteOperators.setup_element_cache(m::StressDrivenIntegrator{a}, sdh::SubDofHandler) where {a}
+        ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+        ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+        qr     = QuadratureRule{Ferrite.getrefshape(ip)}(m.order)
+        return StressDrivenCache{a}(CellValues(qr, ip, ip_geo), AlgebraicValues(m.variable), m.E, m.σ̄,
+                                    dof_range(sdh, m.field_name), global_dof_range(m, sdh))
+    end
+
+    FerriteOperators.duplicate_for_device(device, c::StressDrivenCache{a}) where {a} =
+        StressDrivenCache{a}(FerriteOperators.duplicate_for_device(device, c.cv), c.av,
+                             c.E, c.σ̄, c.range_u, c.range_ε)
+    FerriteOperators.reinit_values!(c::StressDrivenCache, cell) = reinit!(c.cv, cell)
+
+    # ε̄ read out of the tail of the local unknown vector — eltype-generic, so
+    # the AD route seeds the algebraic dofs like any other.
+    function macroscopic_strain(c::StressDrivenCache, uₑ)
+        ε̄ = zero(SymmetricTensor{2, 2, eltype(uₑ)})
+        for (jε, J) in pairs(c.range_ε)
+            ε̄ += uₑ[J] * algebraic_basis_value(c.av, jε)
+        end
+        return ε̄
+    end
+
+    # F(u) = 0 is the stationarity of the RVE potential: the u rows carry
+    # ∫ δε : σ dΩ, the ε̄ rows the constraint ⟨σ⟩ = σ̄ tested with the
+    # algebraic basis.
+    function FerriteOperators.assemble_cell!(req::ResidualRequest, c::StressDrivenCache, args)
+        (; cv, av, E, σ̄, range_u, range_ε) = c
+        uₑ = args.states.u
+        ε̄  = macroscopic_strain(c, uₑ)
+        for qp in 1:getnquadpoints(cv)
+            dΩ = getdetJdV(cv, qp)
+            σ  = E ⊡ (ε̄ + function_symmetric_gradient(cv, qp, uₑ, range_u))
+            for (iu, I) in pairs(range_u)
+                req.r[I] += (shape_symmetric_gradient(cv, qp, iu) ⊡ σ) * dΩ
+            end
+            for (iε, I) in pairs(range_ε)
+                Eᵢ = algebraic_basis_value(av, iε)
+                req.r[I] += (Eᵢ ⊡ σ - σ̄ ⊡ Eᵢ) * dΩ
+            end
+        end
+    end
+
+    FerriteOperators.provides_analytic(::Type{<:StressDrivenCache{true}}, ::JacobianKind{:u}) = true
+    function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::StressDrivenCache{true}, args)
+        (; cv, av, E, range_u, range_ε) = c
+        for qp in 1:getnquadpoints(cv)
+            dΩ = getdetJdV(cv, qp)
+            for (iu, I) in pairs(range_u)
+                δεi = shape_symmetric_gradient(cv, qp, iu)
+                for (ju, J) in pairs(range_u)
+                    req.K[I, J] += (δεi ⊡ E ⊡ shape_symmetric_gradient(cv, qp, ju)) * dΩ
+                end
+                for (jε, J) in pairs(range_ε)
+                    v = (δεi ⊡ E ⊡ algebraic_basis_value(av, jε)) * dΩ
+                    req.K[I, J] += v
+                    req.K[J, I] += v
+                end
+            end
+            for (iε, I) in pairs(range_ε)
+                Eᵢ = algebraic_basis_value(av, iε)
+                for (jε, J) in pairs(range_ε)
+                    req.K[I, J] += (Eᵢ ⊡ E ⊡ algebraic_basis_value(av, jε)) * dΩ
+                end
+            end
+        end
+    end
+
+    ####################################
+    ## Reservoir testbed — cells plus algebraic items
+    ####################################
+    # A scalar diffusion field on a quad grid coupled to a lumped pressure `p1`
+    # that lives in no cell, plus nonlinear 0D exchange rows between `p1` and a
+    # second lumped pressure `p2`. The cell term carries `p1` through
+    # `global_dofs`; the 0D rows are algebraic items — one per exchange path,
+    # all of them on the SAME two dofs, which is what makes their scatter
+    # collide.
+    #
+    # `analytic` picks whether the algebraic cache provides the Jacobian kernel
+    # or leaves it to AD; `coupled` whether the cell term touches `p1` at all,
+    # an uncoupled cell term declaring no global dofs and therefore admitting
+    # a colored partition.
+
+    struct ReservoirIntegrator{analytic, coupled} <: AbstractNonlinearIntegrator
+        order::Int
+        field_name::Symbol
+        variable_names::Tuple{Symbol, Symbol}
+        α::Float64
+        conductances::Vector{Float64}
+        sources::Vector{Float64}
+    end
+    ReservoirIntegrator(; analytic = true, coupled = true, order = 2, field_name = :u,
+                        variable_names = (:p1, :p2), α = 0.7,
+                        conductances = [1.5, -0.4], sources = [0.25, 0.6]) =
+        ReservoirIntegrator{analytic, coupled}(order, field_name, variable_names, α, conductances, sources)
+
+    struct ReservoirCellCache{CV} <: AbstractVolumetricElementCache
+        cv::CV
+        α::Float64
+        range_u::UnitRange{Int}
+        range_p::UnitRange{Int}   # where `p1` sits in the local system; empty when uncoupled
+    end
+
+    FerriteOperators.global_dofs(m::ReservoirIntegrator{<:Any, true}, sdh::SubDofHandler) =
+        algebraic_dofs(sdh.dh, m.variable_names[1])
+
+    function FerriteOperators.setup_element_cache(m::ReservoirIntegrator, sdh::SubDofHandler)
+        ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+        ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+        qr     = QuadratureRule{Ferrite.getrefshape(ip)}(m.order)
+        return ReservoirCellCache(CellValues(qr, ip, ip_geo), m.α,
+                                  dof_range(sdh, m.field_name), global_dof_range(m, sdh))
+    end
+
+    FerriteOperators.duplicate_for_device(device, c::ReservoirCellCache) =
+        ReservoirCellCache(FerriteOperators.duplicate_for_device(device, c.cv), c.α, c.range_u, c.range_p)
+    FerriteOperators.reinit_values!(c::ReservoirCellCache, cell) = reinit!(c.cv, cell)
+
+    # r_u = ∫ (∇u⋅∇v + α p₁ v) dΩ, and the symmetric partner ∫ α u dΩ in the
+    # `p₁` row — the term that makes the lumped unknown see the field.
+    function FerriteOperators.assemble_cell!(req::ResidualRequest, c::ReservoirCellCache, args::CellArgs)
+        (; cv, α, range_u, range_p) = c
+        uₑ = args.states.u
+        p  = isempty(range_p) ? zero(eltype(uₑ)) : uₑ[first(range_p)]
+        for qp in 1:getnquadpoints(cv)
+            dΩ = getdetJdV(cv, qp)
+            ∇u = function_gradient(cv, qp, uₑ, range_u)
+            uq = function_value(cv, qp, uₑ, range_u)
+            for (i, I) in pairs(range_u)
+                req.r[I] += (∇u ⋅ shape_gradient(cv, qp, i) + α * p * shape_value(cv, qp, i)) * dΩ
+            end
+            for I in range_p
+                req.r[I] += α * uq * dΩ
+            end
+        end
+    end
+
+    FerriteOperators.provides_analytic(::Type{<:ReservoirCellCache}, ::JacobianKind{:u}) = true
+    function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::ReservoirCellCache, args::CellArgs)
+        (; cv, α, range_u, range_p) = c
+        for qp in 1:getnquadpoints(cv)
+            dΩ = getdetJdV(cv, qp)
+            for (i, I) in pairs(range_u)
+                for (j, J) in pairs(range_u)
+                    req.K[I, J] += (shape_gradient(cv, qp, i) ⋅ shape_gradient(cv, qp, j)) * dΩ
+                end
+                v = α * shape_value(cv, qp, i) * dΩ
+                for J in range_p
+                    req.K[I, J] += v
+                    req.K[J, I] += v
+                end
+            end
+        end
+    end
+
+    FerriteOperators.functional_value_type(::FunctionalKind{:reservoir_volume}) = Float64
+    function FerriteOperators.evaluate_cell_functional(::FunctionalKind{:reservoir_volume},
+                                                       c::ReservoirCellCache, args::CellArgs)
+        return sum(qp -> getdetJdV(c.cv, qp), 1:getnquadpoints(c.cv))
+    end
+
+    # The 0D rows. Item `k` exchanges between `p₁` and `p₂` with a cubic
+    # characteristic and a parameter-scaled source, so the kernel needs both the
+    # item's index and the sweep's parameter.
+    struct ReservoirItemCache{analytic}
+        conductances::Vector{Float64}
+        sources::Vector{Float64}
+    end
+
+    FerriteOperators.algebraic_items(m::ReservoirIntegrator, dh::DofHandler) =
+        [[only(algebraic_dofs(dh, m.variable_names[1])), only(algebraic_dofs(dh, m.variable_names[2]))]
+         for _ in eachindex(m.conductances)]
+
+    FerriteOperators.setup_algebraic_cache(m::ReservoirIntegrator{analytic}, dh::DofHandler) where {analytic} =
+        ReservoirItemCache{analytic}(m.conductances, m.sources)
+
+    FerriteOperators.duplicate_for_device(device, c::ReservoirItemCache) = c
+
+    function FerriteOperators.assemble_algebraic!(req::ResidualRequest, c::ReservoirItemCache, args::AlgebraicArgs)
+        k    = args.item.index
+        Δ    = args.states.u[1] - args.states.u[2]
+        flux = c.conductances[k] * Δ^3 - args.p * c.sources[k]
+        req.r[1] += flux
+        req.r[2] -= flux
+    end
+
+    FerriteOperators.provides_analytic(::Type{<:ReservoirItemCache{true}}, ::JacobianKind{:u}) = true
+    function FerriteOperators.assemble_algebraic!(req::JacobianRequest{:u}, c::ReservoirItemCache{true}, args::AlgebraicArgs)
+        Δ = args.states.u[1] - args.states.u[2]
+        g = 3 * c.conductances[args.item.index] * Δ^2
+        req.K[1, 1] += g
+        req.K[1, 2] -= g
+        req.K[2, 1] -= g
+        req.K[2, 2] += g
+    end
+
+    "Grid, DofHandler and coupling descriptors of the reservoir problem."
+    function reservoir_testbed(dims = (2, 2); variable_names = (:p1, :p2))
+        grid = generate_grid(Quadrilateral, dims)
+        dh   = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        add!(dh, variable_names[1], AlgebraicVariable())
+        add!(dh, variable_names[2], AlgebraicVariable())
+        close!(dh)
+        cell_coupling = CellCoupling(1:getncells(grid); algebraic_coupling = ((:u, variable_names[1]),))
+        item_coupling = AlgebraicCoupling(; algebraic_coupling = ((variable_names[1], variable_names[2]),))
+        return (; grid, dh, cell_coupling, item_coupling,
+                  item_dofs = [only(algebraic_dofs(dh, variable_names[1])),
+                               only(algebraic_dofs(dh, variable_names[2]))])
+    end
+
+    # The hand-rolled Ferrite loop the FO assembly is compared against: one pass
+    # over the cells with the augmented dof vector spelled out, one over the 0D
+    # rows with their own dof vector.
+    function reservoir_reference(testbed, m::ReservoirIntegrator{<:Any, coupled}, u, θ) where {coupled}
+        (; dh, cell_coupling, item_coupling) = testbed
+        ip = Ferrite.getfieldinterpolation(dh.subdofhandlers[1], m.field_name)
+        cv = CellValues(QuadratureRule{RefQuadrilateral}(m.order), ip,
+                        Ferrite.geometric_interpolation(Quadrilateral))
+        nc      = ndofs_per_cell(dh)
+        gdofs   = coupled ? algebraic_dofs(dh, m.variable_names[1]) : Int[]
+        dofs    = Vector{Int}(undef, nc + length(gdofs))
+        dofs[(nc + 1):end] .= gdofs
+        range_u = dof_range(dh, m.field_name)
+        range_p = (nc + 1):(nc + length(gdofs))
+        nl      = nc + length(gdofs)
+        Ke, re, uₑ = zeros(nl, nl), zeros(nl), zeros(nl)
+
+        K = allocate_matrix(dh; algebraic_couplings = (cell_coupling, item_coupling))
+        r = zeros(ndofs(dh))
+        assembler = start_assemble(K, r)
+        for cell in CellIterator(dh)
+            reinit!(cv, cell)
+            copyto!(dofs, celldofs(cell))
+            uₑ .= @view u[dofs]
+            fill!(Ke, 0)
+            fill!(re, 0)
+            for qp in 1:getnquadpoints(cv)
+                dΩ = getdetJdV(cv, qp)
+                ∇u = function_gradient(cv, qp, uₑ, range_u)
+                uq = function_value(cv, qp, uₑ, range_u)
+                p  = isempty(range_p) ? 0.0 : uₑ[first(range_p)]
+                for (i, I) in pairs(range_u)
+                    re[I] += (∇u ⋅ shape_gradient(cv, qp, i) + m.α * p * shape_value(cv, qp, i)) * dΩ
+                    for (j, J) in pairs(range_u)
+                        Ke[I, J] += (shape_gradient(cv, qp, i) ⋅ shape_gradient(cv, qp, j)) * dΩ
+                    end
+                    v = m.α * shape_value(cv, qp, i) * dΩ
+                    for J in range_p
+                        Ke[I, J] += v
+                        Ke[J, I] += v
+                    end
+                end
+                for I in range_p
+                    re[I] += m.α * uq * dΩ
+                end
+            end
+            assemble!(assembler, dofs, Ke, re)
+        end
+
+        idofs = testbed.item_dofs
+        Δ     = u[idofs[1]] - u[idofs[2]]
+        Ki, ri = zeros(2, 2), zeros(2)
+        for k in eachindex(m.conductances)
+            fill!(Ki, 0)
+            fill!(ri, 0)
+            flux = m.conductances[k] * Δ^3 - θ * m.sources[k]
+            ri[1] += flux
+            ri[2] -= flux
+            g = 3 * m.conductances[k] * Δ^2
+            Ki[1, 1] += g
+            Ki[1, 2] -= g
+            Ki[2, 1] -= g
+            Ki[2, 2] += g
+            assemble!(assembler, idofs, Ki, ri)
+        end
+        return K, r
+    end
+
+    "Grid, DofHandler and the coupling descriptor of the stress-driven RVE problem."
+    function stress_driven_testbed(dims = (3, 3); variable_name = :εbar)
+        grid = generate_grid(Quadrilateral, dims)
+        var  = AlgebraicVariable{SymmetricTensor{2, 2}}()
+        dh   = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}()^2)
+        add!(dh, variable_name, var)
+        close!(dh)
+        coupling = CellCoupling(1:getncells(grid);
+                                algebraic_coupling = ((:u, variable_name), (variable_name, variable_name)))
+        E = 100.0 * one(SymmetricTensor{4, 2}) + 60.0 * (one(SymmetricTensor{2, 2}) ⊗ one(SymmetricTensor{2, 2}))
+        σ̄ = SymmetricTensor{2, 2}((0.3, 1.0, -0.2))
+        return (; grid, dh, var, coupling, E, σ̄)
+    end
+
+    # The hand-rolled Ferrite loop the FO assembly is compared against — the
+    # `assemble_system!` of Ferrite's stress-driven homogenization tutorial,
+    # over one material and with the augmented dof vector spelled out.
+    function stress_driven_reference(testbed; variable_name = :εbar)
+        (; dh, var, coupling, E, σ̄) = testbed
+        ip  = Ferrite.getfieldinterpolation(dh.subdofhandlers[1], :u)
+        cv  = CellValues(QuadratureRule{RefQuadrilateral}(2), ip, Ferrite.geometric_interpolation(Quadrilateral))
+        av  = AlgebraicValues(var)
+        n   = ndofs_per_cell(dh)
+        nε  = getnbasefunctions(av)
+        dofs = Vector{Int}(undef, n + nε)
+        dofs[(n + 1):end] .= algebraic_dofs(dh, variable_name)
+        range_u = dof_range(dh, :u)
+        range_ε = (n + 1):(n + nε)
+        Ke = zeros(n + nε, n + nε)
+        fe = zeros(n + nε)
+        K  = allocate_matrix(dh; algebraic_couplings = (coupling,))
+        f  = zeros(ndofs(dh))
+        assembler = start_assemble(K, f)
+        for cell in CellIterator(dh)
+            reinit!(cv, cell)
+            copyto!(dofs, celldofs(cell))
+            fill!(Ke, 0)
+            fill!(fe, 0)
+            for qp in 1:getnquadpoints(cv)
+                dΩ = getdetJdV(cv, qp)
+                for (iu, I) in pairs(range_u)
+                    δεi = shape_symmetric_gradient(cv, qp, iu)
+                    for (ju, J) in pairs(range_u)
+                        Ke[I, J] += (δεi ⊡ E ⊡ shape_symmetric_gradient(cv, qp, ju)) * dΩ
+                    end
+                    for (jε, J) in pairs(range_ε)
+                        v = (δεi ⊡ E ⊡ algebraic_basis_value(av, jε)) * dΩ
+                        Ke[I, J] += v
+                        Ke[J, I] += v
+                    end
+                end
+                for (iε, I) in pairs(range_ε)
+                    Eᵢ = algebraic_basis_value(av, iε)
+                    fe[I] += (σ̄ ⊡ Eᵢ) * dΩ
+                    for (jε, J) in pairs(range_ε)
+                        Ke[I, J] += (Eᵢ ⊡ E ⊡ algebraic_basis_value(av, jε)) * dΩ
+                    end
+                end
+            end
+            assemble!(assembler, dofs, Ke, fe)
+        end
+        return K, f
+    end
+
+end

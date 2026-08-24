@@ -567,8 +567,18 @@ _patch_workspace(provider, inner) =
     PatchAssemblyWorkspace(provider, Ref(0), inner, eltype(inner.re)[], Int[])
 
 function _patch_subdomain(op, provider::PatchItems)
-    i = findfirst(sc -> sc.domain.sdh === provider.sdh, op.engine.subdomain_caches)
+    i = findfirst(sc -> sc.domain isa AssemblyDomain && sc.domain.sdh === provider.sdh,
+                  op.engine.subdomain_caches)
     i === nothing && throw(ArgumentError("the provider's SubDofHandler is not part of the operator"))
+    # A patch's local numbering is built from `celldofs` alone (`dofmaps`,
+    # `patch_dofs`, the per-cell `ldofs`), so a declared `global_dofs` tail
+    # would be dropped from every cell contribution without a trace. Rejected
+    # where a patch sweep binds to the subdomain, not in the scatter.
+    first(op.engine.subdomain_caches[i].device_cache).dofs === nothing || throw(ArgumentError(
+        "Patch assembly does not support elements declaring `global_dofs`: a patch's dof map is " *
+        "built from `celldofs`, so the declared tail of each element's local system has no " *
+        "patch-local number and would be silently dropped. Build the patch operator on an " *
+        "integrator without a `global_dofs` declaration."))
     return i
 end
 
@@ -717,7 +727,7 @@ function assemble_patch_target!(ekind, target, terms::Tuple, ws::PatchAssemblyWo
     for (k, cellid) in pairs(provider.patches[pid])
         group = provider.groups[pid][k]
         any_patch_term_active(terms, group) || continue
-        reinit!(iws.cell, cellid)
+        reinit!(iws, cellid)
         _zero_element_buffer!(ekind, iws)
         reinit_values!(iws.element, iws.cell, ekind)
         pₑ = query_cell_parameters(iws.element, iws.cell, p)

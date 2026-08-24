@@ -38,8 +38,10 @@ duplicate_for_device(device, a::VectorAssembler) = a
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, Ke::AbstractMatrix, fe::AbstractVector) = assemble!(assembler, celldofs(cell), Ke, fe)
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, Ke::AbstractMatrix) = assemble!(assembler, celldofs(cell), Ke)
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, fe::AbstractVector) = assemble!(assembler, celldofs(cell), fe)
-function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic}, cell::CellCache, fe::AbstractVector) where {atomic}
-    for (i, dof) in enumerate(celldofs(cell))
+Ferrite.assemble!(assembler::VectorAssembler, cell::CellCache, fe::AbstractVector) =
+    assemble!(assembler, celldofs(cell), fe)
+function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic}, dofs::AbstractVector{<:Integer}, fe::AbstractVector) where {atomic}
+    for (i, dof) in enumerate(dofs)
         _accum!(Val(atomic), assembler.f, fe[i], dof)
     end
     return
@@ -54,9 +56,11 @@ finalize_assembly!(::Nothing) = nothing   # sweeps whose sink is request-owned (
 struct ParameterJacobianAssembler{T, MT <: AbstractMatrix{T}, atomic}
     B::MT   # residual_size × nθ
 end
-function Ferrite.assemble!(assembler::ParameterJacobianAssembler{<:Any, <:Any, atomic}, cell::CellCache, Bₑ::AbstractMatrix) where {atomic}
+Ferrite.assemble!(assembler::ParameterJacobianAssembler, cell::CellCache, Bₑ::AbstractMatrix) =
+    assemble!(assembler, celldofs(cell), Bₑ)
+function Ferrite.assemble!(assembler::ParameterJacobianAssembler{<:Any, <:Any, atomic}, dofs::AbstractVector{<:Integer}, Bₑ::AbstractMatrix) where {atomic}
     for j in axes(Bₑ, 2)
-        for (i, dof) in enumerate(celldofs(cell))
+        for (i, dof) in enumerate(dofs)
             _accum!(Val(atomic), assembler.B, Bₑ[i, j], dof, j)
         end
     end
@@ -66,7 +70,9 @@ end
 struct ParameterVJPAssembler{T, VT <: AbstractVector{T}, atomic}
     g::VT   # length nθ
 end
-function Ferrite.assemble!(assembler::ParameterVJPAssembler{<:Any, <:Any, atomic}, cell::CellCache, gₑ::AbstractVector) where {atomic}
+# Parameter-space accumulation: the item address plays no part, so both
+# spellings of it land here.
+function Ferrite.assemble!(assembler::ParameterVJPAssembler{<:Any, <:Any, atomic}, address, gₑ::AbstractVector) where {atomic}
     for i in eachindex(gₑ)
         _accum!(Val(atomic), assembler.g, gₑ[i], i)
     end

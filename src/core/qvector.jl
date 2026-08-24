@@ -73,7 +73,10 @@ function setup_qvector(::Type{T}, operator) where {T}
     npoints = zeros(Int, getncells(get_grid(operator.engine.dh)))
     for sc in operator.engine.subdomain_caches
         domain = sc.domain
-        nqp    = getnquadpoints(domain.element)
+        # Quadrature storage is per cell; an item family without cells (see
+        # `algebraic_items`) contributes no points to the layout.
+        domain isa AssemblyDomain || continue
+        nqp = getnquadpoints(domain.element)
         for cellid in domain.sdh.cellset
             npoints[cellid] = nqp
         end

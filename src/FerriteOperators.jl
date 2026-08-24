@@ -77,6 +77,7 @@ include("operators/condensation.jl")    # condense_internal!: element-local solv
 include("core/quadrature-task.jl")      # Task + operator for evaluating functions at quadrature points
 include("core/item_states.jl")          # ItemStates: provider-agnostic per-item persistent storage
 include("core/patch-task.jl")           # Patch items: multi-cell work items with patch-local scatter (experimental)
+include("core/algebraic-task.jl")       # Algebraic items: work items that are a dof set and nothing else
 
 include("postprocessing/quadrature-grid.jl")  # VTKQuadratureGrid — QP positions as a VTK mesh
 include("postprocessing/quadrature-query.jl") # VTKQuadratureFile + write_quadrature_data
@@ -139,6 +140,7 @@ export SequentialCPUDevice, PolyesterDevice, CudaDevice
 export SequentialAssemblyStrategy, ElementAssemblyStrategy, PerColorAssemblyStrategy
 export AssemblyStrategy, AbstractAssemblyForm, FullAssembly, ElementAssembly
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling
+export StandardOperatorSpecification, BlockedOperatorSpecification
 
 # Transfer operator infrastructure
 export SameGridCellCache, SameGridCellIterator
@@ -150,6 +152,9 @@ export AbstractVolumetricElementCache
 export MassProlongatorIntegrator
 export NestedMassProlongatorIntegrator
 export setup_element_cache, setup_boundary_cache
+export global_dofs, global_dof_range
+export algebraic_items, setup_algebraic_cache, assemble_algebraic!, evaluate_algebraic_functional
+export AlgebraicItem, AlgebraicArgs
 export TransferFerriteOperator, setup_transfer_operator, init_transfer_sparsity_pattern
 export NestedTransferFerriteOperator, setup_nested_transfer_operator, init_nested_transfer_sparsity_pattern
 

@@ -203,6 +203,170 @@ weighted sweep therefore implements `assemble_facet!` for
 [`WeightedJacobianRequest`](@ref); per-slot facet kernels are not composed
 behind the driver's back.
 
+## Elements with global dofs
+
+Some unknowns belong to no cell: the macroscopic strain of a stress-driven RVE,
+a lumped chamber pressure coupling a whole surface, a Lagrange multiplier
+enforcing an integral constraint. Ferrite gives them dofs through
+`AlgebraicVariable`, numbered after the spatial dofs and never appearing in
+`celldofs`. An element declares which of them its local system carries:
+
+```julia
+FerriteOperators.global_dofs(m::MyIntegrator, sdh::SubDofHandler) = algebraic_dofs(sdh.dh, :εbar)
+```
+
+The declaration lives on the **integrator**, one per subdomain, shared by the
+volumetric and the boundary kernel of that subdomain, and is resolved once at
+setup — before any cache is built. The local layout is then a contract:
+
+```
+[ celldofs(cell) ; the declared global dofs, in declaration order ]
+```
+
+so the tail occupies [`global_dof_range`](@ref). The framework passes no extra
+channel and `CellArgs`/`FacetArgs` keep their four fields; an element cache
+resolves its own range at setup and stores it:
+
+```julia
+struct MyCache{CV, AV} <: AbstractVolumetricElementCache
+    cv::CV
+    av::AV                    # Ferrite's AlgebraicValues for the variable
+    range_u::UnitRange{Int}
+    range_ε::UnitRange{Int}   # where the global dofs sit in the local system
+end
+
+function FerriteOperators.setup_element_cache(m::MyIntegrator, sdh::SubDofHandler)
+    ip = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    cv = CellValues(getquadraturerule(m.qrc, sdh), ip, FerriteOperators.geometric_subdomain_interpolation(sdh))
+    return MyCache(cv, AlgebraicValues(m.variable), dof_range(sdh, m.field_name), global_dof_range(m, sdh))
+end
+
+function FerriteOperators.assemble_cell!(req::ResidualRequest, c::MyCache, args::CellArgs)
+    uₑ = args.states.u                                   # length ndofs_per_cell + 3
+    ε̄  = sum(uₑ[J] * algebraic_basis_value(c.av, jε) for (jε, J) in pairs(c.range_ε))
+    for qp in 1:getnquadpoints(c.cv)
+        dΩ = getdetJdV(c.cv, qp)
+        σ  = c.E ⊡ (ε̄ + function_symmetric_gradient(c.cv, qp, uₑ, c.range_u))
+        for (iu, I) in pairs(c.range_u)
+            req.r[I] += (shape_symmetric_gradient(c.cv, qp, iu) ⊡ σ) * dΩ
+        end
+        for (iε, I) in pairs(c.range_ε)
+            Eᵢ = algebraic_basis_value(c.av, iε)
+            req.r[I] += (Eᵢ ⊡ σ - c.σ̄ ⊡ Eᵢ) * dΩ
+        end
+    end
+end
+```
+
+Everything the engine sizes follows the declaration: `Ke`, `re`, the slot
+buffers, the sensitivity buffers, and the ForwardDiff seeds are padded by the
+declared count, so an AD fallback differentiates the FULL augmented system —
+the `ε̄`-`ε̄` block included. `allocate_element_matrix` and friends keep meaning
+the FIELD space, so an element overriding them states `ndofs_per_cell` and
+never the augmented size.
+
+**The sparsity is the caller's declaration.** FerriteOperators does not infer
+which entries the coupling creates from the dof declaration — whether every
+cell couples to the variable, or only one facet set, is a modelling statement
+only the caller can make. It travels as a Ferrite coupling descriptor on the
+operator specification:
+
+```julia
+coupling = CellCoupling(1:getncells(grid); algebraic_coupling = ((:u, :εbar), (:εbar, :εbar)))
+spec     = StandardOperatorSpecification(; algebraic_couplings = (coupling,))
+strategy = AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), SequentialCPUDevice())
+```
+
+A missing descriptor is not silent: it surfaces as Ferrite's
+missing-sparsity-entry error on the first assembly.
+
+Two restrictions are raised at setup. [`ColoredScheduling`](@ref) is rejected —
+coloring works by giving no two items of a color a shared dof, and a declared
+global dof is shared by *every* item of its subdomain, so no coloring isolates
+it; the parallel route is the atomic scatter of [`SequentialScheduling`](@ref)
+under a parallel device. The [`ElementAssembly`](@ref) form is rejected too,
+its per-element dof maps being built from `celldofs`. The declaration itself is
+validated at setup as well: in bounds, without duplicates, and — sampled on the
+subdomain's first cell — disjoint from `celldofs`, since a dof appearing in both
+head and tail would receive every contribution twice.
+
+Patch assembly is rejected on a subdomain that declares global dofs: a patch's
+dof map is built from `celldofs`, so the declared tail would have no patch-local
+number and be dropped. A condensed element cache without an analytic
+`Consistent` Jacobian kernel is rejected too — the generic combination
+`∂F/∂ū|_q + ∂F/∂q · dq/dū` reads a corrector block spanning the field space
+while the AD partials span the augmented system.
+
+## Algebraic terms (items with no mesh support)
+
+A term whose rows belong to no cell at all — a 0D circulation model's own
+equations, a lumped balance, an `AlgebraicCoupling`-only block — is its own item
+family. **An item of this family IS a set of global dofs and nothing else:** no
+geometry cache, no values object, no quadrature. Two declarations on the
+integrator introduce it:
+
+```julia
+FerriteOperators.algebraic_items(m::MyIntegrator, dh::DofHandler) =
+    [[only(algebraic_dofs(dh, :p1)), only(algebraic_dofs(dh, :p2))] for _ in 1:nchambers]
+
+FerriteOperators.setup_algebraic_cache(m::MyIntegrator, dh::DofHandler) = MyChamberCache(m.parameters)
+```
+
+[`algebraic_items`](@ref) lists one dof vector per item, in the order the local
+system uses; [`setup_algebraic_cache`](@ref) builds **one** cache serving them
+all — the analogue of one element cache per `SubDofHandler` serving all its
+cells. It has no silent fallback: declaring items without it is a setup error.
+
+Kernels dispatch through [`assemble_algebraic!`](@ref), the family's own entry
+point next to `assemble_cell!` and `assemble_facet!`, and receive an
+[`AlgebraicArgs`](@ref) — the same four fields as `CellArgs` with the
+[`AlgebraicItem`](@ref) where the geometry cache would be:
+
+```julia
+function FerriteOperators.assemble_algebraic!(req::ResidualRequest, c::MyChamberCache, args::AlgebraicArgs)
+    k = args.item.index                # which of the declared items this is
+    Δ = args.states.u[1] - args.states.u[2]
+    req.r[1] += c.conductances[k] * Δ - args.p * c.sources[k]
+    req.r[2] -= c.conductances[k] * Δ - args.p * c.sources[k]
+end
+```
+
+`args.item` carries `index` and `dofs`; the local buffers are `n × n` and `n`
+for an item of `n` dofs, and `args.states` gathers through the item's dofs like
+any other item's gather. Only the [`ResidualRequest`](@ref) kernel is mandatory
+— every other request is served analytically where
+[`provides_analytic`](@ref) declares it and by ForwardDiff over the residual
+kernel otherwise, so ∂F/∂θ of a 0D model comes out of the same seeding the cell
+family uses.
+
+Items of one declaration must be **uniformly sized**, which is what keeps a
+worker's local buffers fixed-size; the check is a setup error naming the
+offending item. Items usually *share* dofs (several rows on one lumped
+unknown), and that is what fixes the scheduling: [`SequentialScheduling`](@ref)
+puts the whole family in one chunk and lets the atomic scatter resolve the
+collisions, while [`ColoredScheduling`](@ref) — whose promise is that no two
+items of a barrier share a dof — can only run **one item per barrier**. The
+partition is derived, not rejected.
+
+The sparsity is the caller's here too. Entries between two algebraic variables
+travel as an `AlgebraicCoupling`; diagonal entries are always allocated, so only
+the off-diagonal ones need declaring:
+
+```julia
+spec = StandardOperatorSpecification(;
+    algebraic_couplings = (CellCoupling(1:getncells(grid); algebraic_coupling = ((:u, :p1),)),
+                           AlgebraicCoupling(; algebraic_coupling = ((:p1, :p2),))))
+```
+
+Two consequences of an item having no cell. [`InternalSource`](@ref) slots are
+rejected on an operator carrying algebraic items — the source restricts a gather
+to a cell's condensed internal-dof range, which such an item does not have — so
+condensed physics and algebraic terms do not currently share an operator. And a
+reduction reaches the family but contributes nothing by default: a term with no
+mesh support carries no volume, so [`evaluate_functional`](@ref) keeps summing
+the cell contributions alone unless the cache implements
+[`evaluate_algebraic_functional`](@ref).
+
 ## Condensed elements (internal variables)
 
 Elements with per-quadrature-point internal state append their unknowns after

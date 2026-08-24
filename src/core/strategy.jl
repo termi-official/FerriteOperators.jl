@@ -1,5 +1,53 @@
-struct StandardOperatorSpecification
+"""
+    StandardOperatorSpecification(; algebraic_couplings = (), constraint_handler = nothing)
+
+The operator's global matrix as a monolithic
+`SparseMatrixCSC{value_type(device), index_type(device)}`, over the pattern
+[`create_system_matrix`](@ref) builds from two declarations, both of which
+[`BlockedOperatorSpecification`](@ref) shares:
+
+- `algebraic_couplings` — Ferrite coupling descriptors (`CellCoupling`,
+  `FacetCoupling`, `AlgebraicCoupling`) for the entries an element's
+  [`global_dofs`](@ref) couple into. WHICH items couple is the caller's
+  statement, never inferred from the dof declaration; a missing descriptor
+  surfaces as Ferrite's missing-sparsity-entry error on the first assembly.
+- `constraint_handler` — the constraint entries (`add_constraint_entries!`),
+  so condensation has room to write. Sparsity ONLY: applying the constraints
+  stays the caller's, through Ferrite's `apply!`/`apply_assemble!`.
+
+The zero-argument form is the default of [`FullAssembly`](@ref).
+"""
+struct StandardOperatorSpecification{C, CH}
+    algebraic_couplings::C
+    constraint_handler::CH
 end
+StandardOperatorSpecification(; algebraic_couplings = (), constraint_handler = nothing) =
+    StandardOperatorSpecification(algebraic_couplings, constraint_handler)
+
+"""
+    BlockedOperatorSpecification(block_sizes, matrix_type; algebraic_couplings = (), constraint_handler = nothing)
+
+The operator's global matrix as a `BlockMatrix` over the row/column split
+`block_sizes`, allocated from a `BlockSparsityPattern` and from the same two
+declarations as [`StandardOperatorSpecification`](@ref). `matrix_type` is
+REQUIRED and is the caller's — this package depends on neither BlockArrays nor
+SparseMatricesCSR, weakly or otherwise, so the user loads them and names the
+type (`BlockMatrix{Float64, Matrix{SparseMatrixCSR{1, Float64, Int}}}`).
+
+The residual stays a plain `Vector` — `create_system_vector` is unchanged, and
+Ferrite's `BlockAssembler` takes a non-blocked `f`. A LINEAR operator holds no
+matrix at all, so a blocked specification on one is rejected at setup rather
+than silently dropped.
+"""
+struct BlockedOperatorSpecification{B, MT, C, CH}
+    block_sizes::B
+    matrix_type::MT
+    algebraic_couplings::C
+    constraint_handler::CH
+end
+BlockedOperatorSpecification(block_sizes, matrix_type::Type;
+        algebraic_couplings = (), constraint_handler = nothing) =
+    BlockedOperatorSpecification(block_sizes, matrix_type, algebraic_couplings, constraint_handler)
 
 abstract type AbstractAssemblyStrategy end
 
@@ -100,7 +148,7 @@ setup_operator_strategy_cache(strategy, integrator, dh) = strategy
 Abstract supertype for all per-worker workspace types used by the task/device system.
 
 Every concrete workspace must implement:
-- `Ferrite.reinit!(ws, cellid)` — reinitialise geometry and element caches for the given cell
+- `Ferrite.reinit!(ws, item)` — position the workspace on the item its family is indexed by (a cell id, a patch index, an algebraic item index)
 - `duplicate_for_device(device::AbstractCPUDevice, ws)` — create an independent copy for a parallel worker
 
 New device backends must allocate and manage workspaces of a concrete subtype.
@@ -131,15 +179,21 @@ members (`λₑ`, `vₑ`, `Jvₑ`, `gu`, `gₜ`) are eager; parameter-sized memb
     gθ        # parameter pullback output (nθ)
 end
 
-function create_sensitivity_buffers(element, sdh)
-    vₑ  = allocate_element_unknown_vector(element, sdh)
-    gu  = allocate_element_unknown_vector(element, sdh)
-    λₑ  = allocate_element_residual_vector(element, sdh)
-    Jvₑ = allocate_element_residual_vector(element, sdh)
-    gₜ  = allocate_element_residual_vector(element, sdh)
+function create_sensitivity_buffers(element, sdh, n_global_dofs::Int = 0)
+    vₑ  = pad_element_vector(allocate_element_unknown_vector(element, sdh), n_global_dofs)
+    gu  = pad_element_vector(allocate_element_unknown_vector(element, sdh), n_global_dofs)
+    λₑ  = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
+    Jvₑ = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
+    gₜ  = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
     T   = eltype(Jvₑ)
     return SensitivityBuffers(λₑ, vₑ, Jvₑ, gu, gₜ, Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0), Vector{T}())
 end
+
+# The size-based path: an item family whose local system is described by a dof
+# count alone (an algebraic item) has no `SubDofHandler` to allocate against.
+create_sensitivity_buffers(n::Int, ::Type{T}) where {T} = SensitivityBuffers(
+    zeros(T, n), zeros(T, n), zeros(T, n), zeros(T, n), zeros(T, n),
+    Vector{T}(), Matrix{T}(undef, n, 0), Vector{T}())
 
 duplicate_for_device(device::AbstractCPUDevice, s::SensitivityBuffers) =
     SensitivityBuffers(copy(s.λₑ), copy(s.vₑ), copy(s.Jvₑ), copy(s.gu), copy(s.gₜ), copy(s.θ), copy(s.Bₑ), copy(s.gθ))
@@ -184,6 +238,11 @@ Core fields:
 - `boundary_element`: surface cache walked by the facet driver
 - `sensitivity`: [`SensitivityBuffers`](@ref), or `nothing` for an operator
   family that never issues a sensitivity kind (bilinear, linear)
+- `dofs`: the augmented dof vector `[celldofs(cell); the declared global dofs]`
+  (see [`global_dofs`](@ref)), or `nothing` where the integrator declares none.
+  The tail is written once at construction, the head refreshed by
+  `Ferrite.reinit!`; the `nothing` type is what makes the un-augmented path
+  return `celldofs(ws.cell)` directly, with neither copy nor run-time branch.
 """
 @concrete struct AssemblyWorkspace <: AbstractWorkspace
     Ke
@@ -194,9 +253,22 @@ Core fields:
     element
     boundary_element
     sensitivity    # SensitivityBuffers, or `nothing`
+    dofs           # augmented dof vector, or `nothing`
 end
 
-Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = reinit!(ws.cell, cellid)
+function Ferrite.reinit!(ws::AssemblyWorkspace, cellid)
+    reinit!(ws.cell, cellid)
+    _refresh_dof_head!(ws.dofs, ws.cell)
+    return ws
+end
+@inline _refresh_dof_head!(::Nothing, cell) = nothing
+@inline _refresh_dof_head!(dofs, cell) = copyto!(dofs, celldofs(cell))
+
+# The tail as declared, recovered from the augmented vector so a per-worker
+# duplicate rebuilds the same layout without carrying the declaration along.
+_declared_global_dofs(ws::AssemblyWorkspace) = _declared_global_dofs(ws.dofs, ws.cell.dh)
+_declared_global_dofs(::Nothing, sdh) = ()
+_declared_global_dofs(dofs, sdh) = @view dofs[(ndofs_per_cell(sdh) + 1):end]
 
 function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
     return create_assembly_workspace(
@@ -206,12 +278,13 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
         duplicate_for_device(device, ws.ivh),
         keys(ws.slot_buffers);
         needs_sensitivity = ws.sensitivity !== nothing,
+        global_dofs = _declared_global_dofs(ws),
     )
 end
 
 """
     create_assembly_workspace(element, boundary_element, sdh, ivh, slots;
-                              needs_sensitivity = true)
+                              needs_sensitivity = true, global_dofs = ())
 
 Create a single [`AssemblyWorkspace`](@ref) with freshly allocated
 element-local buffers, one state buffer per declared slot name. Slot buffers
@@ -225,20 +298,35 @@ vary per cell independently of — the field dof count.
 STRUCTURAL, decided by the integrator family (see
 [`needs_ad_decoration`](@ref)): a bilinear or linear operator never issues a
 sensitivity kind, so it carries none of this machinery.
+
+`global_dofs` is the subdomain's [`global_dofs`](@ref) declaration. Every
+element-local buffer is padded by its length, and the workspace carries the
+augmented dof vector every gather and scatter of the sweep addresses.
 """
 function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
-        needs_sensitivity::Bool = true) where {N}
-    slot_buffers = NamedTuple{slots}(ntuple(_ -> allocate_element_unknown_vector(element, sdh), N))
+        needs_sensitivity::Bool = true, global_dofs = ()) where {N}
+    n = length(global_dofs)
+    slot_buffers = NamedTuple{slots}(ntuple(_ -> pad_element_vector(allocate_element_unknown_vector(element, sdh), n), N))
     return AssemblyWorkspace(
-        allocate_element_matrix(element, sdh),
+        pad_element_matrix(allocate_element_matrix(element, sdh), n),
         slot_buffers,
-        allocate_element_residual_vector(element, sdh),
+        pad_element_vector(allocate_element_residual_vector(element, sdh), n),
         CellCache(sdh),
         ivh,
         element,
         boundary_element,
-        needs_sensitivity ? create_sensitivity_buffers(element, sdh) : nothing,
+        needs_sensitivity ? create_sensitivity_buffers(element, sdh, n) : nothing,
+        _augmented_dof_vector(sdh, global_dofs),
     )
+end
+
+function _augmented_dof_vector(sdh, global_dofs)
+    n = length(global_dofs)
+    n == 0 && return nothing
+    nc = ndofs_per_cell(sdh)
+    dofs = Vector{Int}(undef, nc + n)
+    dofs[(nc + 1):end] .= global_dofs
+    return dofs
 end
 
 ####################################
@@ -249,9 +337,9 @@ end
     CellItems(sdh)
 
 The default work-item provider: the cells of one `SubDofHandler`. Item
-providers are what `compute_partition` consumes — future item families
-(interface pairs, contact pairs, patches, local BVPs) are further provider
-types, not `SubDofHandler`s.
+providers are what `compute_partition` consumes — every other item family
+brings its own provider type rather than a `SubDofHandler`
+([`AlgebraicItems`](@ref), [`PatchItems`](@ref)).
 """
 struct CellItems{SDH <: SubDofHandler}
     sdh::SDH
@@ -297,6 +385,9 @@ end
 
 matrix_type(strategy::AssemblyStrategy) = matrix_type(strategy.device, strategy.form.operator_specification)
 matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
+# The blocked spec names its own type: the block and the entry storage are the
+# user's choice, and this package carries neither dependency.
+matrix_type(::AbstractDevice, spec::BlockedOperatorSpecification) = spec.matrix_type
 vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
 vector_type(device::AbstractDevice) = Vector{value_type(device)}
 

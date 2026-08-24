@@ -73,6 +73,50 @@ Declaring stays a hint, never a capability restriction: an operator always
 builds what its own integrator family issues ([`mandatory_kinds`](@ref)).
 Undeclared kinds run their checks at the call-time entry points.
 
+## The assembled matrix
+
+What the operator's global matrix looks like is the *operator specification*
+carried by [`FullAssembly`](@ref). [`StandardOperatorSpecification`](@ref) — the
+default — gives a monolithic `SparseMatrixCSC`, and both specifications take the
+same two pattern declarations:
+
+- `algebraic_couplings`, Ferrite coupling descriptors (`CellCoupling`,
+  `FacetCoupling`, `AlgebraicCoupling`) for the entries an element's
+  [`global_dofs`](@ref) couple into — see
+  [Elements with global dofs](elements.md#Elements-with-global-dofs) — and for
+  those an [`algebraic_items`](@ref) declaration needs, see
+  [Algebraic terms](elements.md#Algebraic-terms-(items-with-no-mesh-support));
+- `constraint_handler`, which adds the constraint entries so condensation has
+  room to write. Sparsity **only**: applying the constraints to the assembled
+  system stays with the caller, through Ferrite's `apply!`/`apply_assemble!`.
+
+### Blocked matrices with CSR blocks
+
+[`BlockedOperatorSpecification`](@ref) assembles into a `BlockMatrix` instead —
+the layout a fieldwise preconditioner or a Schur-complement consumer wants, and
+the way to give the blocks a storage format the monolithic path does not offer.
+The matrix type is the caller's: this package depends on neither BlockArrays nor
+SparseMatricesCSR, so the user loads them and names the type.
+
+```julia
+using BlockArrays, SparseMatricesCSR
+
+spec     = BlockedOperatorSpecification([nu, nalg],
+                                        BlockMatrix{Float64, Matrix{SparseMatrixCSR{1, Float64, Int}}};
+                                        algebraic_couplings = (coupling,))
+strategy = AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), SequentialCPUDevice())
+op       = setup_operator(strategy, integrator, dh)
+
+update_linearization!(op, r, u, p)   # the fused Newton path
+```
+
+The residual stays a plain `Vector` — `create_system_vector` is unchanged, and
+Ferrite's `BlockAssembler` takes a non-blocked `f`. The fused,
+matrix-only and residual-only sweeps all work, so a bilinear operator assembles
+into a blocked target just as a nonlinear one does. A *linear* operator holds no
+matrix at all, and a blocked specification on one is rejected at
+`setup_operator` rather than silently dropped.
+
 ## Slots and rate reconstruction
 
 Time discretization of the global unknowns is solver-owned: solvers pass slot

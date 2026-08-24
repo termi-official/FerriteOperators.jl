@@ -14,6 +14,32 @@ end
     sdh_col
 end
 
+"""
+    AlgebraicDomain(element, items)
+
+Domain descriptor of an algebraic subdomain cache. `element` holds the one
+cache [`setup_algebraic_cache`](@ref) built — named after `AssemblyDomain`'s
+field so the per-sweep validation helpers read both domains — and `items` the
+resolved dof vectors.
+"""
+@concrete struct AlgebraicDomain
+    element
+    items
+end
+
+# The trait ↔ kernel check of a domain's cache, over the kernel entry point and
+# args record its item family uses.
+_assert_domain_trait_backed(domain, kind) =
+    _assert_trait_backed(typeof(domain.element), kind, assemble_cell!, CellArgs)
+_assert_domain_trait_backed(domain::AlgebraicDomain, kind) =
+    _assert_trait_backed(typeof(domain.element), kind, assemble_algebraic!, AlgebraicArgs)
+
+# Whether a subdomain can contribute to a reduction at all — the structural
+# half of the reduction precondition. An `EmptyVolumetricElementCache` returns
+# no contribution by construction; every other cache might.
+_may_contribute(domain) = true
+_may_contribute(domain::AssemblyDomain) = !(domain.element isa EmptyVolumetricElementCache)
+
 @concrete struct SubdomainCache
     domain
     device_cache
