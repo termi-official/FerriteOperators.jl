@@ -221,10 +221,14 @@ function FerriteOperators.assemble_facet!(req::ResidualRequest, cache::MyFacetCa
 end
 ```
 
-**⚠ Old-signature `assemble_facet!` methods are never called and produce no
-error — the boundary contribution silently vanishes.** Grep every downstream
-`assemble_facet!`/`assemble_element!` method definition and port it; put at
-least one boundary integral under a test with an analytic reference (see
+**⚠ An old-signature `assemble_facet!`, or a missing `is_facet_in_cache`, now
+raises a loud `ArgumentError` at setup** (`validate_boundary_cache` on the
+fused route, `validate_facet_item_cache` on the facet-item route) instead of
+silently vanishing — except where the drift sits in `setup_boundary_cache`'s
+own signature: Julia then falls back to its empty default, indistinguishable
+from "no boundary terms". Grep every downstream `assemble_facet!`/
+`assemble_element!` method definition and port it regardless; put at least one
+boundary integral under a test with an analytic reference (see
 `test/test_element_api.jl`, "Facet driver with a real Neumann kernel").
 
 ## Strategies and operators

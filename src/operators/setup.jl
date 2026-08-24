@@ -284,6 +284,7 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
     foreach(cache -> validate_element_cache(cache, requests), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
+    foreach(cache -> validate_boundary_cache(cache, requests), boundary_caches)
     algebraic_domain  = resolve_algebraic_domain(integrator, dh, protocol)
     ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
     _warn_boundary_sensitivity(requests, boundary_caches)

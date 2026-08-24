@@ -395,3 +395,77 @@ FerriteOperators.get_number_of_internal_dofs_per_element(
     @test internal_variable_range(ivh, 1) == (ndofs(dh) + 1):(ndofs(dh) + 2)
     @test unknown_size(op) == ndofs(dh) + 2 * getncells(grid)
 end
+
+####################################
+## Boundary cache setup validation (fused route)
+####################################
+# `validate_boundary_cache` is `validate_facet_item_cache`'s counterpart for
+# `setup_boundary_cache` — the 0.3→0.4 migration gap: a surface cache written
+# against the old positional `assemble_facet!` signature builds fine and then
+# either MethodErrors mid-sweep or, if `is_facet_in_cache` never matches,
+# contributes nothing.
+
+# The old 0.3 signature — no method matches the mandatory 0.4 one.
+struct OldSignatureBoundaryCache <: FerriteOperators.AbstractSurfaceElementCache end
+FerriteOperators.assemble_facet!(rₑ, uₑ, cell, lfi::Int, ::OldSignatureBoundaryCache, p) = nothing
+FerriteOperators.is_facet_in_cache(::FacetIndex, cell, ::OldSignatureBoundaryCache) = false
+
+struct OldSignatureBoundaryProbe <: AbstractLinearIntegrator end
+FerriteOperators.setup_element_cache(::OldSignatureBoundaryProbe, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+FerriteOperators.setup_boundary_cache(::OldSignatureBoundaryProbe, ::SubDofHandler) = OldSignatureBoundaryCache()
+
+# The 0.4 residual kernel ported; `is_facet_in_cache` did not.
+struct NoGateBoundaryCache <: FerriteOperators.AbstractSurfaceElementCache end
+FerriteOperators.assemble_facet!(::ResidualRequest, ::NoGateBoundaryCache, args, lfi::Int) = nothing
+
+struct NoGateBoundaryProbe <: AbstractLinearIntegrator end
+FerriteOperators.setup_element_cache(::NoGateBoundaryProbe, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+FerriteOperators.setup_boundary_cache(::NoGateBoundaryProbe, ::SubDofHandler) = NoGateBoundaryCache()
+
+# A `provides_analytic` claim with no facet kernel behind it — the trait ↔
+# kernel check shared with `validate_facet_item_cache`.
+struct OverclaimingBoundaryCache <: FerriteOperators.AbstractSurfaceElementCache end
+FerriteOperators.assemble_facet!(::ResidualRequest, ::OverclaimingBoundaryCache, args, lfi::Int) = nothing
+FerriteOperators.is_facet_in_cache(::FacetIndex, cell, ::OverclaimingBoundaryCache) = false
+FerriteOperators.provides_analytic(::Type{OverclaimingBoundaryCache}, ::JacobianKind{:u}) = true
+
+struct OverclaimingBoundaryProbe <: AbstractLinearIntegrator end
+FerriteOperators.setup_element_cache(::OverclaimingBoundaryProbe, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+FerriteOperators.setup_boundary_cache(::OverclaimingBoundaryProbe, ::SubDofHandler) = OverclaimingBoundaryCache()
+
+@testset "Boundary cache setup validation" begin
+    grid = generate_grid(Quadrilateral, (2, 2))
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+    # The legitimate default validates trivially.
+    @test FerriteOperators.validate_boundary_cache(FerriteOperators.EmptySurfaceElementCache()) === nothing
+
+    # A 0.3-signature cache: no method matches the mandatory 0.4 residual kernel.
+    err = @test_throws ArgumentError setup_operator(strategy, OldSignatureBoundaryProbe(), dh)
+    @test occursin("assemble_facet!", err.value.msg)
+    @test occursin("ResidualRequest", err.value.msg)
+    @test occursin("FacetArgs", err.value.msg)
+
+    # The residual kernel ported; the gate did not.
+    err = @test_throws ArgumentError setup_operator(strategy, NoGateBoundaryProbe(), dh)
+    @test occursin("is_facet_in_cache", err.value.msg)
+    @test occursin("FacetIndex", err.value.msg)
+
+    # A trait claim without the facet kernel behind it.
+    err = @test_throws ArgumentError setup_operator(strategy, OverclaimingBoundaryProbe(), dh)
+    @test occursin("provides_analytic", err.value.msg)
+    @test occursin("::Int", err.value.msg)
+
+    # Existing boundary fixtures — the fused Neumann route — pass unchanged.
+    t̄ = 1.5
+    right = Set(getfacetset(grid, "right"))
+    op = setup_operator(strategy, LinearNeumannProbe(t̄, :u, right), dh)
+    update_operator!(op, nothing)
+    @test sum(op.b) ≈ t̄ * 2.0
+end

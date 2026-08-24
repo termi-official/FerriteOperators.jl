@@ -425,6 +425,52 @@ function validate_element_cache(cache, declared_requests::Tuple = ())
     return nothing
 end
 
+"""
+    validate_boundary_cache(cache, declared_requests = ())
+
+Setup-time consistency check for boundary caches on the FUSED route
+(`setup_boundary_cache`) — the [`validate_facet_item_cache`](@ref) counterpart
+for the family that rides the cell sweep instead of its own traversal.
+[`EmptySurfaceElementCache`](@ref) — "no boundary terms" — validates trivially.
+Any other cache must implement the mandatory
+`assemble_facet!(::ResidualRequest, ::T, ::FacetArgs, ::Int)` and
+`is_facet_in_cache(::FacetIndex, ::Any, ::T)` methods, probed on the
+[`unwrap`](@ref) fixpoint per the [`AbstractElementCacheDecorator`](@ref)
+convention; the trait ↔ kernel check then runs over the primal kinds and every
+declared kind materializing a facet request
+(`_assert_trait_backed(T, kind, assemble_facet!, FacetArgs, (Int,))`), same as
+the facet-item route. Unlike that route, a declared kind is not checked
+harder: `boundary_kernel!` (the fused driver) runs only in primal sweeps, so a
+missing sensitivity kernel here is the coverage gap `_warn_boundary_sensitivity`
+already warns about, not a setup error.
+
+!!! note
+    Cannot catch a drifted `setup_boundary_cache` SIGNATURE: Julia falls back
+    silently to the empty default, indistinguishable at this point from "no
+    boundary terms".
+"""
+function validate_boundary_cache(cache, declared_requests::Tuple = ())
+    cache isa EmptySurfaceElementCache && return nothing
+    T = typeof(cache)
+    D = unwrap(T)
+    hasmethod(assemble_facet!, Tuple{ResidualRequest, D, FacetArgs, Int}) || throw(ArgumentError(
+        "$(T) implements no `assemble_facet!(::ResidualRequest, ::$(nameof(D)), ::FacetArgs, " *
+        "::Int)` method. The residual kernel is mandatory on the fused boundary route, as it is " *
+        "for every other item family."))
+    hasmethod(is_facet_in_cache, Tuple{FacetIndex, Any, D}) || throw(ArgumentError(
+        "$(T) implements no `is_facet_in_cache(::FacetIndex, cell, ::$(nameof(D)))` method. " *
+        "The fused route walks every facet of every cell and calls `assemble_facet!` only " *
+        "where this gate returns `true`."))
+    for kind in _primal_validatable_kinds()
+        _assert_trait_backed(T, kind, assemble_facet!, FacetArgs, (Int,))
+    end
+    for K in declared_requests
+        has_cell_request(K) || continue
+        _assert_trait_backed(T, validation_instance(K), assemble_facet!, FacetArgs, (Int,))
+    end
+    return nothing
+end
+
 function _validate_element_kernels(cache, declared_requests::Tuple)
     T = typeof(cache)
     hasmethod(assemble_cell!, Tuple{ResidualRequest, T, CellArgs}) || throw(ArgumentError(
