@@ -74,6 +74,13 @@ Ferrite.reinit!(ws::AlgebraicWorkspace, index::Int) = (ws.current[] = index; ws)
 "The [`AlgebraicItem`](@ref) `ws` is positioned on, set by `Ferrite.reinit!(ws, index)`."
 @inline current_item(ws::AlgebraicWorkspace) = AlgebraicItem(ws.current[], item_dofs(ws))
 
+# A slot gather restricts its source to the item's support. An algebraic item
+# owns no condensed internal dofs, so its slice of an [`InternalSource`](@ref)
+# is empty — which is what lets condensed cell elements and algebraic items
+# share one operator: the same `states = (u = u, q = InternalSource(u))` serves
+# both families, and an algebraic kernel sees a zero-length `:q` buffer.
+load_slot!(buf, ::InternalSource, ws::AlgebraicWorkspace) = (resize!(buf, 0); buf)
+
 function duplicate_for_device(device::AbstractCPUDevice, ws::AlgebraicWorkspace)
     return AlgebraicWorkspace(
         copy(ws.Ke),

@@ -399,6 +399,11 @@ must have a matching kernel method. Runs once per subdomain at
 `setup_operator` time — a typo'd port fails loudly here instead of silently
 assembling through the wrong path.
 
+Decorators ([`ADElementCache`](@ref), [`FusedFromSplit`](@ref)) unwrap to
+their inner cache, and composites recurse into theirs: the mandatory-method
+probes must reach the author-written method set, which a decorator's
+forwarding methods would otherwise answer for unconditionally.
+
 The trait ↔ kernel check always covers the primal kinds (the operator will
 issue them). Every kind [`requires_admissibility_check`](@ref) names
 additionally runs the internal-state admissibility check

@@ -174,18 +174,20 @@ else
             @test ws.slot_buffers.du ≈ 2.0 .* (u[item_dofs] .- uprev[item_dofs])
         end
 
-        @testset "InternalSource slots do not reach an algebraic item" begin
-            # An item has no cell and no internal-variable range, so the sweep
-            # rejects the source before any item runs.
+        @testset "InternalSource slots gather empty on an algebraic item" begin
+            # An algebraic item owns no condensed internal dofs, so its slice
+            # of an `InternalSource` is the empty vector — the same states
+            # NamedTuple serves condensed cell elements and algebraic items in
+            # one operator.
             op = setup_operator(sequential_strategy(spec), m, dh; slots = (:u, :q))
-            @test_throws ArgumentError update_linearization!(
-                op, zeros(n), (u = u, q = InternalSource(u)), θ, nothing)
-            @test_throws ArgumentError evaluate_functional(
-                op, FunctionalKind(:reservoir_volume), (u = u, q = InternalSource(u)), θ)
-            # The same operator serves a plain slot set.
             r = zeros(n)
-            update_linearization!(op, r, (u = u, q = zeros(n)), θ, nothing)
+            update_linearization!(op, r, (u = u, q = InternalSource(u)), θ, nothing)
             @test r ≈ rref
+            ws = first(last(op.engine.subdomain_caches).device_cache)
+            @test isempty(ws.slot_buffers.q)
+            @test evaluate_functional(
+                op, FunctionalKind(:reservoir_volume), (u = u, q = InternalSource(u)), θ) ≈
+                evaluate_functional(op, FunctionalKind(:reservoir_volume), (u = u, q = zeros(n)), θ)
         end
     end
 

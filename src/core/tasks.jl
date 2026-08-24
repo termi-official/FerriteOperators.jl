@@ -351,22 +351,6 @@ function _check_rate_slots(states::NamedTuple{names}) where {names}
     return nothing
 end
 
-# An `InternalSource` gathers a cell's condensed internal-dof range. An
-# algebraic item has neither a cell nor a range in the internal-variable
-# handler, so such a slot has nothing to restrict to and the sweep says so
-# before any item runs.
-function _check_algebraic_slots(engine, states::NamedTuple)
-    any(sc -> sc.domain isa AlgebraicDomain, engine.subdomain_caches) || return nothing
-    for (name, src) in pairs(states)
-        src isa InternalSource && throw(ArgumentError(
-            "Slot `:$name` carries an `InternalSource`, which restricts the gather to a cell's " *
-            "condensed internal-dof range, and this operator carries algebraic items — items " *
-            "with no cell and no such range. Assemble the condensed physics on an operator " *
-            "without algebraic items."))
-    end
-    return nothing
-end
-
 """
     item_dofs(ws) -> AbstractVector{Int}
 
@@ -645,7 +629,6 @@ end
 function run_sweep!(kind, assembler, op, states::NamedTuple, p, ctx)
     _check_declared_slots(op.engine, states)
     _check_rate_slots(states)
-    _check_algebraic_slots(op.engine, states)
     _check_differentiated_slot(kind, op.engine, states)
     task = AssemblyTask(kind, assembler, states, p, ctx)
     execute_on_subdomains!(task, op.engine)
@@ -674,7 +657,6 @@ run_reduction(kind, op, states::NamedTuple, p, ctx) =
 function run_reduction(::FunctionalFamily, kind, op, states::NamedTuple, p, ctx)
     _check_declared_slots(op.engine, states)
     _check_rate_slots(states)
-    _check_algebraic_slots(op.engine, states)
     _check_reduction_domain(kind, op.engine)
     return reduce_on_subdomains(AssemblyTask(kind, nothing, states, p, ctx), op.engine)
 end

@@ -358,13 +358,14 @@ spec = StandardOperatorSpecification(;
                            AlgebraicCoupling(; algebraic_coupling = ((:p1, :p2),))))
 ```
 
-Two consequences of an item having no cell. [`InternalSource`](@ref) slots are
-rejected on an operator carrying algebraic items — the source restricts a gather
-to a cell's condensed internal-dof range, which such an item does not have — so
-condensed physics and algebraic terms do not currently share an operator. And a
-reduction reaches the family but contributes nothing by default: a term with no
-mesh support carries no volume, so [`evaluate_functional`](@ref) keeps summing
-the cell contributions alone unless the cache implements
+Two consequences of an item having no cell. An [`InternalSource`](@ref) slot
+gathers EMPTY on an algebraic item — the source restricts a gather to the
+item's condensed internal dofs, of which such an item owns none — so condensed
+cell elements and algebraic terms share one operator, with the algebraic
+kernel seeing a zero-length buffer for that slot. And a reduction reaches the
+family but contributes nothing by default: a term with no mesh support carries
+no volume, so [`evaluate_functional`](@ref) keeps summing the cell
+contributions alone unless the cache implements
 [`evaluate_algebraic_functional`](@ref).
 
 ## Condensed elements (internal variables)

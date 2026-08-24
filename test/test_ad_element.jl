@@ -210,3 +210,38 @@ end
     @test Kfused ≈ Kref rtol = 1e-8
     @test rfused ≈ rref rtol = 1e-12
 end
+
+# Two deliberately incomplete caches: setup validation must reject them by
+# probing the AUTHOR-written method set, not the decorator's forwarding
+# surface (which answers `hasmethod` for any inner).
+struct NoResidualIntegrator <: AbstractNonlinearIntegrator end
+struct NoResidualCache <: AbstractVolumetricElementCache end
+FerriteOperators.setup_element_cache(::NoResidualIntegrator, ::SubDofHandler) = NoResidualCache()
+FerriteOperators.reinit_values!(::NoResidualCache, cell) = nothing
+
+struct NoReinitIntegrator <: AbstractNonlinearIntegrator end
+struct NoReinitCache <: AbstractVolumetricElementCache end
+FerriteOperators.setup_element_cache(::NoReinitIntegrator, ::SubDofHandler) = NoReinitCache()
+FerriteOperators.assemble_cell!(req::ResidualRequest, ::NoReinitCache, args::CellArgs) = nothing
+
+@testset "setup validation reaches through the decorator" begin
+    grid = generate_grid(Quadrilateral, (2, 2))
+    dh   = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+    @test_throws "NoResidualCache implements no `assemble_cell!(::ResidualRequest" setup_operator(
+        strategy, NoResidualIntegrator(), dh)
+    @test_throws "NoReinitCache implements no `reinit_values!" setup_operator(
+        strategy, NoReinitIntegrator(), dh)
+
+    # A decorated composite recurses to its leaves: the bad inner is named
+    # even when it sits inside the wrapped sub-composite.
+    qrc = QuadratureRuleCollection(2)
+    bad_composite = NonlinearCompositeIntegrator(WrapDiffusionIntegrator(1.0, qrc, :u), NoResidualIntegrator())
+    @test_throws "NoResidualCache implements no `assemble_cell!(::ResidualRequest" setup_operator(
+        strategy, bad_composite, dh)
+
+    # The unwrap must not over-reject: the residual-only cache still sets up.
+    op = setup_operator(strategy, WrapDiffusionIntegrator(1.0, qrc, :u), dh)
+    @test first_element_cache(op) isa FerriteOperators.ADElementCache
+end

@@ -247,6 +247,14 @@ _assert_trait_backed(::Type{<:ADElementCache{Inner}}, kind, entry, ::Type{Args})
     _assert_trait_backed(Inner, kind, entry, Args)
 _display_cache_type(::Type{<:ADElementCache{Inner}}) where {Inner} = _display_cache_type(Inner)
 
+# Validation unwraps for the same reason: the decorator's forwarding methods
+# (`assemble_cell!` over every request, `reinit_values!`) answer `hasmethod`
+# for ANY inner, so probing the wrapper would pass a cache that implements
+# nothing. Recursing on `inner` also reaches the leaves of a wrapped
+# sub-composite through the composite method.
+validate_element_cache(ad::ADElementCache, declared_requests::Tuple = ()) =
+    validate_element_cache(ad.inner, declared_requests)
+
 ####################################
 ## The seeding entries
 ####################################
@@ -525,6 +533,8 @@ provides_analytic(::Type{<:FusedFromSplit{Inner}}, ::JacobianResidualKind{C}) wh
 _assert_trait_backed(::Type{<:FusedFromSplit{Inner}}, kind, entry, ::Type{Args}) where {Inner, Args} =
     _assert_trait_backed(Inner, kind, entry, Args)
 _display_cache_type(::Type{<:FusedFromSplit{Inner}}) where {Inner} = _display_cache_type(Inner)
+validate_element_cache(f::FusedFromSplit, declared_requests::Tuple = ()) =
+    validate_element_cache(f.inner, declared_requests)
 
 # Construction-time wrapping (`decorate_element_cache`, `needs_ad_decoration`,
 # `fully_analytic`) lives in operators/ad_decoration.jl — it is setup_operator's

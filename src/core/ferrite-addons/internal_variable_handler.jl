@@ -39,6 +39,12 @@ Range of cell `cellid`'s internal variables in the solution vector, absolute
 like [`internal_variable_offset`](@ref).
 """
 internal_variable_range(lvh::InternalVariableHandler, cellid::Int)  = (internal_variable_offset(lvh, cellid)+1):(lvh.base_offset + lvh.internal_variable_offsets[cellid+1])
+# An operator without condensed elements carries the placeholder handler
+# (`offsets === nothing`): every cell owns zero internal dofs, so its range is
+# empty — the same answer the offset cumsum gives a non-condensed cell of a
+# mixed operator. This is what lets an `InternalSource` slot gather harmlessly
+# on subdomains that have no internal state.
+internal_variable_range(lvh::InternalVariableHandler{Nothing}, cellid::Int) = 1:0
 Ferrite.close!(lvh::InternalVariableHandler) = nothing
 
 # Offsets are shared read-only data, so duplication just returns the same instance.
