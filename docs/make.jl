@@ -13,6 +13,11 @@ makedocs(;
         canonical="https://termi-official.github.io/FerriteOperators.jl",
         edit_link="main",
         assets=String[],
+        # Page size is not a quality criterion here: the nav sidebar renders
+        # into every page, so the thresholds mostly measure nav length, and
+        # chasing them fragments the API reference. Disabled by decision.
+        size_threshold = nothing,
+        size_threshold_warn = nothing,
     ),
     warnonly=true,
     pages=[
@@ -24,8 +29,6 @@ makedocs(;
         "Operators and entry points" => "operators.md",
         "Operator API reference" => "operator-api.md",
         "Assembly engine API reference" => "engine-api.md",
-        "Item family API reference" => "item-api.md",
-        "Quadrature data API reference" => "quadrature-api.md",
         "Patch items" => "patches.md",
         "Migration to 0.4" => "migration.md",
         "Developer documentation" => [
