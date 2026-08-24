@@ -28,10 +28,18 @@ without crossing a device boundary.
 | `solves` | `+` | local problems attempted |
 | `iterations` | `+` | total inner iterations |
 | `worst_iterations` | `max` | worst per-quadrature-point iteration count |
-| `worst_cell` | argmax carrier | the cell attaining `worst_iterations` |
-| `worst_qp` | argmax carrier | the quadrature point attaining `worst_iterations` |
+| `worst_cell` | argmax carrier | the cell (or, negated, the algebraic item) attaining `worst_iterations` |
+| `worst_qp` | argmax carrier | the quadrature point attaining `worst_iterations`; `0` for an algebraic item, which has no quadrature points |
 | `worst_residual` | `max` | largest local-residual magnitude at exit |
 | `dt_factor` | `min` | 1 means "no reduction requested"; < 1 is a request |
+
+`worst_cell` is FAMILY-DISAMBIGUATED by sign, since [`condense_cell!`](@ref)
+and [`condense_algebraic!`](@ref) reports fold into the same total and a
+cellid and an item index are both small positive integers: a cell reports its
+`cellid` (`≥ 1`), [`condense_algebraic!`](@ref) reports `-item.index` (`≤ -1`,
+`AlgebraicItem` indices being 1-based too), and `0` means neither — every
+quadrature point (or item) converged in zero iterations, which is what the
+type's `zero` and every closed-form local solve reports.
 
 Reports combine with `+`: a commutative monoid except the argmax tie-break,
 which keeps the FIRST contribution in fold order — the same determinism
@@ -92,6 +100,34 @@ There is no default; only condensed elements implement it.
 function condense_cell! end
 
 """
+    condense_algebraic!(cache, args::AlgebraicArgs, weights::NamedTuple) -> CondensationReport
+
+The [`condense_cell!`](@ref) counterpart for the algebraic-item family: solve
+the item's local problem, write the trial state into `args.states.q` (never
+into `args.states.u`), and store the corrector the cache's own `Consistent`
+kernel reads — item-keyed (an `ItemStates` store indexed by `args.item.index`,
+same mechanism a condensed cell cache uses, indexed by cellid). `weights` are
+the solver's chain-rule scalars, exactly as for [`condense_cell!`](@ref).
+
+Report the item in `worst_cell` as `-args.item.index` (see
+[`CondensationReport`](@ref)'s family-disambiguation convention), never the
+raw index — a positive value there is read as a cellid by any consumer folding
+this report together with a condensed cell's.
+
+There is no default; only a condensed algebraic cache implements it. Called
+only when the cache declares [`has_internal_state`](@ref) — a stateless
+algebraic cache's condensation sweep never reaches this hook.
+
+Analytic-first: a condensed algebraic cache admits `Consistent`
+sensitivity/Jacobian kinds only by serving them analytically or by declaring
+[`internal_state_insensitive`](@ref) — there is no generic AD `Consistent`
+bootstrap for this family (unlike [`ADElementCache`](@ref)'s
+`condensed_corrector` combination for condensed cells): an algebraic item has
+no cellid to key a corrector store by AD would need one keyed on.
+"""
+function condense_algebraic! end
+
+"""
     invalidate_correctors!(cache)
 
 Drop every item's condensation corrector, so the cache's `Consistent` kernel
@@ -123,7 +159,15 @@ sweep_family(::Type{<:CondensationKind}) = FunctionalFamily()
 # to validate, exactly like `FunctionalKind`.
 has_cell_request(::Type{<:CondensationKind}) = false
 
-execute_kind!(kind::CondensationKind, task, ws) = condensation_cell_sweep!(kind, task, ws)
+# Trait-gated: a plain cell subdomain sharing an operator with a condensed one
+# (a condensed algebraic item's cell physics, a plain subdomain of a
+# multi-domain integrator) has no `condense_cell!` method and contributes
+# nothing to the report, exactly like a stateless algebraic cache's gate below
+# — `condense_internal!`'s per-subdomain reduction reaches every subdomain
+# unconditionally, so this is what keeps a mixed operator from a MethodError
+# on the subdomain that never had a local problem to solve.
+execute_kind!(kind::CondensationKind, task, ws) =
+    has_internal_state(typeof(ws.element)) ? condensation_cell_sweep!(kind, task, ws) : nothing
 
 # The `:q` slot is condense_internal!'s write-back target, so it must be
 # present and InternalSource-backed — a plain vector or an AffineRate source

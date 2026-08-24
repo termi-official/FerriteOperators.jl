@@ -1,0 +1,223 @@
+using FerriteOperators
+using FerriteOperatorsExampleElements
+using Test
+
+# Condensed internal state on ALGEBRAIC items needs a DofHandler that can
+# carry dofs outside the mesh (Ferrite's mesh-free algebraic variables), same
+# capability gate as `test_algebraic_items.jl`.
+if !isdefined(Ferrite, :AlgebraicVariable)
+    @info "Skipping the condensed algebraic-item tests: this Ferrite has no `AlgebraicVariable`, " *
+          "so a DofHandler cannot carry dofs outside the mesh."
+else
+
+    include(joinpath(@__DIR__, "fixture_elements.jl"))
+
+    sequential_strategy() = SequentialAssemblyStrategy(SequentialCPUDevice())
+
+    @testset "Condensed algebraic item alone" begin
+        strategy = sequential_strategy()
+        qrc      = QuadratureRuleCollection(2)
+        chamber  = ChamberRelaxationParameters(β = 1.3, τ = 0.9)
+        tb       = chamber_testbed(strategy, qrc; params = chamber)
+        op, dh   = tb.op, tb.dh
+        n        = unknown_size(op)
+        γ̃        = 0.5
+        ctx      = TimeIntegrationContext(0.0, γ̃, γ̃)
+
+        u = zeros(n)
+        view(u, 1:ndofs(dh)) .= 0.3 .* sin.(0.6 .* (1:ndofs(dh)))
+        u[tb.item_dofs] .= (0.4, -0.2)
+        uprev = zeros(n)
+        states = condensed_states(u, uprev)
+
+        report = condense_internal!(op, states, nothing, ctx)
+        @test report.converged
+        @test report.solves == 2   # two items, one closed-form solve each
+
+        r = zeros(residual_size(op))
+        evaluate!(op, r, states, nothing, ctx)
+        rr = zeros(residual_size(op))
+        update_linearization!(op, rr, states, nothing, ctx)
+        @test r ≈ rr
+
+        (; β, τ) = chamber
+        k = γ̃ * β / τ
+        for dof in tb.item_dofs
+            p = u[dof]
+            q_ref = k * p / (1 + k)   # q₀ = 0, closed-form q = (q₀ + k·p)/(1+k)
+            @test r[dof] ≈ β * (p - q_ref) rtol = 1e-12
+            @test op.J[dof, dof] ≈ β / (1 + k) rtol = 1e-12
+        end
+        # The two items are independent (no shared dofs, no coupling declared):
+        # each item's row touches only its own diagonal entry.
+        @test op.J[tb.item_dofs[1], tb.item_dofs[2]] == 0.0
+        @test op.J[tb.item_dofs[2], tb.item_dofs[1]] == 0.0
+    end
+
+    @testset "check_derivatives on the condensed-item operator" begin
+        strategy = sequential_strategy()
+        qrc      = QuadratureRuleCollection(2)
+        chamber  = ChamberRelaxationParameters(β = 0.8, τ = 1.4)
+        tb       = chamber_testbed(strategy, qrc; params = chamber)
+        op, dh   = tb.op, tb.dh
+        n        = unknown_size(op)
+        ctx      = TimeIntegrationContext(0.0, 0.6, 0.6)
+
+        u = zeros(n)
+        view(u, 1:ndofs(dh)) .= 0.2 .* sin.(0.5 .* (1:ndofs(dh)))
+        u[tb.item_dofs] .= (0.3, -0.5)
+        uprev = zeros(n)
+        states = condensed_states(u, uprev)
+
+        # check_derivatives condenses internally at every trial point it
+        # probes, so the FD referee is a total — exactly what the analytic
+        # `Consistent` kernel (reading the stored `dq/dp`) computes, and what
+        # the analytic `ParameterJacobianRequest` kernel (reading `dq/dβ`)
+        # computes for ∂F/∂θ.
+        res = check_derivatives(op, states, chamber, ctx)
+        @test res.passed
+        @test res.checks.jacobian.passed
+        @test res.checks.jacobian.skipped === nothing
+        @test res.checks.parameter_jacobian.passed
+        @test res.checks.parameter_jacobian.skipped === nothing
+    end
+
+    @testset "Freshness: never-condensed item throws, rollback invalidates, re-condense heals" begin
+        strategy = sequential_strategy()
+        qrc      = QuadratureRuleCollection(2)
+        tb       = chamber_testbed(strategy, qrc)
+        op, dh   = tb.op, tb.dh
+        n        = unknown_size(op)
+        ctx      = TimeIntegrationContext(0.0, 0.4, 0.4)
+
+        u = zeros(n)
+        view(u, 1:ndofs(dh)) .= 0.1 .* sin.(1:ndofs(dh))
+        u[tb.item_dofs] .= (0.2, -0.1)
+        uprev = zeros(n)
+        states = condensed_states(u, uprev)
+        r = zeros(residual_size(op))
+
+        # The residual reads whatever is in the q slot (zero, uncondensed), so
+        # it does not throw — only a `Consistent` Jacobian read of the
+        # (unstamped) corrector does, naming the item.
+        evaluate!(op, r, states, nothing, ctx)
+        err = @test_throws ArgumentError update_linearization!(op, r, states, nothing, ctx)
+        @test occursin("item 1", err.value.msg)
+
+        condense_internal!(op, states, nothing, ctx)
+        update_linearization!(op, r, states, nothing, ctx)   # fine now
+
+        committed = zeros(n)
+        rollback_state!(op, u, committed)
+        @test u == committed
+        @test_throws ArgumentError update_linearization!(op, r, states, nothing, ctx)
+
+        condense_internal!(op, states, nothing, ctx)
+        commit_state!(op, u, committed)
+        update_linearization!(op, r, states, nothing, ctx)   # commit does not invalidate
+    end
+
+    @testset "The layout-collision proof: condensed cell AND condensed item in one operator" begin
+        strategy = sequential_strategy()
+        qrc      = QuadratureRuleCollection(2)
+        mat      = NortonRelaxationParameters()
+        chamber  = ChamberRelaxationParameters(β = 1.1, τ = 0.7)
+        γ̃        = 0.5
+        ctx      = TimeIntegrationContext(0.0, γ̃, γ̃)
+
+        # Three testbeds sharing the same `:u` mesh/interpolation, so `:u`'s
+        # dof numbering is identical across all three (algebraic dofs are
+        # numbered after every field's cell dofs, and adding `:p1`/`:p2` to a
+        # DofHandler does not renumber `:u`).
+        tb_cell = relaxation_testbed(strategy, qrc; material = mat)
+        tb_item = chamber_testbed(strategy, qrc; params = chamber)
+        tb_both = chamber_testbed(strategy, qrc;
+                                  cell_integrator = SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q),
+                                  params = chamber)
+        @test tb_item.item_dofs == tb_both.item_dofs
+
+        n_u = ndofs(tb_cell.dh)
+        u_field = 0.3 .* sin.(0.6 .* (1:n_u))
+        p_vals  = (0.4, -0.2)
+
+        u_cell = zeros(unknown_size(tb_cell.op)); view(u_cell, 1:n_u) .= u_field
+        u_item = zeros(unknown_size(tb_item.op)); view(u_item, 1:n_u) .= u_field
+        u_item[tb_item.item_dofs] .= p_vals
+        u_both = zeros(unknown_size(tb_both.op)); view(u_both, 1:n_u) .= u_field
+        u_both[tb_both.item_dofs] .= p_vals
+
+        uprev_cell = zeros(unknown_size(tb_cell.op))
+        uprev_item = zeros(unknown_size(tb_item.op))
+        uprev_both = zeros(unknown_size(tb_both.op))
+
+        states_cell = condensed_states(u_cell, uprev_cell)
+        states_item = condensed_states(u_item, uprev_item)
+        states_both = condensed_states(u_both, uprev_both)
+
+        report_cell = condense_internal!(tb_cell.op, states_cell, nothing, ctx)
+        report_item = condense_internal!(tb_item.op, states_item, nothing, ctx)
+        report_both = condense_internal!(tb_both.op, states_both, nothing, ctx)
+        @test report_both.converged
+        @test report_both.solves == report_cell.solves + report_item.solves
+
+        r_cell = zeros(residual_size(tb_cell.op)); evaluate!(tb_cell.op, r_cell, states_cell, nothing, ctx)
+        r_item = zeros(residual_size(tb_item.op)); evaluate!(tb_item.op, r_item, states_item, nothing, ctx)
+        r_both = zeros(residual_size(tb_both.op)); evaluate!(tb_both.op, r_both, states_both, nothing, ctx)
+
+        rr_cell = zeros(residual_size(tb_cell.op)); update_linearization!(tb_cell.op, rr_cell, states_cell, nothing, ctx)
+        rr_item = zeros(residual_size(tb_item.op)); update_linearization!(tb_item.op, rr_item, states_item, nothing, ctx)
+        rr_both = zeros(residual_size(tb_both.op)); update_linearization!(tb_both.op, rr_both, states_both, nothing, ctx)
+
+        # Neither block corrupts the other: the combined operator's cell
+        # block reproduces the cell-alone reference, and its item block
+        # reproduces the item-alone reference — the `[ū | q_cells | q_items]`
+        # numbering composes cleanly.
+        @test r_both[1:n_u] ≈ r_cell
+        @test r_both[tb_both.item_dofs] ≈ r_item[tb_item.item_dofs]
+        @test Matrix(tb_both.op.J)[1:n_u, 1:n_u] ≈ Matrix(tb_cell.op.J)
+        @test Matrix(tb_both.op.J)[tb_both.item_dofs, tb_both.item_dofs] ≈
+              Matrix(tb_item.op.J)[tb_item.item_dofs, tb_item.item_dofs]
+        # No coupling was declared between the cell and the item dofs, so the
+        # cross block is exactly zero — the layout adds no spurious entries.
+        @test all(iszero, Matrix(tb_both.op.J)[1:n_u, tb_both.item_dofs])
+        @test all(iszero, Matrix(tb_both.op.J)[tb_both.item_dofs, 1:n_u])
+    end
+
+    @testset "Admissibility: condensed algebraic cache without analytic coverage" begin
+        # A cache serving only the mandatory residual, declaring
+        # `has_internal_state`: no generic AD `Consistent` bootstrap exists
+        # for the algebraic-item family (see `condense_algebraic!`), so
+        # `setup_operator` rejects it at setup, naming `assemble_algebraic!`.
+        struct NonAnalyticChamberCache
+            correctors::ItemStates{Float64}
+        end
+        FerriteOperators.has_internal_state(::Type{NonAnalyticChamberCache}) = true
+        FerriteOperators.assemble_algebraic!(::ResidualRequest, ::NonAnalyticChamberCache, args) = nothing
+        FerriteOperators.duplicate_for_device(device, c::NonAnalyticChamberCache) = c
+        FerriteOperators.get_number_of_internal_dofs_per_algebraic_item(m, ::NonAnalyticChamberCache, items) =
+            fill(1, length(items))
+        FerriteOperators.condense_algebraic!(::NonAnalyticChamberCache, args, weights) =
+            CondensationReport(true, 1, 0, 0, -args.item.index, 0, 0.0, 1.0)
+
+        struct NonAnalyticChamberIntegrator <: AbstractNonlinearIntegrator end
+        FerriteOperators.setup_element_cache(::NonAnalyticChamberIntegrator, sdh::SubDofHandler) =
+            FerriteOperators.EmptyVolumetricElementCache()
+        FerriteOperators.algebraic_items(::NonAnalyticChamberIntegrator, dh::DofHandler) =
+            [[only(algebraic_dofs(dh, :p1))]]
+        FerriteOperators.setup_algebraic_cache(::NonAnalyticChamberIntegrator, dh::DofHandler) =
+            NonAnalyticChamberCache(ItemStates{Float64}(1))
+
+        grid = generate_grid(Quadrilateral, (1, 1))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        add!(dh, :p1, AlgebraicVariable())
+        close!(dh)
+
+        err = @test_throws ArgumentError setup_operator(sequential_strategy(), NonAnalyticChamberIntegrator(), dh)
+        @test occursin("assemble_algebraic!", err.value.msg)
+        @test occursin("internal_state_insensitive", err.value.msg)
+        # The cell-family escape does not apply here.
+        @test !occursin("condensed_corrector", err.value.msg)
+    end
+
+end

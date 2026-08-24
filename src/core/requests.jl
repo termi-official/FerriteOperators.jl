@@ -527,7 +527,20 @@ send them looking at the wrong type. One root method; decorators override it.
 """
 _display_cache_type(T::Type) = T
 
-function assert_sensitivity_admissible(T::Type, kind)
+"""
+    assert_sensitivity_admissible(T::Type, kind)
+    assert_sensitivity_admissible(T::Type, kind, entry, ::Type{Args})
+
+The internal-state admissibility check itself: throws unless a `has_internal_state`
+cache `T` serves `kind` analytically or declares it
+[`internal_state_insensitive`](@ref). `entry`/`Args` name which item family's
+kernel entry point and args record the error message should point authors at
+— the 2-arg form defaults to `assemble_cell!`/`CellArgs` (a volumetric cache);
+[`validate_algebraic_cache`](@ref) passes `assemble_algebraic!`/`AlgebraicArgs`
+for the algebraic-item family, whose `Consistent`-Jacobian remedy differs (see
+below).
+"""
+function assert_sensitivity_admissible(T::Type, kind, entry = assemble_cell!, ::Type{Args} = CellArgs) where {Args}
     if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
         name = nameof(_display_cache_type(T))
         wrapping_note = _display_cache_type(T) === T ? "" :
@@ -536,15 +549,22 @@ function assert_sensitivity_admissible(T::Type, kind)
         # FiniteDifferenceSensitivity and `condensed_corrector` are remedies
         # only where they actually apply: the former is a call-time override
         # that exists for time sensitivities alone, the latter is what
-        # ADElementCache's generic Consistent combination reads and is
-        # meaningless for any other kind.
+        # ADElementCache's generic Consistent combination reads — CELL-keyed
+        # (by cellid) and therefore meaningless for the algebraic-item family,
+        # which has no generic `Consistent` bootstrap at all (see
+        # `condense_algebraic!`).
         remedy = if kind isa TimeSensitivityKind
             "declare `internal_state_insensitive` if the local equations do not depend on " *
             "the seeded quantity, or use `FiniteDifferenceSensitivity`."
-        elseif kind isa Union{JacobianKind{:u, Consistent}, JacobianResidualKind{Consistent}}
+        elseif kind isa Union{JacobianKind{:u, Consistent}, JacobianResidualKind{Consistent}} && Args === CellArgs
             "declare `internal_state_insensitive` if the local equations do not depend on " *
             "the seeded quantity, or implement `condensed_corrector` to admit the generic " *
             "`Consistent` combination."
+        elseif kind isa Union{JacobianKind{:u, Consistent}, JacobianResidualKind{Consistent}}
+            "declare `internal_state_insensitive` if the local equations do not depend on " *
+            "the seeded quantity. There is no generic `Consistent` bootstrap for the " *
+            "algebraic-item family (an item has no cellid to key a corrector store by), so " *
+            "this is the only remedy besides the analytic kernel."
         else
             "declare `internal_state_insensitive` if the local equations do not depend on " *
             "the seeded quantity."
@@ -553,7 +573,7 @@ function assert_sensitivity_admissible(T::Type, kind)
             "$(name) carries condensed internal state$(wrapping_note), and AD-from-residual " *
             "through its (now pure) residual kernel would compute only the frozen-q partial, " *
             "missing the ∂F/∂q·dq/d· correction this kind's total needs. Either implement the " *
-            "analytic `assemble_cell!` kernel for $(typeof(kind)) (declared via `provides_analytic`), or " *
+            "analytic `$(nameof(entry))` kernel for $(typeof(kind)) (declared via `provides_analytic`), or " *
             remedy))
     end
     return nothing

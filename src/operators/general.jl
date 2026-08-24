@@ -34,6 +34,15 @@ _assert_domain_trait_backed(domain, kind) =
 _assert_domain_trait_backed(domain::AlgebraicDomain, kind) =
     _assert_trait_backed(typeof(domain.element), kind, assemble_algebraic!, AlgebraicArgs)
 
+# The call-time admissibility check ([`_check_sensitivity_supported`](@ref))
+# over a domain's cache, family-dispatched the same way: an algebraic domain's
+# error message must name `assemble_algebraic!`/`AlgebraicArgs`, not the cell
+# family's, and must not offer the cell-only `condensed_corrector` remedy.
+_assert_domain_sensitivity_admissible(domain, kind) =
+    assert_sensitivity_admissible(typeof(domain.element), kind, assemble_cell!, CellArgs)
+_assert_domain_sensitivity_admissible(domain::AlgebraicDomain, kind) =
+    assert_sensitivity_admissible(typeof(domain.element), kind, assemble_algebraic!, AlgebraicArgs)
+
 # Whether a subdomain can contribute to a reduction at all — the structural
 # half of the reduction precondition. An `EmptyVolumetricElementCache` returns
 # no contribution by construction; every other cache might.

@@ -49,15 +49,23 @@ end
 function create_ad_element_buffers(inner, sdh, n_global_dofs::Int = 0)
     vₑ = pad_element_vector(allocate_element_unknown_vector(inner, sdh), n_global_dofs)
     re = pad_element_vector(allocate_element_residual_vector(inner, sdh), n_global_dofs)
-    return _create_ad_element_buffers(inner, vₑ, re)
+    return _create_ad_element_buffers(inner, vₑ, re, true)
 end
 
 # The size-based path: an item family whose local system is described by a dof
-# count alone (an algebraic item) has no `SubDofHandler` to allocate against.
+# count alone (an algebraic item) has no `SubDofHandler` to allocate against,
+# and no `getnquadpoints` to size the `:q`-Jacobian config the generic
+# `Consistent` bootstrap needs — that combination is cell-only (see
+# `condense_algebraic!`), so this path never builds it, whatever `inner`
+# declares.
 create_ad_element_buffers(inner, ndofs::Int, ::Type{T}) where {T} =
-    _create_ad_element_buffers(inner, zeros(T, ndofs), zeros(T, ndofs))
+    _create_ad_element_buffers(inner, zeros(T, ndofs), zeros(T, ndofs), false)
 
-function _create_ad_element_buffers(inner, vₑ, re)
+# `supports_q_bootstrap` is the cell-vs-algebraic-item structural distinction
+# the two constructors above already carry: `getnquadpoints` is a cell-cache
+# contract, so an algebraic-sized inner must never be queried for it even when
+# `has_internal_state` — its `jac_cfg_q`/`Kq` stay `nothing` unconditionally.
+function _create_ad_element_buffers(inner, vₑ, re, supports_q_bootstrap::Bool)
     T   = eltype(re)
     tag       = ForwardDiff.Tag{FerriteOperatorsADTag, T}()
     chunk     = ForwardDiff.Chunk(vₑ)
@@ -71,7 +79,7 @@ function _create_ad_element_buffers(inner, vₑ, re)
     ndofs     = length(re)
     jac_cfg_q = nothing
     Kq        = nothing
-    if has_internal_state(typeof(inner))
+    if supports_q_bootstrap && has_internal_state(typeof(inner))
         nqp       = getnquadpoints(inner)
         qseed     = zeros(T, nqp)
         chunk_q   = ForwardDiff.Chunk(qseed)
@@ -189,6 +197,7 @@ internal_state_insensitive(::Type{<:ADElementCache{Inner}}, kind) where {Inner} 
 get_number_of_internal_dofs_per_element(model, ad::ADElementCache, sdh) =
     get_number_of_internal_dofs_per_element(model, ad.inner, sdh)
 condense_cell!(ad::ADElementCache, args, weights) = condense_cell!(ad.inner, args, weights)
+condense_algebraic!(ad::ADElementCache, args, weights) = condense_algebraic!(ad.inner, args, weights)
 invalidate_correctors!(ad::ADElementCache) = invalidate_correctors!(ad.inner)
 # Patch assembly (experimental) is a separate protocol with no AD fallback of
 # its own — pass through to whatever `inner` implements.
@@ -507,6 +516,7 @@ internal_state_insensitive(::Type{<:FusedFromSplit{Inner}}, kind) where {Inner} 
 get_number_of_internal_dofs_per_element(model, f::FusedFromSplit, sdh) =
     get_number_of_internal_dofs_per_element(model, f.inner, sdh)
 condense_cell!(f::FusedFromSplit, args, weights) = condense_cell!(f.inner, args, weights)
+condense_algebraic!(f::FusedFromSplit, args, weights) = condense_algebraic!(f.inner, args, weights)
 invalidate_correctors!(f::FusedFromSplit) = invalidate_correctors!(f.inner)
 assemble_patch_cell!(req, f::FusedFromSplit, args, data) = assemble_patch_cell!(req, f.inner, args, data)
 

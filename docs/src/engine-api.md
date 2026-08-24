@@ -11,7 +11,6 @@ Pages = [
     "core/algebraic-task.jl",
     "core/strategy.jl",
     "core/device.jl",
-    "core/iterators.jl",
     "core/ferrite-addons/collections.jl",
     "core/ferrite-addons/internal_variable_handler.jl",
 ]

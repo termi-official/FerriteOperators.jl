@@ -18,6 +18,5 @@ Pages = [
     "operators/verification.jl",
     "operators/condensation.jl",
     "operators/matrix_free.jl",
-    "operators/transfer.jl",
 ]
 ```

@@ -156,7 +156,7 @@ function setup_boundaries(integrator, dh)
     return [setup_boundary_cache(integrator, sdh) for sdh in dh.subdofhandlers]
 end
 
-function setup_internal_variable_handler(integrator::AbstractCondensedNonlinearIntegrator, element_caches, dh)
+function _cell_internal_offsets(integrator, element_caches, dh)
     num_dofs_per_element = zeros(Int, getncells(get_grid(dh))+1)
     for (sdh, cache) in zip(dh.subdofhandlers, element_caches)
         for (cellid, nidofs) in zip(sdh.cellset, get_number_of_internal_dofs_per_element(integrator, cache, sdh))
@@ -166,12 +166,51 @@ function setup_internal_variable_handler(integrator::AbstractCondensedNonlinearI
     @assert all(num_dofs_per_element .≥ 0) "Number of internal dofs must be non-negative!"
     # `num_dofs_per_element` is padded with a leading zero, so the cumulative sum is exactly the
     # `ncells+1` block relative offsets the handler expects.
-    offsets = cumsum(num_dofs_per_element)
-    return InternalVariableHandler(offsets, ndofs(dh), offsets[end])
+    return cumsum(num_dofs_per_element)
 end
 
-function setup_internal_variable_handler(integrator, element_caches, dh)
-    return InternalVariableHandler(nothing, 0, 0)
+# `has_internal_state` alone is not a safe signal that a cache needs a REAL
+# internal-dof block allocated: a cache may declare it purely to opt into the
+# sensitivity-admissibility rules (served by `internal_state_insensitive`,
+# never actually condensing anything — the "Stale-q admissibility hole" test
+# double is exactly this) without implementing the count hook at all. Probing
+# `hasmethod` against the DECORATED type would always see `ADElementCache`'s
+# own blanket forwarding method and say nothing about whether the wrapped
+# cache actually implements it, so the probe runs against `_display_cache_type`
+# — the type an author would actually have written the hook on.
+_declares_internal_dofs(T::Type, hook) =
+    has_internal_state(T) && hasmethod(hook, Tuple{Any, _display_cache_type(T), Any})
+
+"""
+    setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
+
+Build the [`InternalVariableHandler`](@ref) from what the resolved caches
+actually declare — `algebraic_domain` is `resolve_algebraic_domain`'s result,
+`nothing` where the integrator declares no algebraic items. Whether a block is
+REAL (an offsets array) or the placeholder (`nothing`) is decided per block by
+the cache — [`has_internal_state`](@ref) AND an implemented dof-count hook
+([`get_number_of_internal_dofs_per_element`](@ref) /
+[`get_number_of_internal_dofs_per_algebraic_item`](@ref)) — not by the
+integrator's type: an operator whose cells are plain but whose algebraic cache
+is condensed gets a real item block same as one with condensed cells and a
+plain algebraic cache, and either or both blocks can be real at once (the
+layout-collision case).
+"""
+function setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
+    needs_cells = any(c -> _declares_internal_dofs(typeof(c), get_number_of_internal_dofs_per_element), element_caches)
+    needs_items = algebraic_domain !== nothing &&
+        _declares_internal_dofs(typeof(algebraic_domain[1]), get_number_of_internal_dofs_per_algebraic_item)
+    (needs_cells || needs_items) && return _build_internal_variable_handler(
+        integrator, element_caches, algebraic_domain, dh, needs_cells, needs_items)
+    return InternalVariableHandler(nothing, nothing, 0, 0)
+end
+
+function _build_internal_variable_handler(integrator, element_caches, algebraic_domain, dh, needs_cells, needs_items)
+    cell_offsets = needs_cells ? _cell_internal_offsets(integrator, element_caches, dh) : nothing
+    item_offsets = needs_items ? _algebraic_item_offsets(integrator, algebraic_domain[1], algebraic_domain[2]) : nothing
+    cell_len = cell_offsets === nothing ? 0 : cell_offsets[end]
+    item_len = item_offsets === nothing ? 0 : item_offsets[end]
+    return InternalVariableHandler(cell_offsets, item_offsets, ndofs(dh), cell_len + item_len)
 end
 
 function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh;
@@ -256,7 +295,11 @@ implement analytically. `ad_backend = nothing` opts out of wrapping.
 
 The caches of the algebraic item family ([`algebraic_items`](@ref)) are
 appended after the cell subdomains, so a sweep's traversal order is fixed by
-the declaration and does not depend on which families are present.
+the declaration and does not depend on which families are present. The
+algebraic domain is resolved (declared, cached, validated) BEFORE the
+[`InternalVariableHandler`](@ref) is built, since a condensed algebraic
+cache's item block needs the resolved items and cache to size itself; it is
+decorated afterwards, alongside the cell caches.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol;
         ad_backend = ForwardDiffAD())
@@ -266,14 +309,16 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
     foreach(cache -> validate_element_cache(cache, requests), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
-    ivh               = setup_internal_variable_handler(integrator, element_caches, dh)
+    algebraic_domain  = resolve_algebraic_domain(integrator, dh, protocol)
+    ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
     _warn_boundary_sensitivity(requests, boundary_caches)
     needs_sensitivity = needs_ad_decoration(integrator)
     cell_caches       = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
                                                slots = get_declared_slots(protocol),
                                                needs_sensitivity,
                                                global_dof_sets)
-    algebraic_caches  = setup_algebraic_caches(operator_strategy, integrator, dh, protocol, ad_backend, needs_sensitivity)
+    algebraic_caches  = setup_algebraic_caches(operator_strategy, algebraic_domain, protocol, ad_backend,
+                                               needs_sensitivity, ivh)
     # The two families carry different domain types, so the combined vector is
     # only widened where something is declared — an operator without algebraic
     # items keeps the element type it has today.

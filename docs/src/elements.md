@@ -359,14 +359,59 @@ spec = StandardOperatorSpecification(;
 ```
 
 Two consequences of an item having no cell. An [`InternalSource`](@ref) slot
-gathers EMPTY on an algebraic item — the source restricts a gather to the
-item's condensed internal dofs, of which such an item owns none — so condensed
-cell elements and algebraic terms share one operator, with the algebraic
-kernel seeing a zero-length buffer for that slot. And a reduction reaches the
-family but contributes nothing by default: a term with no mesh support carries
-no volume, so [`evaluate_functional`](@ref) keeps summing the cell
-contributions alone unless the cache implements
+gathers the item's own [`internal_variable_range`](@ref) — EMPTY unless the
+algebraic cache is itself condensed (below), which is what lets a condensed
+cell element and a *stateless* algebraic term share one operator with the
+algebraic kernel seeing a zero-length buffer for that slot. And a reduction
+reaches the family but contributes nothing by default: a term with no mesh
+support carries no volume, so [`evaluate_functional`](@ref) keeps summing the
+cell contributions alone unless the cache implements
 [`evaluate_algebraic_functional`](@ref).
+
+### Condensed internal state on algebraic items
+
+An algebraic item can carry its own condensed internal state `q` — a
+circulation chamber's fast internal variables, eliminated item-locally exactly
+like a condensed cell's per-quadrature-point state. Two declarations, the
+algebraic-item analogues of [`get_number_of_internal_dofs_per_element`](@ref)
+and [`condense_cell!`](@ref):
+
+```julia
+FerriteOperators.get_number_of_internal_dofs_per_algebraic_item(m::MyIntegrator, cache::MyChamberCache, items) =
+    fill(1, length(items))   # uniform per provider, like the items' own dof count
+
+function FerriteOperators.condense_algebraic!(cache::MyChamberCache, args::AlgebraicArgs, weights::NamedTuple)
+    q = local_solve(args.states.u, args.states.qprev, stage_scaling(args.ctx))
+    args.states.q[1] = q
+    # ... store the corrector `dq/du` (and `dq/dθ`, if serving ∂F/∂θ) in an `ItemStates` field, keyed by `args.item.index` ...
+    return CondensationReport(true, 1, 0, 0, -args.item.index, 0, 0.0, 1.0)
+end
+```
+
+Both are queried/called only when [`has_internal_state`](@ref) holds for the
+algebraic cache — a stateless cache changes nothing, and every existing
+algebraic operator keeps behaving exactly as before. Internal dofs are
+numbered into the SAME tail a condensed cell's are, cell block first:
+`[ū | q_cells | q_items]` — cell ranges stay keyed by cellid
+([`internal_variable_range`](@ref)`(ivh, cellid::Int)`), item ranges are a
+SEPARATE method keyed by [`AlgebraicItem`](@ref)
+(`internal_variable_range(ivh, args.item)`), deliberately not one `Int`-keyed
+method shared by both — a cellid and an item index are unrelated integers, and
+collapsing them onto one dispatch would silently return the wrong range
+whenever they coincide. [`condense_internal!`](@ref)'s domain sweep reaches
+both families unconditionally; `condense_algebraic!`'s report `worst_cell`
+convention documents how a folded report tells a cell from an item apart.
+
+**Analytic-first, no generic AD bootstrap.** A condensed CELL cache lacking
+analytic `Consistent`-Jacobian coverage still gets an AD `Consistent` path
+(the [`condensed_corrector`](@ref) combination below). The algebraic-item
+family has no such fallback: an item has no cellid to key a corrector store
+by, so a condensed algebraic cache is admissible for a `Consistent`
+sensitivity/Jacobian kind only by serving it analytically or by declaring
+[`internal_state_insensitive`](@ref) — `setup_operator` rejects anything else
+at setup, naming `assemble_algebraic!` and the remedy. This is a known wall,
+the algebraic-item counterpart of the θ/t sensitivity wall condensed cells
+already have.
 
 ## Condensed elements (internal variables)
 
@@ -421,6 +466,13 @@ compact Tier-1 corrector most analytic kernels read, since the framework needs
 the completed `nq × ndofs` block); an element serving `Consistent` kinds
 analytically never needs to implement it. Every other sensitivity kind on a
 condensed cache without an analytic kernel keeps the admissibility rejection.
+
+The algebraic-item family ([Algebraic terms](#Algebraic-terms-(items-with-no-mesh-support)))
+condenses through the same [`condense_internal!`](@ref) sweep and the same
+`[ū | q_cells | q_items]` tail, via its own hook
+([`condense_algebraic!`](@ref)) — but WITHOUT the generic AD `Consistent`
+combination above: an item has no cellid to key a corrector store by, so a
+condensed algebraic cache is analytic-first, no exceptions.
 
 ## Composition
 

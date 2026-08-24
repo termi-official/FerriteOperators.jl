@@ -107,7 +107,7 @@ export parameter_vector, rebuild_parameters
 export TimeIntegrationContext, evaluation_time, stage_scaling, CellArgs, FacetArgs, assemble_cell!
 export AffineRate, InternalSource
 export CorrectionMode, Consistent, FrozenQ
-export CondensationReport, condense_internal!, condense_cell!, CondensationKind
+export CondensationReport, condense_internal!, condense_cell!, condense_algebraic!, CondensationKind
 export condensed_update_linearization!, rollback_state!, commit_state!, invalidate_correctors!
 export CorrectorElection, Stored, Recompute, corrector_election, corrector_election_error
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest

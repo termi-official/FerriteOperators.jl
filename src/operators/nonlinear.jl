@@ -119,10 +119,12 @@ end
 
 # Call-time admissibility over all subdomain caches; the same per-cache check
 # runs at setup for kinds declared via `setup_operator(...; requests)` — see
-# `assert_sensitivity_admissible` for the rationale.
+# `assert_sensitivity_admissible` for the rationale. Family-dispatched through
+# `_assert_domain_sensitivity_admissible` so an algebraic subdomain's error
+# names `assemble_algebraic!`, not `assemble_cell!`.
 function _check_sensitivity_supported(op, kind)
     for sc in op.engine.subdomain_caches
-        assert_sensitivity_admissible(typeof(sc.domain.element), kind)
+        _assert_domain_sensitivity_admissible(sc.domain, kind)
     end
     return nothing
 end

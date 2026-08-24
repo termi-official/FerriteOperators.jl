@@ -585,4 +585,212 @@ if isdefined(Ferrite, :AlgebraicVariable)
         return K, f
     end
 
+    ####################################
+    ## Condensed algebraic item testbed — chamber exchange, linear relaxation
+    ####################################
+    # A single-dof "chamber" pressure `p` (an algebraic dof, one per item, items
+    # sharing no dofs) exchanging linearly with a hidden per-item internal state
+    # `q` — the algebraic-item analogue of `SimpleCondensedPowerLawRelaxation`'s
+    # exchange term, but LINEAR so the local stage problem solves in closed form:
+    #
+    #     r_p = β(p − q),   dq/dt = β(p − q)/τ
+    #
+    # canonical stage problem q = q₀ + γ̃·β(p−q)/τ, k = γ̃β/τ:
+    #
+    #     q = (q₀ + k·p)/(1+k)                          -- closed-form local solve
+    #     dq/dp = k/(1+k)                                -- IFT corrector (Consistent Jacobian)
+    #     dq/dβ = (γ̃/τ)(p−q)/(1+k)                       -- IFT corrector (∂F/∂θ)
+    #
+    # `cell_integrator` supplies the OTHER term of the operator — plain diffusion
+    # (`PlainPoissonIntegrator`) for "condensed item alone", or a condensed cell
+    # integrator (e.g. the lib's `SimpleCondensedPowerLawRelaxation`) for the
+    # layout-collision proof — forwarded to via `setup_element_cache` only:
+    # every other cell hook (`get_number_of_internal_dofs_per_element`,
+    # `condense_cell!`, the kernels) dispatches on the CACHE type, so nothing
+    # else needs forwarding.
+
+    struct PlainPoissonIntegrator <: AbstractNonlinearIntegrator
+        qrc::QuadratureRuleCollection
+        field_name::Symbol
+    end
+    struct PlainPoissonCache{CV <: CellValues} <: AbstractVolumetricElementCache
+        cv::CV
+    end
+    function FerriteOperators.setup_element_cache(m::PlainPoissonIntegrator, sdh::SubDofHandler)
+        qr     = getquadraturerule(m.qrc, sdh)
+        ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+        ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+        return PlainPoissonCache(CellValues(qr, ip, ip_geo))
+    end
+    FerriteOperators.duplicate_for_device(device, c::PlainPoissonCache) =
+        PlainPoissonCache(FerriteOperators.duplicate_for_device(device, c.cv))
+    FerriteOperators.reinit_values!(c::PlainPoissonCache, cell) = reinit!(c.cv, cell)
+    function FerriteOperators.assemble_cell!(req::ResidualRequest, c::PlainPoissonCache, args::CellArgs)
+        uₑ = args.states.u
+        for qp in 1:getnquadpoints(c.cv)
+            dΩ = getdetJdV(c.cv, qp)
+            ∇u = function_gradient(c.cv, qp, uₑ)
+            for i in 1:getnbasefunctions(c.cv)
+                req.r[i] += (shape_gradient(c.cv, qp, i) ⋅ ∇u) * dΩ
+            end
+        end
+    end
+
+"""
+Material parameters of the chamber's linear exchange: rate `β` and relaxation
+time `τ`. Generic over `T` — the layout-collision testbed shares this GLOBAL
+parameter object with a plain cell integrator that has no analytic
+`ParameterJacobianRequest` kernel, so a Dual-valued `rebuild_parameters` must
+be constructible even though the chamber cache itself never needs one (it
+provides the analytic kernel).
+"""
+    struct ChamberRelaxationParameters{T}
+        β::T
+        τ::T
+    end
+    ChamberRelaxationParameters(; β = 1.3, τ = 0.9) = ChamberRelaxationParameters(promote(β, τ)...)
+    # θ = (β,) only — τ stays fixed, mirroring `NortonRelaxationParameters`' κ.
+    FerriteOperators.parameter_vector(p::ChamberRelaxationParameters) = [p.β]
+    FerriteOperators.rebuild_parameters(p::ChamberRelaxationParameters, θ) =
+        ChamberRelaxationParameters(promote(θ[1], p.τ)...)
+
+    """
+    The cache associated with the chamber exchange term: one corrector per item
+    (`dq/dp`, read by the `Consistent` kernel) and one parameter corrector per
+    item (`dq/dβ`, read by the `ParameterJacobianRequest` kernel), both
+    populated by `condense_algebraic!`. Declares `has_internal_state`.
+    """
+    struct CondensedChamberCache
+        params::ChamberRelaxationParameters
+        correctors::ItemStates{Float64}
+        param_correctors::ItemStates{Float64}
+    end
+    FerriteOperators.duplicate_for_device(device, c::CondensedChamberCache) =
+        CondensedChamberCache(c.params, FerriteOperators.duplicate_for_device(device, c.correctors),
+                              FerriteOperators.duplicate_for_device(device, c.param_correctors))
+    FerriteOperators.has_internal_state(::Type{CondensedChamberCache}) = true
+    function FerriteOperators.invalidate_correctors!(cache::CondensedChamberCache)
+        FerriteOperators.invalidate_item_states!(cache.correctors)
+        FerriteOperators.invalidate_item_states!(cache.param_correctors)
+        return nothing
+    end
+
+    _chamber_params(cache::CondensedChamberCache, ::Nothing) = cache.params
+    _chamber_params(cache::CondensedChamberCache, p::ChamberRelaxationParameters) = p
+
+    FerriteOperators.get_number_of_internal_dofs_per_algebraic_item(
+        m, ::CondensedChamberCache, items) = fill(1, length(items))
+
+    """
+        condense_algebraic!(cache::CondensedChamberCache, args, weights) -> CondensationReport
+
+    Solve the item's local exchange problem in closed form (a direct solve —
+    always converged, zero inner iterations), write the trial `q` and store
+    `dq/dp`/`dq/dβ`. `worst_cell` reports `-args.item.index`, the family
+    disambiguation `CondensationReport` documents.
+    """
+    function FerriteOperators.condense_algebraic!(cache::CondensedChamberCache, args::AlgebraicArgs, weights::NamedTuple)
+        (; β, τ) = _chamber_params(cache, args.p)
+        γ̃  = stage_scaling(args.ctx)
+        k  = γ̃ * β / τ
+        idx = args.item.index
+        p  = args.states.u[1]
+        q₀ = args.states.qprev[1]
+        q  = (q₀ + k * p) / (1 + k)
+        args.states.q[1] = q
+        FerriteOperators.set_item_state!(cache.correctors, idx, k / (1 + k))
+        FerriteOperators.set_item_state!(cache.param_correctors, idx, (γ̃ / τ) * (p - q) / (1 + k))
+        return CondensationReport(true, 1, 0, 0, -idx, 0, 0.0, 1.0)
+    end
+
+    const _ChamberJacobianLike = Union{JacobianRequest{:u, Consistent}, JacobianRequest{:u, FrozenQ},
+                                       JacobianResidualRequest{Consistent}, JacobianResidualRequest{FrozenQ}}
+    const _ChamberFrozenLike = Union{JacobianRequest{:u, FrozenQ}, JacobianResidualRequest{FrozenQ}}
+
+    # Pure evaluation at the FROZEN q the last `condense_internal!` wrote: no
+    # solve, no write-back. `item_state` throws, naming the item, if
+    # `condense_internal!` never condensed it (or it was invalidated since).
+    function _chamber_assemble!(req, cache::CondensedChamberCache, args::AlgebraicArgs)
+        (; β) = _chamber_params(cache, args.p)
+        idx = args.item.index
+        p = args.states.u[1]
+        q = args.states.q[1]
+
+        needs_jac = req isa _ChamberJacobianLike
+        dqdp = (needs_jac && !(req isa _ChamberFrozenLike)) ? FerriteOperators.item_state(cache.correctors, idx) : nothing
+
+        if req isa Union{ResidualRequest, JacobianResidualRequest}
+            req.r[1] += β * (p - q)
+        end
+        if needs_jac
+            slope = req isa _ChamberFrozenLike ? 0.0 : dqdp
+            req.K[1, 1] += β * (1 - slope)
+        end
+    end
+    FerriteOperators.assemble_algebraic!(req::ResidualRequest, cache::CondensedChamberCache, args::AlgebraicArgs) = _chamber_assemble!(req, cache, args)
+    FerriteOperators.assemble_algebraic!(req::JacobianRequest{:u, Consistent}, cache::CondensedChamberCache, args::AlgebraicArgs) = _chamber_assemble!(req, cache, args)
+    FerriteOperators.assemble_algebraic!(req::JacobianRequest{:u, FrozenQ}, cache::CondensedChamberCache, args::AlgebraicArgs) = _chamber_assemble!(req, cache, args)
+    FerriteOperators.assemble_algebraic!(req::JacobianResidualRequest{Consistent}, cache::CondensedChamberCache, args::AlgebraicArgs) = _chamber_assemble!(req, cache, args)
+    FerriteOperators.assemble_algebraic!(req::JacobianResidualRequest{FrozenQ}, cache::CondensedChamberCache, args::AlgebraicArgs) = _chamber_assemble!(req, cache, args)
+    FerriteOperators.provides_analytic(::Type{CondensedChamberCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
+
+    # Analytic ∂F/∂θ (θ = (β,)): the exchange term's own partial ∂r/∂β|_q =
+    # (p−q) plus the stored ∂r/∂q · dq/dβ correction (∂r/∂q|_(p,β) = -β).
+    function FerriteOperators.assemble_algebraic!(req::ParameterJacobianRequest, cache::CondensedChamberCache, args::AlgebraicArgs)
+        (; β) = _chamber_params(cache, args.p)
+        idx = args.item.index
+        p = args.states.u[1]
+        q = args.states.q[1]
+        dqdβ = FerriteOperators.item_state(cache.param_correctors, idx)
+        req.B[1, 1] += (p - q) - β * dqdβ
+        return req.B
+    end
+    FerriteOperators.provides_analytic(::Type{CondensedChamberCache}, ::FerriteOperators.ParameterJacobianKind) = true
+
+    """
+        ChamberIntegrator(cell_integrator; params = ChamberRelaxationParameters())
+
+    Plain-or-condensed cell physics (`cell_integrator`, forwarded to via
+    `setup_element_cache` only) plus TWO independent chamber items on their own
+    dedicated algebraic dofs `:p1`/`:p2` (no shared dofs, no cell↔item
+    coupling — the fixture proves dof-LAYOUT composition, not scatter
+    collision, which `test_algebraic_items.jl` already covers). No coupling
+    descriptor is needed: every entry this operator has is on the diagonal,
+    always allocated.
+    """
+    struct ChamberIntegrator{C} <: AbstractNonlinearIntegrator
+        cell_integrator::C
+        params::ChamberRelaxationParameters
+    end
+    ChamberIntegrator(cell_integrator; params = ChamberRelaxationParameters()) =
+        ChamberIntegrator(cell_integrator, params)
+
+    FerriteOperators.setup_element_cache(m::ChamberIntegrator, sdh::SubDofHandler) =
+        FerriteOperators.setup_element_cache(m.cell_integrator, sdh)
+    FerriteOperators.algebraic_items(m::ChamberIntegrator, dh::DofHandler) =
+        [[only(algebraic_dofs(dh, :p1))], [only(algebraic_dofs(dh, :p2))]]
+    FerriteOperators.setup_algebraic_cache(m::ChamberIntegrator, dh::DofHandler) =
+        CondensedChamberCache(m.params, ItemStates{Float64}(2), ItemStates{Float64}(2))
+
+    """
+        chamber_testbed(strategy, qrc; cell_integrator = PlainPoissonIntegrator(qrc, :u), dims = (2, 2), kwargs...)
+
+    Grid, DofHandler and operator of the chamber-exchange problem: a scalar
+    field `:u` plus the two `:p1`/`:p2` chamber dofs. `condensed_states(u,
+    uprev)` (defined above) serves this testbed's states too — the mechanism is
+    family-agnostic.
+    """
+    function chamber_testbed(strategy, qrc; cell_integrator = PlainPoissonIntegrator(qrc, :u),
+                             dims = (2, 2), params = ChamberRelaxationParameters(), kwargs...)
+        grid = generate_grid(Quadrilateral, dims)
+        dh   = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        add!(dh, :p1, AlgebraicVariable())
+        add!(dh, :p2, AlgebraicVariable())
+        close!(dh)
+        integrator = ChamberIntegrator(cell_integrator; params)
+        op = setup_operator(strategy, integrator, dh; slots = (:u, :q, :qprev), kwargs...)
+        return (; op, dh, grid, item_dofs = [only(algebraic_dofs(dh, :p1)), only(algebraic_dofs(dh, :p2))])
+    end
+
 end

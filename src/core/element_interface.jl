@@ -257,6 +257,21 @@ function setup_algebraic_cache(integrator, dh)
 end
 
 """
+    get_number_of_internal_dofs_per_algebraic_item(integrator, cache, items) -> AbstractVector{Int}
+
+Number of condensed internal dofs each item of `items` owns, in declaration
+order — the [`get_number_of_internal_dofs_per_element`](@ref) counterpart for
+the algebraic-item family. Queried once at setup, only when
+[`has_internal_state`](@ref) holds for `cache`, to build the item block of the
+[`InternalVariableHandler`](@ref) (`[ū | q_cells | q_items]`). Every entry
+must be equal: the fixed-size local buffers the uniform-item-size rule keeps
+([`resolve_algebraic_items`](@ref)) extends to the internal-dof count too,
+validated loudly at setup. There is no fallback, so only a condensed algebraic
+cache implements it.
+"""
+function get_number_of_internal_dofs_per_algebraic_item end
+
+"""
     assemble_algebraic!(req::AbstractAssemblyRequest, cache, args)
 
 The kernel entry point of the algebraic item family — one entry point per

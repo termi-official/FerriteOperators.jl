@@ -55,6 +55,10 @@ at setup), so no sweep ever resizes anything here.
 carries one — the item is resolved through the declaration between `reinit!`
 and the kernel rather than handed to the kernel directly, which makes this a
 CPU-scoped positioning mechanism.
+
+`ivh` mirrors [`AssemblyWorkspace`](@ref)'s field of the same name: the shared
+[`InternalVariableHandler`](@ref) an `:q` slot's [`InternalSource`](@ref)
+gather resolves the current item's range against.
 """
 @concrete struct AlgebraicWorkspace <: AbstractWorkspace
     Ke
@@ -64,6 +68,7 @@ CPU-scoped positioning mechanism.
     sensitivity    # SensitivityBuffers, or `nothing`
     items          # the declared dof vectors; shared, read-only during a sweep
     current        # Ref{Int}: the index of the item being processed
+    ivh            # shared InternalVariableHandler
 end
 
 Ferrite.reinit!(ws::AlgebraicWorkspace, index::Int) = (ws.current[] = index; ws)
@@ -74,12 +79,18 @@ Ferrite.reinit!(ws::AlgebraicWorkspace, index::Int) = (ws.current[] = index; ws)
 "The [`AlgebraicItem`](@ref) `ws` is positioned on, set by `Ferrite.reinit!(ws, index)`."
 @inline current_item(ws::AlgebraicWorkspace) = AlgebraicItem(ws.current[], item_dofs(ws))
 
-# A slot gather restricts its source to the item's support. An algebraic item
-# owns no condensed internal dofs, so its slice of an [`InternalSource`](@ref)
-# is empty — which is what lets condensed cell elements and algebraic items
-# share one operator: the same `states = (u = u, q = InternalSource(u))` serves
-# both families, and an algebraic kernel sees a zero-length `:q` buffer.
-load_slot!(buf, ::InternalSource, ws::AlgebraicWorkspace) = (resize!(buf, 0); buf)
+# A slot gather restricts its source to the item's condensed internal-dof
+# range, exactly like the cell family's `InternalSource` gather — empty for an
+# item owning none, which is what a stateless algebraic cache always reports
+# (`internal_variable_range` on the placeholder handler is `1:0` regardless of
+# item), so this reproduces the old unconditional-empty gather exactly for
+# every operator without a condensed algebraic cache.
+function load_slot!(buf, src::InternalSource, ws::AlgebraicWorkspace)
+    range = internal_variable_range(ws.ivh, current_item(ws))
+    resize!(buf, length(range))
+    buf .= @view src.u[range]
+    return buf
+end
 
 function duplicate_for_device(device::AbstractCPUDevice, ws::AlgebraicWorkspace)
     return AlgebraicWorkspace(
@@ -90,11 +101,12 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AlgebraicWorkspace)
         duplicate_for_device(device, ws.sensitivity),
         ws.items,                                    # shared: read-only during a sweep
         Ref(ws.current[]),
+        duplicate_for_device(device, ws.ivh),
     )
 end
 
 """
-    create_algebraic_workspace(cache, items, slots, ::Type{T}; needs_sensitivity = true)
+    create_algebraic_workspace(cache, items, slots, ::Type{T}, ivh; needs_sensitivity = true)
 
 Create a single [`AlgebraicWorkspace`](@ref) whose buffers are sized by the
 common dof count of `items` — an item's local system spans its own dofs and
@@ -105,7 +117,7 @@ apply.
 same STRUCTURAL decision the cell workspace makes (see
 [`needs_ad_decoration`](@ref)).
 """
-function create_algebraic_workspace(cache, items, slots::NTuple{N, Symbol}, ::Type{T};
+function create_algebraic_workspace(cache, items, slots::NTuple{N, Symbol}, ::Type{T}, ivh;
         needs_sensitivity::Bool = true) where {N, T}
     n = length(first(items))
     slot_buffers = NamedTuple{slots}(ntuple(_ -> zeros(T, n), N))
@@ -117,6 +129,7 @@ function create_algebraic_workspace(cache, items, slots::NTuple{N, Symbol}, ::Ty
         needs_sensitivity ? create_sensitivity_buffers(n, T) : nothing,
         items,
         Ref(0),
+        ivh,
     )
 end
 
@@ -193,9 +206,34 @@ function functional_algebraic_sweep(kind, task, ws)
     return evaluate_algebraic_functional(kind, ws.element, _algebraic_args(ws, statesₑ, pₑ, task.ctx))
 end
 
-# Condensation is per cell: an algebraic item owns no internal dofs, so it
-# contributes nothing to the report and its slots are never gathered.
-execute_kind!(::CondensationKind, task, ws::AlgebraicWorkspace) = nothing
+# Trait-gated: a stateless algebraic cache (the common case) owns no internal
+# dofs, so condensation contributes nothing and its slots are never gathered —
+# the exact no-op this dispatched to before condensed algebraic items existed.
+# A condensed cache reaches the real driver below.
+execute_kind!(kind::CondensationKind, task, ws::AlgebraicWorkspace) =
+    has_internal_state(typeof(ws.element)) ? condensation_algebraic_sweep!(kind, task, ws) : nothing
+
+"""
+    condensation_algebraic_sweep!(kind::CondensationKind, task, ws) -> CondensationReport
+
+The [`condensation_cell_sweep!`](@ref) counterpart of the algebraic family:
+gathers the declared slots, hands them to [`condense_algebraic!`](@ref), and
+copies the item-local `q` buffer it filled into the item's slice of the `:q`
+slot's global vector, through the item's [`internal_variable_range`](@ref) —
+the item block of the `[ū | q_cells | q_items]` tail. Only reached for a
+condensed algebraic cache — the `execute_kind!` dispatch immediately above
+gates it on [`has_internal_state`](@ref).
+"""
+function condensation_algebraic_sweep!(kind::CondensationKind, task, ws)
+    statesₑ = load_slots!(ws, task.states)
+    pₑ = query_cell_parameters(ws.element, current_item(ws), task.p)
+    args = _algebraic_args(ws, statesₑ, pₑ, task.ctx)
+    report = condense_algebraic!(ws.element, args, kind.weights)
+    qsrc = _q_source(task.states)
+    range = internal_variable_range(ws.ivh, current_item(ws))
+    qsrc.u[range] .= statesₑ.q
+    return report
+end
 
 # Quadrature evaluation writes the per-quadrature-point data of a cell; an
 # algebraic item has neither cell nor quadrature points.
@@ -212,9 +250,14 @@ Setup-time consistency check for algebraic caches, the
 [`validate_element_cache`](@ref) counterpart: the mandatory
 [`ResidualRequest`](@ref) kernel must exist, every kind
 [`provides_analytic`](@ref) claims must have a matching
-[`assemble_algebraic!`](@ref) method, and the cache must not carry condensed
-internal state — condensation is per cell, and an algebraic item has no place
-in the [`InternalVariableHandler`](@ref).
+[`assemble_algebraic!`](@ref) method, and — when the cache declares
+[`has_internal_state`](@ref) — every primal kind [`requires_admissibility_check`](@ref)
+names must be served analytically or declared
+[`internal_state_insensitive`](@ref), exactly like a condensed CELL cache.
+There is no generic AD `Consistent` bootstrap for this family (see
+[`condense_algebraic!`](@ref)): an algebraic item has no cellid to key a
+corrector store by, so a condensed algebraic cache has only these two
+escapes, never `ADElementCache`'s `condensed_corrector` combination.
 """
 function validate_algebraic_cache(cache, declared_requests::Tuple = ())
     T = typeof(cache)
@@ -222,16 +265,17 @@ function validate_algebraic_cache(cache, declared_requests::Tuple = ())
         "$(T) implements no `assemble_algebraic!(::ResidualRequest, ::$(nameof(T)), " *
         "::AlgebraicArgs)` method. The residual kernel is mandatory: it is the basis for " *
         "AD-derived Jacobians and sensitivities."))
-    has_internal_state(T) && throw(ArgumentError(
-        "$(nameof(_display_cache_type(T))) declares `has_internal_state`, but an algebraic item " *
-        "has no cell and therefore no internal-variable range to condense into. Condensed " *
-        "internal state belongs to a volumetric element cache."))
     for kind in _primal_validatable_kinds()
         _assert_trait_backed(T, kind, assemble_algebraic!, AlgebraicArgs)
+        requires_admissibility_check(kind) &&
+            assert_sensitivity_admissible(T, kind, assemble_algebraic!, AlgebraicArgs)
     end
     for K in declared_requests
         has_cell_request(K) || continue
-        _assert_trait_backed(T, validation_instance(K), assemble_algebraic!, AlgebraicArgs)
+        kind = validation_instance(K)
+        _assert_trait_backed(T, kind, assemble_algebraic!, AlgebraicArgs)
+        requires_admissibility_check(kind) &&
+            assert_sensitivity_admissible(T, kind, assemble_algebraic!, AlgebraicArgs)
     end
     return nothing
 end
@@ -285,25 +329,62 @@ function resolve_algebraic_items(declared, ndofs_total::Int)
     return items
 end
 
-"""
-    setup_algebraic_caches(strategy, integrator, dh, protocol, ad_backend, needs_sensitivity)
+# Uniform-count validation + the `nitems+1` cumsum, mirroring
+# `_cell_internal_offsets`'s shape but over the item declaration.
+function _algebraic_item_offsets(integrator, cache, items)
+    counts = collect(Int, get_number_of_internal_dofs_per_algebraic_item(integrator, cache, items))
+    length(counts) == length(items) || throw(ArgumentError(
+        "get_number_of_internal_dofs_per_algebraic_item returned $(length(counts)) counts for " *
+        "$(length(items)) items."))
+    @assert all(counts .≥ 0) "Number of internal dofs must be non-negative!"
+    n = isempty(counts) ? 0 : first(counts)
+    all(==(n), counts) || throw(ArgumentError(
+        "Algebraic item internal dof counts $(counts) are not uniform. Condensed internal " *
+        "state on the algebraic-item family follows the same uniform-item-size rule as the " *
+        "items' own dof count (see `resolve_algebraic_items`): one `algebraic_items` " *
+        "declaration's local buffers are fixed-size, so every item must own the same number " *
+        "of internal dofs."))
+    return cumsum(vcat(0, counts))
+end
 
-The `SubdomainCache`s of the algebraic family — one per
-[`algebraic_items`](@ref) declaration, and none where nothing is declared.
-[`setup_engine`](@ref) appends them after the cell subdomains, so a sweep's
-traversal order stays deterministic.
 """
-function setup_algebraic_caches(strategy, integrator, dh, protocol, ad_backend, needs_sensitivity::Bool)
+    resolve_algebraic_domain(integrator, dh, protocol) -> (cache, items) or `nothing`
+
+The [`algebraic_items`](@ref) declaration resolved and validated once, before
+[`setup_internal_variable_handler`](@ref) or any decoration: `nothing` where
+the integrator declares no items, otherwise the raw cache
+[`setup_algebraic_cache`](@ref) built and the resolved item dof vectors —
+everything [`setup_internal_variable_handler`](@ref) needs to size a
+condensed algebraic cache's item block, and everything
+[`setup_algebraic_caches`](@ref) needs to finish the domain afterwards.
+"""
+function resolve_algebraic_domain(integrator, dh, protocol)
     declared = algebraic_items(integrator, dh)
-    isempty(declared) && return SubdomainCache[]
-    items  = resolve_algebraic_items(declared, ndofs(dh))
-    cache  = setup_algebraic_cache(integrator, dh)
+    isempty(declared) && return nothing
+    items = resolve_algebraic_items(declared, ndofs(dh))
+    cache = setup_algebraic_cache(integrator, dh)
     validate_algebraic_cache(cache, get_declared_kinds(protocol))
+    return (cache, items)
+end
+
+"""
+    setup_algebraic_caches(strategy, algebraic_domain, protocol, ad_backend, needs_sensitivity, ivh)
+
+The `SubdomainCache`s of the algebraic family, finishing what
+[`resolve_algebraic_domain`](@ref) resolved: decorate the cache, derive the
+partition, and build the shared [`AlgebraicWorkspace`](@ref) against `ivh`.
+`algebraic_domain === nothing` (nothing declared) returns no caches.
+[`setup_engine`](@ref) appends the result after the cell subdomains, so a
+sweep's traversal order stays deterministic.
+"""
+function setup_algebraic_caches(strategy, algebraic_domain, protocol, ad_backend, needs_sensitivity::Bool, ivh)
+    algebraic_domain === nothing && return SubdomainCache[]
+    cache, items = algebraic_domain
     device = strategy.device
     T      = value_type(device)
     resolved  = needs_sensitivity ? decorate_algebraic_cache(cache, length(first(items)), ad_backend, T) : cache
     partition = compute_partition(strategy, AlgebraicItems(items))
-    ws = create_algebraic_workspace(resolved, items, get_declared_slots(protocol), T; needs_sensitivity)
+    ws = create_algebraic_workspace(resolved, items, get_declared_slots(protocol), T, ivh; needs_sensitivity)
     dc = setup_device_instances(device, ws, n_workers(strategy, device, partition))
     return [SubdomainCache(AlgebraicDomain(resolved, items), dc, partition)]
 end
