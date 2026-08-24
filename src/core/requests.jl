@@ -360,10 +360,12 @@ query_facet_parameters(cache, cell, local_facet_index, p) = unwrap_parameters(p)
 """
     provides_analytic(::Type{CacheType}, kind) -> Bool
 
-`true` iff the element cache implements `assemble_cell!` analytically for
-the given request *kind* singleton (`JacobianKind()`, `ParameterJacobianKind()`,
-…). Everything except the mandatory residual defaults to `false`, i.e.
-AD-from-residual.
+`true` iff the cache has an AUTHOR-WRITTEN analytic kernel for the given
+request *kind* singleton (`JacobianKind()`, `ParameterJacobianKind()`, …) —
+that question and no other; whether the cache the engine calls serves the kind
+at all is [`serves_kind`](@ref). Everything except the mandatory residual
+defaults to `false`, i.e. AD-from-residual, and decorators forward the trait
+unchanged.
 
 There is deliberately exactly ONE root method (the residual default is a
 runtime branch), so specializations are always strictly more specific:
@@ -373,6 +375,22 @@ get wrong. Kernel/trait consistency is validated once at operator setup
 ([`validate_element_cache`](@ref)).
 """
 provides_analytic(::Type, kind) = kind isa ResidualKind
+
+"""
+    serves_kind(::Type{CacheType}, kind) -> Bool
+
+`true` iff the RESOLVED cache — the possibly decorated type the engine calls —
+answers `kind` with the quantity that kind names, whether from an
+author-written kernel or from a decorator's generic route.
+[`provides_analytic`](@ref) implies this; the converse does not, since
+[`ADElementCache`](@ref) serves kinds its inner has no kernel for.
+
+Same single-root shape as `provides_analytic`, so the literal returns constant
+fold. Deliberately NOT exported: the methods belong to the wrapping layer
+([`ADElementCache`](@ref), [`CompositeVolumetricElementCache`](@ref)), while an
+element author declares `provides_analytic` and this default composes.
+"""
+serves_kind(T::Type, kind) = provides_analytic(T, kind)
 
 """
     validate_element_cache(cache, declared_requests = ())
@@ -523,7 +541,7 @@ _primal_validatable_kinds() = (JacobianKind{:u}(), JacobianResidualKind())
     assert_sensitivity_admissible(T::Type, kind, entry, ::Type{Args}, trailing = ())
 
 The internal-state admissibility check: throws unless a `has_internal_state`
-cache `T` serves `kind` analytically or declares it
+cache `T` [`serves_kind`](@ref) or declares it
 [`internal_state_insensitive`](@ref). `entry`/`Args`/`trailing` name the item
 family whose kernel entry point, args record and signature tail the error
 message should point authors at; the 2-arg form defaults to the volumetric
@@ -534,12 +552,12 @@ facet-item family its trailing `::Int` local facet index.
 `T` is a SERVED-CAPABILITY subject, so it is the cache the engine calls,
 decorated where the engine decorated it. That is what admits the generic
 routes [`ADElementCache`](@ref) builds from [`condensed_corrector`](@ref) and
-[`local_conditions!`](@ref): the decorator's [`provides_analytic`](@ref)
-already reports them as covered, and an undecorated cache has no such route.
+[`local_conditions!`](@ref): [`serves_kind`](@ref) reports them as the coverage
+they are, and an undecorated cache has no such route.
 """
 function assert_sensitivity_admissible(T::Type, kind, entry = assemble_cell!, ::Type{Args} = CellArgs,
         trailing::Tuple = ()) where {Args}
-    if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
+    if has_internal_state(T) && !serves_kind(T, kind) && !internal_state_insensitive(T, kind)
         name = nameof(unwrap(T))
         wrapping_note = unwrap(T) === T ? "" :
             " — automatically wrapped in `$(nameof(T))` because it lacks analytic coverage of " *
@@ -594,7 +612,7 @@ with a corrector store ([`condense_internal!`](@ref)). Governs the
 sensitivity admissibility check: a kind with no [`CorrectionMode`](@ref) is
 always the total, so AD-from-residual through the pure kernel — which
 computes only the frozen-q partial — is missing the correction unless the
-cache serves the kind analytically or declares it
+cache [`serves_kind`](@ref) or declares it
 [`internal_state_insensitive`](@ref); time sensitivities alone admit a
 finite-difference escape.
 """

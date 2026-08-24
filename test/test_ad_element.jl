@@ -58,7 +58,9 @@ end
         sdh = dh.subdofhandlers[1]
         cache = FerriteOperators.setup_element_cache(WrapDiffusionIntegrator(2.3, qrc, :u), sdh)
         ad = ADElementCache(cache, sdh)   # hand-constructed, not through setup_operator
-        @test provides_analytic(typeof(ad), JacobianKind{:u}())
+        # The decorator SERVES the kind without the inner having a kernel for it.
+        @test FerriteOperators.serves_kind(typeof(ad), JacobianKind{:u}())
+        @test !provides_analytic(typeof(ad), JacobianKind{:u}())
 
         cc = Ferrite.CellCache(dh); reinit!(cc, 1)
         FerriteOperators.reinit_values!(ad, cc)
@@ -173,7 +175,8 @@ end
     )
     ad = ADElementCache(bootstrap_cache, sdh)
     @test !provides_analytic(GenericBootstrapCache, JacobianKind{:u, Consistent}())   # wrapper is NOT
-    @test provides_analytic(typeof(ad), JacobianKind{:u, Consistent}())               # the DECORATOR covers it generically
+    @test FerriteOperators.serves_kind(typeof(ad), JacobianKind{:u, Consistent}())    # the DECORATOR covers it generically
+    @test !provides_analytic(typeof(ad), JacobianKind{:u, Consistent}())              # and does not claim a kernel for it
 
     cc = Ferrite.CellCache(dh); reinit!(cc, 1)
     FerriteOperators.reinit_values!(reference_cache, cc)

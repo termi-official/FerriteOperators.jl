@@ -13,14 +13,12 @@ makedocs(;
         canonical="https://termi-official.github.io/FerriteOperators.jl",
         edit_link="main",
         assets=String[],
-        # Page size is not a quality criterion here: the nav sidebar renders
-        # into every page, so the thresholds mostly measure nav length, and
-        # chasing them fragments the API reference. Disabled by decision.
+        # The nav sidebar renders into every page, so size thresholds mostly
+        # measure nav length; disabled.
         size_threshold = nothing,
         size_threshold_warn = nothing,
     ),
-    # Broken `@ref`s are fatal; the remaining checks (missing docstrings above
-    # all) stay warnings.
+    # Broken `@ref`s are fatal; other checks stay warnings.
     warnonly = Documenter.except(:cross_references),
     pages=[
         "Home" => "index.md",

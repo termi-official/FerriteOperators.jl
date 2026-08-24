@@ -208,7 +208,11 @@ queried on — a kind whose payload is a type parameter must overload it, since
 the default `K()` cannot construct one — and [`has_cell_request`](@ref) is
 `false` for a kind reaching the element through a hook other than
 `assemble_cell!`. [`requires_admissibility_check`](@ref) opts a kind into the
-internal-state admissibility rule at setup.
+internal-state admissibility rule at setup. That rule reads
+`FerriteOperators.serves_kind` — "does the RESOLVED cache answer this kind,
+by kernel or by a decorator's generic route" — and not
+[`provides_analytic`](@ref), which is reserved for "is there a hand-written
+kernel" and forwards through the decorators unchanged.
 
 **New per-worker state** — a workspace is a fixed core (geometry cache, slot
 buffers, `Ke`/`re`) plus [`SensitivityBuffers`](@ref), present exactly when

@@ -280,13 +280,15 @@ subdomain. The workspace therefore lands at nine fields, not the seven the
 draft predicts — the ninth being `dofs`, the augmented dof vector a
 [`global_dofs`](@ref) declaration needs.
 
-**The decorator does not broaden [`provides_analytic`](@ref) for every kind it
-serves.** `WeightedJacobianKind` and `TimeSensitivityKind` carry explicit
-non-broadening overrides. The reason was found by test failure: several safety
-checks read `provides_analytic` as "*has a real analytic kernel*" — the
-`AffineRate`-under-AD rejection and the condensed-state admissibility rule among
-them — and a decorator claiming those kinds silently defeats them. The trait is
-therefore two things at once, and the second meaning is load-bearing.
+**The decorator does not broaden [`provides_analytic`](@ref) at all.** It first
+did, and the trait then answered two questions at once: "*has a real analytic
+kernel*", which the `AffineRate`-under-AD rejection and the fused-weighted route
+select on, and "*this cache serves the kind*", which the condensed-state
+admissibility rule needs. Keeping both meanings in one trait cost per-kind
+non-broadening overrides wherever a check wanted the first. The questions are
+now two predicates: `provides_analytic` is the hand-kernel one and forwards
+through the decorators unchanged, `FerriteOperators.serves_kind` is the
+served-capability one, and the overrides went with the split.
 
 **`FusedFromSplit` is required, not an optimization.** It is the mini-decorator
 that serves a fused Jacobian+residual request by issuing the split kernels back

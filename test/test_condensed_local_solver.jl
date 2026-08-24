@@ -139,12 +139,9 @@ function timed_relaxation_testbed(strategy, qrc, dims = (2, 2); params = TimedRe
     return (; op, dh, grid)
 end
 
-# The same element with its FUSED claim withheld, so `decorate_element_cache`
-# resolves it into `FusedFromSplit` BEFORE the AD decorator sees it. The θ/t
-# route then depends on the hook probes looking through both wrappers.
-# The decorator base forwards every mechanical hook; hand-written here are the
-# served-capability half only — the SPLIT analytic claims and their request
-# forwards — plus the type-reconstructing duplication.
+# The element with its FUSED claim withheld: resolves to
+# `ADElementCache{FusedFromSplit{…}}`, so the θ/t hook probes must look through
+# both wrappers. Hand-written: the split claims, their forwards, duplication.
 struct SplitTimedRelaxationCache{C} <: FerriteOperators.AbstractElementCacheDecorator{C}
     inner::C
 end
@@ -636,8 +633,8 @@ end
         outer = first_element_cache(split_op)
         @test outer isa ADElementCache
         @test outer.inner isa FusedFromSplit
-        @test FerriteOperators.provides_analytic(typeof(outer), ParameterJacobianKind())
-        @test FerriteOperators.provides_analytic(typeof(outer), TimeSensitivityKind())
+        @test FerriteOperators.serves_kind(typeof(outer), ParameterJacobianKind())
+        @test FerriteOperators.serves_kind(typeof(outer), TimeSensitivityKind())
 
         n = unknown_size(ref.op)
         u_ref = 0.3 .* sin.(0.6 .* (1:n)); u_split = copy(u_ref)

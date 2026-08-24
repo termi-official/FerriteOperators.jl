@@ -319,9 +319,7 @@ else
 end
 
 @testset "structural reduction answer of the facet family" begin
-    # Mirrors the family's `execute_kind!` no-op bodies: a reduction whose only
-    # domains are facet-shaped must fail the structural precondition instead of
-    # silently reducing over nothing.
+    # Facet domains decline reductions; an all-facet reduction must fail loudly.
     fd = FerriteOperators.FacetItemDomain(nothing, nothing, nothing)
     @test !FerriteOperators._may_contribute(fd, FunctionalKind(:probe))
     @test !FerriteOperators._may_contribute(fd, FerriteOperators.CondensationKind((u = 1.0,)))

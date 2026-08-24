@@ -129,6 +129,11 @@ than each individually (naive per-inner wrapping costs one full seeding pass
 per wrapped inner, worse than not wrapping at all once two or more inners need
 it).
 
+`provides_analytic` means exactly "there is a hand-written kernel", also on a
+wrapped cache. Whether the RESOLVED cache serves a kind at all (hand kernel,
+AD, or generic completion) is the internal `FerriteOperators.serves_kind`;
+element authors only ever declare `provides_analytic`.
+
 The available request types are [`ResidualRequest`](@ref),
 [`JacobianRequest`](@ref), [`JacobianResidualRequest`](@ref) (the fused Newton
 path), [`WeightedJacobianRequest`](@ref) (a scheme's combined matrix — see
@@ -409,8 +414,6 @@ cells. It has no silent fallback: declaring items without it is a setup error.
     registered Ferrite 1.6. There the declaration fails loudly at its own call
     site before any FerriteOperators surface is reached; every FO-side
     declaration defaults to `()`, so operators declaring none are unaffected.
-    This note is canonical — the global-dofs section and the operator
-    specifications point here.
 
 Kernels dispatch through [`assemble_algebraic!`](@ref), the family's own entry
 point next to `assemble_cell!` and `assemble_facet!`, and receive an

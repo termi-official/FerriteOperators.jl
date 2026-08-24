@@ -57,6 +57,12 @@ provides_analytic(::Type{CompositeVolumetricElementCache{CT}}, kind) where {CT <
 _all_provide(::Type{Tuple{}}, kind) = true
 _all_provide(::Type{T}, kind) where {T <: Tuple} =
     provides_analytic(Base.tuple_type_head(T), kind) && _all_provide(Base.tuple_type_tail(T), kind)
+# The fan-out is all-or-nothing, so an inner that is itself decorated carries
+# its decoration's coverage into the composite's answer.
+serves_kind(::Type{CompositeVolumetricElementCache{CT}}, kind) where {CT <: Tuple} = _all_serve(CT, kind)
+_all_serve(::Type{Tuple{}}, kind) = true
+_all_serve(::Type{T}, kind) where {T <: Tuple} =
+    serves_kind(Base.tuple_type_head(T), kind) && _all_serve(Base.tuple_type_tail(T), kind)
 has_internal_state(::Type{CompositeVolumetricElementCache{CT}}) where {CT <: Tuple} = _any_internal(CT)
 _any_internal(::Type{Tuple{}}) = false
 _any_internal(::Type{T}) where {T <: Tuple} =
@@ -92,12 +98,12 @@ end
 # rejection names them.
 function assert_sensitivity_admissible(::Type{CompositeVolumetricElementCache{CT}}, kind) where {CT <: Tuple}
     has_internal_state(CompositeVolumetricElementCache{CT}) || return nothing
-    provides_analytic(CompositeVolumetricElementCache{CT}, kind) && return nothing
+    serves_kind(CompositeVolumetricElementCache{CT}, kind) && return nothing
     internal_state_insensitive(CompositeVolumetricElementCache{CT}, kind) && return nothing
     missing_kind = _inner_types_without(CT, kind)
     throw(ArgumentError(
         "A composite carrying condensed internal state is inadmissible for $(typeof(kind)) " *
-        "unless every inner serves that kind analytically, but $(missing_kind) do(es) not. " *
+        "unless every inner serves that kind, but $(missing_kind) do(es) not. " *
         "AD-from-residual on the pure residual kernel would compute only the frozen-q " *
         "partial, silently missing the ∂F/∂q·dq/d· correction this kind's total needs. " *
         "Implement the analytic kernel on the listed inner(s), declare " *
@@ -108,7 +114,7 @@ _inner_types_without(::Type{Tuple{}}, kind) = ()
 function _inner_types_without(::Type{T}, kind) where {T <: Tuple}
     H = Base.tuple_type_head(T)
     rest = _inner_types_without(Base.tuple_type_tail(T), kind)
-    return provides_analytic(H, kind) ? rest : (nameof(H), rest...)
+    return serves_kind(H, kind) ? rest : (nameof(H), rest...)
 end
 _cache_names(caches::Tuple) = map(c -> nameof(typeof(c)), caches)
 

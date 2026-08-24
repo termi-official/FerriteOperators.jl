@@ -37,30 +37,23 @@ every domain), and the resolved [`FacetItem`](@ref)s.
     items
 end
 
-# The kernel entry point of a domain's item family — kernel function, args
-# record, trailing argument types — the one triple every family-dispatched
-# check varies. A new family adds one method here and both checks below follow.
+# (kernel function, args record, trailing argument types) of a domain's item
+# family; a new family adds one method and both checks below follow.
 kernel_entry(domain) = (assemble_cell!, CellArgs, ())
 kernel_entry(::AlgebraicDomain) = (assemble_algebraic!, AlgebraicArgs, ())
 kernel_entry(::FacetItemDomain) = (assemble_facet!, FacetArgs, (Int,))
 
-# The trait ↔ kernel and call-time admissibility checks of a domain's cache
-# (the latter driven by `_check_sensitivity_supported`), run over its family's
-# entry so the errors name the family's own kernel and args record and the
-# admissibility remedies are family-aware.
+# Trait ↔ kernel and call-time admissibility checks over the family's entry,
+# so errors name the family's own kernel and args record.
 _assert_domain_trait_backed(domain, kind) =
     _assert_trait_backed(typeof(domain.element), kind, kernel_entry(domain)...)
 _assert_domain_sensitivity_admissible(domain, kind) =
     assert_sensitivity_admissible(typeof(domain.element), kind, kernel_entry(domain)...)
 
-# Whether a subdomain can contribute to a reduction of the given kind at all —
-# the structural half of the reduction precondition, and structural per KIND: a
-# domain contributes to one reduction and not another. An
-# `EmptyVolumetricElementCache` contributes to nothing by construction; the
-# facet family's answer lives in facet-task.jl, next to the `execute_kind!`
-# bodies it mirrors. An algebraic domain answers `true` for every kind, since
-# `hasmethod` cannot decide whether a cache overrides
-# `evaluate_algebraic_functional`: the default method takes untyped arguments.
+# Structural half of the reduction precondition, per kind. The facet family's
+# answer lives in facet-task.jl beside its `execute_kind!` bodies; algebraic
+# domains answer `true` (`hasmethod` cannot see an `evaluate_algebraic_functional`
+# override past the untyped default).
 _may_contribute(domain, kind) = true
 _may_contribute(domain::AssemblyDomain, kind) = !(domain.element isa EmptyVolumetricElementCache)
 
@@ -187,13 +180,11 @@ end
 """
     AbstractBilinearOperator <: AbstractNonlinearOperator
 
-The operator a bilinear form induces: a state-independent matrix `A` whose
-action `F(u) = A·u` is the residual it owes its caller. Because the matrix does
-not depend on the state, it IS this operator's Jacobian, so
-[`update_linearization!`](@ref) reduces to `update_operator!` plus that action
-and the family carries no differentiation machinery — see
-[`AbstractBilinearIntegrator`](@ref) for the setup-time half of the same
-statement.
+The operator a bilinear form induces: a state-independent matrix `A` with
+action `F(u) = A·u`. The matrix IS the Jacobian, so
+[`update_linearization!`](@ref) is `update_operator!` plus that action, and
+the family carries no differentiation machinery (see
+[`AbstractBilinearIntegrator`](@ref)).
 """
 abstract type AbstractBilinearOperator <: AbstractNonlinearOperator end
 

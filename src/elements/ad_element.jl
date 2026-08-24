@@ -8,8 +8,9 @@
 Supertype of the caches this package wraps around a user's element cache
 ([`ADElementCache`](@ref), [`FusedFromSplit`](@ref)). The wrapped cache sits in
 a field `inner`, and everything a decorator simply inherits is forwarded once
-here; traits describing what a decorator SERVES ([`provides_analytic`](@ref))
-stay with the decorators.
+here. What a decorator answers about REQUESTS ([`provides_analytic`](@ref),
+[`serves_kind`](@ref)) stays with the decorators: one that forwards only some
+requests must not inherit the inner's claims for the rest.
 
 Which subject a probe takes is the whole convention:
 
@@ -17,7 +18,7 @@ Which subject a probe takes is the whole convention:
   `condensed_corrector`/`local_conditions!`) run on the [`unwrap`](@ref)
   fixpoint — the forwarding methods below answer `hasmethod` for every inner,
   so probing the wrapper would pass a cache that implements nothing.
-- SERVED-CAPABILITY probes ([`provides_analytic`](@ref),
+- SERVED-CAPABILITY probes ([`serves_kind`](@ref),
   [`assert_sensitivity_admissible`](@ref)) run on the DECORATED type — that is
   the cache the engine calls, and a decorator serves kinds its inner does not.
 """
@@ -128,10 +129,8 @@ end
 create_ad_element_buffers(inner, ndofs::Int, ::Type{T}) where {T} =
     _create_ad_element_buffers(inner, zeros(T, ndofs), zeros(T, ndofs), false)
 
-# `supports_q_bootstrap`: the generic `Consistent` combination is cell-only (see
-# `condense_algebraic!`) and its `:q` config is sized from `getnquadpoints`, a
-# cell-cache contract — so an algebraic inner keeps `jac_cfg_q`/`Kq` at `nothing`
-# whatever it declares.
+# `supports_q_bootstrap`: the `:q` configs are sized from `getnquadpoints`, a
+# cell-cache contract, so an algebraic inner keeps them at `nothing`.
 function _create_ad_element_buffers(inner, vₑ, re, supports_q_bootstrap::Bool)
     T   = eltype(re)
     tag       = ForwardDiff.Tag{FerriteOperatorsADTag, T}()
@@ -215,8 +214,9 @@ _jac_config_for(buf::ADElementBuffers, ::Val{slot}) where {slot} = buf.jac_cfg
 
 Decorates `inner`'s mandatory residual kernel with automatic differentiation,
 serving per request whatever `inner` does not provide analytically
-([`provides_analytic`](@ref) forwards); the engine never forks between the two
-itself. The differentiated kernel follows from the args record —
+([`provides_analytic`](@ref) stays the inner's; [`serves_kind`](@ref) reports
+the union); the engine never forks between the two itself. The differentiated
+kernel follows from the args record —
 `assemble_cell!` for a [`CellArgs`](@ref), `assemble_algebraic!` for an
 [`AlgebraicArgs`](@ref) — so one decorator serves both item families.
 
@@ -279,27 +279,24 @@ the block from `args.states`. The combination is the same either way.
 """
 function condensed_corrector end
 
-# Capability: plain AD-from-residual is exact for every kind whose fallback does
-# not differentiate through a condensed inner's local state — the rule
-# `requires_admissibility_check` names.
-#
-# TRAP: that flag is false for `TimeSensitivityKind` only because setup cannot
-# know whether the AD path even runs (FiniteDifferenceSensitivity is a call-time
-# escape); it does NOT mean plain AD is admissible on a condensed inner, hence
-# the explicit override below instead of the shortcut.
-_ad_covers(Inner, kind) = !requires_admissibility_check(kind) || !has_internal_state(Inner) || internal_state_insensitive(Inner, kind)
-# The θ/t kinds gain a THIRD branch: a declared `local_conditions!` lets the
-# decorator derive `dq/dθ`/`dq/dt` and complete the total itself.
-_ad_covers(Inner, ::TimeSensitivityKind) =
-    !has_internal_state(Inner) || internal_state_insensitive(Inner, TimeSensitivityKind()) || _has_local_conditions(Inner)
-_ad_covers(Inner, ::ParameterJacobianKind) =
-    !has_internal_state(Inner) || internal_state_insensitive(Inner, ParameterJacobianKind()) || _has_local_conditions(Inner)
-_ad_covers(Inner, kind::ParameterVJPKind) =
-    !has_internal_state(Inner) || internal_state_insensitive(Inner, kind) || _has_local_conditions(Inner)
-_ad_covers(Inner, ::JacobianKind{:u, Consistent}) =
-    !has_internal_state(Inner) || internal_state_insensitive(Inner, JacobianKind{:u, Consistent}()) || _has_condensed_corrector(Inner)
-_ad_covers(Inner, ::JacobianResidualKind{Consistent}) =
-    !has_internal_state(Inner) || internal_state_insensitive(Inner, JacobianResidualKind{Consistent}()) || _has_condensed_corrector(Inner)
+# What AD-from-residual covers on `Inner`: exact unless a condensed inner's
+# frozen-q partial is missing the ∂F/∂q·dq/d· correction the kind's total needs,
+# in which case one of the decorator's generic routes has to supply it.
+_ad_covers(Inner, kind) =
+    !has_internal_state(Inner) || internal_state_insensitive(Inner, kind) || _correction_route(Inner, kind)
+
+# The route completing that partial, per kind; `true` where the kind asks for no
+# correction at all. The θ/t kinds read their route directly rather than through
+# `requires_admissibility_check`, which is false for them only because their
+# `FiniteDifferenceSensitivity` escape is a call-time election.
+_correction_route(Inner, kind) = !requires_admissibility_check(kind)
+_correction_route(Inner, ::Union{ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind}) =
+    _has_local_conditions(Inner)
+_correction_route(Inner, ::Union{JacobianKind{:u, Consistent}, JacobianResidualKind{Consistent}}) =
+    _has_condensed_corrector(Inner)
+# The weighted sweep seeds all participating slots at once, and no generic
+# combination completes that into a condensed inner's total.
+_correction_route(Inner, ::WeightedJacobianKind) = false
 
 # Author-written-method probes, so the subject is the `unwrap` fixpoint —
 # `Inner` is itself a decorator whenever a split-analytic cache was fused first.
@@ -310,15 +307,12 @@ _ad_covers(Inner, ::JacobianResidualKind{Consistent}) =
 _has_condensed_corrector(Inner) = hasmethod(condensed_corrector, Tuple{unwrap(Inner), CellArgs})
 _has_local_conditions(Inner) = hasmethod(local_conditions!, Tuple{AbstractVector, unwrap(Inner), CellArgs})
 
-provides_analytic(::Type{<:ADElementCache{Inner}}, kind) where {Inner} =
-    provides_analytic(Inner, kind) || _ad_covers(Inner, kind)
-# `WeightedJacobianKind` is exempt from the AD-admissibility broadening:
-# `_check_differentiated_slot` and `_fused_weighted_route` read
-# `provides_analytic` as "has a REAL analytic kernel", not "is AD admissible",
-# and the latter carries its own
-# `!has_internal_state`/`internal_state_insensitive` fallback.
-provides_analytic(::Type{<:ADElementCache{Inner}}, kind::WeightedJacobianKind) where {Inner} =
-    provides_analytic(Inner, kind)
+# Every request this decorator cannot differentiate forwards to the inner, so
+# the hand-kernel claim is the inner's; the AD and generic routes are what it
+# adds on top.
+provides_analytic(::Type{<:ADElementCache{Inner}}, kind) where {Inner} = provides_analytic(Inner, kind)
+serves_kind(::Type{<:ADElementCache{Inner}}, kind) where {Inner} =
+    serves_kind(Inner, kind) || _ad_covers(Inner, kind)
 
 ####################################
 ## The seeding entries
@@ -661,6 +655,8 @@ function _split_into_fused!(req::JacobianResidualRequest{C}, inner, args) where 
     _inner_kernel!(ResidualRequest(req.r), inner, args)
     return req
 end
+# Every other request forwards to the inner, so its claims carry over; the fused
+# kernel above is this decorator's own.
 provides_analytic(::Type{<:FusedFromSplit{Inner}}, kind) where {Inner} = provides_analytic(Inner, kind)
 provides_analytic(::Type{<:FusedFromSplit{Inner}}, ::JacobianResidualKind{C}) where {Inner, C <: CorrectionMode} = true
 

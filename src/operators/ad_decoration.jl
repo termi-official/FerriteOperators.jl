@@ -25,7 +25,7 @@ const _AD_COVERED_KINDS = (
     StateJVPKind(nothing), StateVJPKind(nothing),
 )
 
-"true iff `T` serves every AD-decorator-covered kind analytically — no wrapping needed."
+"true iff `T` has an analytic kernel for every AD-decorator-covered kind — no wrapping needed."
 fully_analytic(::Type{T}) where {T} = all(kind -> provides_analytic(T, kind), _AD_COVERED_KINDS)
 
 "true iff `T` provides `JacobianKind{:u}` and the mandatory residual analytically but not the fused `JacobianResidualKind` — the [`FusedFromSplit`](@ref) case."
