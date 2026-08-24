@@ -27,12 +27,28 @@ resolved dof vectors.
     items
 end
 
+"""
+    FacetItemDomain(sdh, element, items)
+
+Domain descriptor of a facet item subdomain cache: the `SubDofHandler` whose
+cells own the facets, the surface cache [`setup_facet_item_cache`](@ref) built
+— named after `AssemblyDomain`'s field so the per-sweep validation helpers read
+every domain — and the resolved [`FacetItem`](@ref)s.
+"""
+@concrete struct FacetItemDomain
+    sdh
+    element
+    items
+end
+
 # The trait ↔ kernel check of a domain's cache, over the kernel entry point and
 # args record its item family uses.
 _assert_domain_trait_backed(domain, kind) =
     _assert_trait_backed(typeof(domain.element), kind, assemble_cell!, CellArgs)
 _assert_domain_trait_backed(domain::AlgebraicDomain, kind) =
     _assert_trait_backed(typeof(domain.element), kind, assemble_algebraic!, AlgebraicArgs)
+_assert_domain_trait_backed(domain::FacetItemDomain, kind) =
+    _assert_trait_backed(typeof(domain.element), kind, assemble_facet!, FacetArgs, (Int,))
 
 # The call-time admissibility check ([`_check_sensitivity_supported`](@ref))
 # over a domain's cache, family-dispatched the same way: an algebraic domain's
@@ -42,6 +58,8 @@ _assert_domain_sensitivity_admissible(domain, kind) =
     assert_sensitivity_admissible(typeof(domain.element), kind, assemble_cell!, CellArgs)
 _assert_domain_sensitivity_admissible(domain::AlgebraicDomain, kind) =
     assert_sensitivity_admissible(typeof(domain.element), kind, assemble_algebraic!, AlgebraicArgs)
+_assert_domain_sensitivity_admissible(domain::FacetItemDomain, kind) =
+    assert_sensitivity_admissible(typeof(domain.element), kind, assemble_facet!, FacetArgs)
 
 # Whether a subdomain can contribute to a reduction at all — the structural
 # half of the reduction precondition. An `EmptyVolumetricElementCache` returns

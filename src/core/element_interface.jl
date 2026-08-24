@@ -204,6 +204,50 @@ empty cache — "no boundary terms" is the legitimate common case.
 setup_boundary_cache(integrator, sdh) = EmptySurfaceElementCache()
 
 """
+    facet_items(integrator, sdh) -> iterable of FacetIndex
+
+The facets of `sdh` that assemble as their own work items instead of riding
+the cell sweep. Defaults to `()`, "no facet items"; a non-empty declaration
+additionally needs [`setup_facet_item_cache`](@ref).
+
+Every declared facet's cell must lie in `sdh.cellset` — a facet item's local
+system is its owning cell's — and no facet may be declared twice; both are
+setup errors. Facets of ONE cell always form one item together, so a cell's
+declared facets are assembled and scattered as a single local system.
+
+The DECLARED SET IS THE GATE on this route: [`is_facet_in_cache`](@ref) is not
+consulted. That gate exists so the fused route can rediscover membership while
+walking every facet of every cell, which is exactly the cost this family
+avoids for a term supported on a small fraction of the boundary.
+
+Two routes, one kernel set: the facets declared here are served by the same
+`assemble_facet!(req, cache, args::FacetArgs, lfi)` methods the fused route
+calls, over the same [`FacetArgs`](@ref). Moving a term between routes is a
+change of declaration with no element edits.
+"""
+facet_items(integrator, sdh) = ()
+
+"""
+    setup_facet_item_cache(integrator, sdh) -> AbstractSurfaceElementCache
+
+The surface cache serving the facets [`facet_items`](@ref) declares for `sdh`
+— one cache per subdomain, exactly like [`setup_boundary_cache`](@ref), and
+returning the same kind of object. A cache built here may equally be handed to
+the fused route and vice versa.
+
+There is deliberately no silent fallback: an integrator declaring facet items
+without this method is a loud setup error, not an operator whose boundary term
+quietly assembles nothing.
+"""
+function setup_facet_item_cache(integrator, sdh)
+    throw(ArgumentError(
+        "$(typeof(integrator)) declares `facet_items` but implements no " *
+        "`setup_facet_item_cache(integrator, sdh)` method. One surface cache serves every " *
+        "declared facet of the subdomain, and it is the same kind of cache " *
+        "`setup_boundary_cache` returns."))
+end
+
+"""
 Supertype for all caches to integrate over interfaces (facet pairs). Reserved
 for the DG work; concrete interface caches and their setup hook land with it.
 """

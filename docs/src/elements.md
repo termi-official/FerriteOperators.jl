@@ -203,6 +203,89 @@ weighted sweep therefore implements `assemble_facet!` for
 [`WeightedJacobianRequest`](@ref); per-slot facet kernels are not composed
 behind the driver's back.
 
+## Facet items
+
+The loop above is the **fused route**: the boundary term rides the cell sweep,
+and every cell's every facet is tested against
+[`is_facet_in_cache`](@ref). A term supported on a small fraction of the
+boundary — a tying constraint on an endocardial surface, a contact patch — pays
+that (cells × facets) rediscovery on every Newton iterate to find a set it
+already knows. Such a term declares its facets instead, and gets its own
+traversal:
+
+```julia
+FerriteOperators.facet_items(m::MyIntegrator, sdh::SubDofHandler) = getfacetset(get_grid(sdh.dh), "endocardium")
+FerriteOperators.setup_facet_item_cache(m::MyIntegrator, sdh::SubDofHandler) = MyFacetCache(...)
+```
+
+**Same kernels, two routes.** [`setup_facet_item_cache`](@ref) returns the same
+kind of object [`setup_boundary_cache`](@ref) does, and the driver calls the
+same `assemble_facet!(req, cache, args::FacetArgs, lfi)` methods over the same
+[`FacetArgs`](@ref). There is no second kernel entry point and no second args
+record: moving a term between the two routes is a change of *declaration*, with
+zero element edits. The two coexist — one operator can carry a whole-boundary
+Neumann term on the fused route and a facet-set term as items.
+
+Which route to use:
+
+| | fused route ([`setup_boundary_cache`](@ref)) | facet items ([`facet_items`](@ref)) |
+|---|---|---|
+| term supported on most cells (whole-boundary Neumann) | fine | no gain |
+| term supported on few facets of many cells | pays the per-facet gate | the declared set is the traversal |
+| sensitivity coverage (∂F/∂θ, ∂F/∂t, state products) | **omitted** | **included** |
+| scheduling | the cell sweep's | its own partition |
+
+**The declared set IS the gate.** [`is_facet_in_cache`](@ref) is *not* consulted
+on this route. That gate exists so the fused sweep can rediscover membership
+while walking; here membership is the item list, so a cache whose gate and
+declaration disagree contributes on what was declared. A facet whose cell is
+not in `sdh.cellset`, a local facet index the cell does not have, and a facet
+declared twice are all setup errors.
+
+**One item is one owning cell with all of its declared facets** — never one
+facet. Two facets of a cell therefore share one local system, are assembled
+against one geometry cache and scatter once, and can never land on different
+workers. Both partitions follow from the owning cells:
+[`SequentialScheduling`](@ref) hands out one chunk and lets the atomic scatter
+resolve the dofs neighbouring cells' facets share; [`ColoredScheduling`](@ref)
+colors the owning cells with Ferrite's cell coloring restricted to that set,
+which makes the barrier promise hold for facet items exactly as it holds for
+cells.
+
+The local system is **owning-cell-shaped**: `Ke`, `re` and the slot buffers are
+sized like the cell family's, including the [`global_dofs`](@ref) padding. That
+is what makes the tying shape work — a facet term whose local system is
+`[celldofs(cell); one lumped pressure dof]` writes its coupling rows and
+columns through the augmented tail, and the engine scatters through the
+augmented dof vector:
+
+```julia
+FerriteOperators.global_dofs(m::MyTyingIntegrator, sdh::SubDofHandler) = algebraic_dofs(sdh.dh, :p)
+
+function FerriteOperators.assemble_facet!(req::JacobianResidualRequest, c::MyTyingCache, args::FacetArgs, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    P = first(c.range_p)                       # `global_dof_range`, resolved at setup
+    p = args.states.u[P]
+    # ... req.r[I] += p * ∫Nᵢ ; req.K[I, P] += ∫Nᵢ ; req.K[P, I] += ∫Nᵢ ...
+end
+```
+
+**Sensitivities.** A facet-item term *does* enter the sensitivity sweeps — the
+fused route's omission (see the warning `setup_operator` raises for a boundary
+cache under a declared sensitivity kind) does not apply here. It stays
+**analytic-only**, because facet kernels have no automatic-differentiation
+fallback in any sweep: the cache must implement `assemble_facet!` for the
+sensitivity request itself. Declaring the kind
+(`setup_operator(...; requests = (ParameterJacobianKind,))`) makes setup demand
+that kernel loudly, instead of letting a sweep reach a missing method.
+
+Two things a facet item deliberately does not do. It never calls
+[`reinit_values!`](@ref) — a facet kernel reinitializes its own `FacetValues`
+for the local facet index it was handed, on this route exactly as on the fused
+one. And it contributes nothing to [`evaluate_functional`](@ref): a facet
+functional is a surface integral over the declared set and needs its own
+element hook, an additive capability this family does not have yet.
+
 ## Elements with global dofs
 
 Some unknowns belong to no cell: the macroscopic strain of a stress-driven RVE,

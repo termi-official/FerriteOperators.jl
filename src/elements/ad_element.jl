@@ -252,8 +252,8 @@ provides_analytic(::Type{<:ADElementCache{Inner}}, kind::WeightedJacobianKind) w
 # validates a claim must therefore run against `Inner`, the only type whose
 # method set is author-written. Framework-provided decorator methods need no
 # such check: they are what this package verifies by construction.
-_assert_trait_backed(::Type{<:ADElementCache{Inner}}, kind, entry, ::Type{Args}) where {Inner, Args} =
-    _assert_trait_backed(Inner, kind, entry, Args)
+_assert_trait_backed(::Type{<:ADElementCache{Inner}}, kind, entry, ::Type{Args}, trailing::Tuple = ()) where {Inner, Args} =
+    _assert_trait_backed(Inner, kind, entry, Args, trailing)
 _display_cache_type(::Type{<:ADElementCache{Inner}}) where {Inner} = _display_cache_type(Inner)
 
 # Validation unwraps for the same reason: the decorator's forwarding methods
@@ -540,8 +540,8 @@ provides_analytic(::Type{<:FusedFromSplit{Inner}}, ::JacobianResidualKind{C}) wh
 # Same reasoning as `ADElementCache`: the blanket catch-all method means
 # `hasmethod` on the wrapper can never distinguish a backed claim from an
 # author's overclaim, so the check runs against `Inner`.
-_assert_trait_backed(::Type{<:FusedFromSplit{Inner}}, kind, entry, ::Type{Args}) where {Inner, Args} =
-    _assert_trait_backed(Inner, kind, entry, Args)
+_assert_trait_backed(::Type{<:FusedFromSplit{Inner}}, kind, entry, ::Type{Args}, trailing::Tuple = ()) where {Inner, Args} =
+    _assert_trait_backed(Inner, kind, entry, Args, trailing)
 _display_cache_type(::Type{<:FusedFromSplit{Inner}}) where {Inner} = _display_cache_type(Inner)
 validate_element_cache(f::FusedFromSplit, declared_requests::Tuple = ()) =
     validate_element_cache(f.inner, declared_requests)

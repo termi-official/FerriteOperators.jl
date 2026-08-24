@@ -162,6 +162,91 @@ function FerriteOperators.assemble_facet!(req::ResidualRequest, c::NeumannProbeC
 end
 
 ####################################
+## Facet-item route switch for the Neumann probe
+####################################
+# The very same `NeumannProbeCache` a `NeumannProbe` hands the fused cell
+# sweep, declared as facet items instead: `setup_boundary_cache` stays at its
+# empty default and the facet set travels through `facet_items`. No cache and
+# no kernel changes, which is what makes the two routes comparable.
+#
+# `declared` defaults to the cache's own facet set, so the two routes see the
+# same facets. Passing a different set separates the ROUTE's declaration from
+# the cache's `is_facet_in_cache` gate, which this route does not consult.
+
+struct LinearFacetItemProbe{I} <: AbstractLinearIntegrator
+    inner::I
+    declared::Set{FacetIndex}
+end
+struct NonlinearFacetItemProbe{I} <: AbstractNonlinearIntegrator
+    inner::I
+    declared::Set{FacetIndex}
+end
+LinearFacetItemProbe(inner) = LinearFacetItemProbe(inner, inner.facetset)
+NonlinearFacetItemProbe(inner) = NonlinearFacetItemProbe(inner, inner.facetset)
+const FacetItemProbe = Union{LinearFacetItemProbe, NonlinearFacetItemProbe}
+
+FerriteOperators.setup_element_cache(m::FacetItemProbe, sdh::SubDofHandler) =
+    FerriteOperators.setup_element_cache(m.inner, sdh)
+FerriteOperators.facet_items(m::FacetItemProbe, sdh::SubDofHandler) = m.declared
+FerriteOperators.setup_facet_item_cache(m::FacetItemProbe, sdh::SubDofHandler) =
+    FerriteOperators.setup_boundary_cache(m.inner, sdh)
+
+####################################
+## Parameter-scaled facet traction — the facet-item sensitivity double
+####################################
+# r(v) = θ ∫_Γ v dΓ over the declared facets, plus the ANALYTIC ∂r/∂θ a facet
+# sensitivity sweep needs — facet kernels have no AD fallback, so the cache
+# serves the request itself or the term cannot be differentiated at all.
+# `with_parameter_jacobian = false` drops that kernel; declaring
+# `ParameterJacobianKind` over it is what setup must reject.
+
+struct TractionFacetCache{with_parameter_jacobian, FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+    fv::FV
+end
+TractionFacetCache{wpj}(fv) where {wpj} = TractionFacetCache{wpj, typeof(fv)}(fv)
+
+struct TractionFacetProbe{with_parameter_jacobian} <: AbstractNonlinearIntegrator
+    field_name::Symbol
+    facetset::Set{FacetIndex}
+end
+TractionFacetProbe(field_name, facetset; with_parameter_jacobian = true) =
+    TractionFacetProbe{with_parameter_jacobian}(field_name, facetset)
+
+FerriteOperators.setup_element_cache(::TractionFacetProbe, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+FerriteOperators.facet_items(m::TractionFacetProbe, ::SubDofHandler) = m.facetset
+function FerriteOperators.setup_facet_item_cache(m::TractionFacetProbe{wpj}, sdh::SubDofHandler) where {wpj}
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    fqr    = FacetQuadratureRule{Ferrite.getrefshape(ip)}(2)
+    return TractionFacetCache{wpj}(FacetValues(fqr, ip, ip_geo))
+end
+FerriteOperators.duplicate_for_device(device, c::TractionFacetCache{wpj}) where {wpj} =
+    TractionFacetCache{wpj}(FerriteOperators.duplicate_for_device(device, c.fv))
+
+function FerriteOperators.assemble_facet!(req::ResidualRequest, c::TractionFacetCache, args::FacetArgs, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    for qp in 1:getnquadpoints(c.fv)
+        dΓ = getdetJdV(c.fv, qp)
+        for i in 1:getnbasefunctions(c.fv)
+            req.r[i] += args.p * shape_value(c.fv, qp, i) * dΓ
+        end
+    end
+end
+
+FerriteOperators.provides_analytic(::Type{<:TractionFacetCache{true}}, ::FerriteOperators.ParameterJacobianKind) = true
+function FerriteOperators.assemble_facet!(req::ParameterJacobianRequest, c::TractionFacetCache{true}, args::FacetArgs, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    for qp in 1:getnquadpoints(c.fv)
+        dΓ = getdetJdV(c.fv, qp)
+        for i in 1:getnbasefunctions(c.fv)
+            req.B[i, 1] += shape_value(c.fv, qp, i) * dΓ
+        end
+    end
+    return req.B
+end
+
+####################################
 ## Condensed-viscoelasticity testbed
 ####################################
 # Vector displacement on a hex block plus a hidden per-QP εᵛ, slots (:u, :q,
@@ -307,6 +392,138 @@ if isdefined(Ferrite, :AlgebraicVariable)
                 end
             end
         end
+    end
+
+    ####################################
+    ## Facet-item tying testbed — a facet term coupling to a global dof
+    ####################################
+    # The RSAFDQ shape: a facet set whose local system is
+    # `[celldofs(cell); the chamber pressure dof]`, carrying the coupling in
+    # both the rows and the columns of the augmented tail,
+    #
+    #     r_u[i] += p ∫_Γ Nᵢ dΓ,      r_p += ∫_Γ u dΓ,
+    #
+    # with the matching symmetric off-diagonal blocks. There is deliberately no
+    # volumetric term: what the fixture witnesses is the facet-item traversal
+    # composed with the `global_dofs` machinery, nothing else.
+
+    struct TyingFacetIntegrator <: AbstractNonlinearIntegrator
+        field_name::Symbol
+        variable_name::Symbol
+        facetset::Set{FacetIndex}
+    end
+
+    struct TyingFacetCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+        fv::FV
+        range_u::UnitRange{Int}
+        range_p::UnitRange{Int}
+    end
+
+    FerriteOperators.global_dofs(m::TyingFacetIntegrator, sdh::SubDofHandler) =
+        algebraic_dofs(sdh.dh, m.variable_name)
+    FerriteOperators.setup_element_cache(::TyingFacetIntegrator, ::SubDofHandler) =
+        FerriteOperators.EmptyVolumetricElementCache()
+    FerriteOperators.facet_items(m::TyingFacetIntegrator, ::SubDofHandler) = m.facetset
+    function FerriteOperators.setup_facet_item_cache(m::TyingFacetIntegrator, sdh::SubDofHandler)
+        ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+        ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+        fqr    = FacetQuadratureRule{Ferrite.getrefshape(ip)}(2)
+        return TyingFacetCache(FacetValues(fqr, ip, ip_geo),
+                               dof_range(sdh, m.field_name), global_dof_range(m, sdh))
+    end
+    FerriteOperators.duplicate_for_device(device, c::TyingFacetCache) =
+        TyingFacetCache(FerriteOperators.duplicate_for_device(device, c.fv), c.range_u, c.range_p)
+
+    # One body for all three requests: which buffers it fills is decided on the
+    # request TYPE, so the branches fold away per kernel.
+    function _tying_facet!(req, c::TyingFacetCache, args, lfi)
+        reinit!(c.fv, args.cell, lfi)
+        uₑ = args.states.u
+        P  = first(c.range_p)
+        p  = uₑ[P]
+        for qp in 1:getnquadpoints(c.fv)
+            dΓ = getdetJdV(c.fv, qp)
+            uq = function_value(c.fv, qp, uₑ, c.range_u)
+            for (i, I) in pairs(c.range_u)
+                Nᵢ = shape_value(c.fv, qp, i) * dΓ
+                req isa Union{ResidualRequest, JacobianResidualRequest} && (req.r[I] += p * Nᵢ)
+                if req isa Union{JacobianRequest{:u}, JacobianResidualRequest}
+                    req.K[I, P] += Nᵢ
+                    req.K[P, I] += Nᵢ
+                end
+            end
+            req isa Union{ResidualRequest, JacobianResidualRequest} && (req.r[P] += uq * dΓ)
+        end
+        return nothing
+    end
+
+    FerriteOperators.assemble_facet!(req::ResidualRequest, c::TyingFacetCache, args::FacetArgs, lfi::Int) =
+        _tying_facet!(req, c, args, lfi)
+    FerriteOperators.assemble_facet!(req::JacobianRequest{:u}, c::TyingFacetCache, args::FacetArgs, lfi::Int) =
+        _tying_facet!(req, c, args, lfi)
+    FerriteOperators.assemble_facet!(req::JacobianResidualRequest, c::TyingFacetCache, args::FacetArgs, lfi::Int) =
+        _tying_facet!(req, c, args, lfi)
+    FerriteOperators.provides_analytic(::Type{<:TyingFacetCache}, ::Union{JacobianKind{:u}, JacobianResidualKind}) = true
+
+    """
+    Grid, DofHandler, coupling descriptor and integrator of the facet tying
+    problem. The declared set is the union of two boundary facetsets, so the
+    corner cell owns TWO declared facets — the grouping a facet item exists for.
+    """
+    function tying_facet_testbed(dims = (3, 3); field_name = :u, variable_name = :p)
+        grid = generate_grid(Quadrilateral, dims)
+        dh   = DofHandler(grid)
+        add!(dh, field_name, Lagrange{RefQuadrilateral, 1}())
+        add!(dh, variable_name, AlgebraicVariable())
+        close!(dh)
+        facets   = union(Set(getfacetset(grid, "right")), Set(getfacetset(grid, "top")))
+        coupling = CellCoupling(1:getncells(grid); algebraic_coupling = ((field_name, variable_name),))
+        return (; grid, dh, facets, coupling,
+                  integrator = TyingFacetIntegrator(field_name, variable_name, facets),
+                  pdof = only(algebraic_dofs(dh, variable_name)))
+    end
+
+    # The hand-rolled Ferrite loop the facet-item assembly is compared against:
+    # `FacetIterator` over the declared set, one local system PER FACET with the
+    # augmented dof vector spelled out — the shape Thunderbolt's tying term
+    # hand-rolls today.
+    function tying_facet_reference(testbed, u)
+        (; dh, facets, coupling, pdof) = testbed
+        sdh     = dh.subdofhandlers[1]
+        ip      = Ferrite.getfieldinterpolation(sdh, :u)
+        fv      = FacetValues(FacetQuadratureRule{RefQuadrilateral}(2), ip,
+                              Ferrite.geometric_interpolation(Quadrilateral))
+        nc      = ndofs_per_cell(sdh)
+        range_u = dof_range(sdh, :u)
+        P       = nc + 1
+        dofs    = Vector{Int}(undef, nc + 1)
+        dofs[P] = pdof
+        Ke, re, uₑ = zeros(nc + 1, nc + 1), zeros(nc + 1), zeros(nc + 1)
+
+        K = allocate_matrix(dh; algebraic_couplings = (coupling,))
+        r = zeros(ndofs(dh))
+        assembler = start_assemble(K, r)
+        for facet in FacetIterator(sdh, facets)
+            reinit!(fv, facet)
+            copyto!(view(dofs, 1:nc), celldofs(facet))
+            uₑ .= @view u[dofs]
+            fill!(Ke, 0)
+            fill!(re, 0)
+            p = uₑ[P]
+            for qp in 1:getnquadpoints(fv)
+                dΓ = getdetJdV(fv, qp)
+                uq = function_value(fv, qp, uₑ, range_u)
+                for (i, I) in pairs(range_u)
+                    Nᵢ = shape_value(fv, qp, i) * dΓ
+                    re[I] += p * Nᵢ
+                    Ke[I, P] += Nᵢ
+                    Ke[P, I] += Nᵢ
+                end
+                re[P] += uq * dΓ
+            end
+            assemble!(assembler, dofs, Ke, re)
+        end
+        return K, r
     end
 
     ####################################

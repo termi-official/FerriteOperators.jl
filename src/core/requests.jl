@@ -486,17 +486,24 @@ requires_admissibility_check(kind) = false
 
 # The trait ↔ kernel check, over the kernel entry point and args record of the
 # item family the cache belongs to: `assemble_cell!`/`CellArgs` for a
-# volumetric cache, `assemble_algebraic!`/`AlgebraicArgs` for an algebraic one.
+# volumetric cache, `assemble_algebraic!`/`AlgebraicArgs` for an algebraic one,
+# `assemble_facet!`/`FacetArgs` plus the trailing local facet index for a
+# surface one.
 _assert_trait_backed(T, kind) = _assert_trait_backed(T, kind, assemble_cell!, CellArgs)
-function _assert_trait_backed(T, kind, entry, ::Type{Args}) where {Args}
+function _assert_trait_backed(T, kind, entry, ::Type{Args}, trailing::Tuple = ()) where {Args}
     ReqT = request_type(kind)
-    if provides_analytic(T, kind) && !hasmethod(entry, Tuple{ReqT, T, Args})
+    if provides_analytic(T, kind) && !hasmethod(entry, Tuple{ReqT, T, Args, trailing...})
         throw(ArgumentError(
             "$(T) declares `provides_analytic` for $(typeof(kind)) but implements no " *
-            "matching `$(nameof(entry))(::$(ReqT), ::$(nameof(T)), ::$(nameof(Args)))` method."))
+            "matching `$(nameof(entry))(::$(ReqT), ::$(nameof(T)), ::$(nameof(Args))" *
+            "$(_trailing_signature(trailing)))` method."))
     end
     return nothing
 end
+
+# The kernel-signature tail an entry point carries beyond `(req, cache, args)`,
+# spelled the way an author writes it.
+_trailing_signature(trailing::Tuple) = mapreduce(T -> ", ::$(T)", *, trailing; init = "")
 
 # The kinds whose trait ↔ kernel consistency is checked at setup; the request
 # each analytic kernel takes comes from [`request_type`](@ref), the single

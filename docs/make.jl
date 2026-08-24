@@ -24,6 +24,7 @@ makedocs(;
         "Operators and entry points" => "operators.md",
         "Operator API reference" => "operator-api.md",
         "Assembly engine API reference" => "engine-api.md",
+        "Item family API reference" => "item-api.md",
         "Quadrature data API reference" => "quadrature-api.md",
         "Patch items" => "patches.md",
         "Migration to 0.4" => "migration.md",

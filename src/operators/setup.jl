@@ -87,20 +87,24 @@ mandatory_kinds(integrator) = (JacobianResidualKind, JacobianKind, ResidualKind)
 mandatory_kinds(::AbstractBilinearIntegrator) = (BilinearKind, ResidualKind)
 mandatory_kinds(::AbstractLinearIntegrator) = (LinearKind, ResidualKind)
 
-# A sensitivity sweep runs the VOLUMETRIC kernel only, so a boundary term that
-# depends on the seeded quantity contributes nothing to the result. That is
+# A sensitivity sweep over the CELL family runs the volumetric kernel only, so
+# a boundary term riding that sweep contributes nothing to the result. That is
 # correct for the common case (parameter- and time-independent tractions) and
-# silently incomplete otherwise, which is a warning rather than an error. Once
-# per (declared kind set × boundary cache type) — the operator is what carries
-# the combination, not the individual sweep.
+# silently incomplete otherwise, which is a warning rather than an error. The
+# omission is the FUSED route's alone: a term declared through
+# [`facet_items`](@ref) is its own traversal and enters the sensitivity sweeps.
+# Once per (declared kind set × boundary cache type) — the operator is what
+# carries the combination, not the individual sweep.
 function _warn_boundary_sensitivity(requests::Tuple, boundary_caches)
     any(K -> K <: SensitivityKind, requests) || return nothing
     surface = findfirst(c -> !(c isa EmptySurfaceElementCache), boundary_caches)
     surface === nothing && return nothing
     B = typeof(boundary_caches[surface])
     kinds = join(map(nameof, filter(K -> K <: SensitivityKind, collect(requests))), ", ")
-    @warn "Sensitivity sweeps run the volumetric kernel only: boundary contributions are NOT " *
-          "included in ∂F/∂θ, ∂F/∂t, or the matrix-free state products. This operator declares " *
+    @warn "Sensitivity sweeps run the volumetric kernel only where a boundary term rides the " *
+          "cell sweep: fused-route boundary contributions are NOT included in ∂F/∂θ, ∂F/∂t, or " *
+          "the matrix-free state products — a term declared through `facet_items` is its own " *
+          "traversal and DOES enter them. This operator declares " *
           "$(kinds) and carries a `$(nameof(B))` boundary cache, so its sensitivities are " *
           "correct only if the boundary terms are independent of the seeded quantity — θ for " *
           "the parameter kinds, t for the time sensitivity, u for the state products. " *
@@ -293,13 +297,14 @@ STRUCTURALLY by [`needs_ad_decoration`](@ref): a bilinear or linear operator
 carries no AD/sensitivity machinery whatever an element does or does not
 implement analytically. `ad_backend = nothing` opts out of wrapping.
 
-The caches of the algebraic item family ([`algebraic_items`](@ref)) are
-appended after the cell subdomains, so a sweep's traversal order is fixed by
-the declaration and does not depend on which families are present. The
-algebraic domain is resolved (declared, cached, validated) BEFORE the
-[`InternalVariableHandler`](@ref) is built, since a condensed algebraic
-cache's item block needs the resolved items and cache to size itself; it is
-decorated afterwards, alongside the cell caches.
+The caches of the facet item family ([`facet_items`](@ref)) and then of the
+algebraic item family ([`algebraic_items`](@ref)) are appended after the cell
+subdomains — mesh-supported families first, the mesh-free one last — so a
+sweep's traversal order is fixed by the declarations and does not depend on
+which families are present. The algebraic domain is resolved (declared,
+cached, validated) BEFORE the [`InternalVariableHandler`](@ref) is built, since
+a condensed algebraic cache's item block needs the resolved items and cache to
+size itself; it is decorated afterwards, alongside the cell caches.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol;
         ad_backend = ForwardDiffAD())
@@ -317,13 +322,17 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
                                                slots = get_declared_slots(protocol),
                                                needs_sensitivity,
                                                global_dof_sets)
+    facet_caches      = setup_facet_item_caches(operator_strategy, integrator, dh, protocol, ivh;
+                                                slots = get_declared_slots(protocol),
+                                                needs_sensitivity,
+                                                global_dof_sets)
     algebraic_caches  = setup_algebraic_caches(operator_strategy, algebraic_domain, protocol, ad_backend,
                                                needs_sensitivity, ivh)
-    # The two families carry different domain types, so the combined vector is
-    # only widened where something is declared — an operator without algebraic
-    # items keeps the element type it has today.
-    subdomain_caches  = isempty(algebraic_caches) ? cell_caches :
-        vcat(Vector{SubdomainCache}(cell_caches), algebraic_caches)
+    # The families carry different domain types, so the combined vector is only
+    # widened where something is declared — an operator without facet or
+    # algebraic items keeps the element type it has today.
+    subdomain_caches  = (isempty(facet_caches) && isempty(algebraic_caches)) ? cell_caches :
+        vcat(Vector{SubdomainCache}(cell_caches), facet_caches, algebraic_caches)
     return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, protocol)
 end
 

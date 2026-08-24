@@ -79,6 +79,13 @@ global_dofs(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
 setup_boundaries(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler) =
     [setup_boundary_cache(sub, sdh) for (sub, sdh) in zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers)]
 
+# A subdomain's facet items, like its boundary cache, are its sub-integrator's:
+# each subdomain routes its own facet set through its own surface cache.
+facet_items(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
+    facet_items(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
+setup_facet_item_cache(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
+    setup_facet_item_cache(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
+
 # The per-subdomain hooks stay available for direct use; each pays a full
 # resolution, so the plural hooks above are what the engine calls.
 setup_element_cache(element_model::AnyMultiDomainIntegrator, sdh::SubDofHandler) =

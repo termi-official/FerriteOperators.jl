@@ -220,4 +220,49 @@ else
         @test !occursin("condensed_corrector", err.value.msg)
     end
 
+    @testset "Internal dof counts per item must be uniform" begin
+        # A cache whose internal-dof count is whatever the integrator says, so
+        # the declaration can be made ragged. `internal_state_insensitive`
+        # carries it past the admissibility check; the layout check is what is
+        # under test.
+        struct RaggedChamberCache
+            counts::Vector{Int}
+        end
+        FerriteOperators.has_internal_state(::Type{RaggedChamberCache}) = true
+        FerriteOperators.internal_state_insensitive(::Type{RaggedChamberCache}, kind) = true
+        FerriteOperators.assemble_algebraic!(::ResidualRequest, ::RaggedChamberCache, args) = nothing
+        FerriteOperators.duplicate_for_device(device, c::RaggedChamberCache) = c
+        FerriteOperators.get_number_of_internal_dofs_per_algebraic_item(m, c::RaggedChamberCache, items) = c.counts
+        FerriteOperators.condense_algebraic!(::RaggedChamberCache, args, weights) =
+            CondensationReport(true, 1, 0, 0, -args.item.index, 0, 0.0, 1.0)
+
+        struct RaggedChamberIntegrator <: AbstractNonlinearIntegrator
+            counts::Vector{Int}
+        end
+        FerriteOperators.setup_element_cache(::RaggedChamberIntegrator, sdh::SubDofHandler) =
+            FerriteOperators.EmptyVolumetricElementCache()
+        FerriteOperators.algebraic_items(::RaggedChamberIntegrator, dh::DofHandler) =
+            [[only(algebraic_dofs(dh, :p1))], [only(algebraic_dofs(dh, :p2))]]
+        FerriteOperators.setup_algebraic_cache(m::RaggedChamberIntegrator, dh::DofHandler) =
+            RaggedChamberCache(m.counts)
+
+        grid = generate_grid(Quadrilateral, (1, 1))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        add!(dh, :p1, AlgebraicVariable())
+        add!(dh, :p2, AlgebraicVariable())
+        close!(dh)
+
+        # Two items owning different numbers of internal dofs cannot share one
+        # set of fixed-size local buffers.
+        err = @test_throws ArgumentError setup_operator(sequential_strategy(), RaggedChamberIntegrator([1, 2]), dh)
+        @test occursin("not uniform", err.value.msg)
+        # A hook answering for the wrong number of items is its own rejection.
+        err = @test_throws ArgumentError setup_operator(sequential_strategy(), RaggedChamberIntegrator([1]), dh)
+        @test occursin("get_number_of_internal_dofs_per_algebraic_item", err.value.msg)
+        # A uniform declaration passes the same route.
+        @test setup_operator(sequential_strategy(), RaggedChamberIntegrator([2, 2]), dh) isa
+            FerriteOperators.AbstractNonlinearOperator
+    end
+
 end
