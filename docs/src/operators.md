@@ -272,10 +272,30 @@ unlocks: exact parameter/state sensitivities on a condensed element,
 generically, once the store exists), (b) declares
 [`internal_state_insensitive`](@ref) (asserting the local equations do not
 depend on the seeded quantity, so there is nothing to correct — then AD is
-exact), or (c) for time sensitivities, the caller selects
-[`FiniteDifferenceSensitivity`](@ref) (primal evaluations on a protected
-copy, condensing at each — the total, but it bypasses analytic sensitivity
-kernels).
+exact), (c) declares [`local_conditions!`](@ref), which lets the decorator
+derive `dq/dθ` and `dq/dt` from the element's own local equations and
+complete the total itself (parameter and time kinds, cell caches), or (d) for
+time sensitivities, the caller selects [`FiniteDifferenceSensitivity`](@ref)
+(primal evaluations on a protected copy, condensing at each — the total, but
+it bypasses analytic sensitivity kernels).
+
+Two derivative mechanisms exist and the split is final. Operator-level
+[`FiniteDifferenceSensitivity`](@ref) is the BOUNDARY-INCLUSIVE, Dual-free
+route: it differences `evaluate!`, so facet terms enter, and no kernel ever
+sees a `Dual`. The [`ADElementCache`](@ref) decorator is the PER-CACHE route:
+analytic kernels win cache by cache, it is allocation-free per cell for the
+state and time sweeps, and it is volumetric only. There is deliberately no
+cache-level finite-difference decorator — it would be volumetric like the AD
+one and would therefore lose the single property that makes the operator-level
+method worth keeping.
+
+∂F/∂q, the block coupling the residual to a condensed element's internal
+state, is its own rectangular target rather than a slot Jacobian:
+
+```julia
+Kq = allocate_internal_jacobian(op)                  # residual_size(op) × ndofs(ivh)
+update_internal_jacobian!(Kq, op, states, p, ctx)
+```
 
 State and time derivative sweeps (`update_linearization!` via AD,
 `state_jvp!`, `state_vjp!`, `time_sensitivity!`) run over per-worker

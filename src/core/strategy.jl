@@ -161,12 +161,18 @@ abstract type AbstractWorkspace end
 Per-worker OUTPUT buffers the five sensitivity requests
 ([`ParameterJacobianRequest`](@ref), [`ParameterVJPRequest`](@ref),
 [`TimeSensitivityRequest`](@ref), [`StateJVPRequest`](@ref),
-[`StateVJPRequest`](@ref)) accumulate into and the engine scatters — the
-"outputs and payload gathers" half of the AD decorator's buffer split (see
-[`ADElementCache`](@ref) for the other half, the seeds/configs). Element-sized
-members (`λₑ`, `vₑ`, `Jvₑ`, `gu`, `gₜ`) are eager; parameter-sized members
-(`θ`, `Bₑ`, `gθ`) are (re)allocated on first use via
-[`parameter_sweep_buffers!`](@ref) because nθ arrives with `p` at call time.
+[`StateVJPRequest`](@ref)) accumulate into and the engine scatters, plus the
+rectangular ∂F/∂q block ([`update_internal_jacobian!`](@ref)), which is the
+same shape of thing: a local block whose column space is not the field space
+— the "outputs and payload gathers" half of the AD decorator's buffer split
+(see [`ADElementCache`](@ref) for the other half, the seeds/configs).
+
+Element-sized members (`λₑ`, `vₑ`, `Jvₑ`, `gu`, `gₜ`) are eager. The
+rectangular members are (re)allocated on first use, their column count being
+call-time or per-item knowledge rather than setup knowledge: `θ`/`Bₑ`/`gθ`
+through [`parameter_sweep_buffers!`](@ref) because nθ arrives with `p`, and
+`Kqₑ` through [`internal_sweep_buffers!`](@ref) because an item declares its
+own internal dof count.
 """
 @concrete mutable struct SensitivityBuffers
     λₑ        # residual-sized adjoint gather
@@ -177,6 +183,7 @@ members (`λₑ`, `vₑ`, `Jvₑ`, `gu`, `gₜ`) are eager; parameter-sized memb
     θ         # flat primal parameter copy (nθ)
     Bₑ        # local parameter Jacobian block (residual × nθ)
     gθ        # parameter pullback output (nθ)
+    Kqₑ       # local ∂F/∂q block (residual × the item's condensed internal dof count)
 end
 
 function create_sensitivity_buffers(element, sdh, n_global_dofs::Int = 0)
@@ -186,17 +193,19 @@ function create_sensitivity_buffers(element, sdh, n_global_dofs::Int = 0)
     Jvₑ = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
     gₜ  = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
     T   = eltype(Jvₑ)
-    return SensitivityBuffers(λₑ, vₑ, Jvₑ, gu, gₜ, Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0), Vector{T}())
+    return SensitivityBuffers(λₑ, vₑ, Jvₑ, gu, gₜ, Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0),
+                              Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0))
 end
 
 # The size-based path: an item family whose local system is described by a dof
 # count alone (an algebraic item) has no `SubDofHandler` to allocate against.
 create_sensitivity_buffers(n::Int, ::Type{T}) where {T} = SensitivityBuffers(
     zeros(T, n), zeros(T, n), zeros(T, n), zeros(T, n), zeros(T, n),
-    Vector{T}(), Matrix{T}(undef, n, 0), Vector{T}())
+    Vector{T}(), Matrix{T}(undef, n, 0), Vector{T}(), Matrix{T}(undef, n, 0))
 
 duplicate_for_device(device::AbstractCPUDevice, s::SensitivityBuffers) =
-    SensitivityBuffers(copy(s.λₑ), copy(s.vₑ), copy(s.Jvₑ), copy(s.gu), copy(s.gₜ), copy(s.θ), copy(s.Bₑ), copy(s.gθ))
+    SensitivityBuffers(copy(s.λₑ), copy(s.vₑ), copy(s.Jvₑ), copy(s.gu), copy(s.gₜ), copy(s.θ),
+                       copy(s.Bₑ), copy(s.gθ), copy(s.Kqₑ))
 
 """
     parameter_sweep_buffers!(s::SensitivityBuffers, nθ) -> SensitivityBuffers
@@ -211,6 +220,20 @@ function parameter_sweep_buffers!(s::SensitivityBuffers, nθ::Int)
         s.gθ = Vector{T}(undef, nθ)
         s.Bₑ = Matrix{T}(undef, size(s.Bₑ, 1), nθ)
     end
+    return s
+end
+
+"""
+    internal_sweep_buffers!(s::SensitivityBuffers, nq) -> SensitivityBuffers
+
+Size the ∂F/∂q block (`Kqₑ`) for an item owning `nq` condensed internal dofs,
+reallocating only when that count changed since the last item on this worker.
+The count is per ITEM rather than per subdomain — a cell's internal dof count
+is its own declaration — so this is the block's sizer, not a per-sweep one
+([`update_internal_jacobian!`](@ref)).
+"""
+function internal_sweep_buffers!(s::SensitivityBuffers, nq::Int)
+    size(s.Kqₑ, 2) == nq || (s.Kqₑ = Matrix{eltype(s.Kqₑ)}(undef, size(s.Kqₑ, 1), nq))
     return s
 end
 

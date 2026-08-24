@@ -539,13 +539,14 @@ _display_cache_type(T::Type) = T
     assert_sensitivity_admissible(T::Type, kind, entry, ::Type{Args})
 
 The internal-state admissibility check itself: throws unless a `has_internal_state`
-cache `T` serves `kind` analytically or declares it
-[`internal_state_insensitive`](@ref). `entry`/`Args` name which item family's
+cache `T` serves `kind` analytically, declares it
+[`internal_state_insensitive`](@ref), or — for the parameter and time kinds of
+a CELL cache — declares [`local_conditions!`](@ref), which lets the decorator
+derive the missing `dq/dseed` itself. `entry`/`Args` name which item family's
 kernel entry point and args record the error message should point authors at
 — the 2-arg form defaults to `assemble_cell!`/`CellArgs` (a volumetric cache);
 [`validate_algebraic_cache`](@ref) passes `assemble_algebraic!`/`AlgebraicArgs`
-for the algebraic-item family, whose `Consistent`-Jacobian remedy differs (see
-below).
+for the algebraic-item family, whose remedies differ (see below).
 """
 function assert_sensitivity_admissible(T::Type, kind, entry = assemble_cell!, ::Type{Args} = CellArgs) where {Args}
     if has_internal_state(T) && !provides_analytic(T, kind) && !internal_state_insensitive(T, kind)
@@ -553,16 +554,23 @@ function assert_sensitivity_admissible(T::Type, kind, entry = assemble_cell!, ::
         wrapping_note = _display_cache_type(T) === T ? "" :
             " — automatically wrapped in `$(nameof(T))` because it lacks analytic coverage of " *
             "some request kind, which does not by itself supply this correction"
-        # FiniteDifferenceSensitivity and `condensed_corrector` are remedies
-        # only where they actually apply: the former is a call-time override
-        # that exists for time sensitivities alone, the latter is what
-        # ADElementCache's generic Consistent combination reads — CELL-keyed
-        # (by cellid) and therefore meaningless for the algebraic-item family,
-        # which has no generic `Consistent` bootstrap at all (see
+        # FiniteDifferenceSensitivity, `local_conditions!` and
+        # `condensed_corrector` are remedies only where they actually apply:
+        # the first is a call-time override that exists for time sensitivities
+        # alone; the second and third are what ADElementCache's generic
+        # combinations read, both CELL-shaped (the `∂F/∂q` block they multiply
+        # is sized from `getnquadpoints`) and therefore meaningless for the
+        # algebraic-item family, which has no generic bootstrap at all (see
         # `condense_algebraic!`).
+        local_conditions_remedy = Args === CellArgs ?
+            " Implementing `local_conditions!` admits the generic route instead, which derives " *
+            "`dq/dseed` from the element's own local equations." : ""
         remedy = if kind isa TimeSensitivityKind
             "declare `internal_state_insensitive` if the local equations do not depend on " *
-            "the seeded quantity, or use `FiniteDifferenceSensitivity`."
+            "the seeded quantity, or use `FiniteDifferenceSensitivity`." * local_conditions_remedy
+        elseif kind isa Union{ParameterJacobianKind, ParameterVJPKind}
+            "declare `internal_state_insensitive` if the local equations do not depend on " *
+            "the seeded quantity." * local_conditions_remedy
         elseif kind isa Union{JacobianKind{:u, Consistent}, JacobianResidualKind{Consistent}} && Args === CellArgs
             "declare `internal_state_insensitive` if the local equations do not depend on " *
             "the seeded quantity, or implement `condensed_corrector` to admit the generic " *

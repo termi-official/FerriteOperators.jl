@@ -183,6 +183,62 @@ else
         @test all(iszero, Matrix(tb_both.op.J)[tb_both.item_dofs, 1:n_u])
     end
 
+    @testset "∂F/∂q over both families in one rectangular target" begin
+        strategy = sequential_strategy()
+        qrc      = QuadratureRuleCollection(2)
+        mat      = NortonRelaxationParameters()
+        chamber  = ChamberRelaxationParameters(β = 1.1, τ = 0.7)
+        γ̃        = 0.5
+        ctx      = TimeIntegrationContext(0.0, γ̃, γ̃)
+
+        tb = chamber_testbed(strategy, qrc;
+                             cell_integrator = SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q),
+                             params = chamber)
+        op, dh, grid = tb.op, tb.dh, tb.grid
+        ivh = op.engine.ivh
+        n   = unknown_size(op)
+        u   = zeros(n)
+        view(u, 1:ndofs(dh)) .= 0.3 .* sin.(0.6 .* (1:ndofs(dh)))
+        u[tb.item_dofs] .= (0.4, -0.2)
+        uprev  = zeros(n)
+        states = condensed_states(u, uprev)
+        condense_internal!(op, states, nothing, ctx)
+
+        Kq = allocate_internal_jacobian(op)
+        update_internal_jacobian!(Kq, op, states, nothing, ctx)
+        @test size(Kq) == (residual_size(op), ndofs(ivh))
+
+        # Both column blocks are populated, and they sit where
+        # `[ū | q_cells | q_items]` puts them: the item block after the cell
+        # block, each item's column carrying only its own row.
+        for (index, dof) in pairs(tb.item_dofs)
+            range = internal_variable_range(ivh, FerriteOperators.AlgebraicItem(index, [dof]))
+            col = only(range) - residual_size(op)
+            @test Kq[dof, col] ≈ -chamber.β rtol = 1e-12
+            @test count(!iszero, Kq[:, col]) == 1
+        end
+        for cellid in 1:getncells(grid)
+            range = internal_variable_range(ivh, cellid)
+            for col in (range .- residual_size(op))
+                @test any(!iszero, Kq[:, col])
+                # A cell's column touches its own dofs only — never an item's.
+                @test all(iszero, Kq[tb.item_dofs, col])
+            end
+        end
+
+        # Columns of the assembled block difference the residual w.r.t. the
+        # tail, whichever family owns the entry.
+        h = 1e-6
+        rp = zeros(residual_size(op)); rm = zeros(residual_size(op))
+        for j in (1, ndofs(ivh))
+            up = copy(u); up[residual_size(op)+j] += h
+            evaluate!(op, rp, condensed_states(up, uprev), nothing, ctx)
+            um = copy(u); um[residual_size(op)+j] -= h
+            evaluate!(op, rm, condensed_states(um, uprev), nothing, ctx)
+            @test Vector(Kq[:, j]) ≈ (rp .- rm) ./ 2h rtol = 1e-6
+        end
+    end
+
     @testset "Admissibility: condensed algebraic cache without analytic coverage" begin
         # A cache serving only the mandatory residual, declaring
         # `has_internal_state`: no generic AD `Consistent` bootstrap exists

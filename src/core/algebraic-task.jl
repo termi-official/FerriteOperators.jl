@@ -235,6 +235,31 @@ function condensation_algebraic_sweep!(kind::CondensationKind, task, ws)
     return report
 end
 
+execute_kind!(kind::JacobianKind{:q}, task, ws::AlgebraicWorkspace) =
+    internal_jacobian_algebraic_sweep!(kind, task, ws)
+
+"""
+    internal_jacobian_algebraic_sweep!(kind::JacobianKind{:q}, task, ws)
+
+The [`internal_jacobian_cell_sweep!`](@ref) counterpart of the algebraic
+family: the item's ∂F/∂q block, its rows the item's own dofs and its columns
+the item's [`internal_variable_range`](@ref) — the item block of the
+`[ū | q_cells | q_items]` tail. A stateless algebraic cache owns no internal
+dofs, so its range is empty and it never reaches a kernel.
+"""
+function internal_jacobian_algebraic_sweep!(kind::JacobianKind{:q, C}, task, ws) where {C}
+    range = internal_variable_range(ws.ivh, current_item(ws))
+    isempty(range) && return nothing
+    Kqₑ = internal_sweep_buffers!(ws.sensitivity, length(range)).Kqₑ
+    fill!(Kqₑ, zero(eltype(Kqₑ)))
+    statesₑ = load_slots!(ws, task.states)
+    pₑ = query_cell_parameters(ws.element, current_item(ws), task.p)
+    @timeit_debug "assemble internal jacobian" assemble_algebraic!(
+        JacobianRequest{:q, C}(Kqₑ), ws.element, _algebraic_args(ws, statesₑ, pₑ, task.ctx))
+    assemble!(task.inner_assembler, item_dofs(ws), _internal_columns(ws.ivh, range), Kqₑ)
+    return nothing
+end
+
 # Quadrature evaluation writes the per-quadrature-point data of a cell; an
 # algebraic item has neither cell nor quadrature points.
 execute_kind!(::QuadratureEvaluationKind, task, ws::AlgebraicWorkspace) = nothing

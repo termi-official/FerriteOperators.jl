@@ -196,7 +196,11 @@ and implement `condense_cell!(cache, args, weights) -> CondensationReport` —
 the local solve, run once per item by `condense_internal!` rather than inside
 every kernel. `q` is an ordinary slot sourced by `InternalSource`; every
 evaluation sweep afterwards is a pure function at frozen `q`, and
-`condense_internal!` is the only writer of it.
+`condense_internal!` is the only writer of it. Where the corrector comes from
+is a construction-time election (`Stored()`/`Recompute()`), so read it through
+one access point instead of touching the store in the kernel, and
+`local_conditions!` is what admits the generic parameter and time
+sensitivities on a cache with no analytic kernel for them.
 
 ## Facets ⚠
 
@@ -258,8 +262,9 @@ local problems](elements.md)).
 - **Sensitivities**: `update_parameter_jacobian!(B, op, states, p, ctx)`,
   `parameter_vjp!(g, op, λ, states, p, ctx)`,
   `time_sensitivity!(g, op, states, p, ctx)` (AD by default, analytic kernels
-  win per cache, `FiniteDifferenceSensitivity` for condensed time
-  derivatives). ∂F/∂t seeds through the context — the AD sweep hands the
+  win per cache, `local_conditions!` admits the generic route on a condensed
+  cache, `FiniteDifferenceSensitivity` as the boundary-inclusive override).
+  ∂F/∂t seeds through the context — the AD sweep hands the
   kernel a Dual-timed context and the FD method perturbs the context time — so
   `time_sensitivity!` takes the same `(states, p, ctx)` triple as every other
   entry point, reads `t` from `evaluation_time(ctx)`, and throws when `ctx` is

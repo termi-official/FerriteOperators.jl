@@ -10,7 +10,10 @@
 #   preallocated ForwardDiff configs, owned by this decorator. The parameter
 #   sweeps build their configs per call: their seed dimension nθ is call-time
 #   knowledge, and a cached config would be abstractly typed across nθ
-#   changes.
+#   changes. The `local_conditions!` route allocates per item on top of that —
+#   a configuration-free seed of the hook, plus the local operator's pivots —
+#   so a condensed θ/t sweep taking that route is not allocation-free per cell
+#   the way the plain state and time sweeps are.
 
 "Tag for the package-owned ForwardDiff configs, so per-worker configs outlive the per-cell closures."
 struct FerriteOperatorsADTag end
@@ -44,6 +47,11 @@ ends up analytic or decorated.
     θ          # flat primal parameter copy (nθ), grown on first use
     jac_cfg_q  # ∂F/∂q JacobianConfig, ndofs × nqp — `nothing` unless the inner carries internal state
     Kq         # ndofs × nqp scratch for the condensed generic Consistent combination, or `nothing`
+    L_cfg      # ∂L/∂q JacobianConfig, nqp × nqp (`local_conditions!`), or `nothing`
+    Lₑ         # nqp local-conditions output of the differentiated calls, or `nothing`
+    Lq         # nqp × nqp ∂L/∂q, consumed by its own factorization, or `nothing`
+    Lθ         # nqp × nθ ∂L/∂θ, overwritten by dq/dθ; grown on first use
+    qsc        # nqp scratch: ∂L/∂t, and the parameter VJP's (∂F/∂q)ᵀλ
 end
 
 function create_ad_element_buffers(inner, sdh, n_global_dofs::Int = 0)
@@ -79,21 +87,35 @@ function _create_ad_element_buffers(inner, vₑ, re, supports_q_bootstrap::Bool)
     ndofs     = length(re)
     jac_cfg_q = nothing
     Kq        = nothing
+    L_cfg     = nothing
+    Lₑ        = nothing
+    Lq        = nothing
     if supports_q_bootstrap && has_internal_state(typeof(inner))
         nqp       = getnquadpoints(inner)
         qseed     = zeros(T, nqp)
         chunk_q   = ForwardDiff.Chunk(qseed)
         jac_cfg_q = ForwardDiff.JacobianConfig(nothing, re, qseed, chunk_q, tag)
         Kq        = zeros(T, ndofs, nqp)
+        # The local conditions are nqp-valued, so their ∂/∂q configuration is
+        # square where `jac_cfg_q` is ndofs × nqp and cannot be shared.
+        Lₑ        = zeros(T, nqp)
+        L_cfg     = ForwardDiff.JacobianConfig(nothing, Lₑ, qseed, chunk_q, tag)
+        Lq        = zeros(T, nqp, nqp)
     end
-    return ADElementBuffers(re, jac_cfg, deriv_cfg, grad_cfg, u_dual, re_dual, wseed, wdual, Vector{T}(), jac_cfg_q, Kq)
+    nq = Lₑ === nothing ? 0 : length(Lₑ)
+    return ADElementBuffers(re, jac_cfg, deriv_cfg, grad_cfg, u_dual, re_dual, wseed, wdual, Vector{T}(),
+                            jac_cfg_q, Kq, L_cfg, Lₑ, Lq, Matrix{T}(undef, nq, 0), _copy_or_nothing(Lₑ))
 end
+
+_copy_or_nothing(::Nothing) = nothing
+_copy_or_nothing(x) = copy(x)
 
 function duplicate_for_device(device, b::ADElementBuffers)
     return ADElementBuffers(
         copy(b.re), b.jac_cfg, b.deriv_cfg, b.grad_cfg,
         copy(b.u_dual), copy(b.re_dual), copy(b.wseed), copy.(b.wdual), copy(b.θ),
-        b.jac_cfg_q, b.Kq === nothing ? nothing : copy(b.Kq),
+        b.jac_cfg_q, _copy_or_nothing(b.Kq),
+        b.L_cfg, _copy_or_nothing(b.Lₑ), _copy_or_nothing(b.Lq), copy(b.Lθ), _copy_or_nothing(b.qsc),
     )
 end
 
@@ -118,6 +140,13 @@ function _theta!(buf::ADElementBuffers, nθ::Int)
     return buf.θ
 end
 
+# ∂L/∂θ, sized like every other parameter-sized member: nθ is call-time
+# knowledge, so the block is grown on first use of a given seed dimension.
+function _local_theta_block!(buf::ADElementBuffers, nθ::Int)
+    size(buf.Lθ, 2) == nθ || (buf.Lθ = Matrix{eltype(buf.Lθ)}(undef, size(buf.Lθ, 1), nθ))
+    return buf.Lθ
+end
+
 # slot-sized differentiation config: :q needs its own (nqp generally ≠ ndofs);
 # every other slot shares the :u-sized config, matching today's assumption
 # that non-condensed state slots are all field-dof-shaped.
@@ -139,9 +168,15 @@ decorator serves both item families.
 
 For a condensed `inner` ([`has_internal_state`](@ref)) the `Consistent`
 Jacobian/JacobianResidual has a generic path: `∂F/∂ū|_q` and `∂F/∂q` by AD,
-combined with the stored `dq/dū` block from [`condensed_corrector`](@ref) —
+combined with the `dq/dū` block from [`condensed_corrector`](@ref) —
 `Jₑ = ∂F/∂ū|_q + ∂F/∂q · dq/dū`. Without an analytic kernel or
 `condensed_corrector`, admissibility rejects it, naming the missing correction.
+
+The parameter and time kinds have the same shape of generic path, from
+[`local_conditions!`](@ref) instead of a stored block: `∂L/∂q` (factorized once
+per item), `∂L/∂θ` and `∂L/∂t` by AD of the hook give `dq/dθ` and `dq/dt`
+through the implicit function theorem, and the same `∂F/∂q` block completes
+the total. Without the hook those kinds stay rejected for a condensed inner.
 
 `n_global_dofs` pads the seeds and configs by the subdomain's
 [`global_dofs`](@ref) count, so the differentiated system is the FULL augmented
@@ -204,12 +239,19 @@ invalidate_correctors!(ad::ADElementCache) = invalidate_correctors!(ad.inner)
 assemble_patch_cell!(req, ad::ADElementCache, args, data) = assemble_patch_cell!(req, ad.inner, args, data)
 
 """
-    condensed_corrector(cache, id) -> AbstractMatrix
+    condensed_corrector(cache, args) -> AbstractMatrix
 
 The completed `nq × ndofs` `dq/dū` block a condensed cache exposes for
 `ADElementCache`'s generic `Consistent` combination. Only needed to admit the
 generic bootstrap; a cache serving `Consistent` analytically never needs this.
 No default.
+
+This is the decorator's corrector ACCESS POINT, and it takes the item's
+[`CellArgs`](@ref) rather than an item id so that both
+[`CorrectorElection`](@ref)s can be served through it: a `Stored()` cache reads
+its store keyed by `cellid(args.cell)`, a [`Recompute`](@ref) one re-derives
+the block from `args.states`. The decorator does not know which, and the
+combination `∂F/∂ū|_q + ∂F/∂q · dq/dū` is the same either way.
 """
 function condensed_corrector end
 
@@ -225,11 +267,27 @@ function condensed_corrector end
 # admissible on a condensed inner, so it gets an explicit override instead of
 # the shortcut every other exempt kind uses.
 _ad_covers(Inner, kind) = !requires_admissibility_check(kind) || !has_internal_state(Inner) || internal_state_insensitive(Inner, kind)
-_ad_covers(Inner, ::TimeSensitivityKind) = !has_internal_state(Inner) || internal_state_insensitive(Inner, TimeSensitivityKind())
+# The θ/t kinds gain the THIRD acceptance branch: a declared `local_conditions!`
+# lets the decorator derive `dq/dθ`/`dq/dt` and complete the total itself.
+_ad_covers(Inner, ::TimeSensitivityKind) =
+    !has_internal_state(Inner) || internal_state_insensitive(Inner, TimeSensitivityKind()) || _has_local_conditions(Inner)
+_ad_covers(Inner, ::ParameterJacobianKind) =
+    !has_internal_state(Inner) || internal_state_insensitive(Inner, ParameterJacobianKind()) || _has_local_conditions(Inner)
+_ad_covers(Inner, kind::ParameterVJPKind) =
+    !has_internal_state(Inner) || internal_state_insensitive(Inner, kind) || _has_local_conditions(Inner)
 _ad_covers(Inner, ::JacobianKind{:u, Consistent}) =
-    !has_internal_state(Inner) || internal_state_insensitive(Inner, JacobianKind{:u, Consistent}()) || hasmethod(condensed_corrector, Tuple{Inner, Int})
+    !has_internal_state(Inner) || internal_state_insensitive(Inner, JacobianKind{:u, Consistent}()) || _has_condensed_corrector(Inner)
 _ad_covers(Inner, ::JacobianResidualKind{Consistent}) =
-    !has_internal_state(Inner) || internal_state_insensitive(Inner, JacobianResidualKind{Consistent}()) || hasmethod(condensed_corrector, Tuple{Inner, Int})
+    !has_internal_state(Inner) || internal_state_insensitive(Inner, JacobianResidualKind{Consistent}()) || _has_condensed_corrector(Inner)
+
+# Probed against `CellArgs` specifically: the generic combination needs the
+# `:q` Jacobian config, which only the cell-sized buffer constructor builds
+# (`supports_q_bootstrap`), so an algebraic cache's method — written against
+# `AlgebraicArgs` — must not be read as coverage. Same reasoning for the
+# local-conditions hook, whose `L` argument is Dual-valued under the sweeps
+# that differentiate it and so can be typed no tighter than `AbstractVector`.
+_has_condensed_corrector(Inner) = hasmethod(condensed_corrector, Tuple{Inner, CellArgs})
+_has_local_conditions(Inner) = hasmethod(local_conditions!, Tuple{AbstractVector, Inner, CellArgs})
 
 # `true` for every kind `inner` serves analytically (forwarded), plus every
 # kind this decorator's own AD path covers — every kind except the
@@ -300,13 +358,24 @@ function evaluate_item_residual!(r, cache, args)
     return r
 end
 
+# `:q` is the one slot whose config is conditional — only the cell-sized buffer
+# constructor builds it (`supports_q_bootstrap`) — so an algebraic cache
+# reaches an AD `:q` sweep with `nothing` and is told so here instead of
+# failing inside ForwardDiff. The branch is on a field TYPE and folds away.
+_require_slot_config(cfg, ::Val, ad) = cfg
+_require_slot_config(::Nothing, ::Val{slot}, ad::ADElementCache{Inner}) where {slot, Inner} = throw(ArgumentError(
+    "$(nameof(_display_cache_type(Inner))) has no ForwardDiff configuration for the `:$slot` " *
+    "slot. `:q` configurations are sized from `getnquadpoints`, a CELL-cache contract, so an " *
+    "item family described by a dof count alone (an algebraic item) has none: serve " *
+    "`JacobianKind{:$slot}` with the analytic `assemble_algebraic!` kernel instead."))
+
 # ∂F/∂slot — writes the Jacobian into K, overwriting `y` with the primal
 # residual as a byproduct. Only the named slot is seeded; every other slot
 # stays at its primal value — including `AffineRate`-reconstructed slots,
 # which are formed at gather time. Tag checking is off: the config carries the
 # package tag, not the closure's.
 function ad_state_jacobian!(K, y, ad::ADElementCache, args, ::Val{slot} = Val(:u)) where {slot}
-    cfg = _jac_config_for(ad.buffers, Val(slot))
+    cfg = _require_slot_config(_jac_config_for(ad.buffers, Val(slot)), Val(slot), ad)
     inner = ad.inner
     f! = (r, x) -> evaluate_item_residual!(
         r, inner, with_states(args, merge(args.states, NamedTuple{(slot,)}((x,)))))
@@ -315,12 +384,13 @@ function ad_state_jacobian!(K, y, ad::ADElementCache, args, ::Val{slot} = Val(:u
 end
 
 # The generic Consistent combination for a condensed inner: AD gives both
-# partials, `condensed_corrector` gives the stored dq/dū block.
+# partials, `condensed_corrector` gives the dq/dū block — read from a store or
+# re-derived from `args`, which is the inner's election to make.
 function _condensed_consistent_jacobian!(K, y, ad::ADElementCache, args)
     buf = ad.buffers
     ad_state_jacobian!(K, y, ad, args, Val(:u))
     ad_state_jacobian!(buf.Kq, buf.re, ad, args, Val(:q))
-    corr = condensed_corrector(ad.inner, cellid(args.cell))
+    corr = condensed_corrector(ad.inner, args)
     mul!(K, buf.Kq, corr, true, true)
     return K
 end
@@ -392,20 +462,27 @@ end
 # ∂F/∂θ — dense local parameter Jacobian. The parameter sweep re-queries the
 # element parameters from the Dual-rebuilt global `p` (`req.p`, NOT `args.p` —
 # already the element-local view) so wrappers forward Duals transparently.
+# For a condensed inner this is the FROZEN-q partial; the total needs the
+# `∂F/∂q · dq/dθ` block a declared `local_conditions!` supplies.
 function _ad_assemble!(req::ParameterJacobianRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, ParameterJacobianKind())
         return _inner_kernel!(req, ad.inner, args)
     end
+    _ad_parameter_jacobian!(req.B, ad, args, req.p)
+    _has_local_conditions(Inner) && _add_local_parameter_correction!(req.B, ad, args, req.p)
+    return req.B
+end
+
+function _ad_parameter_jacobian!(B, ad::ADElementCache, args, p)
     buf = ad.buffers
     inner = ad.inner
-    p = req.p
-    θ = copyto!(_theta!(buf, size(req.B, 2)), parameter_vector(p))
+    θ = copyto!(_theta!(buf, size(B, 2)), parameter_vector(p))
     f! = (r, θᵢ) -> begin
         pₑ = query_cell_parameters(inner, _parameter_subject(args), rebuild_parameters(p, θᵢ))
         evaluate_item_residual!(r, inner, with_parameters(args, pₑ))
     end
-    ForwardDiff.jacobian!(req.B, f!, buf.re, θ)
-    return req.B
+    ForwardDiff.jacobian!(B, f!, buf.re, θ)
+    return B
 end
 
 # (∂F/∂θ)ᵀλₑ — adjoint pullback as the gradient of the scalar λₑ·rₑ(θ).
@@ -413,10 +490,14 @@ function _ad_assemble!(req::ParameterVJPRequest, ad::ADElementCache{Inner}, args
     if provides_analytic(Inner, ParameterVJPKind(nothing))
         return _inner_kernel!(req, ad.inner, args)
     end
+    _ad_parameter_vjp!(req.g, ad, args, req.λₑ, req.p)
+    _has_local_conditions(Inner) && _add_local_parameter_vjp!(req.g, ad, args, req.λₑ, req.p)
+    return req.g
+end
+
+function _ad_parameter_vjp!(g, ad::ADElementCache, args, λₑ, p)
     buf = ad.buffers
     inner = ad.inner
-    p = req.p
-    λₑ = req.λₑ
     θ = copyto!(_theta!(buf, length(parameter_vector(p))), parameter_vector(p))
     fscalar = θᵢ -> begin
         pₑ = query_cell_parameters(inner, _parameter_subject(args), rebuild_parameters(p, θᵢ))
@@ -424,8 +505,8 @@ function _ad_assemble!(req::ParameterVJPRequest, ad::ADElementCache{Inner}, args
         evaluate_item_residual!(r, inner, with_parameters(args, pₑ))
         return dot(λₑ, r)
     end
-    ForwardDiff.gradient!(req.g, fscalar, θ)
-    return req.g
+    ForwardDiff.gradient!(g, fscalar, θ)
+    return g
 end
 
 # ∂F/∂t — explicit time dependence, seeded through the context channel: the
@@ -437,17 +518,96 @@ function _ad_assemble!(req::TimeSensitivityRequest, ad::ADElementCache{Inner}, a
     if provides_analytic(Inner, TimeSensitivityKind())
         return _inner_kernel!(req, ad.inner, args)
     end
+    _ad_time_sensitivity!(req.g, ad, args)
+    _has_local_conditions(Inner) && _add_local_time_correction!(req.g, ad, args)
+    return req.g
+end
+
+function _ad_time_sensitivity!(g, ad::ADElementCache, args)
     buf = ad.buffers
     inner = ad.inner
     ctx = args.ctx
     t = evaluation_time(ctx)
     f! = (r, t̃) -> evaluate_item_residual!(r, inner, with_context(args, with_time(ctx, t̃)))
     if t isa eltype(buf.re)
-        ForwardDiff.derivative!(req.g, f!, buf.re, t, buf.deriv_cfg, Val{false}())
+        ForwardDiff.derivative!(g, f!, buf.re, t, buf.deriv_cfg, Val{false}())
     else
-        ForwardDiff.derivative!(req.g, f!, buf.re, t)
+        ForwardDiff.derivative!(g, f!, buf.re, t)
     end
-    return req.g
+    return g
+end
+
+####################################
+## The local-conditions route — dq/dθ and dq/dt from `local_conditions!`
+####################################
+#
+# Post-condensation the residual kernel is pure, so the AD paths above compute
+# frozen-q PARTIALS. The kinds carrying no `CorrectionMode` are always totals,
+# and the missing block is `∂F/∂q · dq/dseed` with `dq/dseed` given by the
+# implicit function theorem on the element's declared local conditions. Both
+# factors already exist: `∂F/∂q` is the `:q` slot Jacobian the Kq machinery
+# assembles, and `∂L/∂q`/`∂L/∂seed` come from differentiating the hook.
+
+# ∂L/∂q at the condensed state, factorized in place — the local inverse every
+# seed of the sweep goes through, and the reason the hook is worth its cost:
+# ONE factorization per item serves all nθ parameter directions. It is redone
+# per sweep, not retained across sweeps: retaining it is corrector storage
+# again, which is what `CorrectorElection` exists to let a user refuse.
+function _local_operator_factorization(ad::ADElementCache, args)
+    buf = ad.buffers
+    inner = ad.inner
+    f! = (L, x) -> local_conditions!(L, inner, with_states(args, merge(args.states, (q = x,))))
+    ForwardDiff.jacobian!(buf.Lq, f!, buf.Lₑ, args.states.q, buf.L_cfg, Val{false}())
+    return lu!(buf.Lq)
+end
+
+# `(∂L/∂q)⁻¹ ∂L/∂θ`, in place in the θ-sized block — `dq/dθ` up to the sign the
+# callers fold into their accumulation.
+function _local_parameter_slopes!(ad::ADElementCache, args, p, nθ::Int)
+    buf = ad.buffers
+    inner = ad.inner
+    Lθ = _local_theta_block!(buf, nθ)
+    θ = copyto!(_theta!(buf, nθ), parameter_vector(p))
+    f! = (L, θᵢ) -> begin
+        pₑ = query_cell_parameters(inner, _parameter_subject(args), rebuild_parameters(p, θᵢ))
+        local_conditions!(L, inner, with_parameters(args, pₑ))
+    end
+    ForwardDiff.jacobian!(Lθ, f!, buf.Lₑ, θ)
+    ldiv!(_local_operator_factorization(ad, args), Lθ)
+    return Lθ
+end
+
+# B += ∂F/∂q · dq/dθ
+function _add_local_parameter_correction!(B, ad::ADElementCache, args, p)
+    buf = ad.buffers
+    ad_state_jacobian!(buf.Kq, buf.re, ad, args, Val(:q))
+    Lθ = _local_parameter_slopes!(ad, args, p, size(B, 2))
+    mul!(B, buf.Kq, Lθ, -one(eltype(B)), one(eltype(B)))
+    return B
+end
+
+# g += (dq/dθ)ᵀ (∂F/∂q)ᵀ λₑ — the same two factors, contracted right to left so
+# no `nres × nθ` block is materialized.
+function _add_local_parameter_vjp!(g, ad::ADElementCache, args, λₑ, p)
+    buf = ad.buffers
+    ad_state_jacobian!(buf.Kq, buf.re, ad, args, Val(:q))
+    mul!(buf.qsc, transpose(buf.Kq), λₑ)
+    Lθ = _local_parameter_slopes!(ad, args, p, length(g))
+    mul!(g, transpose(Lθ), buf.qsc, -one(eltype(g)), one(eltype(g)))
+    return g
+end
+
+# g += ∂F/∂q · dq/dt, the time seed against the same local operator.
+function _add_local_time_correction!(g, ad::ADElementCache, args)
+    buf = ad.buffers
+    inner = ad.inner
+    ad_state_jacobian!(buf.Kq, buf.re, ad, args, Val(:q))
+    ctx = args.ctx
+    f! = (L, t̃) -> local_conditions!(L, inner, with_context(args, with_time(ctx, t̃)))
+    ForwardDiff.derivative!(buf.qsc, f!, buf.Lₑ, evaluation_time(ctx))
+    ldiv!(_local_operator_factorization(ad, args), buf.qsc)
+    mul!(g, buf.Kq, buf.qsc, -one(eltype(g)), one(eltype(g)))
+    return g
 end
 
 # (∂F/∂u)·v — one directional-Dual sweep through the residual kernel: the

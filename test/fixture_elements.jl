@@ -254,13 +254,14 @@ end
 # :qprev its committed predecessor (InternalSource over a separate `uprev`
 # vector). `transform` reshapes the reference grid before the dofs are
 # distributed.
-function visco_testbed(strategy, qrc, dims = (1, 1, 1); transform = nothing, kwargs...)
+function visco_testbed(strategy, qrc, dims = (1, 1, 1); transform = nothing,
+                       corrector = Stored(), kwargs...)
     grid = generate_grid(Hexahedron, dims)
     transform === nothing || Ferrite.transform_coordinates!(grid, transform)
     dh = DofHandler(grid)
     add!(dh, :u, Lagrange{RefHexahedron, 1}()^3)
     close!(dh)
-    integrator = SimpleCondensedLinearViscoelasticity(MaxwellParameters(), qrc, :u, :εᵛ)
+    integrator = SimpleCondensedLinearViscoelasticity(MaxwellParameters(), qrc, :u, :εᵛ; corrector)
     op = setup_operator(strategy, integrator, dh; slots = (:u, :q, :qprev), kwargs...)
     return (; op, dh, grid)
 end
@@ -273,16 +274,17 @@ condensed_states(u, uprev) = (u = u, q = InternalSource(u), qprev = InternalSour
 ####################################
 # Scalar field on a quad grid plus a hidden per-QP internal state whose local
 # stage problem is nonlinear, slots (:u, :q, :qprev) — see `visco_testbed`.
-# `material` and `local_solver` are the element's configuration, both
-# arriving through the integrator.
+# `material`, `local_solver` and `corrector` are the element's configuration,
+# all arriving through the integrator.
 function relaxation_testbed(strategy, qrc, dims = (2, 2);
                             material = NortonRelaxationParameters(),
-                            local_solver = LocalNewtonSettings(), kwargs...)
+                            local_solver = LocalNewtonSettings(),
+                            corrector = Stored(), kwargs...)
     grid = generate_grid(Quadrilateral, dims)
     dh = DofHandler(grid)
     add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
     close!(dh)
-    integrator = SimpleCondensedPowerLawRelaxation(material, qrc, :u, :q; local_solver)
+    integrator = SimpleCondensedPowerLawRelaxation(material, qrc, :u, :q; local_solver, corrector)
     op = setup_operator(strategy, integrator, dh; slots = (:u, :q, :qprev), kwargs...)
     return (; op, dh, grid)
 end
@@ -950,6 +952,16 @@ provides the analytic kernel).
     FerriteOperators.assemble_algebraic!(req::JacobianResidualRequest{Consistent}, cache::CondensedChamberCache, args::AlgebraicArgs) = _chamber_assemble!(req, cache, args)
     FerriteOperators.assemble_algebraic!(req::JacobianResidualRequest{FrozenQ}, cache::CondensedChamberCache, args::AlgebraicArgs) = _chamber_assemble!(req, cache, args)
     FerriteOperators.provides_analytic(::Type{CondensedChamberCache}, ::Union{JacobianKind, JacobianResidualKind}) = true
+
+    # ∂F/∂q, the item's 1×1 block of the rectangular field × internal target
+    # (`update_internal_jacobian!`). Analytic is the only route for this
+    # family: an item's AD buffers are sized from a dof count, which builds no
+    # `:q` configuration.
+    function FerriteOperators.assemble_algebraic!(req::JacobianRequest{:q}, cache::CondensedChamberCache, args::AlgebraicArgs)
+        (; β) = _chamber_params(cache, args.p)
+        req.K[1, 1] += -β
+        return req.K
+    end
 
     # Analytic ∂F/∂θ (θ = (β,)): the exchange term's own partial ∂r/∂β|_q =
     # (p−q) plus the stored ∂r/∂q · dq/dβ correction (∂r/∂q|_(p,β) = -β).

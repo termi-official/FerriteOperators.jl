@@ -486,15 +486,16 @@ both families unconditionally; `condense_algebraic!`'s report `worst_cell`
 convention documents how a folded report tells a cell from an item apart.
 
 **Analytic-first, no generic AD bootstrap.** A condensed CELL cache lacking
-analytic `Consistent`-Jacobian coverage still gets an AD `Consistent` path
-(the [`condensed_corrector`](@ref) combination below). The algebraic-item
-family has no such fallback: an item has no cellid to key a corrector store
-by, so a condensed algebraic cache is admissible for a `Consistent`
-sensitivity/Jacobian kind only by serving it analytically or by declaring
-[`internal_state_insensitive`](@ref) — `setup_operator` rejects anything else
-at setup, naming `assemble_algebraic!` and the remedy. This is a known wall,
-the algebraic-item counterpart of the θ/t sensitivity wall condensed cells
-already have.
+analytic coverage still gets generic AD paths (the
+[`condensed_corrector`](@ref) and [`local_conditions!`](@ref) combinations
+below). The algebraic-item family has none of them: an item's buffers are
+sized from a dof count, so the framework builds no `:q` differentiation
+configuration to combine against, and there is no cellid to key a corrector
+store by either. A condensed algebraic cache is therefore admissible for a
+`Consistent` sensitivity/Jacobian kind only by serving it analytically or by
+declaring [`internal_state_insensitive`](@ref) — `setup_operator` rejects
+anything else at setup, naming `assemble_algebraic!` and the remedy. That is
+this family's standing limitation.
 
 ## Condensed elements (internal variables)
 
@@ -518,6 +519,28 @@ frozen `q`; no sweep writes back. `q` is gathered through an
 [`InternalSource`](@ref) slot like any other state — declared at setup
 (`slots = (:u, :q, …)`) and sourced per call (`states = (u = u, q =
 InternalSource(u), …)`).
+
+Whether the corrector is stored at all is a construction-time election
+([`CorrectorElection`](@ref)), because per-quadrature-point corrector storage
+is the phase's binding cost at scale — gigabytes at 10⁶ cells for a tensor
+slope:
+
+```julia
+SimpleCondensedPowerLawRelaxation(mat, qrc, :u, :q; corrector = Recompute())
+```
+
+[`Stored`](@ref) (the default) keeps the corrector per item;
+[`Recompute`](@ref) keeps none and re-derives it from the converged `(u, q)`
+where a kernel needs it, which is exact rather than approximate — the
+corrector is a closed form in that pair. Elect `Recompute()` for memory-bound
+ASSEMBLED sweeps and `Stored()` for action-style use, where every operator
+application would otherwise re-derive the same corrector. Write the element so
+the election is invisible to its kernels: read the corrector through ONE
+access point that either reads the store or recomputes. The two elections then
+differ only in memory, and under `Recompute()` the corrector staleness class
+disappears with the store — but the q contract does not, and nothing detects a
+missing [`condense_internal!`](@ref) any more, since there is no stamp to
+check.
 
 A Jacobian-shaped kind's [`CorrectionMode`](@ref) (`Consistent`, the default,
 or `FrozenQ`) selects the total `∂F/∂·|_q + ∂F/∂q · dq/d·` or the partial
@@ -543,19 +566,57 @@ A condensed cache still gets wrapped in [`ADElementCache`](@ref) when it lacks
 some kind's analytic coverage, and the decorator's `Consistent` state
 Jacobian/JacobianResidual then has a GENERIC path: it AD-differentiates the
 (now pure) residual seeding `ū` and `q` separately and combines them with the
-stored `dq/dū` block, read through [`condensed_corrector`](@ref) — `Jₑ =
+`dq/dū` block, read through [`condensed_corrector`](@ref) — `Jₑ =
 ∂F/∂ū|_q + ∂F/∂q · dq/dū`. This is the getting-started path (bigger than the
 compact Tier-1 corrector most analytic kernels read, since the framework needs
 the completed `nq × ndofs` block); an element serving `Consistent` kinds
-analytically never needs to implement it. Every other sensitivity kind on a
-condensed cache without an analytic kernel keeps the admissibility rejection.
+analytically never needs to implement it. `condensed_corrector` receives the
+item's [`CellArgs`](@ref), so it serves either election — read the store, or
+re-derive the block from `args.states`.
+
+The parameter and time sensitivities have the same shape of generic path, out
+of the element's LOCAL CONDITIONS rather than a stored block:
+
+```julia
+function FerriteOperators.local_conditions!(L, cache::MyCache, args)
+    # L .= the residual form of the equations condense_cell! solved for q
+end
+```
+
+Given [`local_conditions!`](@ref), the decorator differentiates it for
+`∂L/∂q` — factorized once per item — plus `∂L/∂θ` and `∂L/∂t`, and closes the
+implicit function theorem against the same `∂F/∂q` block: `dq/dθ =
+−(∂L/∂q)⁻¹ ∂L/∂θ`, `dF/dθ = ∂F/∂θ|_q + ∂F/∂q · dq/dθ`. `L` is evaluated,
+never solved, and must be eltype-generic — it is what gets differentiated, so
+`q`, the parameters and the evaluation time all reach it Dual-valued (which
+also means a parameter bag whose [`rebuild_parameters`](@ref) cannot return a
+Dual-valued object rules the route out). Without the hook, and without an
+analytic kernel or an [`internal_state_insensitive`](@ref) declaration, those
+kinds keep the admissibility rejection.
+
+!!! warning "Experimental surface"
+    The local-model seam is a CANDIDATE contract: `local_conditions!`'s
+    signature may change in a minor release. The assembled results of the
+    kinds it admits are not affected.
+
+The `∂F/∂q` block itself is available to a solver, not only to the decorator:
+[`allocate_internal_jacobian`](@ref) builds the rectangular
+`residual_size(op) × ndofs(ivh)` target and
+[`update_internal_jacobian!`](@ref) fills it — the block a Schur-complement
+consumer wants. Elements serve it through the analytic
+`assemble_cell!(::JacobianRequest{:q}, …)` kernel or by ForwardDiff seeding of
+the `:q` slot, which needs no admissibility guard: `q` is the seed itself, so
+`Consistent` and `FrozenQ` coincide.
 
 The algebraic-item family ([Algebraic terms](#Algebraic-terms-(items-with-no-mesh-support)))
 condenses through the same [`condense_internal!`](@ref) sweep and the same
 `[ū | q_cells | q_items]` tail, via its own hook
-([`condense_algebraic!`](@ref)) — but WITHOUT the generic AD `Consistent`
-combination above: an item has no cellid to key a corrector store by, so a
-condensed algebraic cache is analytic-first, no exceptions.
+([`condense_algebraic!`](@ref)), and its items ride the same `∂F/∂q` target,
+their column block sitting after the cell block. It has none of the generic AD
+routes above, though: an item's buffers are sized from a dof count, which
+builds no `:q` differentiation configuration, so a condensed algebraic cache
+is analytic-first for `Consistent` kinds AND for `JacobianKind{:q}` — no
+exceptions.
 
 ## Composition
 

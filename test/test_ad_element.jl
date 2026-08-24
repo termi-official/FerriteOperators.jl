@@ -161,7 +161,7 @@ end
         end
         return report
     end
-    FerriteOperators.condensed_corrector(c::GenericBootstrapCache, id::Int) = c.blocks[id]
+    FerriteOperators.condensed_corrector(c::GenericBootstrapCache, args) = c.blocks[cellid(args.cell)]
 
     mat  = NortonRelaxationParameters()
     qrc  = QuadratureRuleCollection(2)

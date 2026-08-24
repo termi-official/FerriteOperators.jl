@@ -303,10 +303,17 @@ with `p` at call time, and the parameter-sized members of
 state-and-time sweeps *are* allocation-free per cell; the parameter sweeps are
 not.
 
-The finite-difference decorator sketched as a third backend was **not** built.
-Operator-level [`FiniteDifferenceSensitivity`](@ref) remains, and remains the
-only **boundary-inclusive** sensitivity route — element-level differentiation of
-any kind sees the volumetric kernel only. Both routes are kept deliberately.
+The finite-difference decorator sketched as a third backend was **not** built,
+and that is the settled state rather than a deferral. A cache-level FD
+decorator would differentiate the volumetric kernel, exactly like the AD one,
+and would therefore lose the single property that makes operator-level
+[`FiniteDifferenceSensitivity`](@ref) worth keeping: it differences
+`evaluate!`, so **boundary terms enter**. Its remaining niche — kernels that
+cannot carry `Dual`s — has no consumer in the tree. The two mechanisms are
+final and their division of labour is documented where the routes are
+described: the operator-level method is the boundary-inclusive, Dual-free
+route, the decorator is the per-cache one where analytic kernels win cache by
+cache.
 
 *Implemented 2026-08-20 (W1). Record: `report4-architect-second-pass.md` §A2 for
 the design, and this page for the deviations.*
@@ -505,10 +512,21 @@ docstrings describe what is there.
 **Per-quadrature-point corrector storage is the binding constraint at scale.** A
 scalar corrector is cheap; a 6×6 slope on a viscoelastic element is ~2.3 GB at
 10⁶ cells, and the generic block bigger still. [`Recompute`](@ref) is therefore
-kept as a **first-class election**, not a fallback, and it is targeted:
-memory-bound *assembled* sweeps. For matrix-free, action-style use — Krylov
-`mul!`/JVP sequences at a fixed state — recompute-per-action is not the intended
-profile and [`Stored`](@ref) is the election.
+a **first-class election**, not a fallback, and it is targeted: memory-bound
+*assembled* sweeps. For matrix-free, action-style use — Krylov `mul!`/JVP
+sequences at a fixed state — recompute-per-action is not the intended profile
+and [`Stored`](@ref) is the election.
+
+The election is exact rather than approximate, which is what makes it an
+election rather than a trade of accuracy: the corrector is a closed form in the
+converged `(u, q)` — the implicit-function-theorem slopes of the local
+conditions — so recomputing it re-runs the arithmetic the condensation already
+ran, at the same point. Both shipped condensed elements implement both
+elections and produce bitwise-identical matrices. What the election *does* cost
+is the freshness guard: with no store there is no stamp, so a `Consistent`
+sweep on a never-condensed item silently uses whatever `q` the tail holds
+instead of throwing. The q-ordering contract is unchanged and the detection of
+its violation is what is traded away, alongside the memory.
 
 **The phase is a global barrier.** It must complete over the whole domain before
 any evaluation sweep begins. On a shared-memory engine that is one join; on a
@@ -517,16 +535,41 @@ condensation with anything asynchronous. This is intrinsic to the decoupling —
 the decoupling *is* "solve everything, then evaluate" — not an implementation
 artifact.
 
-**The generic bootstrap covers the state Jacobian only.** The decorator's
-generic [`Consistent`](@ref) path handles `∂F/∂ū` (and its fused sibling) by
-seeding `ū` and `q` separately and combining with the stored `dq/dū`. Extending
-it to θ and `t` needs `dq/dθ = −(∂L/∂q)⁻¹ ∂L/∂θ`, which requires the retained
-factorization of the local operator and a declared `local_conditions` seam —
-**neither is in the tree**. This is a genuine wall, not a gap someone forgot to
-close: those kinds keep the admissibility rejection on condensed caches without
-analytic kernels until that machinery lands.
+**The generic bootstrap reaches θ and `t` only through a declared local model.**
+The decorator's generic [`Consistent`](@ref) path handles `∂F/∂ū` (and its
+fused sibling) out of the corrector alone. `dq/dθ = −(∂L/∂q)⁻¹ ∂L/∂θ` needs
+something the corrector does not carry: the local operator itself, against a
+different right-hand side. The framework cannot see an element's local
+equations, so the extension could only ever be an element declaration — which
+is what [`local_conditions!`](@ref) is. With it the decorator differentiates
+the hook for `∂L/∂q`, `∂L/∂θ` and `∂L/∂t`, factorizes the local operator once
+per item, and completes the total against the `∂F/∂q` block; without it those
+kinds keep the admissibility rejection, now naming the hook as the third
+remedy.
 
-*Record: `condensation-phase-design.md` §5.2, §10.2, §10.4, §10.6.*
+The seam is spelled against the package's own kernel convention —
+`local_conditions!(L, cache, args)`, per ITEM, filling the item's stacked local
+residual — rather than the design draft's per-quadrature-point argument list.
+The draft's form cannot be driven by the framework: it asks for the field value
+AT a quadrature point, which only the element's own `CellValues` can produce,
+and for a `qprev` the framework has no vocabulary for. The `args` form carries
+both without the framework interpreting either, and it is what makes one
+factorization per item — the whole cost argument for the route — well defined.
+It is marked experimental for that reason: the contract is validated, not
+frozen.
+
+**∂F/∂q is a target, not a slot Jacobian.** The block is field × internal
+shaped, so it fits neither the operator's square matrix nor the per-slot
+component bag. It gets a rectangular sparse target of its own
+([`allocate_internal_jacobian`](@ref)/[`update_internal_jacobian!`](@ref)) whose
+pattern is the cell loop's `celldofs × internal range`, scattered through the
+two-index `assemble!` the transfer operators already use. Columns are disjoint
+between items by construction — an item owns its internal range alone — so the
+sweep needs no new assembler and no new race analysis. [`assemble_slot_jacobian!`](@ref)
+refuses `:q` outright rather than silently scattering a rectangular block into
+a square pattern.
+
+*Record: `condensation-phase-design.md` §5.2, §6, §7, §10.2, §10.4, §10.6.*
 
 ## The operator layer
 

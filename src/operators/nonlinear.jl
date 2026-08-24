@@ -41,9 +41,19 @@ in particular a member of a component bag from
 [`allocate_components`](@ref) — so the multi-slot linearization
 `Σ wₛ ∂F/∂s` is assembled once per slot and folded with [`combine!`](@ref).
 `op.J` is untouched unless it is passed as `J`.
+
+`:q` is not a slot of this entry point: ∂F/∂q is field × internal-shaped, not
+square, and has its own target and entry point
+([`update_internal_jacobian!`](@ref)).
 """
 assemble_slot_jacobian!(J::AbstractMatrix, op::LinearizedFerriteOperator, kind::JacobianKind, states::NamedTuple, p, ctx) =
     assemble_into!(kind, (J,), op, states, p, ctx)
+assemble_slot_jacobian!(J::AbstractMatrix, op::LinearizedFerriteOperator, ::JacobianKind{:q}, states::NamedTuple, p, ctx) =
+    throw(ArgumentError(
+        "∂F/∂q is not a square slot Jacobian: `q` lives in the condensed `[ū; q]` tail, so the " *
+        "block is `residual_size(op) × ndofs(op.engine.ivh)` and cannot be assembled into a " *
+        "matrix sharing the operator's pattern. Use `update_internal_jacobian!(Kq, op, states, " *
+        "p, ctx)` with a target from `allocate_internal_jacobian(op)`."))
 
 """
     assemble_weighted_jacobian!(W, op, weights::NamedTuple, states, p, ctx)
@@ -244,8 +254,18 @@ Central-difference derivative method: evaluates the PRIMAL residual at
 contexts carrying perturbed evaluation times, on a protected copy of `u` (so
 trial write-back never leaks), and forms `(F(t+h) − F(t−h)) / 2h`. Exact local
 solves, no Dual propagation — admissible for condensed elements, where it
-yields the total t-derivative at fixed `u` including the element-local state's
-response (as does AD, when admissible). Accuracy O(h²).
+condenses AT each perturbed context and so yields the total t-derivative at
+fixed `u`, including the element-local state's response (as does AD, when
+admissible). The operator's corrector stores are left holding the last
+perturbed point's condensation. Accuracy O(h²).
+
+This and the [`ADElementCache`](@ref) decorator are the two derivative
+mechanisms, and the split is final: the operator-level method here is the only
+BOUNDARY-INCLUSIVE route, since it differences `evaluate!` (facet terms
+included) rather than an element kernel, and the only Dual-free one; the
+decorator is the per-cache route, where an analytic kernel still wins cache by
+cache. This method is an operator-level OVERRIDE and therefore bypasses
+analytic sensitivity kernels everywhere.
 """
 struct FiniteDifferenceSensitivity{T}
     h::T
@@ -287,21 +307,25 @@ function _time_sensitivity!(::ADSensitivity, g, op, states, p, ctx)
 end
 
 function _time_sensitivity!(method::FiniteDifferenceSensitivity, g, op, states, p, ctx)
-    # Primal evaluations at perturbed contexts — a pure evaluation sweep
-    # writes nothing back, so `u` (and, once condensed, `q`) stay fixed across
-    # both calls; `uw` only protects the caller's `states.u` from aliasing.
-    # `u` itself never changes (only the context time does), so one
-    # condensation ahead of both evaluations covers both.
+    # Primal evaluations at perturbed contexts, on a copy of `u` so the
+    # caller's state never moves. A condensed operator is re-condensed AT each
+    # perturbed context, not once ahead of both: a local model reading
+    # `evaluation_time` has its own t-dependence, and differencing at a frozen
+    # `q` would silently return the partial where this method's contract is
+    # the total. `u` itself never changes — only the context time and the `q`
+    # each condensation writes for it.
     t  = evaluation_time(ctx)
     h  = method.h * max(one(t), abs(t))
     uw = copy(states.u)
     statesw = merge(states, (u = uw,))
-    if unknown_size(op) > residual_size(op) && haskey(states, :q) && states.q isa InternalSource
-        statesw = merge(statesw, (q = InternalSource(uw),))
-        condense_internal!(op, statesw, p, ctx)
+    condensed = unknown_size(op) > residual_size(op) && haskey(states, :q) && states.q isa InternalSource
+    condensed && (statesw = merge(statesw, (q = InternalSource(uw),)))
+    _evaluate_at_time!(r, ctxt) = begin
+        condensed && condense_internal!(op, statesw, p, ctxt)
+        evaluate!(op, r, statesw, p, ctxt)
     end
-    rp = similar(g); evaluate!(op, rp, statesw, p, with_time(ctx, t + h))
-    rm = similar(g); evaluate!(op, rm, statesw, p, with_time(ctx, t - h))
+    rp = similar(g); _evaluate_at_time!(rp, with_time(ctx, t + h))
+    rm = similar(g); _evaluate_at_time!(rm, with_time(ctx, t - h))
     g .= (rp .- rm) ./ (2h)
     return g
 end

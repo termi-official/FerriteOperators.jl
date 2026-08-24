@@ -239,6 +239,10 @@ execute_kind!(::FunctionalKind, task, ws::FacetItemWorkspace) = nothing
 # that cell, so both condensing would write the same range twice.
 execute_kind!(::CondensationKind, task, ws::FacetItemWorkspace) = nothing
 
+# ∂F/∂q is the block over the CONDENSED internal state, which no facet item
+# owns — the family has no internal dof block at all.
+execute_kind!(::JacobianKind{:q}, task, ws::FacetItemWorkspace) = nothing
+
 # Quadrature evaluation writes the per-quadrature-point data of a cell, which
 # the cell family's own sweep over that same cell already does.
 execute_kind!(::QuadratureEvaluationKind, task, ws::FacetItemWorkspace) = nothing
