@@ -3,13 +3,20 @@ Material parameters of the power-law relaxation model used by
 [`SimpleCondensedPowerLawRelaxation`](@ref): the diffusivity `κ`, the exchange
 modulus `α` between field and internal state, the dashpot viscosity `η` and
 the Norton exponent `n`. `n = 1` degenerates to a linear dashpot.
+
+Generic over `T` and promoting, because [`rebuild_parameters`](@ref) must be
+able to return a DUAL-valued object: every generic parameter path — the AD
+frozen-q partial, and the `local_conditions!` route's `∂L/∂θ` — rebuilds the
+bag from a seeded θ, and a monomorphic field type would reject it.
 """
-@kwdef struct NortonRelaxationParameters
-    κ::Float64 = 1.0
-    α::Float64 = 1.0
-    η::Float64 = 1.0
-    n::Float64 = 3.0
+struct NortonRelaxationParameters{T}
+    κ::T
+    α::T
+    η::T
+    n::T
 end
+NortonRelaxationParameters(; κ = 1.0, α = 1.0, η = 1.0, n = 3.0) =
+    NortonRelaxationParameters(promote(κ, α, η, n)...)
 
 # The differentiable-parameter view for parameter sensitivities: θ = (α, η,
 # n). κ is pure diffusion, structurally independent of the local q-problem
@@ -87,10 +94,10 @@ r(u, q) = \int_\Omega \kappa\, \nabla u \cdot \nabla \delta u
 The element owns the LOCAL stage problem `q = q_prev + γ̃ · q̇(u, q)`, which is
 nonlinear for `n ≠ 1` and solved per quadrature point by a Newton iteration
 started at `q_prev` inside [`condense_cell!`](@ref) — [`condense_internal!`](@ref)
-must run before any evaluation sweep. The implicit-function-theorem slope
-`dq/du` (and, for the parameter-sensitivity path, `dq/dθ`) is stored per
-quadrature point and read by the `Consistent` kernels, so the element is
-admissible under the internal-state rule.
+must run before any evaluation sweep. The implicit-function-theorem slopes
+`dq/du` and (for the parameter-sensitivity path) `dq/dθ` are what the
+`Consistent` kernels read, so the element is admissible under the
+internal-state rule.
 
 Two channels connect the local solver to the outer one:
 
@@ -100,11 +107,13 @@ Two channels connect the local solver to the outer one:
   * inner → outer: the [`CondensationReport`](@ref) [`condense_internal!`](@ref)
     returns.
 
-`corrector` is a construction-time seam ([`CorrectorElection`](@ref)); only
-its default (`Stored()`) is implemented.
+`corrector` elects where those slopes come from ([`CorrectorElection`](@ref)):
+`Stored()` keeps them per quadrature point, `Recompute()` keeps none and
+re-derives them from the converged `(u, q)` in the kernel that needs them.
+Both are implemented and produce the same numbers.
 """
 struct SimpleCondensedPowerLawRelaxation{Corr <: CorrectorElection} <: AbstractCondensedNonlinearIntegrator
-    material_parameters::NortonRelaxationParameters
+    material_parameters::NortonRelaxationParameters{Float64}
     # Every integrator needs these
     qrc::QuadratureRuleCollection
     field_name::Symbol
@@ -114,7 +123,7 @@ struct SimpleCondensedPowerLawRelaxation{Corr <: CorrectorElection} <: AbstractC
 end
 function SimpleCondensedPowerLawRelaxation(material_parameters, qrc, field_name, internal_name;
         local_solver = LocalNewtonSettings(), corrector = Stored())
-    corrector isa Stored || corrector_election_error(corrector)
+    corrector isa Union{Stored, Recompute} || corrector_election_error(corrector)
     return SimpleCondensedPowerLawRelaxation(material_parameters, qrc, field_name, internal_name,
                                               local_solver, corrector)
 end
@@ -122,32 +131,49 @@ FerriteOperators.corrector_election(integrator::SimpleCondensedPowerLawRelaxatio
 
 """
 The cache associated with [`SimpleCondensedPowerLawRelaxation`](@ref). Beyond
-its `CellValues` and the local solver's static configuration, it carries two
-per-quadrature-point correctors, populated by [`condense_cell!`](@ref) and
-read by the `Consistent` kernels: `correctors` (`dq/du`, Tier 1) and
-`param_correctors` (`dq/dθ`, θ = (α, η, n) — the parameter-sensitivity path).
-Declares [`has_internal_state`](@ref).
+its `CellValues` and the local solver's static configuration it carries the
+two per-quadrature-point corrector stores the `Consistent` kernels read —
+`correctors` (`dq/du`, Tier 1) and `param_correctors` (`dq/dθ`, θ = (α, η, n),
+the parameter-sensitivity path) — under a [`Stored`](@ref) election, and
+`nothing` in both fields under [`Recompute`](@ref), where the kernels
+re-derive the slopes instead. `weight` is the solver's `:u` chain-rule scalar
+of the last condensation: `O(1)` per cache rather than per item, so it stays
+whatever the election, and the recomputing path reads it back (a `Stored()`
+corrector has it folded in already). Declares [`has_internal_state`](@ref).
 """
-struct SimpleCondensedPowerLawRelaxationCache{NQP, CV <: CellValues} <: AbstractVolumetricElementCache
-    material_parameters::NortonRelaxationParameters
+struct SimpleCondensedPowerLawRelaxationCache{NQP, CV <: CellValues, S, P} <: AbstractVolumetricElementCache
+    material_parameters::NortonRelaxationParameters{Float64}
     cv::CV
     local_solver::LocalNewtonSettings
-    correctors::ItemStates{SVector{NQP, Float64}}
-    param_correctors::ItemStates{SVector{NQP, SVector{3, Float64}}}
+    correctors::S
+    param_correctors::P
+    weight::Base.RefValue{Float64}
 end
+# NQP is a kernel loop bound, and under `Recompute()` no field carries it, so
+# it is spelled at construction instead of inferred from the store type.
+SimpleCondensedPowerLawRelaxationCache{NQP}(mat, cv::CV, ls, c::S, pc::P, w) where {NQP, CV, S, P} =
+    SimpleCondensedPowerLawRelaxationCache{NQP, CV, S, P}(mat, cv, ls, c, pc, w)
+
+# The election, read off the cache: no store means the slopes are recomputed.
+# The `CV` bound is spelled rather than left `<:Any`, which would make every
+# method below ambiguous against its unparameterized sibling instead of more
+# specific.
+const _PLRRecomputing{NQP} = SimpleCondensedPowerLawRelaxationCache{NQP, <:CellValues, Nothing, Nothing}
 
 Ferrite.getnquadpoints(e::SimpleCondensedPowerLawRelaxationCache) = getnquadpoints(e.cv)
 reinit_values!(e::SimpleCondensedPowerLawRelaxationCache, cell) = Ferrite.reinit!(e.cv, cell)
 
 # The corrector stores alias across workers (ItemStates' own duplication
-# rule): items are disjoint per worker, so there is nothing to copy.
-function duplicate_for_device(device, cache::SimpleCondensedPowerLawRelaxationCache)
-    return SimpleCondensedPowerLawRelaxationCache(
+# rule): items are disjoint per worker, so there is nothing to copy. `weight`
+# is per-worker, each worker's condensation writing its own copy.
+function duplicate_for_device(device, cache::SimpleCondensedPowerLawRelaxationCache{NQP}) where {NQP}
+    return SimpleCondensedPowerLawRelaxationCache{NQP}(
         cache.material_parameters,
         duplicate_for_device(device, cache.cv),
         cache.local_solver,
         duplicate_for_device(device, cache.correctors),
         duplicate_for_device(device, cache.param_correctors),
+        Ref(cache.weight[]),
     )
 end
 
@@ -165,6 +191,8 @@ function FerriteOperators.invalidate_correctors!(cache::SimpleCondensedPowerLawR
     FerriteOperators.invalidate_item_states!(cache.param_correctors)
     return nothing
 end
+# Nothing is stored, so nothing can be stale — the framework default.
+FerriteOperators.invalidate_correctors!(::_PLRRecomputing) = nothing
 
 # The element solves no tighter than its own configuration, and no tighter
 # than the outer solver asked for.
@@ -175,6 +203,21 @@ end
 
 _plr_params(cache::SimpleCondensedPowerLawRelaxationCache, ::Nothing) = cache.material_parameters
 _plr_params(cache::SimpleCondensedPowerLawRelaxationCache, p::NortonRelaxationParameters) = p
+
+# The local operator ∂R/∂q at (u, q) — the single quantity both correctors
+# invert, and a closed form in the pair alone. That is what makes the
+# `Recompute()` election exact: re-evaluating this at the converged pair is the
+# same arithmetic the solve's last iterate ran.
+@inline function _plr_dRdq(mat, u, q, γ̃)
+    (; α, η, n) = mat
+    σ = α * (u - q)
+    return 1 + γ̃ * α * n * abs(σ)^(n - 1) / η
+end
+
+# The two implicit-function-theorem slopes at the converged pair, `dq/du`
+# carrying the solver's chain-rule scalar `w` inside the local inverse.
+@inline _plr_dqdu(dRdq, w) = ((dRdq - 1) / dRdq) * w
+@inline _plr_dqdθ(mat, u, q, γ̃, dRdq) = (-_plr_dRdθ(mat, u, q, γ̃)) / dRdq
 
 # Local stage problem  R(q) = q − q₀ − γ̃ σ|σ|ⁿ⁻¹/η  with  σ = α(u − q),
 # solved by Newton from q₀. R is strictly increasing with R′ ≥ 1 and the flow
@@ -191,7 +234,7 @@ _plr_params(cache::SimpleCondensedPowerLawRelaxationCache, p::NortonRelaxationPa
         σ    = α * (u - q)
         flow = σ * abs(σ)^(n - 1) / η
         R    = q - q₀ - γ̃ * flow
-        dRdq = 1 + γ̃ * α * n * abs(σ)^(n - 1) / η
+        dRdq = _plr_dRdq(mat, u, q, γ̃)
         ok   = abs(R) ≤ tol
         (ok || iterations == maxit) && return q, dRdq, iterations, abs(R), ok
         q -= R / dRdq
@@ -201,8 +244,7 @@ end
 
 # ∂R/∂θ at the converged (q, u), θ = (α, η, n) — the local model's own
 # parameter sensitivity, element-internal AD-free (closed form; the local
-# model is one scalar equation). `dq/dθ = -(∂R/∂q)⁻¹ ∂R/∂θ` reuses the SAME
-# `dRdq` the local Newton solve already produced.
+# model is one scalar equation).
 @inline function _plr_dRdθ(mat, u, q, γ̃)
     (; α, η, n) = mat
     σ = α * (u - q)
@@ -214,11 +256,42 @@ end
     return SVector(dRdα, dRdη, dRdn)
 end
 
+# The corrector ACCESS POINT the `Consistent` kernels call — under `Stored()`
+# what `condense_cell!` put in the store, under `Recompute()` the same slopes
+# re-derived from the item's current `(u, q)` through the very expressions the
+# condensation ran. The kernels below do not know which they got.
+_plr_correctors(cache::SimpleCondensedPowerLawRelaxationCache, args) =
+    FerriteOperators.item_state(cache.correctors, cellid(args.cell))
+_plr_param_correctors(cache::SimpleCondensedPowerLawRelaxationCache, args) =
+    FerriteOperators.item_state(cache.param_correctors, cellid(args.cell))
+
+_plr_correctors(cache::_PLRRecomputing, args) =
+    _plr_recompute((mat, u, q, γ̃, dRdq, w) -> _plr_dqdu(dRdq, w), cache, args)
+_plr_param_correctors(cache::_PLRRecomputing, args) =
+    _plr_recompute((mat, u, q, γ̃, dRdq, w) -> _plr_dqdθ(mat, u, q, γ̃, dRdq), cache, args)
+
+# One quadrature-point walk over the converged pair, shared by both slopes.
+@inline function _plr_recompute(slope, cache::_PLRRecomputing{NQP}, args) where {NQP}
+    mat = _plr_params(cache, args.p)
+    γ̃   = stage_scaling(args.ctx)
+    w   = cache.weight[]
+    cv  = cache.cv
+    dₑ  = args.states.u
+    qₑ  = args.states.q
+    return SVector{NQP}(ntuple(Val(NQP)) do qp
+        u = function_value(cv, qp, dₑ)
+        q = qₑ[qp]
+        slope(mat, u, q, γ̃, _plr_dRdq(mat, u, q, γ̃), w)
+    end)
+end
+
 """
     condense_cell!(cache::SimpleCondensedPowerLawRelaxationCache, args, weights) -> CondensationReport
 
-Solve the local Norton-dashpot problem at every quadrature point, write the
-trial `q` and store `dq/du`/`dq/dθ`.
+Solve the local Norton-dashpot problem at every quadrature point and write the
+trial `q`. Under a [`Stored`](@ref) election the two slopes `dq/du` and
+`dq/dθ` are stored alongside; under [`Recompute`](@ref) they are not, and the
+kernels re-derive them from the pair this hook converged.
 """
 function FerriteOperators.condense_cell!(cache::SimpleCondensedPowerLawRelaxationCache{NQP}, args::CellArgs, weights::NamedTuple) where {NQP}
     cv  = cache.cv
@@ -227,6 +300,7 @@ function FerriteOperators.condense_cell!(cache::SimpleCondensedPowerLawRelaxatio
     tol = _plr_tolerance(cache, args.ctx)
     id  = cellid(args.cell)
     w   = get(weights, :u, 1.0)
+    cache.weight[] = w
 
     dₑ     = args.states.u
     qₑ     = args.states.q
@@ -245,8 +319,8 @@ function FerriteOperators.condense_cell!(cache::SimpleCondensedPowerLawRelaxatio
         u = function_value(cv, qp, dₑ)
         q, dRdq, iterations, resid, ok = _plr_local_solve(cache, mat, u, qₑprev[qp], γ̃, tol)
         qₑ[qp]   = q
-        dqdu[qp] = ((dRdq - 1) / dRdq) * w
-        dqdθ[qp] = (-_plr_dRdθ(mat, u, q, γ̃)) / dRdq
+        dqdu[qp] = _plr_dqdu(dRdq, w)
+        dqdθ[qp] = _plr_dqdθ(mat, u, q, γ̃, dRdq)
 
         converged &= ok
         total_iterations += iterations
@@ -258,10 +332,16 @@ function FerriteOperators.condense_cell!(cache::SimpleCondensedPowerLawRelaxatio
         worst_residual = max(worst_residual, resid)
     end
 
-    FerriteOperators.set_item_state!(cache.correctors, id, SVector{NQP}(dqdu))
-    FerriteOperators.set_item_state!(cache.param_correctors, id, SVector{NQP}(dqdθ))
+    _plr_store_correctors!(cache, id, SVector{NQP}(dqdu), SVector{NQP}(dqdθ))
     return CondensationReport(converged, NQP, total_iterations, worst_iterations, worst_cell, worst_qp, worst_residual, 1.0)
 end
+
+function _plr_store_correctors!(cache::SimpleCondensedPowerLawRelaxationCache, id, dqdu, dqdθ)
+    FerriteOperators.set_item_state!(cache.correctors, id, dqdu)
+    FerriteOperators.set_item_state!(cache.param_correctors, id, dqdθ)
+    return nothing
+end
+_plr_store_correctors!(::_PLRRecomputing, id, dqdu, dqdθ) = nothing
 
 # One concrete entry method per provided kernel (no blanket request method:
 # it would satisfy every `hasmethod` probe in the setup-time validation).
@@ -301,18 +381,18 @@ const _PLRFrozenLike   = Union{JacobianRequest{:u, FrozenQ}, JacobianResidualReq
 
 # Pure evaluation at the FROZEN q the last `condense_internal!` wrote: no
 # solve, no write-back. `req isa _PLRFrozenLike` reads `dq/du = 0` (the elected
-# partial); otherwise it reads the stored consistent slope — `item_state`
-# throws, naming the cell, if `condense_internal!` never ran for it.
+# partial); otherwise it reads the consistent slope through the corrector
+# access point, which under `Stored()` throws, naming the cell, if
+# `condense_internal!` never ran for it.
 function _plr_assemble!(req::Union{ResidualRequest, _PLRJacobianLike}, cache::SimpleCondensedPowerLawRelaxationCache, args::CellArgs)
     (; κ, α) = _plr_params(cache, args.p)
     cv = cache.cv
-    id = cellid(args.cell)
     dₑ = args.states.u
     qₑ = args.states.q
     ndofs = getnbasefunctions(cv)
 
     needs_jac = req isa _PLRJacobianLike
-    dqdu = (needs_jac && !(req isa _PLRFrozenLike)) ? FerriteOperators.item_state(cache.correctors, id) : nothing
+    dqdu = (needs_jac && !(req isa _PLRFrozenLike)) ? _plr_correctors(cache, args) : nothing
 
     @inbounds for qp in 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
@@ -347,11 +427,10 @@ end
 function assemble_cell!(req::ParameterJacobianRequest, cache::SimpleCondensedPowerLawRelaxationCache, args::CellArgs)
     (; α) = _plr_params(cache, args.p)
     cv = cache.cv
-    id = cellid(args.cell)
     dₑ = args.states.u
     qₑ = args.states.q
     ndofs = getnbasefunctions(cv)
-    dqdθ = FerriteOperators.item_state(cache.param_correctors, id)
+    dqdθ = _plr_param_correctors(cache, args)
 
     @inbounds for qp in 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
@@ -377,11 +456,21 @@ function setup_element_cache(element_model::SimpleCondensedPowerLawRelaxation, s
     ip_geo = geometric_subdomain_interpolation(sdh)
     ncells = getncells(Ferrite.get_grid(sdh.dh))
 
-    return SimpleCondensedPowerLawRelaxationCache(
+    correctors, param_correctors = _plr_corrector_stores(element_model.corrector, nqp, ncells)
+    return SimpleCondensedPowerLawRelaxationCache{nqp}(
         element_model.material_parameters,
         CellValues(qr, ip, ip_geo),
         element_model.local_solver,
-        ItemStates{SVector{nqp, Float64}}(ncells),
-        ItemStates{SVector{nqp, SVector{3, Float64}}}(ncells),
+        correctors,
+        param_correctors,
+        Ref(1.0),
     )
 end
+
+# The election, spent: `Stored()` allocates the two per-item stores,
+# `Recompute()` allocates neither.
+_plr_corrector_stores(::Stored, nqp, ncells) = (
+    ItemStates{SVector{nqp, Float64}}(ncells),
+    ItemStates{SVector{nqp, SVector{3, Float64}}}(ncells),
+)
+_plr_corrector_stores(::Recompute, nqp, ncells) = (nothing, nothing)
