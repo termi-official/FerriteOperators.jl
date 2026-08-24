@@ -1,14 +1,12 @@
 """
     QuadratureDataQuery{T, QV <: QVector{T}}
 
-A post-processing query buffer that holds quadrature-point results for all (or a
-filtered subset of) cells.
+A post-processing query buffer holding quadrature-point results.
 
-Fields:
 - `buffer` — [`QVector{T}`](@ref) storing the result at every quadrature point
-- `set`    — optional set of cell IDs to evaluate; `nothing` means all cells
+- `set`    — cell IDs to evaluate; `nothing` means all cells
 
-Build with [`prepare_quadrature_query`](@ref) and execute with [`process_query!`](@ref).
+Build with [`prepare_quadrature_query`](@ref), execute with [`process_query!`](@ref).
 """
 struct QuadratureDataQuery{T, QV <: QVector{T}}
     buffer::QV
@@ -19,8 +17,8 @@ QuadratureDataQuery(buffer::QVector) = QuadratureDataQuery(buffer, nothing)
 """
     QuadratureDataMultiQuery{Q <: QuadratureDataQuery}
 
-A bundle of [`QuadratureDataQuery`](@ref) objects that are executed together
-(one pass per query) via [`process_query!`](@ref).
+A bundle of [`QuadratureDataQuery`](@ref) objects executed together, one pass
+per query, via [`process_query!`](@ref).
 """
 struct QuadratureDataMultiQuery{Q <: QuadratureDataQuery}
     queries::Vector{Q}
@@ -32,12 +30,9 @@ end
 
 Build a [`QuadratureDataQuery{T}`](@ref).
 
-The first form allocates a fresh [`QVector{T}`](@ref) whose layout matches `op`.
-The optional `set` keyword restricts evaluation to the given cell IDs.
-
-The second form reuses the offset/npoints layout of an existing `prototype`
-query, useful for building multiple queries over the same mesh without
-recomputing the layout.
+The first form allocates a fresh [`QVector{T}`](@ref) whose layout matches `op`;
+`set` restricts evaluation to the given cell IDs. The second reuses the
+`prototype`'s offset/npoints layout, for multiple queries over one mesh.
 """
 function prepare_quadrature_query(::Type{T}, op;
                                   set::Union{Nothing, AbstractSet{Int}} = nothing) where {T}
@@ -56,9 +51,9 @@ end
     process_query!(query::QuadratureDataQuery, op, u, p, f)
     process_query!(multi::QuadratureDataMultiQuery, op, u, p, fs)
 
-Evaluate `f(qe, ue, cell, element_cache, pe)` at every quadrature point and store
-results in `query.buffer`.  If `query.set` is set, only cells whose ID is in that
-set are evaluated; all other cells retain their current (typically zero) values.
+Evaluate `f(qe, ue, cell, element_cache, pe)` at every quadrature point into
+`query.buffer`. A non-`nothing` `query.set` restricts evaluation to those cells;
+all others retain their current (typically zero) values.
 
 The multi-query form calls `process_query!` once per `(query, f)` pair.
 """
@@ -78,10 +73,8 @@ end
 """
     VTKQuadratureFile
 
-A VTK file handler for quadrature-point data, analogous to `Ferrite.VTKGridFile`
-but backed by a [`VTKQuadratureGrid`](@ref).
-
-Use the do-block syntax (which calls `close` automatically):
+A VTK file handler for quadrature-point data: `Ferrite.VTKGridFile`, but backed
+by a [`VTKQuadratureGrid`](@ref). The do-block form closes the file:
 
 ```julia
 qgrid = VTKQuadratureGrid(dh, qrc)
@@ -126,8 +119,8 @@ Base.setindex!(pvd::WriteVTK.CollectionFile, datfile::VTKQuadratureFile, time::R
 """
     write_quadrature_data(vtk::VTKQuadratureFile, q::QVector, name)
 
-Write quadrature-point data from `q` to the VTK point-data field `name`.
-Supports both scalar (`QVector{<:Real}`) and vector (`QVector{Vec{dim,T}}`) data.
+Write quadrature-point data from `q` to the VTK point-data field `name`; scalar
+(`QVector{<:Real}`) and vector (`QVector{Vec{dim,T}}`) data are supported.
 """
 write_quadrature_data(vtk::VTKQuadratureFile, q::QVector{<:Real}, name) =
     (vtk.vtk[name, VTKBase.VTKPointData()] = q.data; vtk)

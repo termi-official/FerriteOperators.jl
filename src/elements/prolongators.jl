@@ -4,7 +4,6 @@
 P_ij = M^{-1}_{e} ∫ ϕ_i(x) ⋅ ϕc_j(x) dx (ϕc is the coarse basis function)
 """
 struct MassProlongatorIntegrator <: AbstractTransferIntegrator
-    # Every integrator needs these
     qrc::QuadratureRuleCollection
     field_name::Symbol
 end
@@ -39,8 +38,8 @@ function assemble_transfer_element!(Pₑ::AbstractMatrix, cell, element_cache::M
     fill!(Mₑbuf, zero(eltype(Mₑbuf)))
     fill!(Pₑbuf, zero(eltype(Pₑbuf)))
 
-    # Single quadrature pass: accumulate Mₑ (upper triangle, M is SPD) and Pₑbuf together.
-    # Merging the two loops halves the number of shape_value(cv1,...) evaluations.
+    # One pass for Mₑ (upper triangle, M is SPD) and Pₑbuf, halving the
+    # shape_value(cv1, …) evaluations.
     @inbounds for qp in 1:getnquadpoints(cv1)
         dΩ = getdetJdV(cv1, qp)
         for i in 1:n1
@@ -54,8 +53,7 @@ function assemble_transfer_element!(Pₑ::AbstractMatrix, cell, element_cache::M
         end
     end
 
-    # In-place Cholesky on the SPD mass matrix.  cholesky! overwrites the upper triangle of
-    # Mₑbuf with the Cholesky factor and returns a lightweight wrapper (no large allocation).
+    # In-place Cholesky: Mₑbuf's upper triangle is overwritten by the factor.
     C = cholesky!(Symmetric(Mₑbuf))
     ldiv!(Pₑ, C, Pₑbuf)
 end
@@ -74,11 +72,11 @@ end
 @doc raw"""
     NestedMassProlongatorIntegrator
 
-Integrator for assembling a prolongation operator between a fine and a coarse grid that
-are **hierarchically nested** (geometric multigrid).
+Prolongation operator between a fine and a coarse grid that are
+**hierarchically nested** (geometric multigrid).
 
 Unlike [`MassProlongatorIntegrator`](@ref) (same grid, two DofHandlers), this variant
-evaluates the coarse basis functions at fine quadrature points by mapping through the
+evaluates the coarse basis functions at fine quadrature points through the
 reference-space affine map stored in [`NestedGridCellCache`](@ref):
 
 ```math
@@ -154,8 +152,7 @@ function assemble_transfer_element!(
         dΩ     = getdetJdV(cv_fine, qp)
         ξ_fine = qr_points[qp]
 
-        # Map fine reference quadrature point to coarse reference coordinates via the
-        # affine map defined by child_nodes (the fine cell's corners in parent ref space).
+        # Fine → coarse reference coordinates through the affine map of child_nodes.
         ξ_coarse = sum(
             Ferrite.reference_shape_value(ip_geo_fine, ξ_fine, i) * child_nodes[i]
             for i in eachindex(child_nodes)

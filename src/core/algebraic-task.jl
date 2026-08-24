@@ -3,11 +3,11 @@
 ####################################
 #
 # An item of this family IS a set of global dofs and nothing else: a 0D model's
-# own rows, an `AlgebraicCoupling`-only block, a lumped balance equation. There
-# is no geometry cache, no values object and no quadrature, so the driver below
-# is `primal_cell_sweep!` with the geometry taken out. Everything else — the
-# gathers, the request materialization, the scatter, the AD decorator — is the
-# machinery the cell family already uses.
+# own rows, an `AlgebraicCoupling`-only block, a lumped balance equation. No
+# geometry cache, no values object, no quadrature — the drivers below are the
+# cell family's with the geometry taken out, and everything else (gathers,
+# request materialization, scatter, AD decorator) is machinery the cell family
+# already uses.
 #
 # The element-facing half of the family (`algebraic_items`,
 # `setup_algebraic_cache`, `assemble_algebraic!`, `AlgebraicArgs`) lives with the
@@ -44,21 +44,17 @@ compute_partition(::ColoredScheduling, provider::AlgebraicItems) = [[i] for i in
 
 Per-worker workspace of the algebraic item family: the item-sized local system
 (`Ke`, `re`, one slot buffer per declared slot), the algebraic cache, the
-[`SensitivityBuffers`](@ref) a nonlinear operator's sensitivity entry points
-need, and the item declaration this worker resolves indices against.
+[`SensitivityBuffers`](@ref) the sensitivity entry points need, and the item
+declaration this worker resolves indices against.
 `Ferrite.reinit!(ws, index)` positions it on an item.
 
 Every buffer is FIXED-size: one provider's items are uniformly sized (validated
 at setup), so no sweep ever resizes anything here.
 
 `current` is a `Ref{Int}` for the same reason [`PatchAssemblyWorkspace`](@ref)
-carries one — the item is resolved through the declaration between `reinit!`
-and the kernel rather than handed to the kernel directly, which makes this a
-CPU-scoped positioning mechanism.
-
-`ivh` mirrors [`AssemblyWorkspace`](@ref)'s field of the same name: the shared
-[`InternalVariableHandler`](@ref) an `:q` slot's [`InternalSource`](@ref)
-gather resolves the current item's range against.
+carries one. `ivh` mirrors [`AssemblyWorkspace`](@ref)'s field of the same
+name: the shared [`InternalVariableHandler`](@ref) an `:q` slot's
+[`InternalSource`](@ref) gather resolves the current item's range against.
 """
 @concrete struct AlgebraicWorkspace <: AbstractWorkspace
     Ke
@@ -79,11 +75,9 @@ Ferrite.reinit!(ws::AlgebraicWorkspace, index::Int) = (ws.current[] = index; ws)
 "The [`AlgebraicItem`](@ref) `ws` is positioned on, set by `Ferrite.reinit!(ws, index)`."
 @inline current_item(ws::AlgebraicWorkspace) = AlgebraicItem(ws.current[], item_dofs(ws))
 
-# A slot gather restricts its source to the item's condensed internal-dof
-# range, exactly like the cell family's `InternalSource` gather — empty for an
-# item owning none, which is what a stateless algebraic cache always reports
-# (`internal_variable_range` on the placeholder handler is `1:0` regardless of
-# item).
+# Restricts the source to the item's condensed internal-dof range, exactly like
+# the cell family's `InternalSource` gather. A stateless algebraic cache has an
+# empty range (`1:0` from the placeholder handler), so the gather is a no-op.
 function load_slot!(buf, src::InternalSource, ws::AlgebraicWorkspace)
     range = internal_variable_range(ws.ivh, current_item(ws))
     resize!(buf, length(range))
@@ -109,8 +103,7 @@ end
 
 Create a single [`AlgebraicWorkspace`](@ref) whose buffers are sized by the
 common dof count of `items` — an item's local system spans its own dofs and
-nothing else, so there is no field space to allocate against and no padding to
-apply.
+nothing else, so there is no padding to apply.
 
 `needs_sensitivity` selects whether [`SensitivityBuffers`](@ref) is built, the
 same STRUCTURAL decision the cell workspace makes (see
@@ -147,12 +140,10 @@ execute_kind!(kind::PrimalKind, task, ws::AlgebraicWorkspace) = primal_algebraic
     primal_algebraic_sweep!(kind, task, ws)
 
 The primal driver body of the algebraic family: [`primal_cell_sweep!`](@ref)
-with the geometry taken out. There is no `reinit_values!` (an item carries no
-values objects) and no facet walk (it carries no facets); everything else is
-the same — zero the buffers [`assembles_matrix`](@ref)/
-[`assembles_vector`](@ref) name, query the item parameters, gather the state
-slots iff [`depends_on_unknowns`](@ref), run [`assemble_algebraic!`](@ref), and
-scatter through [`scatter_local!`](@ref).
+with the geometry taken out. No `reinit_values!` (an item carries no values
+objects) and no facet walk (it carries no facets); the buffer zeroing, the
+parameter query, the [`depends_on_unknowns`](@ref)-gated slot gather and the
+[`scatter_local!`](@ref) scatter are the cell family's.
 """
 function primal_algebraic_sweep!(kind, task, ws)
     assembles_matrix(kind) && fill!(ws.Ke, zero(eltype(ws.Ke)))
@@ -174,10 +165,10 @@ execute_kind!(kind::SensitivityKind, task, ws::AlgebraicWorkspace) = sensitivity
 """
     sensitivity_algebraic_sweep!(kind, task, ws)
 
-The [`sensitivity_cell_sweep!`](@ref) counterpart of the algebraic family:
-gather the trial state, bind the request over [`SensitivityBuffers`](@ref),
-issue it against the resolved cache, and scatter through
-[`scatter_request!`](@ref). Nothing is written back into `u`.
+The [`sensitivity_cell_sweep!`](@ref) counterpart of the algebraic family: the
+request is bound over [`SensitivityBuffers`](@ref), issued against the resolved
+cache and scattered through [`scatter_request!`](@ref). Nothing is written back
+into `u`.
 """
 function sensitivity_algebraic_sweep!(kind, task, ws)
     statesₑ = load_slots!(ws, task.states)
@@ -196,8 +187,8 @@ execute_kind!(kind::FunctionalKind, task, ws::AlgebraicWorkspace) = functional_a
 
 The [`functional_cell_sweep`](@ref) counterpart of the algebraic family:
 gathers the state slots without writing anything back and returns what
-[`evaluate_algebraic_functional`](@ref) gives for the item, `nothing` by
-default.
+[`evaluate_algebraic_functional`](@ref) gives for the item (`nothing` by
+default).
 """
 function functional_algebraic_sweep(kind, task, ws)
     statesₑ = load_slots!(ws, task.states)
@@ -207,7 +198,6 @@ end
 
 # Trait-gated: a stateless algebraic cache (the common case) owns no internal
 # dofs, so condensation contributes nothing and its slots are never gathered.
-# A condensed cache reaches the driver below.
 execute_kind!(kind::CondensationKind, task, ws::AlgebraicWorkspace) =
     has_internal_state(typeof(ws.element)) ? condensation_algebraic_sweep!(kind, task, ws) : nothing
 
@@ -215,12 +205,10 @@ execute_kind!(kind::CondensationKind, task, ws::AlgebraicWorkspace) =
     condensation_algebraic_sweep!(kind::CondensationKind, task, ws) -> CondensationReport
 
 The [`condensation_cell_sweep!`](@ref) counterpart of the algebraic family:
-gathers the declared slots, hands them to [`condense_algebraic!`](@ref), and
-copies the item-local `q` buffer it filled into the item's slice of the `:q`
-slot's global vector, through the item's [`internal_variable_range`](@ref) —
-the item block of the `[ū | q_cells | q_items]` tail. Only reached for a
-condensed algebraic cache — the `execute_kind!` dispatch immediately above
-gates it on [`has_internal_state`](@ref).
+hands the gathered slots to [`condense_algebraic!`](@ref) and copies the
+item-local `q` buffer it filled into the `:q` slot's global vector over the
+item's [`internal_variable_range`](@ref) — the item block of the
+`[ū | q_cells | q_items]` tail. Gated on [`has_internal_state`](@ref) above.
 """
 function condensation_algebraic_sweep!(kind::CondensationKind, task, ws)
     statesₑ = load_slots!(ws, task.states)
@@ -241,9 +229,8 @@ execute_kind!(kind::JacobianKind{:q}, task, ws::AlgebraicWorkspace) =
 
 The [`internal_jacobian_cell_sweep!`](@ref) counterpart of the algebraic
 family: the item's ∂F/∂q block, its rows the item's own dofs and its columns
-the item's [`internal_variable_range`](@ref) — the item block of the
-`[ū | q_cells | q_items]` tail. A stateless algebraic cache owns no internal
-dofs, so its range is empty and it never reaches a kernel.
+the item's [`internal_variable_range`](@ref). A stateless algebraic cache owns
+no internal dofs, so its range is empty and it never reaches a kernel.
 """
 function internal_jacobian_algebraic_sweep!(kind::JacobianKind{:q, C}, task, ws) where {C}
     range = internal_variable_range(ws.ivh, current_item(ws))
@@ -274,20 +261,20 @@ Setup-time consistency check for algebraic caches, the
 [`ResidualRequest`](@ref) kernel must exist, every kind
 [`provides_analytic`](@ref) claims must have a matching
 [`assemble_algebraic!`](@ref) method, and — when the cache declares
-[`has_internal_state`](@ref) — every primal kind [`requires_admissibility_check`](@ref)
-names must be served analytically or declared
-[`internal_state_insensitive`](@ref), exactly like a condensed CELL cache.
-There is no generic AD `Consistent` bootstrap for this family (see
-[`condense_algebraic!`](@ref)): an algebraic item has no cellid to key a
-corrector store by, so a condensed algebraic cache has only these two
-escapes, never `ADElementCache`'s `condensed_corrector` combination.
+[`has_internal_state`](@ref) — every primal kind
+[`requires_admissibility_check`](@ref) names must be served analytically or
+declared [`internal_state_insensitive`](@ref), exactly like a condensed CELL
+cache. Those two are the only escapes here: an algebraic item has no cellid to
+key a corrector store by, so there is no generic AD `Consistent` bootstrap (see
+[`condense_algebraic!`](@ref)) and never `ADElementCache`'s
+`condensed_corrector` combination.
 
 Runs on the RAW cache, before [`decorate_algebraic_cache`](@ref): the two
 subjects the [`AbstractElementCacheDecorator`](@ref) convention distinguishes
-coincide for this family, because the generic routes a decorator would add are
-`CellArgs`-shaped and this family has none of them. The kernel probe still
-takes the [`unwrap`](@ref) fixpoint, so a hand-decorated cache handed to this
-entry point is probed on its author-written method set.
+coincide here, since the generic routes a decorator would add are
+`CellArgs`-shaped and this family has none. The kernel probe still takes the
+[`unwrap`](@ref) fixpoint, so a hand-decorated cache is probed on its
+author-written method set.
 """
 function validate_algebraic_cache(cache, declared_requests::Tuple = ())
     T = typeof(cache)
@@ -384,10 +371,10 @@ end
 The [`algebraic_items`](@ref) declaration resolved and validated once, before
 [`setup_internal_variable_handler`](@ref) or any decoration: `nothing` where
 the integrator declares no items, otherwise the raw cache
-[`setup_algebraic_cache`](@ref) built and the resolved item dof vectors —
-everything [`setup_internal_variable_handler`](@ref) needs to size a
-condensed algebraic cache's item block, and everything
-[`setup_algebraic_caches`](@ref) needs to finish the domain afterwards.
+[`setup_algebraic_cache`](@ref) built and the resolved item dof vectors — what
+[`setup_internal_variable_handler`](@ref) needs to size a condensed algebraic
+cache's item block, and what [`setup_algebraic_caches`](@ref) needs to finish
+the domain.
 """
 function resolve_algebraic_domain(integrator, dh, protocol)
     declared = algebraic_items(integrator, dh)

@@ -13,10 +13,10 @@ end
 """
     AlgebraicDomain(element, items)
 
-Domain descriptor of an algebraic subdomain cache. `element` holds the one
-cache [`setup_algebraic_cache`](@ref) built — named after `AssemblyDomain`'s
-field so the per-sweep validation helpers read both domains — and `items` the
-resolved dof vectors.
+Domain descriptor of an algebraic subdomain cache: the cache
+[`setup_algebraic_cache`](@ref) built (field named after `AssemblyDomain`'s so
+the per-sweep validation helpers read both domains) and the resolved dof
+vectors.
 """
 @concrete struct AlgebraicDomain
     element
@@ -28,8 +28,8 @@ end
 
 Domain descriptor of a facet item subdomain cache: the `SubDofHandler` whose
 cells own the facets, the surface cache [`setup_facet_item_cache`](@ref) built
-— named after `AssemblyDomain`'s field so the per-sweep validation helpers read
-every domain — and the resolved [`FacetItem`](@ref)s.
+(field named after `AssemblyDomain`'s so the per-sweep validation helpers read
+every domain), and the resolved [`FacetItem`](@ref)s.
 """
 @concrete struct FacetItemDomain
     sdh
@@ -37,33 +37,30 @@ every domain — and the resolved [`FacetItem`](@ref)s.
     items
 end
 
-# The kernel entry point of a domain's item family: the kernel function, its
-# args record, and any trailing argument types — the one triple every
-# family-dispatched check varies. A new item family adds one method here and
-# both checks below follow.
+# The kernel entry point of a domain's item family — kernel function, args
+# record, trailing argument types — the one triple every family-dispatched
+# check varies. A new family adds one method here and both checks below follow.
 kernel_entry(domain) = (assemble_cell!, CellArgs, ())
 kernel_entry(::AlgebraicDomain) = (assemble_algebraic!, AlgebraicArgs, ())
 kernel_entry(::FacetItemDomain) = (assemble_facet!, FacetArgs, (Int,))
 
-# The trait ↔ kernel check and the call-time admissibility check
-# ([`_check_sensitivity_supported`](@ref)) of a domain's cache, over its
-# family's entry: the error messages name the family's own kernel and args
-# record, and the admissibility remedies are family-aware.
+# The trait ↔ kernel and call-time admissibility checks of a domain's cache
+# (the latter driven by `_check_sensitivity_supported`), run over its family's
+# entry so the errors name the family's own kernel and args record and the
+# admissibility remedies are family-aware.
 _assert_domain_trait_backed(domain, kind) =
     _assert_trait_backed(typeof(domain.element), kind, kernel_entry(domain)...)
 _assert_domain_sensitivity_admissible(domain, kind) =
     assert_sensitivity_admissible(typeof(domain.element), kind, kernel_entry(domain)...)
 
 # Whether a subdomain can contribute to a reduction of the given kind at all —
-# the structural half of the reduction precondition, and structural per KIND:
-# a domain contributes to one reduction and not another. An
-# `EmptyVolumetricElementCache` returns no contribution to anything by
-# construction. The facet family's answer lives in facet-task.jl, next to the
-# `execute_kind!` bodies it mirrors.
-#
-# An algebraic domain answers `true` for every kind: whether its cache
-# overrides `evaluate_algebraic_functional` is not decidable by `hasmethod`,
-# since the default method takes untyped arguments and answers for every cache.
+# the structural half of the reduction precondition, and structural per KIND: a
+# domain contributes to one reduction and not another. An
+# `EmptyVolumetricElementCache` contributes to nothing by construction; the
+# facet family's answer lives in facet-task.jl, next to the `execute_kind!`
+# bodies it mirrors. An algebraic domain answers `true` for every kind, since
+# `hasmethod` cannot decide whether a cache overrides
+# `evaluate_algebraic_functional`: the default method takes untyped arguments.
 _may_contribute(domain, kind) = true
 _may_contribute(domain::AssemblyDomain, kind) = !(domain.element isa EmptyVolumetricElementCache)
 
@@ -78,10 +75,9 @@ end
 
 The assembly machinery shared by all operators: the execution strategy, the
 per-subdomain caches (workspaces + partitions), the dof handler the operator
-assembles against, the engine-scoped internal-variable handler, and the
-scheme protocol carrying the setup-time declarations
-([`AbstractSchemeProtocol`](@ref) — slot names and request kinds). Operators
-are payload (matrices/vectors) plus an engine plus their integrator.
+assembles against, the engine-scoped internal-variable handler, and the scheme
+protocol carrying the setup-time declarations ([`AbstractSchemeProtocol`](@ref)).
+Operators are payload (matrices/vectors) plus an engine plus their integrator.
 """
 @concrete struct AssemblyEngine
     strategy
@@ -102,11 +98,11 @@ execute_on_subdomains!(task, engine::AssemblyEngine) =
 """
     reduce_on_subdomains(task, engine) -> value
 
-The value-returning counterpart of `execute_on_subdomains!`: run
-`task` over every subdomain and reduce the per-subdomain partials in subdomain
-order. Within a subdomain [`reduce_on_device`](@ref) reduces the per-worker
-partials in worker order, so the whole reduction order is fixed by the
-partition and the result is deterministic for a fixed worker count.
+The value-returning counterpart of `execute_on_subdomains!`: run `task` over
+every subdomain and reduce the per-subdomain partials in subdomain order.
+Within a subdomain [`reduce_on_device`](@ref) reduces the per-worker partials
+in worker order, so the reduction order is fixed by the partition and the
+result is deterministic for a fixed worker count.
 """
 function reduce_on_subdomains(task, strategy, subdomain_caches)
     total = initial_partial(task.kind)
@@ -139,16 +135,16 @@ Interface:
 
 The `(states, p, ctx)` forms are canonical: `states` carries one entry per
 declared slot, `p` the parameter object element kernels query, `ctx` the
-per-sweep evaluation context. The `(u, p)` forms are conveniences for
-stationary problems, evaluating at `states = (u = u,)` with no context.
+per-sweep evaluation context. The `(u, p)` forms are stationary conveniences
+evaluating at `states = (u = u,)` with no context.
 """
 abstract type AbstractNonlinearOperator end
 
 """
     update_linearization!(op, residual, u, p)
 
-Setup the linearized operator `Jᵤ(u) := dᵤF(u)` in op and its residual `F(u)` in
-preparation to solve for the increment `Δu` with the linear problem `J(u) Δu = F(u)`.
+Setup the linearized operator `Jᵤ(u) := dᵤF(u)` in op and its residual `F(u)`, in
+preparation to solve `J(u) Δu = F(u)` for the increment `Δu`.
 """
 update_linearization!(Jᵤ::AbstractNonlinearOperator, residual::AbstractVector, u::AbstractVector, p)
 
@@ -163,7 +159,6 @@ update_linearization!(Jᵤ::AbstractNonlinearOperator, u::AbstractVector, p)
     evaluate!(op, residual, u, p)
 
 Evaluate the residual `F(u)` into `residual` without updating the Jacobian.
-Operators that support residual-only evaluation should implement this method.
 """
 function evaluate! end
 
@@ -174,8 +169,8 @@ it exists for downstream operators assembled into hand-built block systems.
 
 !!! warning "Slated for removal"
     Do not subtype this in new code. Block-structured targets are served by
-    [`BlockedOperatorSpecification`](@ref), and this supertype is removed once
-    its remaining downstream consumers migrate to that route.
+    [`BlockedOperatorSpecification`](@ref); this supertype is removed once its
+    remaining downstream consumers migrate.
 """
 abstract type AbstractBlockOperator <: AbstractNonlinearOperator end
 

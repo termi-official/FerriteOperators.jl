@@ -7,9 +7,7 @@ end
 create_dof_to_element_map(dh::DofHandler) = create_dof_to_element_map(Int, dh::DofHandler)
 
 function create_dof_to_element_map(::Type{IndexType}, dh::DofHandler) where IndexType
-    # Preallocate storage
     dof_to_element_vs = [Set{ElementDofPair{IndexType}}() for _ in 1:ndofs(dh)]
-    # Fill set
     for sdh in dh.subdofhandlers
         for cc in CellIterator(sdh)
             eid = Ferrite.cellid(cc)
@@ -19,7 +17,7 @@ function create_dof_to_element_map(::Type{IndexType}, dh::DofHandler) where Inde
             end
         end
     end
-    #
+    # Flatten the sets into one contiguous array indexed by dof-wise offsets.
     dof_to_element_vv = ElementDofPair{IndexType}[]
     offset = 1
     offsets = IndexType[]
@@ -30,7 +28,6 @@ function create_dof_to_element_map(::Type{IndexType}, dh::DofHandler) where Inde
         append!(dof_to_element_vv, s)
     end
     append!(offsets, offset)
-    #
     return GenericIndexedData(
         dof_to_element_vv,
         offsets,

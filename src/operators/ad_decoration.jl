@@ -10,13 +10,13 @@
 
 Whether an operator built for `integrator` may issue a kind
 [`ADElementCache`](@ref) covers — STRUCTURAL, so a bilinear or linear operator
-carries no AD/sensitivity machinery whatever an element cache does or does not
-implement analytically. `true` for `AbstractNonlinearIntegrator`.
+carries no AD/sensitivity machinery whatever an element cache implements
+analytically. `true` for `AbstractNonlinearIntegrator`.
 """
 needs_ad_decoration(integrator) = integrator isa AbstractNonlinearIntegrator
 
-# The kind instances `fully_analytic` probes: the eight decorator-covered
-# request kinds, each at a placeholder payload (only the TYPE is read).
+# The kind instances `fully_analytic` probes: every decorator-covered request
+# kind, at a placeholder payload (only the TYPE is read).
 const _AD_COVERED_KINDS = (
     JacobianKind{:u, Consistent}(), JacobianKind{:u, FrozenQ}(),
     JacobianResidualKind{Consistent}(), JacobianResidualKind{FrozenQ}(),
@@ -39,12 +39,11 @@ _maybe_fuse_split(cache) = _needs_fused_from_split(typeof(cache)) ? FusedFromSpl
 
 Resolve `cache` into the form the engine calls unconditionally:
 [`FusedFromSplit`](@ref) where it provides split analytic kernels but not the
-fused one, then [`ADElementCache`](@ref) where it still lacks analytic
-coverage of some AD-decorator kind. `ad_backend === nothing` opts out of the
+fused one, then [`ADElementCache`](@ref) where it still lacks analytic coverage
+of some AD-decorator kind. `ad_backend === nothing` opts out of the
 `ADElementCache` step only. A [`CompositeVolumetricElementCache`](@ref) wraps
 its non-analytic inners as ONE sub-composite (the maximal-sub-composite
-policy) — wrapping each individually costs one full seeding pass per inner,
-worse than not wrapping at all once two or more need it.
+policy), since wrapping each individually costs a full seeding pass per inner.
 
 `n_global_dofs` is the subdomain's [`global_dofs`](@ref) count and pads the AD
 buffers, so an AD fallback differentiates the augmented local system rather

@@ -79,8 +79,8 @@ struct StateVJPKind{L}; λ::L; end
     JacobianKind{slot}()
     JacobianKind()
 
-Assembly of the Jacobian ∂F/∂slot, materialized into the operator's matrix.
-`slot` names the state slot differentiated against; `JacobianKind()` is
+Assembly of the Jacobian ∂F/∂slot into the operator's matrix. `slot` names the
+state slot differentiated against; `JacobianKind()` is
 `JacobianKind{:u, Consistent}()`, the Newton path. Every other slot is a
 *component* of a multi-slot linearization (`JacobianKind{:du}()` for the DAE
 mass block, `JacobianKind{:v}()`/`JacobianKind{:a}()` for structural
@@ -89,20 +89,19 @@ are the solver's, not the framework's. `slot = :q` is the block a
 Schur-complement consumer or the generic corrector combination wants — see
 [`condense_internal!`](@ref).
 
-`C` is the [`CorrectionMode`](@ref): `JacobianKind{slot}()` defaults it to
-`Consistent`, so `FrozenQ` must always be spelled — `JacobianKind{slot,
-FrozenQ}()`.
+`C` is the [`CorrectionMode`](@ref); `JacobianKind{slot}()` defaults it to
+`Consistent`, so `FrozenQ` must be spelled: `JacobianKind{slot, FrozenQ}()`.
 
-The differentiated slot must carry a plain vector source: [`AffineRate`](@ref)
-slots are reconstructed at gather time and frozen under AD, so a Jacobian
-w.r.t. them is not what the sweep computes and the entry point rejects it.
+The differentiated slot must carry a plain vector source — [`AffineRate`](@ref)
+slots are reconstructed at gather time and frozen under AD, so the entry point
+rejects them.
 
-Elements serve the kind either analytically — `assemble_cell!` on
-`JacobianRequest{slot, C}`, declared through [`provides_analytic`](@ref) — or
+Elements serve the kind analytically (`assemble_cell!` on
+`JacobianRequest{slot, C}`, declared through [`provides_analytic`](@ref)) or
 through ForwardDiff seeding of the named slot buffer, which computes exactly
-the `FrozenQ` partial (the kernel it differentiates is pure at frozen `q`) —
-correct as-is for `C = FrozenQ`, and admissible for `C = Consistent` only when
-the element has no condensed internal state to miss a correction for.
+the `FrozenQ` partial — correct as-is for `C = FrozenQ`, and admissible for
+`C = Consistent` only when the element has no condensed internal state to miss
+a correction for.
 """
 struct JacobianKind{slot, C <: CorrectionMode} end
 JacobianKind{slot}() where {slot} = JacobianKind{slot, Consistent}()
@@ -116,16 +115,16 @@ Assembly of the weighted Jacobian `W = Σₛ wₛ ∂F/∂s` in ONE sweep, over 
 slots `weights` names and at frozen values of every other slot — the matrix a
 scheme actually solves with (`W = M/(γΔt) + K` for SDIRK/backward Euler,
 `M/(βΔt²) + γ/(βΔt) C + K` for Newmark). The slot set is the type parameter
-`slots`; the weights themselves are runtime payload and eltype-generic.
+`slots`; the weights are runtime payload and eltype-generic.
 
 Weights are REQUEST payload: the kernel reads them from
-[`WeightedJacobianRequest`](@ref), and the composed fallback folds the very
-same NamedTuple with [`combine!`](@ref), so the two routes cannot disagree
-about the scheme's scalars. Solvers issue the kind through
+[`WeightedJacobianRequest`](@ref) and the composed fallback folds the same
+NamedTuple with [`combine!`](@ref), so the two routes cannot disagree about the
+scheme's scalars. Solvers issue the kind through
 [`assemble_weighted_jacobian!`](@ref), which selects the route.
 
 `C` is the [`CorrectionMode`](@ref) of every participating slot;
-`WeightedJacobianKind(weights)` defaults it to `Consistent` —
+`WeightedJacobianKind(weights)` defaults it to `Consistent`, and
 `WeightedJacobianKind{slots, FrozenQ}(weights)` spells the partial.
 
 An element opts into the fused route with
@@ -140,9 +139,9 @@ Radau) go through the composed route.
 
 !!! note "AffineRate participation"
     The AD route freezes [`AffineRate`](@ref) slots at gather time, so a
-    reconstructed slot cannot participate in it and the sweep rejects one — the
-    same rule as [`JacobianKind`](@ref). An ANALYTIC weighted kernel is exempt:
-    it forms the combination internally, which is what a multilevel-Newton
+    reconstructed slot cannot participate and the sweep rejects one — the same
+    rule as [`JacobianKind`](@ref). An ANALYTIC weighted kernel is exempt: it
+    forms the combination internally, which is what a multilevel-Newton
     element with a rate-coupled local problem needs (its condensed tangent
     `−(∂L/∂q)⁻¹(∂L/∂ε + slope·∂L/∂ε̇)` carries the slope inside the local
     inverse and cannot be recovered by weighting separated partials).
@@ -181,13 +180,12 @@ The type a value-returning sweep of `kind` reduces to, or `Nothing` when the
 kind does not declare one. Queried on the INSTANCE, because every consumer is
 a running sweep holding the kind it was issued with.
 
-Declaring the type is what makes a worker's fold typed from the start: the
-accumulator is seeded with `zero(T)` instead of with the first item that
-contributes, so the partials are a concretely typed array and a kernel
-returning something other than `T` fails loudly instead of widening the
-reduction. It is REQUIRED under a parallel device, whose per-worker partials
-are allocated before the batch runs; the sequential fold can still infer the
-type from the first contribution.
+Declaring it types the worker's fold from the start: the accumulator is seeded
+with `zero(T)` instead of with the first contributing item, so the partials are
+a concretely typed array and a kernel returning something else fails loudly
+instead of widening the reduction. REQUIRED under a parallel device, whose
+per-worker partials are allocated before the batch runs; the sequential fold
+can still infer the type from the first contribution.
 
     FerriteOperators.functional_value_type(::FunctionalKind{:energy}) = Float64
     FerriteOperators.functional_value_type(::FunctionalKind{:gradient_volume}) = Vec{2, Float64}
@@ -235,12 +233,13 @@ The per-worker driver-shape routing. `NoFamily` marks a sweep that scatters
 its result through an assembler (every request-carrying kind); `FunctionalFamily`
 selects the VALUE-RETURNING driver instead: its kernel returns the item's
 contribution and the sweep reduces the returned values, so it needs no
-per-worker state at all. A sensitivity kind's OUTPUT buffers
-([`SensitivityBuffers`](@ref)) are engine/workspace-owned unconditionally for
-a nonlinear operator (see [`needs_ad_decoration`](@ref)) rather than gated by
-a third family — the ForwardDiff seeding machinery those kinds may fall back
-to lives on the resolved element cache ([`ADElementCache`](@ref)) instead of a
-family-gated workspace member.
+per-worker state at all.
+
+A sensitivity kind's OUTPUT buffers ([`SensitivityBuffers`](@ref)) are
+engine/workspace-owned unconditionally for a nonlinear operator (see
+[`needs_ad_decoration`](@ref)) rather than gated by a third family — the
+ForwardDiff seeding machinery lives on the resolved element cache
+([`ADElementCache`](@ref)) instead of a family-gated workspace member.
 """
 struct NoFamily end
 @doc (@doc NoFamily) struct FunctionalFamily end
@@ -292,12 +291,10 @@ validation_instance(::Type{<:StateVJPKind})         = StateVJPKind(nothing)
 validation_instance(::Type{<:WeightedJacobianKind}) = WeightedJacobianKind((u = 1.0,))
 
 # The kinds whose AD fallback would silently miss a condensed cache's
-# ∂F/∂q·dq/d· correction — for the sensitivity kinds always (they carry no
-# `CorrectionMode`, so they are always the total). `JacobianKind`/
-# `JacobianResidualKind` are mode-aware: a `Consistent` AD fallback needs the
-# check for the same reason; a `FrozenQ` AD fallback IS the requested partial
-# (the kernel it differentiates is pure at frozen `q`), so it never needs it —
-# see `CorrectionMode`.
+# ∂F/∂q·dq/d· correction — always for the sensitivity kinds, which carry no
+# `CorrectionMode`. `JacobianKind`/`JacobianResidualKind` are mode-aware: a
+# `Consistent` AD fallback needs the check, a `FrozenQ` one IS the requested
+# partial and never does.
 requires_admissibility_check(::Union{ParameterJacobianKind, ParameterVJPKind, StateJVPKind, StateVJPKind}) = true
 requires_admissibility_check(::JacobianKind{slot, Consistent}) where {slot} = true
 requires_admissibility_check(::JacobianKind{slot, FrozenQ}) where {slot} = false
@@ -315,12 +312,11 @@ materialize_request(::BilinearKind, ws)                    = JacobianRequest{:u}
 materialize_request(::JacobianResidualKind{C}, ws) where {C} = JacobianResidualRequest{C}(ws.Ke, ws.re)
 materialize_request(kind::WeightedJacobianKind{slots, C}, ws) where {slots, C} = WeightedJacobianRequest{C}(ws.Ke, kind.weights)
 
-# The five sensitivity kinds: `ws` alone is not enough (their destination
-# buffers live on `ws.sensitivity`, and the parameter kinds size themselves
-# from `task.p`), so these take the 3-arg form. The destination is zeroed
-# unconditionally — cheap, and correct whether the resolved cache serves the
-# request analytically (accumulates) or falls back to AD (overwrites), so the
-# engine needs no fork between the two to decide.
+# The five sensitivity kinds take the 3-arg form: their destination buffers
+# live on `ws.sensitivity`, and the parameter kinds size themselves from
+# `task.p`. The destination is zeroed unconditionally — cheap, and correct
+# whether the resolved cache accumulates (analytic) or overwrites (AD), so the
+# engine needs no fork between the two.
 function materialize_request(::ParameterJacobianKind, ws, task)
     s = parameter_sweep_buffers!(ws.sensitivity, length(parameter_vector(task.p)))
     fill!(s.Bₑ, zero(eltype(s.Bₑ)))
@@ -410,12 +406,11 @@ end
     item_dofs(ws) -> AbstractVector{Int}
 
 The global dof indices of the current item's local system: `celldofs(cell)`
-returned directly where the integrator declares no [`global_dofs`](@ref), and
-the augmented `[celldofs(cell); global dofs]` vector the workspace carries
-otherwise. Every gather of a sweep addresses through this, so the augmented
-tail reaches the slot buffers and the adjoint payloads. On an
-[`AlgebraicWorkspace`](@ref) it is the current item's own dof vector, an item
-of that family having no cell dofs to start from.
+where the integrator declares no [`global_dofs`](@ref), and the augmented
+`[celldofs(cell); global dofs]` vector the workspace carries otherwise. Every
+gather of a sweep addresses through this, so the augmented tail reaches the
+slot buffers and the adjoint payloads. On an [`AlgebraicWorkspace`](@ref) it is
+the item's own dof vector, that family having no cell dofs to start from.
 """
 @inline item_dofs(ws) = _item_dofs(ws.dofs, ws.cell)
 @inline _item_dofs(::Nothing, cell) = celldofs(cell)
@@ -428,23 +423,21 @@ What a scatter of the current item addresses. Without declared
 [`global_dofs`](@ref) it is the geometry cache, which every assembler in the
 package takes — the element-indexed [`ElementAssembly`](@ref) one reads
 `cellid` from it, the dof-scattered ones read `celldofs`. With them the local
-system spans dofs no cell owns, so the augmented dof vector is the only
-address that describes it; `ElementAssembly` is rejected at setup for exactly
-that reason. An algebraic item is addressed by its dof vector for the same
-reason, there being no cell to name it by.
+system spans dofs no cell owns, so the augmented dof vector is the only address
+that describes it, and `ElementAssembly` is rejected at setup for that reason.
+An algebraic item is addressed by its dof vector, there being no cell to name
+it by.
 """
 @inline scatter_address(ws) = _scatter_address(ws.dofs, ws.cell)
 @inline _scatter_address(::Nothing, cell) = cell
 @inline _scatter_address(dofs, cell) = dofs
 
 # Gather every task slot into the workspace's slot buffers, returning the
-# element-local states NamedTuple. A slot's SOURCE decides how it gathers — a
-# plain vector reads [`item_dofs`](@ref) (the field space plus the declared
-# global dofs, fixed per subdomain), `AffineRate` reconstructs over that same
+# element-local states NamedTuple. A slot's SOURCE decides how it gathers: a
+# plain vector reads `item_dofs`, `AffineRate` reconstructs over that same
 # gather, and `InternalSource` restricts to the cell's condensed internal-dof
-# range, resizing the buffer to fit (a per-cell size, not `ndofs_per_cell`). A
-# reconstructed slot's source is therefore structurally the field space and
-# cannot reach `q`.
+# range, resizing the buffer to fit. A reconstructed slot's source is therefore
+# structurally the field space and cannot reach `q`.
 function load_slots!(ws, states::NamedTuple{names}) where {names}
     return map(NamedTuple{names}(ws.slot_buffers), states) do buf, src
         load_slot!(buf, src, ws)
@@ -485,11 +478,10 @@ the cell parameters, runs the cell and facet kernels — gathering the state
 slots iff [`depends_on_unknowns`](@ref) — and scatters through
 [`scatter_local!`](@ref).
 
-The kernel it calls is `cell_kernel!(kind, …)`, whose generic method issues
-the kind's request analytically; the built-in kinds with an AD fallback
-specialize it. It writes nothing back — [`condense_internal!`](@ref) is the
-only writer of `q`, so a primal sweep is a pure evaluation at whatever `q` is
-currently stored.
+The kernel it calls is `cell_kernel!(kind, …)`, whose generic method issues the
+kind's request analytically; the built-in kinds with an AD fallback specialize
+it. It writes nothing back: [`condense_internal!`](@ref) is the only writer of
+`q`, so a primal sweep is a pure evaluation at whatever `q` is stored.
 """
 function primal_cell_sweep!(kind, task, ws)
     assembles_matrix(kind) && fill!(ws.Ke, zero(eltype(ws.Ke)))
@@ -565,9 +557,9 @@ end
 
 Bind `kind`'s request over `ws.sensitivity`, issue it against the resolved
 element cache, and scatter the result — the entry point a downstream
-sensitivity-family kind's own `execute_kind!` (via
-[`sensitivity_cell_sweep!`](@ref)) reaches without writing anything beyond a
-`materialize_request(::MyKind, ws, task)` / `scatter_request!` pair.
+sensitivity-family kind reaches (via [`sensitivity_cell_sweep!`](@ref)) with
+nothing beyond a `materialize_request(::MyKind, ws, task)` / `scatter_request!`
+pair.
 """
 function sensitivity_kernel!(kind, task, ws, args)
     req = materialize_request(kind, ws, task)
@@ -590,9 +582,9 @@ without writing anything back, and returns what
 [`evaluate_cell_functional`](@ref) gives for the cell — `nothing` for a cell
 that contributes nothing.
 
-Unlike [`primal_cell_sweep!`](@ref) and [`sensitivity_cell_sweep!`](@ref) this
-body writes no result into the workspace and scatters nothing; the sweep
-reduces what it returns ([`run_reduction`](@ref)).
+Unlike [`primal_cell_sweep!`](@ref) and [`sensitivity_cell_sweep!`](@ref) it
+writes no result into the workspace and scatters nothing; the sweep reduces
+what it returns ([`run_reduction`](@ref)).
 """
 function functional_cell_sweep(kind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
@@ -695,16 +687,15 @@ assemble_into!(kind, out::Tuple, op, states::NamedTuple, p, ctx) =
 """
     run_reduction(kind, op, states::NamedTuple, p, ctx) -> value
 
-The value-returning counterpart of `run_sweep!`: the same per-sweep
-validation, but the sweep hands its result back as a value instead of
-scattering it, and no workspace state is read or written. `nothing` means no
-item contributed.
+The value-returning counterpart of `run_sweep!`: the same per-sweep validation,
+but the sweep hands its result back as a value instead of scattering it, and no
+workspace state is read or written. `nothing` means no item contributed.
 
-Which shape a kind runs in is [`sweep_family`](@ref): only a
-`FunctionalFamily` kind is value-returning, so this is the entry point a
-downstream scalar or tensor kind reaches once it declares that family and
-gives `execute_kind!` a body returning the item's contribution
-([`functional_cell_sweep`](@ref) is the built-in one).
+Which shape a kind runs in is [`sweep_family`](@ref): only a `FunctionalFamily`
+kind is value-returning, so this is the entry point a downstream scalar or
+tensor kind reaches once it declares that family and gives `execute_kind!` a
+body returning the item's contribution ([`functional_cell_sweep`](@ref) is the
+built-in one).
 """
 run_reduction(kind, op, states::NamedTuple, p, ctx) =
     run_reduction(sweep_family(typeof(kind)), kind, op, states, p, ctx)
@@ -716,13 +707,12 @@ function run_reduction(::FunctionalFamily, kind, op, states::NamedTuple, p, ctx)
     return reduce_on_subdomains(AssemblyTask(kind, nothing, states, p, ctx), op.engine)
 end
 
-# A reduction has two STRUCTURAL preconditions, both misconfiguration and both
-# decidable before any item runs: there have to be items to reduce over, and
-# some subdomain has to be able to contribute at all. Deciding them here is
-# what separates them from the data-dependent case — a sweep whose kernels all
-# answer `nothing` over a non-empty, non-empty-cached domain is a legitimate
-# empty sum, not a misconfiguration. Both checks are O(subdomains): partition
-# lengths and the cache TYPE, never cell data.
+# A reduction has two STRUCTURAL preconditions, both decidable before any item
+# runs: there have to be items to reduce over, and some subdomain has to be
+# able to contribute at all. A sweep whose kernels all answer `nothing` over a
+# non-empty, non-empty-cached domain is a legitimate empty sum, not a
+# misconfiguration. Both checks are O(subdomains): partition lengths and the
+# cache TYPE, never cell data.
 function _check_reduction_domain(kind, engine)
     caches = engine.subdomain_caches
     sum(sc -> sum(length, sc.partition; init = 0), caches; init = 0) == 0 && throw(ArgumentError(
@@ -748,13 +738,12 @@ run_reduction(family, kind, op, states::NamedTuple, p, ctx) = throw(ArgumentErro
     evaluate_functional(op, kind::FunctionalKind, states, p, ctx = nothing)
     evaluate_functional(op, kind::FunctionalKind, u::AbstractVector, p)
 
-Evaluate the functional named by `kind` over the operator's domain: the sum
-of the per-cell contributions returned by
-[`evaluate_cell_functional`](@ref) (a `Number` or a Tensors tensor).
-Contributions fold per worker in item order and the per-worker partials reduce
-in a fixed order — results are deterministic for a fixed worker count. Nothing
-is written into the operator, so an operator declaring no functional kind
-serves one just as well.
+Evaluate the functional named by `kind` over the operator's domain: the sum of
+the per-cell contributions returned by [`evaluate_cell_functional`](@ref) (a
+`Number` or a Tensors tensor). Contributions fold per worker in item order and
+the per-worker partials reduce in a fixed order — results are deterministic for
+a fixed worker count. Nothing is written into the operator, so an operator
+declaring no functional kind serves one just as well.
 
 Cell items contribute through [`evaluate_cell_functional`](@ref) and algebraic
 items through [`evaluate_algebraic_functional`](@ref); the facet item family
@@ -763,13 +752,11 @@ have.
 
 Two failure modes are kept apart. STRUCTURAL emptiness — no items in the
 operator's partitions, or no subdomain whose element cache can contribute — is
-a misconfiguration and is an `ArgumentError` raised before any cell runs,
-whatever the kind declares. A sweep that runs and whose kernels all answer
-`nothing` is the DATA-DEPENDENT case: an empty sum, which a kind declaring
-[`functional_value_type`](@ref) answers with `zero(T)` and an undeclared kind
-cannot answer at all (there is no `T` to take the identity of) and reports as
-an `ArgumentError`. Declaring the value type is what makes an all-quiet sweep
-well-defined.
+a misconfiguration, raised as an `ArgumentError` before any cell runs. A sweep
+that runs and whose kernels all answer `nothing` is the DATA-DEPENDENT case: an
+empty sum, which a kind declaring [`functional_value_type`](@ref) answers with
+`zero(T)` and an undeclared kind cannot answer at all (there is no `T` to take
+the identity of) and reports as an `ArgumentError`.
 """
 function evaluate_functional(op, kind::FunctionalKind, states::NamedTuple, p, ctx = nothing)
     total = run_reduction(kind, op, states, p, ctx)

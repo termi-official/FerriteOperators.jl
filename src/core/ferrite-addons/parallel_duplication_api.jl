@@ -1,4 +1,4 @@
-# Adaption of the API presented in Ferrite.jl#1070 for general devices with some tweaks. Essentially a Adapt.jl wrapper.
+# Adaption of the API presented in Ferrite.jl#1070 to general devices; essentially an Adapt.jl wrapper.
 function duplicate_for_device(device, asm::Ferrite.CSCAssembler{T, Ti, TK, atomic}) where {T, Ti, TK, atomic}
     return Ferrite.CSCAssembler{T, Ti, TK, atomic}(
         asm.K,
@@ -102,10 +102,8 @@ end
 function duplicate_for_device(device, x::T)::T where {S, T <: DenseArray{S}}
     @assert !isbitstype(T)
     if isbitstype(S)
-        # If the eltype isbitstype the normal shallow copy can be used...
         return copy(x)::T
     else
-        # ... otherwise we recurse and call duplicate_for_device on the elements
         return map(y->duplicate_for_device(device,y), x)::T
     end
 end

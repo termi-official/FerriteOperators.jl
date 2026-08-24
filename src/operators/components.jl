@@ -5,16 +5,13 @@
 """
     allocate_components(op, names::NTuple{N, Symbol}) -> NamedTuple of matrices
 
-Allocate `N` square system matrices for `op` that all share ONE sparsity
-pattern: the shared-memory-CSC realization aliases `colptr`/`rowval` across the
-bag (`===`) and gives every component its own zeroed `nzval`. Assemble into a
-component through the ordinary entry points — it is a plain system matrix —
-and fold the bag with [`combine!`](@ref).
+Allocate `N` square system matrices for `op` that share ONE sparsity pattern
+(see [`share_pattern`](@ref)). Each is a plain system matrix — assemble into it
+through the ordinary entry points, fold the bag with [`combine!`](@ref).
 
-The shared pattern is what makes `combine!` a pure `nzval` operation. It is
-also a contract: structural mutation of a component (`dropzeros!`, inserting an
-entry) breaks the whole bag and is not supported. `apply_zero!`-style value
-mutation is fine.
+The shared pattern makes `combine!` a pure `nzval` operation, and is a contract:
+structural mutation of a component (`dropzeros!`, inserting an entry) breaks the
+whole bag. `apply_zero!`-style value mutation is fine.
 
 ```julia
 comps = allocate_components(op, (:Ju, :Jdu))
@@ -34,8 +31,8 @@ end
     share_pattern(A::SparseMatrixCSC, T = eltype(A)) -> SparseMatrixCSC
 
 A `T`-valued matrix aliasing `A`'s `colptr`/`rowval` with a fresh zeroed
-`nzval` — the CSC backend's realization of "same pattern group as `A`". Pass
-`T = ComplexF64` for the combination target of a transformed Radau stage.
+`nzval` — "same pattern group as `A`". Pass `T = ComplexF64` for the
+combination target of a transformed Radau stage.
 """
 share_pattern(A::SparseMatrixCSC, ::Type{T} = eltype(A)) where {T} =
     SparseMatrixCSC(size(A, 1), size(A, 2), getcolptr(A), rowvals(A), zeros(T, nnz(A)))
@@ -45,14 +42,11 @@ share_pattern(A::AbstractMatrix, ::Type = Float64) = throw(ArgumentError(
 """
     combine!(W, comps::NamedTuple, weights::NamedTuple) -> W
 
-Fold the weighted sum `W = Σ weights[k] · comps[k]` over the names in
-`weights` — a subset of `comps`, so a scheme combines only the components it
-needs. Values only: `W` and the components must share the sparsity pattern
-(checked), and `W.nzval` is overwritten.
-
-Eltype-generic in both directions: real components with complex weights
-combine into a `Complex` `W`, which is what transformed (diagonalized) Radau
-needs per eigenvalue of the tableau inverse.
+Fold `W = Σ weights[k] · comps[k]` over the names in `weights`, a subset of
+`comps`. Values only: `W` and the components must share the sparsity pattern
+(checked), and `W.nzval` is overwritten. Real components with complex weights
+combine into a `Complex` `W` — what transformed (diagonalized) Radau needs per
+eigenvalue of the tableau inverse.
 """
 function combine!(W::SparseMatrixCSC, comps::NamedTuple, weights::NamedTuple)
     isempty(weights) && throw(ArgumentError("`weights` names no component to combine."))
@@ -69,9 +63,8 @@ function combine!(W::SparseMatrixCSC, comps::NamedTuple, weights::NamedTuple)
     return W
 end
 
-# Loud pattern check for one component. Aliased index arrays are the
-# constructed case and settle it outright; a `W` allocated elsewhere is
-# compared entrywise instead of trusted.
+# Aliased index arrays are the constructed case and settle the check outright;
+# a `W` allocated elsewhere is compared entrywise instead of trusted.
 function assert_shared_pattern(W::SparseMatrixCSC, C::SparseMatrixCSC, name::Symbol)
     size(W) == size(C) || throw(DimensionMismatch(
         "component `:$name` has size $(size(C)), target has $(size(W))."))

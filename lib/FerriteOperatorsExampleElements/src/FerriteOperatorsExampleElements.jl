@@ -1,19 +1,18 @@
 """
 Example elements for [FerriteOperators](https://github.com/termi-official/FerriteOperators.jl).
 
-The elements here are minimal, readable implementations of the element
-contract — one per feature the contract exposes: a bilinear form
-([`SimpleBilinearDiffusionIntegrator`](@ref), [`SimpleBilinearMassIntegrator`](@ref)),
-a linear form ([`SimpleLinearIntegrator`](@ref)), a nonlinear element with
-analytic tangent ([`SimpleHyperelasticityIntegrator`](@ref)), a condensed
-element with per-quadrature-point internal state
-([`SimpleCondensedLinearViscoelasticity`](@ref)) and a condensed element whose
-local problem is nonlinear and communicates with the outer solver
+Minimal, readable implementations of the element contract — one per feature it
+exposes: a bilinear form ([`SimpleBilinearDiffusionIntegrator`](@ref),
+[`SimpleBilinearMassIntegrator`](@ref)), a linear form
+([`SimpleLinearIntegrator`](@ref)), a nonlinear element with analytic tangent
+([`SimpleHyperelasticityIntegrator`](@ref)), a condensed element with
+per-quadrature-point internal state
+([`SimpleCondensedLinearViscoelasticity`](@ref)) and one whose local problem is
+nonlinear and communicates with the outer solver
 ([`SimpleCondensedPowerLawRelaxation`](@ref)).
 
-They are meant to be read, copied and used as test fixtures. They are not
-tuned for production use and carry no stability guarantee beyond the element
-contract they demonstrate.
+Meant to be read, copied and used as test fixtures: not tuned for production
+use, and carrying no stability guarantee beyond the contract they demonstrate.
 """
 module FerriteOperatorsExampleElements
 

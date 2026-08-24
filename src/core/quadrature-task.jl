@@ -2,11 +2,9 @@
 ## Quadrature evaluation as a request kind
 ####################################
 #
-# Per-quadrature-point evaluation runs through the SAME engine as assembly —
-# no bespoke task system, no separate operator type. Reinitialization goes
-# through the same `reinit_values!` hook as every other kind; the framework
-# provides the cell filtering, slot gathering, parameter query, and the
-# data-query/store hooks.
+# Per-quadrature-point evaluation runs through the SAME engine as assembly — no
+# bespoke task system, no separate operator type, and the same `reinit_values!`
+# hook as every other kind.
 
 """
     query_element_quadrature_data(element, cell, ivh, q::QVector)
@@ -20,8 +18,8 @@ query_element_quadrature_data(element, cell, ivh, q::QVector) = get_range_for_ce
     store_quadrature_data!(q::QVector, qe, cell, ivh, element)
 
 Element-overridable write-back counterpart of
-[`query_element_quadrature_data`](@ref). The default is a no-op because the
-default query hands out a mutable view.
+[`query_element_quadrature_data`](@ref), a no-op by default because the default
+query hands out a mutable view.
 """
 store_quadrature_data!(q::QVector, qe, cell, ivh, element) = nothing
 
@@ -56,8 +54,8 @@ end
     evaluate_quadrature!(q::QVector, op, u, p, f, [set = nothing])
 
 Evaluate `f(uₑ, qp, cell, element_cache, pₑ)` at every quadrature point and
-store the returned values in `q`, using `op`'s assembly engine. If `set` is
-given, only cells in it are evaluated; the remaining entries of `q` are left
+store the returned values in `q`, using `op`'s assembly engine. With `set`
+given, only its cells are evaluated and the remaining entries of `q` are left
 untouched.
 """
 function evaluate_quadrature!(q::QVector, op, u, p, f, set = nothing)

@@ -11,14 +11,14 @@ the request-typed `assemble_cell!`/`assemble_facet!` methods.
     integrator
     slot_components   # lazily built per-slot matrices of the composed weighted route
 end
-# `slot_components` is operator-owned scratch, not payload: it holds one matrix
-# per slot ever combined through `assemble_weighted_jacobian!`, each sharing
-# `J`'s sparsity pattern, so a repeated evaluation allocates nothing.
+# `slot_components` is operator-owned scratch, not payload: one `J`-patterned
+# matrix per slot ever combined through `assemble_weighted_jacobian!`, so a
+# repeated evaluation allocates nothing.
 LinearizedFerriteOperator(J, engine, integrator) =
     LinearizedFerriteOperator(J, engine, integrator, Dict{Symbol, typeof(J)}())
 
-# Interface. The states/ctx forms are canonical; the u-vector forms are
-# conveniences for stationary problems (states = (u = u,), no context).
+# Interface; the u-vector forms are the stationary conveniences described in
+# `AbstractNonlinearOperator`.
 update_linearization!(op::LinearizedFerriteOperator, states::NamedTuple, p, ctx) =
     assemble_into!(JacobianKind(), (op.J,), op, states, p, ctx)
 update_linearization!(op::LinearizedFerriteOperator, u::AbstractVector, p) =
@@ -37,14 +37,12 @@ evaluate!(op::LinearizedFerriteOperator, residual::AbstractVector, u::AbstractVe
 
 Assemble ∂F/∂slot into `J`, where `kind` names the slot
 ([`JacobianKind`](@ref)). `J` is any matrix the operator's assembler accepts —
-in particular a member of a component bag from
-[`allocate_components`](@ref) — so the multi-slot linearization
-`Σ wₛ ∂F/∂s` is assembled once per slot and folded with [`combine!`](@ref).
-`op.J` is untouched unless it is passed as `J`.
+in particular a member of an [`allocate_components`](@ref) bag, so the
+multi-slot linearization `Σ wₛ ∂F/∂s` is assembled slot by slot and folded with
+[`combine!`](@ref). `op.J` is untouched unless passed as `J`.
 
-`:q` is not a slot of this entry point: ∂F/∂q is field × internal-shaped, not
-square, and has its own target and entry point
-([`update_internal_jacobian!`](@ref)).
+`:q` is not a slot here — ∂F/∂q is field × internal-shaped, not square, and has
+its own target and entry point ([`update_internal_jacobian!`](@ref)).
 """
 assemble_slot_jacobian!(J::AbstractMatrix, op::LinearizedFerriteOperator, kind::JacobianKind, states::NamedTuple, p, ctx) =
     assemble_into!(kind, (J,), op, states, p, ctx)
@@ -60,30 +58,24 @@ assemble_slot_jacobian!(J::AbstractMatrix, op::LinearizedFerriteOperator, ::Jaco
 
 Assemble the weighted Jacobian `W = Σₛ weights[s] · ∂F/∂s` — the matrix a
 scheme solves with — over the slots `weights` names, at frozen values of every
-other slot. `weights` are the solver's chain-rule scalars
-(`(u = 1.0, du = 1/(γΔt))` for SDIRK/backward Euler).
+other slot. `weights` are chain-rule scalars (`(u = 1.0, du = 1/(γΔt))` for
+SDIRK/backward Euler). `W` must share the operator's sparsity pattern: `op.J`,
+a member of [`allocate_components`](@ref), or [`share_pattern`](@ref)
+(`ComplexF64` for a complex combination).
 
-Two routes produce the same matrix from the same weights, and which one runs
-is a capability of the operator's element caches, not a caller choice:
+Two routes give the same matrix to round-off ([`check_derivatives`](@ref)
+verifies); which one runs is a capability of the element caches, not a caller
+choice:
 
-- **fused** — one sweep of [`WeightedJacobianKind`](@ref): the element's
-  analytic `WeightedJacobianRequest` kernel where declared, otherwise the
-  residual kernel with every participating slot seeded by its weight-scaled
-  Duals.
+- **fused** — one [`WeightedJacobianKind`](@ref) sweep: the analytic
+  `WeightedJacobianRequest` kernel where declared, else the residual kernel
+  with every participating slot seeded by weight-scaled Duals.
 - **composed** — one [`assemble_slot_jacobian!`](@ref) sweep per slot into
-  operator-held components sharing `W`'s pattern, folded by [`combine!`](@ref)
-  with the very same `weights`.
-
-The composed route runs for complex weights (the element matrix and the Dual
-machinery are real — this is what transformed Radau needs) and for caches whose
-condensed internal state makes the AD-seeded fused route inadmissible; there
-the per-slot sweeps apply their own guards, so the weighted kind is servable
-exactly when every participating [`JacobianKind`](@ref) is. Both routes agree
-to round-off, which [`check_derivatives`](@ref) verifies.
-
-`W` must share the operator's sparsity pattern — use `op.J`, a member of
-[`allocate_components`](@ref), or [`share_pattern`](@ref) (with `ComplexF64`
-for a complex combination).
+  components sharing `W`'s pattern, folded by [`combine!`](@ref). Runs for
+  complex weights (the Dual machinery is real — transformed Radau needs this)
+  and where condensed internal state makes the fused route inadmissible; its
+  per-slot sweeps carry their own guards, so the weighted kind is servable
+  exactly when every participating [`JacobianKind`](@ref) is.
 """
 function assemble_weighted_jacobian!(W::AbstractMatrix, op::LinearizedFerriteOperator, weights::NamedTuple, states::NamedTuple, p, ctx)
     kind = WeightedJacobianKind(weights)
@@ -94,12 +86,10 @@ end
 
 # The fused sweep needs real weights, and needs every cache to either serve the
 # kind analytically or be safe to differentiate: a `Consistent` AD fallback
-# would silently drop a condensed cache's ∂F/∂q·dq/d· correction, and the
-# fused sweep seeds ALL participating slots at once, so a condensed cache
-# without the analytic weighted kernel has no admissible fused route
-# (`assert_sensitivity_admissible`'s rule, applied to this kind). A `FrozenQ`
-# election needs no such guard: the AD fallback IS the requested partial (the
-# kernel it differentiates is pure at frozen `q`), same as for `JacobianKind`.
+# would silently drop a condensed cache's ∂F/∂q·dq/d· correction, and the fused
+# sweep seeds ALL participating slots at once (`assert_sensitivity_admissible`'s
+# rule, applied to this kind). A `FrozenQ` election needs no such guard: the AD
+# fallback IS the requested partial, same as for `JacobianKind`.
 function _fused_weighted_route(op, kind::WeightedJacobianKind{slots, C}) where {slots, C}
     all(w -> w isa Real, values(kind.weights)) || return false
     C === FrozenQ && return true
@@ -127,11 +117,10 @@ function _slot_component_bag!(op::LinearizedFerriteOperator, slots::NTuple{N, Sy
     return NamedTuple{slots}(ntuple(i -> store[slots[i]], Val(N)))
 end
 
-# Call-time admissibility over all subdomain caches; the same per-cache check
-# runs at setup for kinds declared via `setup_operator(...; requests)` — see
-# `assert_sensitivity_admissible` for the rationale. Family-dispatched through
-# `_assert_domain_sensitivity_admissible` so an algebraic subdomain's error
-# names `assemble_algebraic!`, not `assemble_cell!`.
+# Call-time admissibility over all subdomain caches; a declared kind runs the
+# same per-cache check at setup (rationale: `assert_sensitivity_admissible`).
+# Family-dispatched, so an algebraic subdomain's error names
+# `assemble_algebraic!`, not `assemble_cell!`.
 function _check_sensitivity_supported(op, kind)
     for sc in op.engine.subdomain_caches
         _assert_domain_sensitivity_admissible(sc.domain, kind)
@@ -142,16 +131,16 @@ end
 """
     update_parameter_jacobian!(B, op, u, p)
 
-Assemble the parameter Jacobian ∂F/∂θ into `B` (`residual_size(op) × nθ`),
-evaluated at the trial state `u`. θ is the flat parameter view defined by
-[`parameter_vector`](@ref)/[`rebuild_parameters`](@ref); elements provide
-analytic [`ParameterJacobianRequest`](@ref) kernels or fall back to AD of
-their residual. Never writes back into `u`.
+Assemble the parameter Jacobian ∂F/∂θ into `B` (`residual_size(op) × nθ`) at
+the trial state `u`, never writing back into `u`. θ is the flat parameter view
+defined by [`parameter_vector`](@ref)/[`rebuild_parameters`](@ref); elements
+provide analytic [`ParameterJacobianRequest`](@ref) kernels or fall back to AD
+of their residual.
 
 !!! note
-    The u-vector convenience forms evaluate at the stationary point
-    `states = (u = u,)` with no time-integration context. Elements reading
-    further slots (`uprev`, …) or `args.ctx` must use the states/ctx forms.
+    The u-vector forms evaluate at `states = (u = u,)` with no
+    time-integration context. Elements reading further slots (`uprev`, …) or
+    `args.ctx` must use the states/ctx forms.
 """
 function update_parameter_jacobian!(B::AbstractMatrix, op::LinearizedFerriteOperator, states::NamedTuple, p, ctx)
     _check_sensitivity_supported(op, ParameterJacobianKind())
@@ -195,12 +184,11 @@ parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVec
     state_jvp!(Jv, op, v, states, p, ctx)
     state_jvp!(Jv, op, v, u, p)
 
-Matrix-free action of the state Jacobian: `Jv = (∂F/∂u)·v` at the trial
-state, computed kernel-level (one directional-Dual sweep per cell for the AD
-fallback; analytic [`StateJVPRequest`](@ref) kernels win per cache) — no
-matrix is materialized anywhere. Never writes back into the caller's state.
-Requires an operator without condensed unknowns
-(`unknown_size(op) == residual_size(op)`); anything else is an `ArgumentError`.
+Matrix-free action of the state Jacobian: `Jv = (∂F/∂u)·v` at the trial state,
+computed kernel-level (one directional-Dual sweep per cell for the AD fallback;
+analytic [`StateJVPRequest`](@ref) kernels win per cache). Never writes back
+into the caller's state. Requires `unknown_size(op) == residual_size(op)`, i.e.
+no condensed unknowns; anything else is an `ArgumentError`.
 """
 function state_jvp!(Jv::AbstractVector, op::LinearizedFerriteOperator, v::AbstractVector, states::NamedTuple, p, ctx)
     unknown_size(op) == residual_size(op) || throw(ArgumentError(
@@ -223,8 +211,8 @@ state_jvp!(Jv::AbstractVector, op::LinearizedFerriteOperator, v::AbstractVector,
 Matrix-free pullback of the state Jacobian: `g = (∂F/∂u)ᵀλ` at the trial
 state — the action adjoint time stepping applies. Kernel-level (per-cell
 gradient of `λₑ·rₑ` for the AD fallback; analytic [`StateVJPRequest`](@ref)
-kernels win per cache). Never writes back into the caller's state. Requires an
-operator without condensed unknowns, like [`state_jvp!`](@ref).
+kernels win per cache). Never writes back into the caller's state, and
+requires no condensed unknowns, like [`state_jvp!`](@ref).
 """
 function state_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::AbstractVector, states::NamedTuple, p, ctx)
     unknown_size(op) == residual_size(op) || throw(ArgumentError(
@@ -250,22 +238,19 @@ struct ADSensitivity end
 """
     FiniteDifferenceSensitivity(h = cbrt(eps(Float64)))
 
-Central-difference derivative method: evaluates the PRIMAL residual at
-contexts carrying perturbed evaluation times, on a protected copy of `u` (so
-trial write-back never leaks), and forms `(F(t+h) − F(t−h)) / 2h`. Exact local
-solves, no Dual propagation — admissible for condensed elements, where it
-condenses AT each perturbed context and so yields the total t-derivative at
-fixed `u`, including the element-local state's response (as does AD, when
-admissible). The operator's corrector stores are left holding the last
-perturbed point's condensation. Accuracy O(h²).
+Central-difference derivative method, accuracy O(h²): `(F(t+h) − F(t−h)) / 2h`
+from PRIMAL residual evaluations at contexts carrying perturbed evaluation
+times, on a protected copy of `u` so trial write-back never leaks. No Dual
+propagation, hence admissible for condensed elements: it condenses AT each
+perturbed context and so yields the TOTAL t-derivative at fixed `u`, the
+element-local state's response included. The operator's corrector stores are
+left holding the last perturbed point's condensation.
 
-This and the [`ADElementCache`](@ref) decorator are the two derivative
-mechanisms, and the split is final: the operator-level method here is the only
-BOUNDARY-INCLUSIVE route, since it differences `evaluate!` (facet terms
-included) rather than an element kernel, and the only Dual-free one; the
-decorator is the per-cache route, where an analytic kernel still wins cache by
-cache. This method is an operator-level OVERRIDE and therefore bypasses
-analytic sensitivity kernels everywhere.
+The operator-level counterpart of the [`ADElementCache`](@ref) decorator, and
+the split is final: this is the only BOUNDARY-INCLUSIVE route (it differences
+`evaluate!`, facet terms included, rather than an element kernel) and the only
+Dual-free one, and being an operator-level OVERRIDE it bypasses analytic
+sensitivity kernels everywhere.
 """
 struct FiniteDifferenceSensitivity{T}
     h::T
@@ -278,17 +263,15 @@ FiniteDifferenceSensitivity() = FiniteDifferenceSensitivity(cbrt(eps(Float64)))
 Assemble the time sensitivity ∂F/∂t into `g` (`residual_size(op)`) at the
 trial state, never writing back into the caller's state. The evaluation time
 is `evaluation_time(ctx)` — time reaches elements through the context channel
-only, so `ctx` is mandatory here and `p` carries user parameters as in every
-other entry point.
+only, so `ctx` is mandatory here.
 
-Method hierarchy: with [`ADSensitivity`](@ref) (default), each element cache
-that declares an analytic [`TimeSensitivityRequest`](@ref) kernel is used
-directly, and every other cache falls back to ForwardDiff of its residual
-kernel over a Dual-timed context — analytic kernels always win per cache.
+With [`ADSensitivity`](@ref) (default) an analytic
+[`TimeSensitivityRequest`](@ref) kernel wins per cache, and every other cache
+falls back to ForwardDiff of its residual kernel over a Dual-timed context.
 [`FiniteDifferenceSensitivity`](@ref) is an operator-level override that
-differences primal residual evaluations and therefore BYPASSES analytic
-sensitivity kernels; prefer it only where AD is inadmissible (condensed
-internal state without analytic kernels or insensitivity declarations).
+BYPASSES analytic sensitivity kernels; prefer it only where AD is inadmissible
+(condensed internal state without analytic kernels or insensitivity
+declarations).
 """
 function time_sensitivity!(g::AbstractVector, op::LinearizedFerriteOperator, states::NamedTuple, p, ctx; method = ADSensitivity())
     length(g) == residual_size(op) || throw(DimensionMismatch(
@@ -307,13 +290,11 @@ function _time_sensitivity!(::ADSensitivity, g, op, states, p, ctx)
 end
 
 function _time_sensitivity!(method::FiniteDifferenceSensitivity, g, op, states, p, ctx)
-    # Primal evaluations at perturbed contexts, on a copy of `u` so the
-    # caller's state never moves. A condensed operator is re-condensed AT each
-    # perturbed context, not once ahead of both: a local model reading
-    # `evaluation_time` has its own t-dependence, and differencing at a frozen
-    # `q` would silently return the partial where this method's contract is
-    # the total. `u` itself never changes — only the context time and the `q`
-    # each condensation writes for it.
+    # A condensed operator is re-condensed AT each perturbed context, not once
+    # ahead of both: a local model reading `evaluation_time` has its own
+    # t-dependence, and differencing at a frozen `q` would silently return the
+    # partial where this method's contract is the total. `u` never changes —
+    # only the context time and the `q` each condensation writes for it.
     t  = evaluation_time(ctx)
     h  = method.h * max(one(t), abs(t))
     uw = copy(states.u)
@@ -334,7 +315,7 @@ end
     mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector)
     mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β)
 
-Apply the (scaled) action of the linearization of the contained nonlinear operator to the vector `in`.
+Apply the (scaled) action of the assembled linearization to the vector `in`.
 """
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector) = mul!(out, op.J, in)
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.J, in, α, β)
@@ -349,9 +330,9 @@ Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)
 
 The two lengths an operator's entry points size their arguments by:
 `residual_size` is the number of FE dofs (rows of `F`, length of a residual or
-adjoint vector), `unknown_size` adds the condensed internal tail
-(`[ū; q]`, length of a solution vector). They coincide exactly when the
-operator carries no condensed element.
+adjoint vector); `unknown_size` adds the condensed internal tail (`[ū; q]`,
+length of a solution vector). They coincide exactly when the operator carries
+no condensed element.
 """
 residual_size(op::LinearizedFerriteOperator) = ndofs(op.engine.dh)
 

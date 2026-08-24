@@ -11,10 +11,10 @@ update_operator!(op::BilinearFerriteOperator, p) =
     evaluate!(op::BilinearFerriteOperator, residual, states, p, ctx)
     evaluate!(op::BilinearFerriteOperator, residual, u, p)
 
-Assemble `residual = A·u` from the element residual kernels — the action of
-the operator induced by the bilinear form, evaluated without touching `op.A`.
-The residual kernel is mandatory for every element cache (validated at
-setup), so this entry point is available for every bilinear operator.
+Assemble `residual = A·u` from the element residual kernels — the action of the
+operator induced by the bilinear form, evaluated without touching `op.A`. The
+residual kernel is mandatory for every element cache (validated at setup), so
+this entry point exists for every bilinear operator.
 """
 evaluate!(op::BilinearFerriteOperator, residual::AbstractVector, states::NamedTuple, p, ctx) =
     assemble_into!(ResidualKind(), (residual,), op, states, p, ctx)

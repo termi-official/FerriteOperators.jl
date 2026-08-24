@@ -3,17 +3,16 @@
 
 Compile-time flag selecting the exhaustive form of setup-time checks whose
 production form samples. Loaded from the `use_debug` preference and therefore
-constant-folded: production carries neither the check nor a branch on it.
-Mirrors `Ferrite.DEBUG`, and is set independently of it.
+constant-folded: production carries neither check nor branch. Mirrors
+`Ferrite.DEBUG` but is set independently of it.
 """
 const DEBUG = Preferences.@load_preference("use_debug", false)
 
 """
     FerriteOperators.debug_mode(; enable = true)
 
-Turn the [`FerriteOperators.DEBUG`](@ref) preference on or off. The change
-takes effect after restarting the Julia session, since the flag is baked in at
-precompilation.
+Turn the [`FerriteOperators.DEBUG`](@ref) preference on or off. Takes effect
+after a Julia session restart, since the flag is baked in at precompilation.
 """
 function debug_mode(; enable = true)
     if DEBUG == enable

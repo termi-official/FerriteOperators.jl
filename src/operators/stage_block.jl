@@ -6,28 +6,23 @@
     StageBlockOperator(op, A, c, Δt)
 
 The Newton block operator of an s-stage fully implicit Runge-Kutta scheme:
-stage `i` contributes the residual row `F(t + cᵢΔt, zᵢ, kᵢ)` with
-`zᵢ = uₙ + Δt Σⱼ aᵢⱼ kⱼ`, so the block against the stage derivatives `k` is
+stage `i` contributes the row `F(t + cᵢΔt, zᵢ, kᵢ)`, `zᵢ = uₙ + Δt Σⱼ aᵢⱼ kⱼ`,
+so the block against the stage derivatives `k` is
 
     block(i, j) = δᵢⱼ · Jdu⁽ⁱ⁾ + Δt · aᵢⱼ · Ju⁽ⁱ⁾ ,
 
-with `Ju⁽ⁱ⁾ = ∂F/∂u` and `Jdu⁽ⁱ⁾ = ∂F/∂du` assembled at stage `i`'s state and
-time. All s² blocks come from those 2s component matrices — the tableau enters
-as coefficients, never as extra assembly. Every component shares one sparsity
-pattern (see [`allocate_components`](@ref)).
-
-Fill the components with [`assemble_stages!`](@ref), apply the block matrix
-with `mul!` over stage-stacked vectors of length `s·n`.
+with `Ju⁽ⁱ⁾ = ∂F/∂u`, `Jdu⁽ⁱ⁾ = ∂F/∂du` at stage `i`'s state and time. All s²
+blocks come from those 2s components, which share one sparsity pattern (see
+[`allocate_components`](@ref)) — the tableau enters as coefficients, never as
+extra assembly. Fill them with [`assemble_stages!`](@ref); `mul!` applies the
+block matrix over stage-stacked vectors of length `s·n`.
 
 !!! note "Transformed (simplified-Newton) Radau needs no dedicated machinery"
     The Hairer-Wanner transformation replaces the stage-dependent Jacobians by
-    ONE stage-independent pair `(Ju, Jdu)` evaluated at `uₙ` and diagonalizes
-    `A⁻¹`, leaving one decoupled matrix per eigenvalue `λ`:
-    `W_λ = Jdu + Δt·λ·Ju`, complex for the complex conjugate pairs. That is a
-    single component bag plus a complex [`combine!`](@ref) — build it with
-    `share_pattern(Ju, ComplexF64)` and
-    `combine!(W_λ, (Ju = Ju, Jdu = Jdu), (Jdu = 1.0, Ju = Δt*λ))`, not with
-    this operator.
+    ONE pair `(Ju, Jdu)` at `uₙ` and diagonalizes `A⁻¹`, leaving one decoupled
+    `W_λ = Jdu + Δt·λ·Ju` per eigenvalue, complex for the conjugate pairs.
+    Build those from a component bag with `share_pattern(Ju, ComplexF64)` and
+    a complex [`combine!`](@ref), not with this operator.
 """
 mutable struct StageBlockOperator{M <: AbstractMatrix, T}
     const Ju::Vector{M}
@@ -51,11 +46,11 @@ end
 """
     assemble_stages!(sbop, op, stage_states, p, ctxs) -> sbop
 
-Assemble the stage components of `sbop`: for every stage `i`, one sweep of
-`JacobianKind{:u}()` into `Ju[i]` and one of `JacobianKind{:du}()` into
-`Jdu[i]`, both at `stage_states[i]` and `ctxs[i]`. The caller owns the stage
-arithmetic — `stage_states[i]` is `(u = zᵢ, du = kᵢ, …)` with both slots plain
-vectors, and `ctxs[i]` carries `t + cᵢΔt` and the stage's local interval.
+Assemble the stage components of `sbop`: per stage `i`, one `JacobianKind{:u}()`
+sweep into `Ju[i]` and one `JacobianKind{:du}()` sweep into `Jdu[i]`, both at
+`stage_states[i]` and `ctxs[i]`. The caller owns the stage arithmetic —
+`stage_states[i]` is `(u = zᵢ, du = kᵢ, …)` with both slots plain vectors, and
+`ctxs[i]` carries `t + cᵢΔt` and the stage's local interval.
 """
 function assemble_stages!(sbop::StageBlockOperator, op, stage_states::AbstractVector{<:NamedTuple}, p, ctxs::AbstractVector)
     s = nstages(sbop)
@@ -83,8 +78,7 @@ Base.size(sbop::StageBlockOperator, axis) = size(sbop)[axis]
     mul!(y, sbop::StageBlockOperator, x, α, β)
 
 Action of the stage-block matrix on the stage-stacked vector `x` (`s` blocks
-of length `n`): `yᵢ = Jdu⁽ⁱ⁾ xᵢ + Δt · Ju⁽ⁱ⁾ Σⱼ aᵢⱼ xⱼ`. The tableau-combined
-vector is formed once per stage row.
+of length `n`): `yᵢ = Jdu⁽ⁱ⁾ xᵢ + Δt · Ju⁽ⁱ⁾ Σⱼ aᵢⱼ xⱼ`.
 """
 function mul!(y::AbstractVector, sbop::StageBlockOperator, x::AbstractVector)
     s = nstages(sbop)

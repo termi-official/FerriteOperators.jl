@@ -14,15 +14,12 @@ function FerriteOperators.execute_on_device!(task, device::FerriteOperators.Poly
         num_items   = length(chunk)
         num_tasks   = ceil(Int, num_items / chunksize)
         @batch for tasksetid in 1:num_tasks
-            # Query the local task and workspace
             local_task = tasks[tasksetid]
             local_ws   = workspaces[tasksetid]
 
-            # Compute the range of tasks
             first_itemid = (tasksetid-1)*chunksize+1
             last_itemid  = min(num_items, tasksetid*chunksize)
 
-            # These are the local tasks
             for itemid in first_itemid:last_itemid
                 cellid = chunk[itemid]
                 FerriteOperators.reinit!(local_ws, cellid)
@@ -47,10 +44,9 @@ function FerriteOperators.reduce_on_device(task, device::FerriteOperators.Polyes
 
     # TODO preallocate this
     tasks = [FerriteOperators.duplicate_for_device(device, task) for tid in 1:num_tasks_max]
-    # One partial per taskset, seeded with the reduction's additive identity and
-    # carried across the barriers so a taskset's whole contribution folds in one
-    # sequence. A taskset that contributes nothing therefore hands back
-    # `zero(T)`, which the host reduction below adds in as a no-op.
+    # One partial per taskset, carried across the barriers so a taskset's whole
+    # contribution folds in one sequence. Seeded with the reduction's additive
+    # identity, so a taskset that contributes nothing hands back `zero(T)`.
     partials = zeros(T, num_tasks_max)
 
     for chunk in items

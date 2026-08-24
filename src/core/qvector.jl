@@ -1,17 +1,16 @@
 """
     QVector{T, VT, OT, NT} <: AbstractVector{T}
 
-A flat storage vector for quadrature-point data across all cells, with per-cell
-random-access via [`get_range_for_cell`](@ref).
+Flat storage for quadrature-point data across all cells, with per-cell random
+access through [`get_range_for_cell`](@ref).
 
-Fields:
 - `data`: flat storage (`AbstractVector{T}`) holding all quadrature values
 - `offsets`: `offsets[cellid]` is the 1-based start index in `data` for cell `cellid`
-- `npoints`: `npoints[cellid]` is the number of quadrature points for cell `cellid`
+- `npoints`: quadrature points of cell `cellid` as `npoints[cellid]`, or one
+  count for every cell where that count is uniform
 
-Use [`setup_qvector`](@ref) to build a `QVector` from a `Ferrite.DofHandler` or an
-assembled operator. Use [`get_range_for_cell`](@ref) to obtain a mutable view into
-the slice owned by a particular cell.
+Built by [`setup_qvector`](@ref) from a `Ferrite.DofHandler` or an assembled
+operator.
 """
 struct QVector{T, VT <: AbstractVector{T}, OT, NT} <: AbstractVector{T}
     data::VT
@@ -26,8 +25,8 @@ Base.eltype(::QVector{T}) where {T} = T
 """
     get_range_for_cell(q::QVector, cellid::Integer)
 
-Return a mutable view into the slice of `q` that belongs to cell `cellid`.
-The view has length following `q.npoints`.
+A mutable view into the slice of `q` that belongs to cell `cellid`, of the
+length `q.npoints` gives that cell.
 """
 @inline function get_range_for_cell(r::QVector, i::Integer)
     i1 = r.offsets[i]
@@ -42,12 +41,10 @@ _get_npoints_for_cell(r, npoints::AbstractVector, i) = npoints[i]
 """
     setup_qvector(::Type{T}, dh::AbstractDofHandler, qrc) -> QVector{T}
 
-Build a [`QVector`](@ref) with element type `T` whose layout matches the quadrature
-structure defined by `qrc` over all cells in `dh`.
-
-For each `SubDofHandler` in `dh`, the number of quadrature points per cell is
-determined by `getnquadpoints(getquadraturerule(qrc, sdh))`. Cells not belonging
-to any subdomain receive zero quadrature points.
+Build a [`QVector`](@ref) with element type `T`, laid out by `qrc` over the
+cells of `dh`: every `SubDofHandler` contributes
+`getnquadpoints(getquadraturerule(qrc, sdh))` points per cell, and cells
+outside every subdomain zero.
 """
 function setup_qvector(::Type{T}, dh::AbstractDofHandler, qrc) where {T}
     npoints = zeros(Int, getncells(get_grid(dh)))
@@ -64,10 +61,9 @@ end
 """
     setup_qvector(::Type{T}, operator) -> QVector{T}
 
-Build a [`QVector`](@ref) whose layout matches the quadrature structure of `operator`.
-
-The number of quadrature points per cell is determined from the element caches
-stored in the operator's subdomain caches via `getnquadpoints`.
+Build a [`QVector`](@ref) laid out by the quadrature structure of `operator`,
+the per-cell point count taken via `getnquadpoints` from the element caches in
+its subdomain caches.
 """
 function setup_qvector(::Type{T}, operator) where {T}
     npoints = zeros(Int, getncells(get_grid(operator.engine.dh)))
@@ -85,9 +81,8 @@ function setup_qvector(::Type{T}, operator) where {T}
 end
 
 # Shared layout builder: 1-based start offsets from the per-cell point counts,
-# then compression where possible. Uniform nonzero point counts imply the
-# offsets are the arithmetic progression; a zero count cannot be a range step,
-# so those layouts stay uncompressed.
+# compressed to an arithmetic progression when the count is uniform. A zero
+# count cannot be a range step, so those layouts stay uncompressed.
 function _qvector_from_npoints(::Type{T}, npoints::Vector{Int}) where {T}
     offsets = similar(npoints)
     offset = 1

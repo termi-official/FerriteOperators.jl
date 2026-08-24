@@ -5,29 +5,26 @@
 """
     TimeIntegrationContext(t, Δt, γ̃)
 
-Solver-controlled scalars the framework must understand. `t` is the evaluation
-time (Dual-typed during ∂F/∂t sweeps), `Δt` the physical step size for
-reference, and `γ̃` the effective local stage interval of the element-local
-internal-variable problem. Its NORMALIZATION is fixed by the canonical form
+Solver-controlled scalars: evaluation time `t` (Dual-typed during ∂F/∂t
+sweeps), physical step size `Δt`, and the effective local stage interval `γ̃`
+of the element-local internal-variable problem, normalized by the canonical
+form
 
     q = q_ref + γ̃ · g(·, q)
 
-— i.e. a solver passing `γ̃` means "an implicit-Euler local integrator would
-solve exactly this" (the reference state `q_ref` is dof-shaped and flows
-through a slot, solver-folded for multistep schemes). The canonical form
-normalizes the *number*, it does not prescribe the element's local rule: the
-element owns its local integrator and may realize the update with any
-consistent rule over `γ̃` — implicit Euler, exact exponential
-(Rush-Larsen/EME-type `q = q∞ + (q_ref − q∞)·exp(−γ̃/τ)`), or local
-substepping.
+— passing `γ̃` means "an implicit-Euler local integrator would solve exactly
+this" (`q_ref` is dof-shaped and flows through a slot, solver-folded for
+multistep schemes). This normalizes the *number*, not the element's local
+rule: the element may realize the update with any consistent rule over `γ̃` —
+implicit Euler, exact exponential (Rush-Larsen-type
+`q = q∞ + (q_ref − q∞)·exp(−γ̃/τ)`), or local substepping.
 
 !!! warning
     `γ̃` is NOT the rate-reconstruction slope of any state slot. Under
-    backward Euler the two happen to be reciprocals (`slope = 1/Δt`,
-    `γ̃ = Δt`), so writing `1/γ̃` for a rate slope is accidentally right under
-    BE and silently wrong under every other scheme (Newmark:
-    `slope = γ/(βΔt)` while `γ̃ = Δt`). Rate slopes belong to the slot that
-    carries the reconstruction, never to the context.
+    backward Euler the two are reciprocals (`slope = 1/Δt`, `γ̃ = Δt`), so
+    `1/γ̃` as a rate slope is accidentally right under BE and silently wrong
+    under every other scheme (Newmark: `slope = γ/(βΔt)` while `γ̃ = Δt`).
+    Rate slopes belong to the slot that carries the reconstruction.
 """
 struct TimeIntegrationContext{T}
     t::T
@@ -38,9 +35,8 @@ function TimeIntegrationContext(t, Δt, γ̃)
     tp, Δtp, γ̃p = promote(t, Δt, γ̃)
     return TimeIntegrationContext{typeof(tp)}(tp, Δtp, γ̃p)
 end
-# Deliberately no 1-arg convenience constructor: a defaulted γ̃ (e.g. zero)
-# would silently break local internal-variable stage problems that scale by
-# it. All three scalars are the solver's explicit statement.
+# No 1-arg constructor: a defaulted γ̃ (e.g. zero) would silently break local
+# stage problems that scale by it.
 
 # Framework code touches contexts only through these accessors, so schemes
 # with richer per-sweep scalars can pass their own context types.
@@ -48,7 +44,7 @@ end
 evaluation_time(ctx::TimeIntegrationContext) = ctx.t
 "Rebuild `ctx` with the evaluation time replaced by `t̃` (Dual-typed in ∂F/∂t sweeps)."
 with_time(ctx::TimeIntegrationContext, t̃) = TimeIntegrationContext(t̃, oftype(t̃, ctx.Δt), oftype(t̃, ctx.γ̃))
-"Effective local stage interval γ̃ of the element-local internal-variable problem (see `TimeIntegrationContext`); custom/wrapper context types must forward it, same as `evaluation_time`."
+"Effective local stage interval γ̃ (see `TimeIntegrationContext`); wrapper context types must forward it, same as `evaluation_time`."
 stage_scaling(ctx::TimeIntegrationContext) = ctx.γ̃
 
 """
@@ -71,14 +67,13 @@ derivative or the PARTIAL at frozen internal state `q`:
     Consistent:  ∂F/∂·|_q + ∂F/∂q · dq/d·     (the total — DEFAULT)
     FrozenQ:     ∂F/∂·|_q only                (the partial)
 
-`Consistent` is the default everywhere a `CorrectionMode` type parameter is
-left unspecified — the unsafe direction is a silently missing correction, so
-`FrozenQ` must always be spelled explicitly. For a stateless element (no `q`)
-the two coincide. `FrozenQ` is a legitimate election for an iteration matrix
-(modified Newton, MLN outer loops), where a wrong tangent costs convergence
-rate and nothing else; it is never legitimate for a gradient, so the
-sensitivity request kinds carry no `CorrectionMode` parameter at all — there
-is no way to construct a `FrozenQ` election for them.
+`Consistent` is the default wherever the type parameter is left unspecified:
+the unsafe direction is a silently missing correction, so `FrozenQ` must be
+spelled explicitly. For a stateless element (no `q`) the two coincide.
+`FrozenQ` is a legitimate election for an iteration matrix (modified Newton,
+MLN outer loops), where a wrong tangent costs convergence rate and nothing
+else, and never for a gradient — the sensitivity request kinds therefore
+carry no `CorrectionMode` parameter at all.
 """
 abstract type CorrectionMode end
 @doc (@doc CorrectionMode) struct Consistent <: CorrectionMode end
@@ -120,10 +115,10 @@ JacobianResidualRequest{C}(K::M, r::V) where {C <: CorrectionMode, M <: Abstract
     WeightedJacobianRequest(K, weights)
 
 Accumulate the weighted Jacobian `Σₛ wₛ ∂F/∂s` into `K`, over the slots named
-by `weights` and at frozen values of every other slot. `weights` is the
-caller's per-slot `NamedTuple` — the scheme's chain-rule scalars ride as
-request payload, so a fused kernel and the composed per-slot fallback draw
-from one source (see [`WeightedJacobianKind`](@ref)).
+by the per-slot `NamedTuple` `weights` and at frozen values of every other
+slot. The scheme's chain-rule scalars ride as request payload, so a fused
+kernel and the composed per-slot fallback draw from one source (see
+[`WeightedJacobianKind`](@ref)).
 
 A hand-fused scheme matrix (SDIRK/backward Euler `W = M/(γΔt) + K`) is an
 analytic provider of THIS request, not of [`JacobianRequest`](@ref): it
@@ -138,10 +133,10 @@ WeightedJacobianRequest{C}(K::M, weights::W) where {C <: CorrectionMode, M <: Ab
 
 """
 Accumulate the dense local parameter Jacobian ∂Fₑ/∂θ into `B` (ndofsₑ × nθ).
-`p` is the GLOBAL parameter bag (not `args.p`, the element-local view) — the
-AD fallback re-queries [`query_cell_parameters`](@ref) from a Dual-rebuilt `p`
-per seed direction, so wrappers and per-element parameter views forward Duals
-transparently; an analytic kernel reads `B` only.
+`p` is the GLOBAL parameter bag, not the element-local `args.p`: the AD
+fallback re-queries [`query_cell_parameters`](@ref) from a Dual-rebuilt `p`
+per seed direction, so wrappers and per-element views forward Duals
+transparently. An analytic kernel reads `B` only.
 """
 struct ParameterJacobianRequest{M <: AbstractMatrix, P} <: AbstractAssemblyRequest
     B::M
@@ -179,7 +174,7 @@ Slot *source* reconstructing a rate-like slot from the primary unknown: the
 slot's cell-local value is `slope · (u − anchor)`, formed at gather time from
 the `:u` slot. Solvers pass it in place of a plain vector, e.g. backward
 Euler `states = (u = u, du = AffineRate(1/Δt, uprev))` or Newmark
-`states = (u = u, v = AffineRate(γ/(β*Δt), uᵥ))`. The slot is declared like
+`states = (u = u, v = AffineRate(γ/(β*Δt), uᵥ))`; the slot is declared like
 any other (`setup_operator(...; slots = (:u, :du))`).
 
 A `:u` slot must exist and PRECEDE the reconstructed slot in the states
@@ -190,17 +185,16 @@ encodes a time-integration scheme.
 !!! warning "Reconstructed slots are frozen under AD"
     Reconstruction happens at gather time, before any Dual seeding, and the
     ∂F/∂u sweep seeds only the `:u` buffer. A kernel reading a reconstructed
-    slot therefore sees it at its primal value throughout the sweep, and the
-    assembled Jacobian is ∂F/∂u at frozen slot values. The chain-rule term
-    through the reconstruction (`slope · ∂F/∂slot`) belongs to the solver,
-    which contributes it through its per-slot weights.
+    slot sees its primal value throughout, so the assembled Jacobian is
+    ∂F/∂u at frozen slot values. The chain-rule term (`slope · ∂F/∂slot`)
+    belongs to the solver, which contributes it through its per-slot weights.
 
 !!! note "Condensed elements"
     The reconstruction applies uniformly to ALL entries of the element
     buffer, because `u` and `anchor` are both `[ū; q]`-shaped gathers.
-    Internal variables are never rate-reconstructed by the framework
-    contract: the condensed tail of a reconstructed slot is an artifact of
-    the uniform formula and elements must not interpret it.
+    Internal variables are never rate-reconstructed by contract: the
+    condensed tail of a reconstructed slot is an artifact of the uniform
+    formula and elements must not interpret it.
 """
 struct AffineRate{T, V <: AbstractVector}
     slope::T
@@ -211,15 +205,15 @@ end
     InternalSource(u::AbstractVector)
 
 Slot *source* restricting the gather to the condensed internal-variable block
-of `u` (the `q` tail of `[ū; q]`, [`internal_variable_range`](@ref)) instead of
-`celldofs(cell)`. This is what makes `q` an ordinary slot (`states = (u = u,
-q = InternalSource(u), …)`): the source carries its own restriction, exactly
-like [`AffineRate`](@ref) carries reconstruction. A slot sourced this way is
-sized per cell by the number of internal dofs the cell owns, not by
-`ndofs_per_cell` — the element-local buffer is resized to fit on every gather.
+of `u` (the `q` tail of `[ū; q]`, [`internal_variable_range`](@ref)) instead
+of `celldofs(cell)` — this is what makes `q` an ordinary slot
+(`states = (u = u, q = InternalSource(u), …)`), the source carrying its own
+restriction exactly as [`AffineRate`](@ref) carries reconstruction. Such a
+slot is sized per cell by the cell's internal dof count, not by
+`ndofs_per_cell`, so its buffer is resized on every gather.
 
-[`condense_internal!`](@ref) is the only writer of an `InternalSource`-backed
-slot's underlying vector: every evaluation sweep only reads through it.
+[`condense_internal!`](@ref) is the only writer of the underlying vector;
+evaluation sweeps only read through it.
 """
 struct InternalSource{V <: AbstractVector}
     u::V
@@ -235,13 +229,11 @@ The argument bundle a cell kernel's third parameter receives.
 | `states` | the engine; one cell-local slot buffer per slot declared at setup (`(u = uₑ, uprev = uₑprev, …)`), refreshed every sweep |
 | `cell` | the engine; the geometry cache of the current item — READ-ONLY for kernels |
 | `p` | the element; the cell-local parameter view from [`query_cell_parameters`](@ref) — configuration only, never time or history |
-| `ctx` | the solver; the per-sweep scalars — the [`TimeIntegrationContext`](@ref) `(t, Δt, γ̃)`, or `nothing` for stationary sweeps. This is the one open channel: a scheme with richer per-sweep scalars passes its own context type, read through [`evaluation_time`](@ref)/[`with_time`](@ref)/[`stage_scaling`](@ref) instead of field access. |
+| `ctx` | the solver; the per-sweep scalars — a [`TimeIntegrationContext`](@ref) `(t, Δt, γ̃)`, or `nothing` for stationary sweeps. The one open channel: a scheme with richer scalars passes its own context type, read through [`evaluation_time`](@ref)/[`with_time`](@ref)/[`stage_scaling`](@ref) instead of field access. |
 
 Kernels select on the `(request, cache)` pair, never on `args`, so annotating
-the parameter (`args::CellArgs`) is permitted.
-
-Hand-constructing an instance is the supported way to unit-test a kernel
-without an operator:
+the parameter (`args::CellArgs`) is permitted. Hand-constructing an instance
+unit-tests a kernel without an operator:
 
     args = CellArgs((u = uₑ,), cell_cache, p, nothing)
     assemble_cell!(ResidualRequest(rₑ), cache, args)
@@ -257,9 +249,9 @@ end
     FacetArgs(states, cell, p, ctx)
 
 The argument bundle a facet kernel's third parameter receives — the same four
-fields as [`CellArgs`](@ref) (see its docstring), built by the framework's
-facet driver. `CellArgs` and `FacetArgs` share no supertype: a cell kernel and
-a facet kernel never meet at the same dispatch site.
+fields as [`CellArgs`](@ref), built by the framework's facet driver.
+`CellArgs` and `FacetArgs` share no supertype: a cell kernel and a facet
+kernel never meet at the same dispatch site.
 """
 struct FacetArgs{States <: NamedTuple, Cell, P, Ctx}
     states::States
@@ -285,22 +277,18 @@ end
     AlgebraicArgs(states, item, p, ctx)
 
 The argument bundle an algebraic kernel's third parameter receives — the
-[`CellArgs`](@ref) analogue with the [`AlgebraicItem`](@ref) where the geometry
-cache sits.
+[`CellArgs`](@ref) analogue (see its table for `states` and `ctx`) with the
+[`AlgebraicItem`](@ref) where the geometry cache sits:
 
 | field | owner / lifetime |
 |---|---|
-| `states` | the engine; one item-local slot buffer per slot declared at setup, refreshed every sweep |
 | `item` | the engine; the [`AlgebraicItem`](@ref) the sweep stands on — READ-ONLY for kernels |
 | `p` | the cache; the item-local parameter view from [`query_cell_parameters`](@ref), queried on the item |
-| `ctx` | the solver; the per-sweep scalars — the [`TimeIntegrationContext`](@ref), or `nothing` for stationary sweeps |
 
-Kernels select on the `(request, cache)` pair, never on `args`, so annotating
-the parameter (`args::AlgebraicArgs`) is permitted. This record shares no
-supertype with `CellArgs`/`FacetArgs`: a cell kernel and an algebraic kernel
-never meet at the same dispatch site.
-
-Hand-constructing an instance is the supported way to unit-test a kernel
+Kernels select on the `(request, cache)` pair, so annotating the parameter
+(`args::AlgebraicArgs`) is permitted. This record shares no supertype with
+`CellArgs`/`FacetArgs`: a cell kernel and an algebraic kernel never meet at
+the same dispatch site. Hand-constructing an instance unit-tests a kernel
 without an operator:
 
     args = AlgebraicArgs((u = uₑ,), AlgebraicItem(1, [17]), p, nothing)
@@ -331,12 +319,11 @@ with_context(args::AlgebraicArgs, ctx) = AlgebraicArgs(args.states, args.item, a
 """
     assemble_cell!(req::AbstractAssemblyRequest, cache, args)
 
-The volumetric kernel entry point. Elements must at least provide the
-[`ResidualRequest`](@ref) method (validated at setup); every other request falls back to automatic
-differentiation of the residual kernel unless [`provides_analytic`](@ref)
-declares an analytic method.
-
-`args` is a [`CellArgs`](@ref); annotating the parameter is permitted.
+The volumetric kernel entry point. Elements must provide at least the
+[`ResidualRequest`](@ref) method (validated at setup); every other request
+falls back to automatic differentiation of the residual kernel unless
+[`provides_analytic`](@ref) declares an analytic method. `args` is a
+[`CellArgs`](@ref).
 """
 function assemble_cell! end
 
@@ -357,9 +344,8 @@ unwrap_parameters(p) = p
     query_cell_parameters(cache, cell, p)
 
 Element-overridable query producing the element-local parameter view `pₑ`
-handed to volumetric kernels. The default applies [`unwrap_parameters`](@ref)
-and passes the bag through. Parameter layouts (parameter fields) gather their
-per-element views through this seam.
+handed to volumetric kernels; parameter fields gather their per-element views
+through this seam. Defaults to [`unwrap_parameters`](@ref) on the bag.
 """
 query_cell_parameters(cache, cell, p) = unwrap_parameters(p)
 
@@ -379,12 +365,11 @@ the given request *kind* singleton (`JacobianKind()`, `ParameterJacobianKind()`,
 …). Everything except the mandatory residual defaults to `false`, i.e.
 AD-from-residual.
 
-There is deliberately exactly ONE root method (with the residual default as a
-runtime branch): specializations are therefore always strictly more specific,
-so blanket declarations like
-`provides_analytic(::Type{<:MyCache}, kind) = true` cannot create dispatch
-ambiguities, and there is no request-type-parameter matching to get subtly
-wrong. Kernel/trait consistency is validated once at operator setup
+There is deliberately exactly ONE root method (the residual default is a
+runtime branch), so specializations are always strictly more specific:
+blanket declarations like `provides_analytic(::Type{<:MyCache}, kind) = true`
+cannot create ambiguities, and there is no request-type-parameter matching to
+get wrong. Kernel/trait consistency is validated once at operator setup
 ([`validate_element_cache`](@ref)).
 """
 provides_analytic(::Type, kind) = kind isa ResidualKind
@@ -392,31 +377,29 @@ provides_analytic(::Type, kind) = kind isa ResidualKind
 """
     validate_element_cache(cache, declared_requests = ())
 
-Setup-time consistency check for element caches: a cache that opts into the
+Setup-time consistency check for element caches: a cache opting into the
 request protocol must implement the mandatory [`ResidualRequest`](@ref)
-kernel, and every request kind the [`provides_analytic`](@ref) trait claims
-must have a matching kernel method. Runs once per subdomain at
-`setup_operator` time — a typo'd port fails loudly here instead of silently
-assembling through the wrong path.
+kernel, and every request kind [`provides_analytic`](@ref) claims must have a
+matching kernel method. Runs once per subdomain at `setup_operator` time, so
+a typo'd port fails loudly instead of silently assembling through the wrong
+path.
 
 The two halves take different subjects, per the
 [`AbstractElementCacheDecorator`](@ref) convention. The KERNEL half — the
 mandatory-method probes and the trait ↔ kernel check — runs on the
-[`unwrap`](@ref) fixpoint (and a composite recurses into its inners from
-there), since a decorator's forwarding methods would answer those probes
-unconditionally. The ADMISSIBILITY half runs on `cache` as the engine will
-call it, decoration included, so a decorator's generic routes count as the
+[`unwrap`](@ref) fixpoint (a composite recurses into its inners from there),
+since a decorator's forwarding methods would answer those probes
+unconditionally. The ADMISSIBILITY half runs on `cache` as the engine calls
+it, decoration included, so a decorator's generic routes count as the
 coverage they are.
 
-The trait ↔ kernel check always covers the primal kinds (the operator will
-issue them). Every kind [`requires_admissibility_check`](@ref) names
-additionally runs the internal-state admissibility check
-([`has_internal_state`](@ref)) here instead of on first use — unconditionally
-for the primal kinds it names, since those are always covered, and for any
+The trait ↔ kernel check always covers the primal kinds. Every kind
+[`requires_admissibility_check`](@ref) names additionally runs the
+internal-state admissibility check ([`has_internal_state`](@ref)) here
+instead of on first use — unconditionally for the primal kinds, and for any
 other kind only when declared via
 `setup_operator(...; requests = (ParameterVJPKind, …))`. Undeclared,
-non-primal kinds stay usable — their checks simply run at the call-time entry
-points.
+non-primal kinds stay usable; their checks run at the call-time entry points.
 """
 function validate_element_cache(cache, declared_requests::Tuple = ())
     _validate_element_kernels(unwrap(cache), declared_requests)
@@ -459,28 +442,27 @@ end
 """
     has_cell_request(::Type{K}) -> Bool
 
-Whether kind `K` materializes an [`assemble_cell!`](@ref) request, i.e. whether
-[`request_type`](@ref) answers for it. Setup validates the trait ↔ kernel
-backing of declared kinds that do.
+Whether kind `K` materializes an [`assemble_cell!`](@ref) request, i.e.
+whether [`request_type`](@ref) answers for it. Setup validates the trait ↔
+kernel backing of declared kinds that do.
 
 Kinds served by a different element hook declare `false`:
 [`FunctionalKind`](@ref) reaches the element through
 [`evaluate_cell_functional`](@ref) and *returns* its contribution instead of
-filling a request, so it has no request to check.
+filling a request.
 """
 has_cell_request(::Type{K}) where {K} = true
 
 """
     validation_instance(::Type{K}) -> kind instance
 
-The placeholder instance setup-time validation queries `K`'s traits on.
-Declarations carry kind TYPES normalized to their `UnionAll` base, while
+The placeholder instance setup-time validation queries `K`'s traits on:
+declarations carry kind TYPES normalized to their `UnionAll` base, while
 [`request_type`](@ref) and [`provides_analytic`](@ref) are queried on
-instances; this is the bridge.
+instances.
 
-The default calls `K()`, which serves every kind constructible without
-payload. A kind whose payload is a type parameter overloads it with a
-placeholder — only the type is read, never the value:
+The default calls `K()`. A kind whose payload is a type parameter overloads
+it with a placeholder — only the type is read, never the value:
 
     FerriteOperators.validation_instance(::Type{<:MyVJPKind}) = MyVJPKind(nothing)
 
@@ -493,21 +475,20 @@ validation_instance(::Type{K}) where {K} = K()
     requires_admissibility_check(kind) -> Bool
 
 Whether declaring `kind` runs the internal-state admissibility rule
-(`assert_sensitivity_admissible`) at setup instead of on first use.
+(`assert_sensitivity_admissible`) at setup instead of on first use. Defaults
+to `false`, so a downstream kind opts in.
 
-True for the kinds whose AD fallback differentiates THROUGH an element's local
-solve. Time sensitivities and weighted Jacobians are exempt although they
-differentiate: their escape (finite differences, the composed route) is chosen
-per call, so setup cannot know whether the AD path will be taken. The default
-is `false`, so a downstream kind opts in.
+True for the kinds whose AD fallback differentiates THROUGH an element's
+local solve. Time sensitivities and weighted Jacobians are exempt although
+they differentiate: their escape (finite differences, the composed route) is
+chosen per call, so setup cannot know whether the AD path will be taken.
 """
 requires_admissibility_check(kind) = false
 
 # The trait ↔ kernel check, over the kernel entry point and args record of the
-# item family the cache belongs to: `assemble_cell!`/`CellArgs` for a
-# volumetric cache, `assemble_algebraic!`/`AlgebraicArgs` for an algebraic one,
-# `assemble_facet!`/`FacetArgs` plus the trailing local facet index for a
-# surface one.
+# item family the cache belongs to: `assemble_cell!`/`CellArgs` (volumetric),
+# `assemble_algebraic!`/`AlgebraicArgs`, or `assemble_facet!`/`FacetArgs` plus
+# the trailing local facet index (surface).
 #
 # A claim is backed by an AUTHOR-WRITTEN method, so the subject is the
 # `unwrap` fixpoint: a decorator's blanket kernel methods answer `hasmethod`
@@ -530,37 +511,31 @@ end
 _trailing_signature(trailing::Tuple) = mapreduce(T -> ", ::$(T)", *, trailing; init = "")
 
 # The kinds whose trait ↔ kernel consistency is checked at setup; the request
-# each analytic kernel takes comes from [`request_type`](@ref), the single
-# kind → request association. Payload-carrying kinds get placeholder payloads —
-# only the type matters for the trait query.
+# each analytic kernel takes comes from `request_type`, the single
+# kind → request association.
 _primal_validatable_kinds() = (JacobianKind{:u}(), JacobianResidualKind())
 
-# A condensed cache's residual kernel is pure, so AD-from-residual computes the
-# frozen-q PARTIAL, while these kinds carry no `CorrectionMode` and are always
-# the total — the partial silently misses ∂F/∂q·dq/d·. The rejection is PER
-# CACHE and PER KIND and hits only the would-be AD fallback: an analytic kernel
-# carries the correction, and `internal_state_insensitive` asserts there is
-# none to carry.
+# The rejection below is PER CACHE and PER KIND, and hits only the would-be AD
+# fallback: an analytic kernel carries the ∂F/∂q·dq/d· correction, and
+# `internal_state_insensitive` asserts there is none to carry.
 """
     assert_sensitivity_admissible(T::Type, kind)
     assert_sensitivity_admissible(T::Type, kind, entry, ::Type{Args}, trailing = ())
 
-The internal-state admissibility check itself: throws unless a `has_internal_state`
+The internal-state admissibility check: throws unless a `has_internal_state`
 cache `T` serves `kind` analytically or declares it
-[`internal_state_insensitive`](@ref). `entry`/`Args`/`trailing` name which item
-family's kernel entry point, args record and signature tail the error message
-should point authors at — the 2-arg form defaults to
-`assemble_cell!`/`CellArgs` (a volumetric cache);
-[`validate_algebraic_cache`](@ref) passes `assemble_algebraic!`/`AlgebraicArgs`
-for the algebraic-item family, whose remedies differ (see below), and the
-facet-item family passes its trailing `::Int` local facet index.
+[`internal_state_insensitive`](@ref). `entry`/`Args`/`trailing` name the item
+family whose kernel entry point, args record and signature tail the error
+message should point authors at; the 2-arg form defaults to the volumetric
+`assemble_cell!`/`CellArgs`. [`validate_algebraic_cache`](@ref) passes
+`assemble_algebraic!`/`AlgebraicArgs`, whose remedies differ, and the
+facet-item family its trailing `::Int` local facet index.
 
-`T` is a SERVED-CAPABILITY subject, so it is the cache the engine calls —
+`T` is a SERVED-CAPABILITY subject, so it is the cache the engine calls,
 decorated where the engine decorated it. That is what admits the generic
 routes [`ADElementCache`](@ref) builds from [`condensed_corrector`](@ref) and
 [`local_conditions!`](@ref): the decorator's [`provides_analytic`](@ref)
-already reports them as covered, and an undecorated cache has no such route to
-report.
+already reports them as covered, and an undecorated cache has no such route.
 """
 function assert_sensitivity_admissible(T::Type, kind, entry = assemble_cell!, ::Type{Args} = CellArgs,
         trailing::Tuple = ()) where {Args}
@@ -617,11 +592,11 @@ end
 `true` iff the element cache carries condensed per-item internal state `q`
 with a corrector store ([`condense_internal!`](@ref)). Governs the
 sensitivity admissibility check: a kind with no [`CorrectionMode`](@ref) is
-always the total, so a plain AD-from-residual fallback — which differentiates a
-pure kernel and therefore computes only the frozen-q partial — is missing the correction
-unless the cache serves the kind analytically or declares it
+always the total, so AD-from-residual through the pure kernel — which
+computes only the frozen-q partial — is missing the correction unless the
+cache serves the kind analytically or declares it
 [`internal_state_insensitive`](@ref); time sensitivities alone admit a
-finite-difference method as a further escape.
+finite-difference escape.
 """
 has_internal_state(::Type) = false
 
@@ -629,12 +604,11 @@ has_internal_state(::Type) = false
     internal_state_insensitive(::Type{CacheType}, kind) -> Bool
 
 Author-asserted declaration that the element-local internal-state equations
-do NOT depend on the quantity the sensitivity `kind` seeds (`∂L/∂seed ≡ 0`).
-When true, `dq/∂seed = 0`, so the total collapses to the frozen-q partial
-plain AD-from-residual already computes on the pure residual kernel — there is
-nothing left for the ∂F/∂q·dq/∂seed correction to add. The framework
-CANNOT verify this claim; a wrong assertion produces a silently wrong
-sensitivity. Same trust model as [`provides_analytic`](@ref).
+do NOT depend on the quantity the sensitivity `kind` seeds (`∂L/∂seed ≡ 0`),
+so `dq/∂seed = 0` and the total collapses to the frozen-q partial plain
+AD-from-residual already computes. The framework CANNOT verify this claim; a
+wrong assertion produces a silently wrong sensitivity. Same trust model as
+[`provides_analytic`](@ref).
 """
 internal_state_insensitive(::Type, kind) = false
 
@@ -645,13 +619,13 @@ internal_state_insensitive(::Type, kind) = false
 """
     parameter_vector(p) -> AbstractVector
 
-Flat vector view θ of the differentiable parameters in `p`. Together with
+Flat vector view θ of the differentiable parameters in `p`. With
 [`rebuild_parameters`](@ref) this is the seam through which parameter
-sensitivities are seeded. Implement both for custom parameter types.
+sensitivities are seeded; implement both for custom parameter types.
 
-θ need not cover all of `p`: entries not exposed here are static — held
-fixed by every sensitivity sweep — and all parameter-sensitivity costs
-(seed dimension, local Jacobian columns) scale with `length(θ)`.
+θ need not cover all of `p`: entries not exposed here are held fixed by every
+sensitivity sweep, and all parameter-sensitivity costs (seed dimension, local
+Jacobian columns) scale with `length(θ)`.
 """
 parameter_vector(p::Real) = SVector(p)
 parameter_vector(p::AbstractVector) = p

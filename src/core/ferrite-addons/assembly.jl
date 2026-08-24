@@ -1,6 +1,4 @@
-# Atomic scatter is needed when a parallel device writes into shared global
-# storage without color isolation. Atomicity is a property of the SCATTER
-# TARGET, not of the strategy alone:
+# Atomicity is a property of the SCATTER TARGET, not of the strategy alone:
 # - dof-scattered shared targets (global sparse matrices, global vectors,
 #   dense parameter-Jacobian rows) follow `dof_scatter_needs_atomic` —
 #   coloring isolates them, otherwise a parallel device needs atomics,
@@ -52,7 +50,7 @@ finalize_assembly!(::Nothing) = nothing   # sweeps whose sink is request-owned (
 
 # Sensitivity scatter targets. Deliberately not Ferrite.AbstractAssembler:
 # their column/entry layout is the parameter space, not the dof space, so the
-# celldofs-scatter convenience methods above must never match them.
+# celldofs-scatter methods above must never match them.
 struct ParameterJacobianAssembler{T, MT <: AbstractMatrix{T}, atomic}
     B::MT   # residual_size × nθ
 end

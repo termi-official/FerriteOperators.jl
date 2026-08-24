@@ -2,11 +2,10 @@
 ## Condensation phase
 ####################################
 #
-# The phase that turns a condensed element's per-kernel local solve into one
-# up-front traversal: `condense_internal!` solves every quadrature point's
-# local problem, writes the trial `q`, and stores each item's corrector; every
-# evaluation sweep afterwards is a pure function of `(u, q, p, t)` at frozen
-# `q`. See the design's structural statement:
+# `condense_internal!` turns a condensed element's per-kernel local solve into
+# one up-front traversal: it solves every quadrature point's local problem,
+# writes the trial `q`, and stores each item's corrector. Every evaluation
+# sweep afterwards is a pure function of `(u, q, p, t)` at frozen `q`:
 #
 #     W = Σₛ wₛ ∂F/∂s|_q  +  ∂F/∂q · dq/du
 #
@@ -18,9 +17,9 @@
     CondensationReport{T}
 
 Per-item summary of a [`condense_internal!`](@ref) sweep, isbits by
-construction so the same mechanism serves a device sweep. `converged`
-replaces a thrown non-convergence exception with data a caller can act on
-without crossing a device boundary.
+construction so the same mechanism serves a device sweep. `converged` replaces
+a thrown non-convergence exception with data a caller can act on without
+crossing a device boundary.
 
 | field | monoid op | meaning |
 |---|---|---|
@@ -34,17 +33,16 @@ without crossing a device boundary.
 | `dt_factor` | `min` | 1 means "no reduction requested"; < 1 is a request |
 
 `worst_cell` is FAMILY-DISAMBIGUATED by sign, since [`condense_cell!`](@ref)
-and [`condense_algebraic!`](@ref) reports fold into the same total and a
-cellid and an item index are both small positive integers: a cell reports its
-`cellid` (`≥ 1`), [`condense_algebraic!`](@ref) reports `-item.index` (`≤ -1`,
-`AlgebraicItem` indices being 1-based too), and `0` means neither — every
-quadrature point (or item) converged in zero iterations, which is what the
+and [`condense_algebraic!`](@ref) reports fold into the same total and a cellid
+and an item index are both small positive integers: a cell reports its `cellid`
+(`≥ 1`), [`condense_algebraic!`](@ref) reports `-item.index` (`≤ -1`), and `0`
+means neither — everything converged in zero iterations, which is what the
 type's `zero` and every closed-form local solve reports.
 
 Reports combine with `+`: a commutative monoid except the argmax tie-break,
-which keeps the FIRST contribution in fold order — the same determinism
-statement [`fold_items`](@ref) already makes for a fixed worker count. The
-identity is `zero(CondensationReport{T})`.
+which keeps the FIRST contribution in fold order — the determinism
+[`fold_items`](@ref) already states for a fixed worker count. The identity is
+`zero(CondensationReport{T})`.
 """
 struct CondensationReport{T}
     converged::Bool
@@ -80,15 +78,15 @@ end
 Element hook run once per item by [`condense_internal!`](@ref): solve every
 quadrature point's local problem, write the trial state into `args.states.q`
 (never into `args.states.u`), and — under a [`Stored`](@ref) election — store
-the corrector, whatever compact per-quadrature-point quantity the cache's own
+the corrector: whatever compact per-quadrature-point quantity the cache's own
 `Consistent` kernel later reads (Tier 1), or the completed local block a
 generic combination would need (Tier 2). Under [`Recompute`](@ref) nothing is
 stored and the corrector is re-derived at every point of use. `weights` are
 the solver's chain-rule scalars for reconstructed slots participating in the
 local model (e.g. a rate slot under Newmark), chained into the corrector
 INSIDE the local inverse, where post-hoc weighting of separated partial
-Jacobians cannot put them. They are per-sweep solver data rather than item
-data, so a recomputing element retains them per cache.
+Jacobians cannot put them; being per-sweep solver data rather than item data,
+a recomputing element retains them per cache.
 
 This is the only hook allowed to EVOLVE a condensed element's state:
 `assemble_cell!` kernels are pure evaluations at the `q` this hook wrote and
@@ -109,25 +107,23 @@ The [`condense_cell!`](@ref) counterpart for the algebraic-item family: solve
 the item's local problem, write the trial state into `args.states.q` (never
 into `args.states.u`), and store the corrector the cache's own `Consistent`
 kernel reads — item-keyed (an `ItemStates` store indexed by `args.item.index`,
-same mechanism a condensed cell cache uses, indexed by cellid), or nothing at
-all under a [`Recompute`](@ref) election. `weights` are the solver's
-chain-rule scalars, exactly as for [`condense_cell!`](@ref).
+the mechanism a condensed cell cache uses with a cellid), or nothing at all
+under a [`Recompute`](@ref) election. `weights` are the solver's chain-rule
+scalars, exactly as for [`condense_cell!`](@ref).
 
 Report the item in `worst_cell` as `-args.item.index` (see
 [`CondensationReport`](@ref)'s family-disambiguation convention), never the
-raw index — a positive value there is read as a cellid by any consumer folding
-this report together with a condensed cell's.
+raw index — a positive value there is read as a cellid.
 
-There is no default; only a condensed algebraic cache implements it. Called
-only when the cache declares [`has_internal_state`](@ref) — a stateless
-algebraic cache's condensation sweep never reaches this hook.
+There is no default; only a condensed algebraic cache implements it, and it is
+called only when the cache declares [`has_internal_state`](@ref).
 
 Analytic-first: a condensed algebraic cache admits `Consistent`
 sensitivity/Jacobian kinds only by serving them analytically or by declaring
-[`internal_state_insensitive`](@ref) — there is no generic AD `Consistent`
+[`internal_state_insensitive`](@ref). There is no generic AD `Consistent`
 bootstrap for this family (unlike [`ADElementCache`](@ref)'s
 `condensed_corrector` combination for condensed cells): an algebraic item has
-no cellid to key a corrector store by AD would need one keyed on.
+no cellid to key a corrector store by.
 """
 function condense_algebraic! end
 
@@ -141,19 +137,18 @@ is the item's condensed internal dof count and whose ordering is the `:q`
 slot's.
 
 Optional, and the third acceptance branch of the internal-state admissibility
-rule ([`assert_sensitivity_admissible`](@ref)). Without an analytic kernel or
+rule ([`assert_sensitivity_admissible`](@ref)): without an analytic kernel or
 an [`internal_state_insensitive`](@ref) declaration, a condensed cache is
-refused `ParameterJacobianKind`/`ParameterVJPKind`/`TimeSensitivityKind`,
-because AD of the residual kernel computes only the frozen-q partial. Given
-this hook, [`ADElementCache`](@ref) completes the total generically: it
-differentiates `local_conditions!` for `∂L/∂q` (factorized once per item),
-`∂L/∂θ` and `∂L/∂t`, and closes the implicit function theorem against the
-`∂F/∂q` block [`JacobianKind{:q}`](@ref JacobianKind) already gives —
+refused `ParameterJacobianKind`/`ParameterVJPKind`/`TimeSensitivityKind`.
+Given this hook, [`ADElementCache`](@ref) completes the total generically —
+differentiating `local_conditions!` for `∂L/∂q` (factorized once per item),
+`∂L/∂θ` and `∂L/∂t`, then closing the implicit function theorem against the
+`∂F/∂q` block [`JacobianKind{:q}`](@ref JacobianKind) already gives:
 
     dq/dθ = −(∂L/∂q)⁻¹ ∂L/∂θ,      dF/dθ = ∂F/∂θ|_q + ∂F/∂q · dq/dθ
 
 and likewise with `t` in place of `θ`. An analytic kernel still wins where the
-cache declares one; the hook is what a cache without one falls back to.
+cache declares one.
 
 Contract: `L` is the residual form of exactly the equations `condense_cell!`
 converged, a PURE function of `(args.states, args.p, args.ctx)` with no solve
@@ -202,13 +197,10 @@ sweep_family(::Type{<:CondensationKind}) = FunctionalFamily()
 # to validate, exactly like `FunctionalKind`.
 has_cell_request(::Type{<:CondensationKind}) = false
 
-# Trait-gated: a plain cell subdomain sharing an operator with a condensed one
-# (a condensed algebraic item's cell physics, a plain subdomain of a
-# multi-domain integrator) has no `condense_cell!` method and contributes
-# nothing to the report, exactly like a stateless algebraic cache's gate below
-# — `condense_internal!`'s per-subdomain reduction reaches every subdomain
-# unconditionally, so this is what keeps a mixed operator from a MethodError
-# on the subdomain that never had a local problem to solve.
+# Trait-gated: `condense_internal!`'s per-subdomain reduction reaches every
+# subdomain unconditionally, so a plain subdomain sharing an operator with a
+# condensed one — having no `condense_cell!` method — would raise a
+# MethodError instead of contributing nothing to the report.
 execute_kind!(kind::CondensationKind, task, ws) =
     has_internal_state(typeof(ws.element)) ? condensation_cell_sweep!(kind, task, ws) : nothing
 
@@ -252,32 +244,28 @@ end
 
 Solve every condensed element's local problem over the WHOLE domain, write the
 trial `q` into the `[ū; q]` tail, store each item's corrector (under a
-[`Stored`](@ref) election), and report what happened — the only writer of `q`
-(no evaluation sweep writes back). Must run before any `Consistent`-mode
-sweep, whatever the election: the sweep is a pure evaluation at whatever `q`
-the tail currently holds.
+[`Stored`](@ref) election), and report what happened. This is the only writer
+of `q`, and it must run before any `Consistent`-mode sweep, whatever the
+election: a sweep is a pure evaluation at whatever `q` the tail currently
+holds.
 
 Under `Stored()`, reading a never-condensed or invalidated
 ([`rollback_state!`](@ref)) item throws, naming the item, through
-[`item_state`](@ref)'s own freshness contract on the element's corrector
-store. This catches "never condensed" and "invalidated since"; it does NOT
-catch the same vector mutated in place without going through
-[`rollback_state!`](@ref) — see [what the phase
-concedes](devdocs/rationale.md#What-the-phase-concedes). Under
+[`item_state`](@ref)'s freshness contract on the element's corrector store.
+That catches "never condensed" and "invalidated since", but NOT the same
+vector mutated in place without going through [`rollback_state!`](@ref) — see
+[what the phase concedes](devdocs/rationale.md#What-the-phase-concedes). Under
 [`Recompute`](@ref) there is no store to stamp, so none of these are detected
 and the ordering requirement is the caller's alone.
 
 `weights` are the solver's chain-rule scalars passed through to
-[`condense_cell!`](@ref); `condense_internal!(op, states, p, ctx)` defaults to
-`(u = 1.0,)`.
+[`condense_cell!`](@ref); the 4-argument form defaults them to `(u = 1.0,)`.
 
-Value-returning WITH write-back: it rides `FunctionalFamily` through
+Value-returning WITH write-back, riding `FunctionalFamily` through
 [`fold_items`](@ref)/[`reduce_on_device`](@ref)/[`reduce_on_subdomains`](@ref),
 so the deterministic fold order and the `_check_reduction_domain` structural
-checks hold for it too.
-
-Unconditionally its own domain traversal, run before the evaluation sweeps it
-feeds.
+checks hold for it too. Always its own domain traversal, run before the
+evaluation sweeps it feeds.
 """
 function condense_internal!(op, weights::NamedTuple, states::NamedTuple, p, ctx)
     _check_declared_slots(op.engine, states)
@@ -296,12 +284,10 @@ condense_internal!(op, states::NamedTuple, p, ctx) = condense_internal!(op, (u =
 The fused convenience entry point a Newton loop calls once per trial point:
 condenses via [`condense_internal!`](@ref) and, only if every local problem
 converged, calls [`update_linearization!`](@ref) to fill `op.J`/`residual`.
-Returns the report EARLY on `!report.converged`, without evaluating — the
-same "one call, route decided inside" move
-[`assemble_weighted_jacobian!`](@ref) already makes. Forgetting to condense
-requires deliberately dropping to the lower-level `condense_internal!` +
-`update_linearization!` pair, which is what makes the correct sequence the
-convenient one.
+Returns the report EARLY on `!report.converged`, without evaluating — the same
+"one call, route decided inside" move [`assemble_weighted_jacobian!`](@ref)
+already makes. Forgetting to condense requires deliberately dropping to the
+lower-level pair, which makes the correct sequence the convenient one.
 """
 function condensed_update_linearization!(op, residual, weights::NamedTuple, states::NamedTuple, p, ctx)
     report = condense_internal!(op, weights, states, p, ctx)
@@ -321,9 +307,9 @@ the one mutation FerriteOperators itself sees: the solver's own `u .+= Δu`
 happens outside the package and is invisible to it (see [what the phase
 concedes](devdocs/rationale.md#What-the-phase-concedes)).
 
-A [`Recompute`](@ref) cache carries no correctors, so the invalidation pass is
-a no-op for it: `u` and its `q` tail are restored together, and a corrector
-re-derived from that pair is the committed point's own.
+A [`Recompute`](@ref) cache carries no correctors, so the invalidation is a
+no-op: `u` and its `q` tail are restored together, and a corrector re-derived
+from that pair is the committed point's own.
 """
 function rollback_state!(op, u::AbstractVector, committed::AbstractVector)
     u .= committed
@@ -353,8 +339,8 @@ end
 # operator's square matrix: `q` lives in the `[ū | q_cells | q_items]` tail, so
 # the block is `ndofs(dh) × ndofs(ivh)` and its per-item contribution is
 # `celldofs(cell) × internal_variable_range(ivh, cellid)`. Columns are disjoint
-# between items by construction — an item owns its internal range alone — so
-# only the rows ever collide, exactly like every other dof-scattered sweep.
+# between items — an item owns its internal range alone — so only the rows ever
+# collide, exactly like every other dof-scattered sweep.
 
 """
     internal_jacobian_cell_sweep!(kind::JacobianKind{:q}, task, ws)
@@ -397,9 +383,9 @@ algebraic items both contribute, their column blocks lying where the
 """
 function init_internal_jacobian_sparsity_pattern(engine)
     ivh = engine.ivh
-    # `nnz_per_row` is a growth hint only — the pattern grows as entries are
-    # added, and a row's real width is (items touching the dof) × (internal
-    # dofs per item), which no single number covers across mixed subdomains.
+    # `nnz_per_row` is a growth hint only: a row's real width is (items
+    # touching the dof) × (internal dofs per item), which no single number
+    # covers across mixed subdomains.
     sp = SparsityPattern(ndofs(engine.dh), ndofs(ivh); nnz_per_row = 8)
     for sc in engine.subdomain_caches
         _add_internal_jacobian_entries!(sp, sc, ivh)
@@ -475,8 +461,8 @@ through the analytic `assemble_cell!(::JacobianRequest{:q}, …)` kernel or by
 ForwardDiff seeding of the `:q` slot — which needs no admissibility guard,
 `q` being the seed itself, so `Consistent` and `FrozenQ` coincide here.
 
-An operator without condensed unknowns has no such block and is rejected:
-`ndofs(ivh) == 0` means there is no column space to assemble into.
+An operator without condensed unknowns is rejected: `ndofs(ivh) == 0` means
+there is no column space to assemble into.
 """
 function update_internal_jacobian!(Kq::AbstractMatrix, op, states::NamedTuple, p, ctx)
     _assert_condensed_operator(op, "update_internal_jacobian!")
@@ -517,8 +503,7 @@ sweep.
 The election is invisible to kernels: a `Consistent` kernel reads its
 corrector through ONE access point, which either reads the store or
 recomputes. [`condensed_corrector`](@ref) is that access point for the AD
-decorator's generic combination, and it receives the args record for exactly
-this reason.
+decorator's generic combination, which is why it receives the args record.
 """
 abstract type CorrectorElection end
 @doc (@doc CorrectorElection) struct Stored <: CorrectorElection end
@@ -531,28 +516,25 @@ trial `q` and nothing else — and re-derives the corrector from the item's
 current `(u, q)` at every point of use.
 
 Targets memory-bound ASSEMBLED sweeps at scale, where per-quadrature-point
-corrector storage is the binding cost. For matrix-free/action-style use —
-repeated operator actions at a fixed state, e.g. a Krylov `mul!`/JVP sequence
-— [`Stored`](@ref) is the right election, since every action would otherwise
-re-derive the same corrector.
+corrector storage is the binding cost. For repeated operator actions at a
+fixed state (a Krylov `mul!`/JVP sequence) [`Stored`](@ref) is the right
+election, since every action would otherwise re-derive the same corrector.
 
 Recomputation is EXACT, not approximate: the corrector is a closed-form
 function of the converged pair `(u, q)` — the implicit-function-theorem slopes
 of the element's local conditions — so it is the same quantity
-[`condense_cell!`](@ref) would have stored, evaluated at the same point. The
-solver's chain-rule scalars are not item data; an element chaining `weights`
-into its corrector retains them per cache, which is `O(1)` and not the storage
-this election trades away.
+[`condense_cell!`](@ref) would have stored, at the same point. An element
+chaining `weights` into its corrector retains them per cache, which is `O(1)`
+and not the storage this election trades away.
 
-Freshness: the corrector staleness class disappears — nothing is stored, so
-nothing can go stale, and [`rollback_state!`](@ref) has no correctors to drop
-(restoring `u` restores its `q` tail with it). The q-freshness contract
-REMAINS unchanged: `q` is written only by [`condense_internal!`](@ref), so a
-`Consistent` sweep still requires a condensation at the current trial point.
-What is lost is the DETECTION of a missing one — [`Stored`](@ref) throws
-through [`item_state`](@ref)'s freshness contract on a never-condensed or
-invalidated item, while a recomputing kernel silently derives a corrector from
-whatever `q` the tail currently holds.
+Freshness: nothing is stored, so nothing can go stale and
+[`rollback_state!`](@ref) has no correctors to drop (restoring `u` restores its
+`q` tail with it). The q-freshness contract is unchanged — `q` is written only
+by [`condense_internal!`](@ref), so a `Consistent` sweep still requires a
+condensation at the current trial point. What is lost is the DETECTION of a
+missing one: [`Stored`](@ref) throws through [`item_state`](@ref)'s freshness
+contract on a never-condensed or invalidated item, while a recomputing kernel
+silently derives a corrector from whatever `q` the tail currently holds.
 """
 struct Recompute <: CorrectorElection end
 

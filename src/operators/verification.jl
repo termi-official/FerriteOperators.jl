@@ -10,8 +10,8 @@ end
 
 _relerr(a, b) = norm(a .- b) / max(norm(b), eps(Float64))
 
-# One check body: ArgumentError (inadmissible kind) and MethodError (entry
-# point not implemented by this operator type) are recorded as skips.
+# ArgumentError (inadmissible kind) and MethodError (entry point not
+# implemented by this operator type) are recorded as skips.
 function _run_check(f)
     try
         return f()
@@ -28,41 +28,37 @@ _check_entry(passed, err) = (passed = passed, err = err, skipped = nothing)
                       weights = nothing) -> (passed, checks)
 
 Cross-check the operator's derivative paths against central finite differences
-of its own residual, through the same entry points solvers use — a wrong
-analytic kernel ([`provides_analytic`](@ref)) fails its check against the FD
-referee. Checks: assembled Jacobian action along `nprobes` deterministic
-directions, fused-vs-split residual consistency, parameter Jacobian (per
-flat-θ column) and VJP, matrix-free state JVP/VJP actions, and — when `ctx` is
-given — the time sensitivity (default method against
-[`FiniteDifferenceSensitivity`](@ref); the evaluation time comes from the
-context, which is where ∂F/∂t seeds).
+of its own residual, through the entry points solvers use — a wrong analytic
+kernel ([`provides_analytic`](@ref)) fails against the FD referee. Checks:
+Jacobian action along `nprobes` deterministic directions, fused-vs-split
+residual consistency, parameter Jacobian (per flat-θ column) and VJP,
+matrix-free state JVP/VJP, and — when `ctx` is given — the time sensitivity
+against [`FiniteDifferenceSensitivity`](@ref), seeded at the context's
+evaluation time.
 
-Passing `weights` (a per-slot NamedTuple, e.g. `(u = 1.0, du = 1/(γ*Δt))`)
-adds the two weighted-Jacobian checks: `weighted_jacobian` probes the fused
-`Σₛ wₛ ∂F/∂s` against per-slot finite differences of the residual, and
-`weighted_jacobian_routes` requires the fused and composed routes of
-[`assemble_weighted_jacobian!`](@ref) to agree — the caller cannot tell which
-route a given operator takes, so the two must be interchangeable. Both are
-skipped with the reason recorded when no weights are given, when the weights
-are complex (the FD referee is real), or when a participating slot carries an
-[`AffineRate`](@ref) source (nothing to difference against).
+`weights` (per-slot, e.g. `(u = 1.0, du = 1/(γ*Δt))`) adds two more:
+`weighted_jacobian` probes the fused `Σₛ wₛ ∂F/∂s` against per-slot finite
+differences, and `weighted_jacobian_routes` requires the fused and composed
+routes of [`assemble_weighted_jacobian!`](@ref) to agree — the caller cannot
+tell which route an operator takes, so the two must be interchangeable. Both
+skip without weights, with complex weights (the FD referee is real), or when a
+participating slot carries an [`AffineRate`](@ref) source.
 
-The FD referee evaluates the operator's FULL residual, boundary terms
-included, while the sensitivity sweeps it checks skip a boundary term that
-rides the cell sweep (a [`facet_items`](@ref) term is its own traversal and
-does enter them). On an operator carrying a fused-route boundary cache, a
-failing parameter, time, or state-product check is therefore the diagnostic
-for a boundary term that depends on the seeded quantity.
+The FD referee evaluates the FULL residual, boundary terms included, while the
+sensitivity sweeps skip a boundary term riding the cell sweep
+([`facet_items`](@ref) terms are their own traversal and do enter them). A
+failing parameter, time, or state-product check on an operator with a
+fused-route boundary cache is therefore the diagnostic for a boundary term
+depending on the seeded quantity.
 
-`checks` holds one `(passed, err, skipped)` entry per check; inadmissible or
-unsupported checks are skipped with the reason recorded, and `passed` is the
-conjunction of all non-skipped checks. The caller's vectors are never
-mutated. Condensed operators (`unknown_size(op) > residual_size(op)`) are
-probed along the field dofs only; the FD evaluations exercise the full local
-solves, so the check validates the consistent condensed tangent.
+`checks` holds one `(passed, err, skipped)` entry per check, with the reason
+recorded on a skip; `passed` is the conjunction of the non-skipped ones. The
+caller's vectors are never mutated. Condensed operators
+(`unknown_size(op) > residual_size(op)`) are probed along the field dofs only;
+the FD evaluations exercise the full local solves, so the check validates the
+consistent condensed tangent.
 
-Supports [`LinearizedFerriteOperator`](@ref) only — the family with a
-Jacobian, a residual, and the sensitivity entry points this checks against.
+Supports [`LinearizedFerriteOperator`](@ref) only.
 """
 check_derivatives(op, states::NamedTuple, p, ctx = nothing; kwargs...) = throw(ArgumentError(
     "check_derivatives supports LinearizedFerriteOperator only (got $(typeof(op))): " *
@@ -77,20 +73,16 @@ function check_derivatives(op::LinearizedFerriteOperator, states::NamedTuple, p,
     ubase = copy(states.u)
     uw    = copy(states.u)
     statesw = merge(states, (u = uw,))
-    # `uw` is mutated in place (never reassigned) below, so a `:q` slot
-    # sourced by `InternalSource` — which wraps `uw` once, here — stays valid
-    # across every perturbation without being rebuilt per trial point.
+    # `uw` is mutated in place (never reassigned) below, so the `InternalSource`
+    # wrapping it here stays valid across every perturbation.
     condensed = unknown_size(op) > residual_size(op)
     if condensed && haskey(states, :q) && states.q isa InternalSource
         statesw = merge(statesw, (q = InternalSource(uw),))
     end
-    # The FD referee must re-solve `q` at every trial point to be a total,
-    # matching what a `Consistent` analytic kernel computes — condensation is
-    # the evaluation that makes that solve happen post-phase (see
-    # `condense_internal!`). A `FrozenQ` election is a deliberately partial
-    # kernel with no total to compare against, so its checks are skipped
-    # rather than run against a doomed reference — an elected mismatch is
-    # as-elected, not a failure.
+    # Re-solving `q` at every trial point makes the FD referee a total, which is
+    # what a `Consistent` analytic kernel computes (see `condense_internal!`). A
+    # `FrozenQ` election is a deliberately partial kernel with no total to
+    # compare against, so its checks are skipped rather than failed.
     _condense!(s, pc, cc) = condensed && correction === Consistent && condense_internal!(op, s, pc, cc)
     hs = h * max(1.0, maximum(abs, view(ubase, 1:nres)))
 
@@ -181,8 +173,8 @@ function check_derivatives(op::LinearizedFerriteOperator, states::NamedTuple, p,
         _check_entry(isapprox(Jv, fd; rtol, atol), _relerr(Jv, fd))
     end
 
-    # (∂F/∂u)ᵀλ is checked through the probe identity ⟨g, v⟩ = ⟨λ, J v⟩, so no
-    # transposed operator action is required of `op`.
+    # Checked through the probe identity ⟨g, v⟩ = ⟨λ, J v⟩, so `op` needs no
+    # transposed action.
     state_vjp = _run_check() do
         λ = _probe_vector(nres, 13)
         g = zeros(nres); fd = zeros(nres)
@@ -210,8 +202,8 @@ function check_derivatives(op::LinearizedFerriteOperator, states::NamedTuple, p,
         _check_entry(isapprox(g, gfd; rtol, atol), _relerr(g, gfd))
     end
 
-    # The weighted routes assemble into two members of one pattern group, so
-    # the fused-vs-composed comparison is a plain `nzval` comparison.
+    # Both weighted routes assemble into one pattern group, so comparing
+    # `nzval` settles fused-vs-composed.
     Wf = Ref{Any}(nothing)
     weighted_jacobian = _run_check() do
         skip = _weighted_check_skip(weights, states)
@@ -220,8 +212,8 @@ function check_derivatives(op::LinearizedFerriteOperator, states::NamedTuple, p,
         _fused_weighted_route(op, kind) || return (passed = true, err = NaN, skipped =
             "this operator's element caches route the weighted Jacobian to the composed path only")
         slots = keys(weights)
-        # Writable copies of every participating slot; `:u` reuses the copy the
-        # checker already protects the caller's state with.
+        # Writable copies of every participating slot; `:u` reuses the checker's
+        # copy of the caller's state.
         wbase = NamedTuple{slots}(map(s -> s === :u ? ubase : copy(states[s]), slots))
         wwork = NamedTuple{slots}(map(s -> s === :u ? uw : copy(states[s]), slots))
         statesq = merge(statesw, wwork)

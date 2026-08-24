@@ -1,5 +1,7 @@
 @doc raw"""
     SimpleHyperelasticityIntegrator{EnergyType}
+
+Hyperelasticity with strain energy density ``\psi(F)``, ``F = I + \nabla u``.
 """
 struct SimpleHyperelasticityIntegrator{EnergyType} <: AbstractNonlinearIntegrator
     # This is specific to our model
@@ -12,7 +14,7 @@ end
 """
 The cache associated with [`SimpleHyperelasticityIntegrator`](@ref). It serves
 the residual, the Jacobian and the fused Jacobian-residual analytically, all
-three from `Tensors` derivatives of the energy.
+from `Tensors` derivatives of the energy.
 """
 struct SimpleHyperelasticityElementCache{EnergyType, CV <: CellValues} <: AbstractVolumetricElementCache
     ψ::EnergyType
@@ -29,7 +31,6 @@ end
 Ferrite.getnquadpoints(e::SimpleHyperelasticityElementCache) = getnquadpoints(e.cv)
 reinit_values!(e::SimpleHyperelasticityElementCache, cell) = Ferrite.reinit!(e.cv, cell)
 
-# Element residual
 function assemble_cell!(req::ResidualRequest, element_cache::SimpleHyperelasticityElementCache, args::CellArgs)
     residualₑ = req.r
     uₑ = args.states.u
@@ -41,24 +42,19 @@ function assemble_cell!(req::ResidualRequest, element_cache::SimpleHyperelastici
     @inbounds for qp ∈ 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
 
-        # Compute deformation gradient F
         ∇u = function_gradient(cv, qp, uₑ)
         F = one(∇u) + ∇u
 
-        # Compute stress and tangent
         P = Tensors.gradient(F_ad -> ψ(F_ad), F)
 
-        # Loop over test functions
         for i in 1:ndofs
             ∇δui = shape_gradient(cv, qp, i)
 
-            # Add contribution to the residual from this test function
             residualₑ[i] += ∇δui ⊡ P * dΩ
         end
     end
 end
 
-# jac
 function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleHyperelasticityElementCache, args::CellArgs)
     Kₑ = req.K
     uₑ = args.states.u
@@ -70,28 +66,23 @@ function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleHyperelas
     @inbounds for qp ∈ 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
 
-        # Compute deformation gradient F
         ∇u = function_gradient(cv, qp, uₑ)
         F = one(∇u) + ∇u
 
-        # Compute stress and tangent
         ∂P∂F = Tensors.hessian(F_ad -> ψ(F_ad), F)
 
-        # Loop over test functions
         for i in 1:ndofs
             ∇δui = shape_gradient(cv, qp, i)
 
             ∇δui∂P∂F = ∇δui ⊡ ∂P∂F # Hoisted computation
             for j in 1:ndofs
                 ∇δuj = shape_gradient(cv, qp, j)
-                # Add contribution to the tangent
                 Kₑ[i, j] += ( ∇δui∂P∂F ⊡ ∇δuj ) * dΩ
             end
         end
     end
 end
 
-# Combined residual and jac
 function assemble_cell!(req::JacobianResidualRequest, element_cache::SimpleHyperelasticityElementCache, args::CellArgs)
     Kₑ = req.K
     residualₑ = req.r
@@ -104,24 +95,20 @@ function assemble_cell!(req::JacobianResidualRequest, element_cache::SimpleHyper
     @inbounds for qp ∈ 1:getnquadpoints(cv)
         dΩ = getdetJdV(cv, qp)
 
-        # Compute deformation gradient F
         ∇u = function_gradient(cv, qp, uₑ)
         F = one(∇u) + ∇u
 
-        # Compute stress and tangent
+        # `:all` returns the stress alongside the tangent, in one pass
         ∂P∂F, P = Tensors.hessian(F_ad -> ψ(F_ad), F, :all)
 
-        # Loop over test functions
         for i in 1:ndofs
             ∇δui = shape_gradient(cv, qp, i)
 
-            # Add contribution to the residual from this test function
             residualₑ[i] += ∇δui ⊡ P * dΩ
 
             ∇δui∂P∂F = ∇δui ⊡ ∂P∂F # Hoisted computation
             for j in 1:ndofs
                 ∇δuj = shape_gradient(cv, qp, j)
-                # Add contribution to the tangent
                 Kₑ[i, j] += ( ∇δui∂P∂F ⊡ ∇δuj ) * dΩ
             end
         end

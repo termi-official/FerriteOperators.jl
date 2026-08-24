@@ -1,20 +1,6 @@
-## TransferFerriteOperator
-##
-## Assembles a rectangular sparse matrix P (nrdofs × ncdofs) from element-local
-## rectangular contributions, using the two-DofHandler iterator infrastructure defined in
-## src/core/iterators.jl.
-##
-## The entry point for the rectangular assembler relies on:
-##   Ferrite.assemble!(assembler, rdofs, cdofs, Ke)
-## which is available in Ferrite ≥ 1.4 (see Ferrite.jl PR https://github.com/Ferrite-FEM/Ferrite.jl/pull/1279).
-##
-## Usage sketch (p-multigrid prolongator):
-##
-##   integrator = MassProlongatorIntegrator(QuadratureRuleCollection(3), :u)
-##   strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
-##   op         = setup_transfer_operator(strategy, integrator, fine_dh, coarse_dh)
-##   update_operator!(op, nothing)
-##   P = op.P
+## Cell traversal uses the two-DofHandler iterators of src/core/iterators.jl. The
+## rectangular assembler entry point `Ferrite.assemble!(assembler, rdofs, cdofs, Ke)`
+## needs Ferrite ≥ 1.4 (https://github.com/Ferrite-FEM/Ferrite.jl/pull/1279).
 
 ####################################
 ## Element interface              ##
@@ -23,13 +9,11 @@
 """
     AbstractTransferIntegrator
 
-Supertype for integrators that produce element-local **rectangular** matrices, i.e.
+Supertype for integrators producing element-local **rectangular** matrices —
 contributions to a transfer (prolongation / restriction) operator between two DofHandlers.
 
-Required methods:
-- `setup_transfer_element_cache(integrator, sdh_row::SubDofHandler, sdh_col::SubDofHandler)`
-
-The returned cache must be a subtype of [`AbstractTransferElementCache`](@ref).
+Required: `setup_transfer_element_cache(integrator, sdh_row::SubDofHandler,
+sdh_col::SubDofHandler)`, returning an [`AbstractTransferElementCache`](@ref).
 """
 abstract type AbstractTransferIntegrator end
 
@@ -38,13 +22,12 @@ abstract type AbstractTransferIntegrator end
 
 Supertype for element caches used in transfer-operator assembly.
 
-Required method:
+Required:
 
     assemble_transfer_element!(Pe, tc, element_cache, p)
 
-where `tc` is a [`SameGridCellCache`](@ref) or a
-[`NestedGridCellCache`](@ref) and `Pe` is the pre-allocated rectangular element
-matrix of size `(nrdofs_per_cell × ncdofs_per_cell)`.
+with `tc` a [`SameGridCellCache`](@ref) or [`NestedGridCellCache`](@ref) and `Pe`
+the pre-allocated `(nrdofs_per_cell × ncdofs_per_cell)` element matrix.
 """
 abstract type AbstractTransferElementCache end
 
@@ -52,7 +35,6 @@ abstract type AbstractTransferElementCache end
 allocate_transfer_element_matrix(::AbstractTransferElementCache, sdh_row, sdh_col) =
     zeros(ndofs_per_cell(sdh_row), ndofs_per_cell(sdh_col))
 
-## Default setup (can be overridden)
 function setup_transfer_element_cache end
 
 
@@ -63,8 +45,8 @@ function setup_transfer_element_cache end
 """
     TransferWorkspace
 
-Per-worker workspace for transfer operator assembly. Holds the element cache,
-pre-allocated rectangular element matrix, and the transfer cell cache.
+Per-worker workspace for transfer assembly: element cache, pre-allocated
+rectangular element matrix, and transfer cell cache.
 """
 @concrete struct TransferWorkspace <: AbstractWorkspace
     element
@@ -110,14 +92,8 @@ end
     TransferFerriteOperator
 
 A transfer (prolongation / restriction) operator assembled as a rectangular sparse matrix
-`P` of size `(nrdofs × ncdofs)`.
-
-Construct via [`setup_transfer_operator`](@ref) and update via [`update_operator!`](@ref).
-
-    mul!(out, op, x)
-    mul!(out, op, x, α, β)
-
-apply the operator (matrix-vector product).
+`P` of size `(nrdofs × ncdofs)`. Construct via [`setup_transfer_operator`](@ref), update
+via [`update_operator!`](@ref), apply with `mul!(out, op, x[, α, β])`.
 
 !!! warning "Experimental surface"
     The transfer constructors and operator types may change in a minor release;
@@ -171,10 +147,9 @@ Base.size(op::TransferFerriteOperator) = size(op.P)
 """
     NestedTransferFerriteOperator
 
-Transfer operator for hierarchically nested grids (geometric multigrid).  The fine and
-coarse DofHandlers live on different grids connected via `fine2coarse` mappings.
-
-Construct via [`setup_nested_transfer_operator`](@ref); update via [`update_operator!`](@ref).
+Transfer operator for hierarchically nested grids (geometric multigrid): the fine and
+coarse DofHandlers live on different grids, connected via `fine2coarse` mappings.
+Construct via [`setup_nested_transfer_operator`](@ref), update via [`update_operator!`](@ref).
 
 !!! warning "Experimental surface"
     The transfer constructors and operator types may change in a minor release;

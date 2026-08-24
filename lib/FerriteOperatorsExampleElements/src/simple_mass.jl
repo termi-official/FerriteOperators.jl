@@ -1,7 +1,7 @@
 @doc raw"""
     SimpleLinearIntegrator
 
-Represents the integrand of the linear form ``b(v) = f v(x) dx`` for a given constant ``f`` and ``v`` from the test function space.
+Represents the integrand of the linear form ``b(v) = \int f v(x) dx`` for a given constant ``f`` and ``v`` from the test function space.
 """
 struct SimpleLinearIntegrator <: AbstractLinearIntegrator
     # This is specific to our model
@@ -29,8 +29,7 @@ function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofH
     return SimpleLinearElementCache(element_model.f, CellValues(qr, ip, ip_geo))
 end
 
-# The load form is state-independent: the residual kernel reads nothing from
-# `args.states`.
+# The load form is state-independent: the kernel reads nothing from `args.states`.
 function assemble_cell!(req::ResidualRequest, cache::SimpleLinearElementCache, args::CellArgs)
     (; cellvalues, f) = cache
     for qp in 1:getnquadpoints(cellvalues)
@@ -46,7 +45,7 @@ duplicate_for_device(device, cache::SimpleLinearElementCache) = SimpleLinearElem
 @doc raw"""
     SimpleBilinearMassIntegrator
 
-Represents the integrand of the bilinear form ``a(u,v) = \int v(x) \cdot D u(x) dx`` for a given Mass value ``D`` and ``u,v`` from the same function space.
+Represents the integrand of the bilinear form ``a(u,v) = \int v(x) \cdot \rho u(x) dx`` for a given density ``\rho`` and ``u,v`` from the same function space.
 """
 struct SimpleBilinearMassIntegrator <: AbstractBilinearIntegrator
     # This is specific to our model
@@ -57,7 +56,7 @@ struct SimpleBilinearMassIntegrator <: AbstractBilinearIntegrator
 end
 
 """
-The cache associated with [`SimpleBilinearMassIntegrator`](@ref) to assemble element Mass matrices.
+The cache associated with [`SimpleBilinearMassIntegrator`](@ref) to assemble element mass matrices.
 """
 struct SimpleBilinearMassElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
     ρ::Float64

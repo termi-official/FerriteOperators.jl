@@ -48,7 +48,6 @@ function EAVector(::Type{ValueType}, ::Type{IndexType}, dh::DofHandler) where {V
 end
 Base.fill!(v::EAVector, val) = fill!(v.data, val)
 
-# Generic Element Assembly Data Type
 @concrete struct EAOperator
     device
     device_cache

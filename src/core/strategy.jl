@@ -3,19 +3,18 @@
 
 The operator's global matrix as a monolithic
 `SparseMatrixCSC{value_type(device), index_type(device)}`, over the pattern
-[`create_system_matrix`](@ref) builds from two declarations, both of which
-[`BlockedOperatorSpecification`](@ref) shares:
+[`create_system_matrix`](@ref) builds from two declarations
+[`BlockedOperatorSpecification`](@ref) shares (the zero-argument form is
+[`FullAssembly`](@ref)'s default):
 
 - `algebraic_couplings` — Ferrite coupling descriptors (`CellCoupling`,
   `FacetCoupling`, `AlgebraicCoupling`) for the entries an element's
-  [`global_dofs`](@ref) couple into. WHICH items couple is the caller's
-  statement, never inferred from the dof declaration; a missing descriptor
-  surfaces as Ferrite's missing-sparsity-entry error on the first assembly.
-- `constraint_handler` — the constraint entries (`add_constraint_entries!`),
-  so condensation has room to write. Sparsity ONLY: applying the constraints
-  stays the caller's, through Ferrite's `apply!`/`apply_assemble!`.
-
-The zero-argument form is the default of [`FullAssembly`](@ref).
+  [`global_dofs`](@ref) couple into, never inferred from the dof declaration.
+  A missing descriptor surfaces as Ferrite's missing-sparsity-entry error on
+  the first assembly.
+- `constraint_handler` — sparsity room for the constraint entries
+  (`add_constraint_entries!`). Applying the constraints stays the caller's,
+  through Ferrite's `apply!`/`apply_assemble!`.
 """
 struct StandardOperatorSpecification{C, CH}
     algebraic_couplings::C
@@ -28,16 +27,15 @@ StandardOperatorSpecification(; algebraic_couplings = (), constraint_handler = n
     BlockedOperatorSpecification(block_sizes, matrix_type; algebraic_couplings = (), constraint_handler = nothing)
 
 The operator's global matrix as a `BlockMatrix` over the row/column split
-`block_sizes`, allocated from a `BlockSparsityPattern` and from the same two
+`block_sizes`, allocated from a `BlockSparsityPattern` and the same two
 declarations as [`StandardOperatorSpecification`](@ref). `matrix_type` is
-REQUIRED and is the caller's — this package depends on neither BlockArrays nor
-SparseMatricesCSR, weakly or otherwise, so the user loads them and names the
-type (`BlockMatrix{Float64, Matrix{SparseMatrixCSR{1, Float64, Int}}}`).
+REQUIRED: this package depends on neither BlockArrays nor SparseMatricesCSR, so
+the user loads them and names the type
+(`BlockMatrix{Float64, Matrix{SparseMatrixCSR{1, Float64, Int}}}`).
 
-The residual stays a plain `Vector` — `create_system_vector` is unchanged, and
-Ferrite's `BlockAssembler` takes a non-blocked `f`. A LINEAR operator holds no
-matrix at all, so a blocked specification on one is rejected at setup rather
-than silently dropped.
+The residual stays a plain `Vector` — Ferrite's `BlockAssembler` takes a
+non-blocked `f`. A LINEAR operator holds no matrix, so a blocked specification
+on one is rejected at setup.
 """
 struct BlockedOperatorSpecification{B, MT, C, CH}
     block_sizes::B
@@ -84,26 +82,23 @@ end
 ####################################
 
 """
-How parallel work is made safe — the second strategy axis. Sequential
-scheduling relies on atomic scatter under parallel devices; colored
-scheduling provides race freedom without atomics (required for eltypes
-without atomic support, and for run-to-run reproducibility).
+How parallel work is made safe — the second strategy axis. See
+[`SequentialScheduling`](@ref) and [`ColoredScheduling`](@ref).
 """
 abstract type AbstractSchedulingPolicy end
 """
     SequentialScheduling()
 
 Race freedom by atomic scatter: every worker assembles into the same global
-target and the assembler resolves collisions atomically. Requires an eltype
-with atomic support.
+target, collisions resolved atomically. Requires an eltype with atomic support.
 """
 struct SequentialScheduling <: AbstractSchedulingPolicy end
 
 """
     ColoredScheduling(alg = ColoringAlgorithm.WorkStream)
 
-Race freedom by coloring: the partition is a sequence of colors, and no two
-items of one color share a dof, so the scatter needs no atomics. Required for
+Race freedom by coloring: the partition is a sequence of colors, no two items
+of one color sharing a dof, so the scatter needs no atomics. Required for
 eltypes without atomic support, and what makes a run reproducible
 element-by-element.
 """
@@ -119,11 +114,10 @@ ColoredScheduling() = ColoredScheduling(ColoringAlgorithm.WorkStream)
 """
     AssemblyStrategy(form, scheduling, device)
 
-An assembly strategy is the composition of three orthogonal axes: the operator
-form ([`AbstractAssemblyForm`](@ref) — what is produced), the scheduling
-policy ([`AbstractSchedulingPolicy`](@ref) — how parallel work is made safe),
-and the device (where it runs). The named constructors below build the
-common compositions.
+The composition of three orthogonal axes: the operator form
+([`AbstractAssemblyForm`](@ref) — what is produced), the scheduling policy
+([`AbstractSchedulingPolicy`](@ref) — how parallel work is made safe), and the
+device. The named constructors below build the common compositions.
 """
 struct AssemblyStrategy{F <: AbstractAssemblyForm, S <: AbstractSchedulingPolicy, D} <: AbstractAssemblyStrategy
     form::F
@@ -134,29 +128,27 @@ end
 """
     SequentialAssemblyStrategy(device)
 
-[`FullAssembly`](@ref) into a global matrix, scheduled by
-[`SequentialScheduling`](@ref) — one chunk, races resolved by the atomic
-scatter under a parallel `device`. The default composition, and the only one
-that admits [`global_dofs`](@ref) and the algebraic item family.
+[`FullAssembly`](@ref) under [`SequentialScheduling`](@ref), i.e. one chunk.
+The default composition, and the only one that admits [`global_dofs`](@ref) and
+the algebraic item family.
 """
 SequentialAssemblyStrategy(device) = AssemblyStrategy(FullAssembly(), SequentialScheduling(), device)
 
 """
     PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream)
 
-[`FullAssembly`](@ref) scheduled by [`ColoredScheduling`](@ref): items of one
-color share no dof, so a color is a barrier a parallel `device` runs without
-atomics. `alg` is the Ferrite coloring algorithm.
+[`FullAssembly`](@ref) under [`ColoredScheduling`](@ref), each color a barrier
+the parallel `device` runs without atomics. `alg` is the Ferrite coloring
+algorithm.
 """
 PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = AssemblyStrategy(FullAssembly(), ColoredScheduling(alg), device)
 
 """
     ElementAssemblyStrategy(device)
 
-[`ElementAssembly`](@ref) — element matrices kept per element instead of
-scattered into a global one (the matrix-free/partial-assembly level) — under
-[`SequentialScheduling`](@ref). Its per-element dof maps come from `celldofs`,
-so an element declaring [`global_dofs`](@ref) is rejected at setup.
+[`ElementAssembly`](@ref) under [`SequentialScheduling`](@ref). Its per-element
+dof maps come from `celldofs`, so an element declaring [`global_dofs`](@ref) is
+rejected at setup.
 """
 ElementAssemblyStrategy(device) = AssemblyStrategy(ElementAssembly(), SequentialScheduling(), device)
 
@@ -174,13 +166,10 @@ setup_operator_strategy_cache(strategy, integrator, dh) = strategy
 """
     AbstractWorkspace
 
-Abstract supertype for all per-worker workspace types used by the task/device system.
-
+Supertype of the per-worker workspaces a device backend allocates and manages.
 Every concrete workspace must implement:
-- `Ferrite.reinit!(ws, item)` — position the workspace on the item its family is indexed by (a cell id, a patch index, an algebraic item index)
-- `duplicate_for_device(device::AbstractCPUDevice, ws)` — create an independent copy for a parallel worker
-
-New device backends must allocate and manage workspaces of a concrete subtype.
+- `Ferrite.reinit!(ws, item)` — position it on the item its family is indexed by (a cell id, a patch index, an algebraic item index)
+- `duplicate_for_device(device::AbstractCPUDevice, ws)` — an independent copy for a parallel worker
 """
 abstract type AbstractWorkspace end
 
@@ -191,17 +180,13 @@ Per-worker OUTPUT buffers the five sensitivity requests
 ([`ParameterJacobianRequest`](@ref), [`ParameterVJPRequest`](@ref),
 [`TimeSensitivityRequest`](@ref), [`StateJVPRequest`](@ref),
 [`StateVJPRequest`](@ref)) accumulate into and the engine scatters, plus the
-rectangular ∂F/∂q block ([`update_internal_jacobian!`](@ref)), which is the
-same shape of thing: a local block whose column space is not the field space
-— the "outputs and payload gathers" half of the AD decorator's buffer split
-(see [`ADElementCache`](@ref) for the other half, the seeds/configs).
+rectangular ∂F/∂q block ([`update_internal_jacobian!`](@ref)), also a local
+block whose column space is not the field space. The outputs half of the AD
+decorator's buffer split — [`ADElementCache`](@ref) holds the seeds and configs.
 
-Element-sized members (`λₑ`, `vₑ`, `Jvₑ`, `gu`, `gₜ`) are eager. The
-rectangular members are (re)allocated on first use, their column count being
-call-time or per-item knowledge rather than setup knowledge: `θ`/`Bₑ`/`gθ`
-through [`parameter_sweep_buffers!`](@ref) because nθ arrives with `p`, and
-`Kqₑ` through [`internal_sweep_buffers!`](@ref) because an item declares its
-own internal dof count.
+Element-sized members (`λₑ`, `vₑ`, `Jvₑ`, `gu`, `gₜ`) are eager; the rectangular
+ones are (re)allocated once their column count is known — `θ`/`Bₑ`/`gθ` by
+[`parameter_sweep_buffers!`](@ref), `Kqₑ` by [`internal_sweep_buffers!`](@ref).
 """
 @concrete mutable struct SensitivityBuffers
     λₑ        # residual-sized adjoint gather
@@ -239,8 +224,8 @@ duplicate_for_device(device::AbstractCPUDevice, s::SensitivityBuffers) =
 """
     parameter_sweep_buffers!(s::SensitivityBuffers, nθ) -> SensitivityBuffers
 
-Size the parameter-sweep members (`θ`, `Bₑ`, `gθ`) for `nθ` flat parameters,
-reallocating only when nθ changed since the last sweep on this worker.
+Size the parameter-sweep members (`θ`, `Bₑ`, `gθ`) for the `nθ` flat parameters
+arriving with `p`, reallocating only when nθ changed on this worker.
 """
 function parameter_sweep_buffers!(s::SensitivityBuffers, nθ::Int)
     if length(s.θ) != nθ
@@ -256,9 +241,8 @@ end
     internal_sweep_buffers!(s::SensitivityBuffers, nq) -> SensitivityBuffers
 
 Size the ∂F/∂q block (`Kqₑ`) for an item owning `nq` condensed internal dofs,
-reallocating only when that count changed since the last item on this worker.
-The count is per ITEM rather than per subdomain — a cell's internal dof count
-is its own declaration — so this is the block's sizer, not a per-sweep one
+reallocating only when that count changed on this worker. The count is per
+ITEM, not per subdomain, so this runs per item rather than per sweep
 ([`update_internal_jacobian!`](@ref)).
 """
 function internal_sweep_buffers!(s::SensitivityBuffers, nq::Int)
@@ -269,43 +253,36 @@ end
 """
     AssemblyWorkspace
 
-Per-worker workspace for square operator assembly (bilinear, nonlinear, linear):
-a fixed CORE of pre-allocated element-local buffers and caches reused across
-cells, plus the [`SensitivityBuffers`](@ref) a nonlinear operator's sensitivity
-entry points need.
+Per-worker workspace for square operator assembly (bilinear, nonlinear,
+linear): element-local buffers and caches reused across cells, plus the
+[`SensitivityBuffers`](@ref) a nonlinear operator's sensitivity entry points
+need.
 
-IMMUTABLE: every field is bound at construction, and a sweep works by filling
-the buffers those fields point at. No sweep ever rebinds a field, which is what
-lets the workspace cross a device boundary — a scalar or tensor evaluation
-RETURNS its value instead of parking it in a slot here (see
-[`evaluate_functional`](@ref)).
+IMMUTABLE: every field is bound at construction, a sweep only filling the
+buffers they point at. That is what lets the workspace cross a device boundary
+— a scalar or tensor evaluation RETURNS its value instead of parking it in a
+slot here (see [`evaluate_functional`](@ref)).
 
 Core fields:
-- `Ke`: element stiffness matrix
+- `Ke`, `re`, `cell`, `ivh`: element matrix, element residual, `Ferrite.CellCache`, internal variable handler
 - `slot_buffers`: NamedTuple of element-local state buffers, one per declared slot
-- `re`: element residual vector
-- `cell`: geometry cache (`Ferrite.CellCache`)
-- `ivh`: internal variable handler
-- `element`: element cache (user-defined, subtype of [`AbstractVolumetricElementCache`](@ref))
-- `boundary_element`: surface cache walked by the facet driver
-- `sensitivity`: [`SensitivityBuffers`](@ref), or `nothing` for an operator
-  family that never issues a sensitivity kind (bilinear, linear)
-- `dofs`: the augmented dof vector `[celldofs(cell); the declared global dofs]`
-  (see [`global_dofs`](@ref)), or `nothing` where the integrator declares none.
-  The tail is written once at construction, the head refreshed by
-  `Ferrite.reinit!`; the `nothing` type is what makes the un-augmented path
-  return `celldofs(ws.cell)` directly, with neither copy nor run-time branch.
+- `element`, `boundary_element`: volumetric ([`AbstractVolumetricElementCache`](@ref)) and surface element caches
+- `sensitivity`: [`SensitivityBuffers`](@ref), or `nothing` for a family that never issues a sensitivity kind (bilinear, linear)
+- `dofs`: augmented dof vector `[celldofs(cell); the declared global dofs]` ([`global_dofs`](@ref)), or `nothing`
+  where the integrator declares none. The tail is written once at construction, the head refreshed by
+  `Ferrite.reinit!`; the `nothing` type is what makes the un-augmented path return `celldofs(ws.cell)`
+  directly, with neither copy nor run-time branch.
 """
 @concrete struct AssemblyWorkspace <: AbstractWorkspace
     Ke
-    slot_buffers   # NamedTuple of element-local state buffers keyed by slot name
+    slot_buffers
     re
     cell
     ivh
     element
     boundary_element
-    sensitivity    # SensitivityBuffers, or `nothing`
-    dofs           # augmented dof vector, or `nothing`
+    sensitivity
+    dofs
 end
 
 function Ferrite.reinit!(ws::AssemblyWorkspace, cellid)
@@ -338,22 +315,18 @@ end
     create_assembly_workspace(element, boundary_element, sdh, ivh, slots;
                               needs_sensitivity = true, global_dofs = ())
 
-Create a single [`AssemblyWorkspace`](@ref) with freshly allocated
-element-local buffers, one state buffer per declared slot name. Slot buffers
-are sized by `allocate_element_unknown_vector` at construction, matching
-`ndofs_per_cell`; a slot gathered through [`InternalSource`](@ref) (a
-condensed element's `q`) is resized to fit the cell's internal-dof range on
-every gather instead, since that count is generally different from — and can
-vary per cell independently of — the field dof count.
+Create one [`AssemblyWorkspace`](@ref) with freshly allocated element-local
+buffers, one state buffer per declared slot name and sized to `ndofs_per_cell`;
+a slot gathered through [`InternalSource`](@ref) (a condensed element's `q`) is
+resized to the cell's internal-dof range on every gather instead, that count
+being unrelated to the field dof count and free to vary per cell.
 
 `needs_sensitivity` selects whether [`SensitivityBuffers`](@ref) is built —
-STRUCTURAL, decided by the integrator family (see
-[`needs_ad_decoration`](@ref)): a bilinear or linear operator never issues a
-sensitivity kind, so it carries none of this machinery.
+STRUCTURAL, decided by the integrator family ([`needs_ad_decoration`](@ref)).
 
-`global_dofs` is the subdomain's [`global_dofs`](@ref) declaration. Every
+`global_dofs` is the subdomain's [`global_dofs`](@ref) declaration: every
 element-local buffer is padded by its length, and the workspace carries the
-augmented dof vector every gather and scatter of the sweep addresses.
+augmented dof vector the sweep's gathers and scatters address.
 """
 function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
         needs_sensitivity::Bool = true, global_dofs = ()) where {N}
@@ -390,8 +363,7 @@ end
 
 The default work-item provider: the cells of one `SubDofHandler`. Item
 providers are what `compute_partition` consumes — every other item family
-brings its own provider type rather than a `SubDofHandler`
-([`AlgebraicItems`](@ref), [`PatchItems`](@ref)).
+brings its own provider type ([`AlgebraicItems`](@ref), [`PatchItems`](@ref)).
 """
 struct CellItems{SDH <: SubDofHandler}
     sdh::SDH
@@ -400,9 +372,9 @@ end
 """
     compute_partition(strategy, provider)
 
-Compute the work partition for the given strategy and item provider.
-Returns an iterable of iterables: the outer level represents synchronization barriers
-(e.g. colors), the inner level represents parallelizable work items (cell IDs).
+The work partition for a strategy and item provider: an iterable of iterables,
+the outer level synchronization barriers (e.g. colors), the inner level work
+items that may run in parallel (cell ids).
 """
 compute_partition(strategy::AssemblyStrategy, sdh::SubDofHandler) = compute_partition(strategy.scheduling, CellItems(sdh))
 compute_partition(strategy::AssemblyStrategy, provider) = compute_partition(strategy.scheduling, provider)
@@ -415,7 +387,7 @@ end
 """
     n_workers(strategy, device, partition) -> Int
 
-Compute the number of parallel workers needed for the given strategy, device, and partition.
+Number of parallel workers for this strategy, device and partition.
 """
 n_workers(strategy, ::SequentialCPUDevice, partition) = 1
 function n_workers(strategy, device::PolyesterDevice, partition)
@@ -437,8 +409,8 @@ end
 
 matrix_type(strategy::AssemblyStrategy) = matrix_type(strategy.device, strategy.form.operator_specification)
 matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
-# The blocked spec names its own type: the block and the entry storage are the
-# user's choice, and this package carries neither dependency.
+# The blocked spec names its own type: block and entry storage are the user's
+# choice, and this package carries neither dependency.
 matrix_type(::AbstractDevice, spec::BlockedOperatorSpecification) = spec.matrix_type
 vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
 vector_type(device::AbstractDevice) = Vector{value_type(device)}

@@ -6,23 +6,19 @@
     AbstractElementCacheDecorator{Inner} <: AbstractVolumetricElementCache
 
 Supertype of the caches this package wraps around a user's element cache
-([`ADElementCache`](@ref), [`FusedFromSplit`](@ref)). A decorator holds the
-wrapped cache in a field named `inner`, and the MECHANICAL half of the element
-contract — everything whose decorated behaviour simply IS the inner's — is
-forwarded once here rather than per decorator. Traits describing what a
-decorator SERVES ([`provides_analytic`](@ref)) genuinely differ between
-decorators and stay with them.
+([`ADElementCache`](@ref), [`FusedFromSplit`](@ref)). The wrapped cache sits in
+a field `inner`, and everything a decorator simply inherits is forwarded once
+here; traits describing what a decorator SERVES ([`provides_analytic`](@ref))
+stay with the decorators.
 
-Probes against a decorated cache take one of two subjects, and which one is
-the whole convention:
+Which subject a probe takes is the whole convention:
 
-- a probe about an AUTHOR-WRITTEN method — the mandatory-kernel checks, the
-  trait ↔ kernel check, the `condensed_corrector`/`local_conditions!` hook
-  probes — runs on the [`unwrap`](@ref) fixpoint. The forwarding methods below
-  answer `hasmethod` for every inner, so probing the wrapper would pass a
-  cache that implements nothing.
-- a probe about SERVED CAPABILITY — [`provides_analytic`](@ref),
-  [`assert_sensitivity_admissible`](@ref) — runs on the DECORATED type. That is
+- AUTHOR-WRITTEN-METHOD probes (mandatory kernels, trait ↔ kernel,
+  `condensed_corrector`/`local_conditions!`) run on the [`unwrap`](@ref)
+  fixpoint — the forwarding methods below answer `hasmethod` for every inner,
+  so probing the wrapper would pass a cache that implements nothing.
+- SERVED-CAPABILITY probes ([`provides_analytic`](@ref),
+  [`assert_sensitivity_admissible`](@ref)) run on the DECORATED type — that is
   the cache the engine calls, and a decorator serves kinds its inner does not.
 """
 abstract type AbstractElementCacheDecorator{Inner} <: AbstractVolumetricElementCache end
@@ -33,7 +29,7 @@ abstract type AbstractElementCacheDecorator{Inner} <: AbstractVolumetricElementC
 
 The cache an author wrote: `cache` itself, or the innermost cache a chain of
 [`AbstractElementCacheDecorator`](@ref)s wraps. Defined on values and on types,
-since the probes needing it come in both shapes.
+since the probes come in both shapes.
 """
 unwrap(cache) = cache
 unwrap(d::AbstractElementCacheDecorator) = unwrap(d.inner)
@@ -67,8 +63,7 @@ condense_algebraic!(d::AbstractElementCacheDecorator, args, weights) = condense_
 condensed_corrector(d::AbstractElementCacheDecorator, args) = condensed_corrector(d.inner, args)
 local_conditions!(L, d::AbstractElementCacheDecorator, args) = local_conditions!(L, d.inner, args)
 invalidate_correctors!(d::AbstractElementCacheDecorator) = invalidate_correctors!(d.inner)
-# Patch assembly (experimental) is a separate protocol with no AD fallback of
-# its own — pass through to whatever the inner implements.
+# Patch assembly (experimental) has no AD fallback — pass through to the inner.
 assemble_patch_cell!(req, d::AbstractElementCacheDecorator, args, data) =
     assemble_patch_cell!(req, d.inner, args, data)
 
@@ -77,17 +72,14 @@ assemble_patch_cell!(req, d::AbstractElementCacheDecorator, args, data) =
 ####################################
 #
 # Limitations:
-# - AD sweeps cover the volumetric kernel only. A boundary term riding the cell
-#   sweep is therefore NOT captured by a sensitivity sweep; a `facet_items`
-#   term is, through its own traversal's analytic facet kernel.
-# - State sweeps (∂F/∂u Jacobian, JVP, VJP, ∂F/∂t) run over per-worker
-#   preallocated ForwardDiff configs, owned by this decorator. The parameter
-#   sweeps build their configs per call: their seed dimension nθ is call-time
-#   knowledge, and a cached config would be abstractly typed across nθ
-#   changes. The `local_conditions!` route allocates per item on top of that —
-#   a configuration-free seed of the hook, plus the local operator's pivots —
-#   so a condensed θ/t sweep taking that route is not allocation-free per cell
-#   the way the plain state and time sweeps are.
+# - AD sweeps cover the volumetric kernel only, so a boundary term riding the
+#   cell sweep is NOT captured; a `facet_items` term is, through its own
+#   traversal's analytic facet kernel.
+# - State sweeps (∂F/∂u, JVP, VJP, ∂F/∂t) run over per-worker preallocated
+#   configs. Parameter sweeps build theirs per call — nθ is call-time knowledge
+#   and a cached config would be abstractly typed across nθ changes. The
+#   `local_conditions!` route allocates per item on top of that, so a condensed
+#   θ/t sweep is not allocation-free per cell the way state and time sweeps are.
 
 "Tag for the package-owned ForwardDiff configs, so per-worker configs outlive the per-cell closures."
 struct FerriteOperatorsADTag end
@@ -104,10 +96,9 @@ struct ForwardDiffAD end
 """
     ADElementBuffers
 
-Per-worker seeds and ForwardDiff configs for `ADElementCache`. The
-output/payload half of the buffer split lives on `SensitivityBuffers`
-instead, since a request's destination is needed whether the resolved cache
-ends up analytic or decorated.
+Per-worker seeds and ForwardDiff configs for `ADElementCache`. Outputs live on
+`SensitivityBuffers` instead: a request's destination is needed whether the
+resolved cache ends up analytic or decorated.
 """
 @concrete mutable struct ADElementBuffers
     re         # ndofs-sized scratch primal-residual output for AD closures
@@ -134,19 +125,13 @@ function create_ad_element_buffers(inner, sdh, n_global_dofs::Int = 0)
     return _create_ad_element_buffers(inner, vₑ, re, true)
 end
 
-# The size-based path: an item family whose local system is described by a dof
-# count alone (an algebraic item) has no `SubDofHandler` to allocate against,
-# and no `getnquadpoints` to size the `:q`-Jacobian config the generic
-# `Consistent` bootstrap needs — that combination is cell-only (see
-# `condense_algebraic!`), so this path never builds it, whatever `inner`
-# declares.
 create_ad_element_buffers(inner, ndofs::Int, ::Type{T}) where {T} =
     _create_ad_element_buffers(inner, zeros(T, ndofs), zeros(T, ndofs), false)
 
-# `supports_q_bootstrap` is the cell-vs-algebraic-item structural distinction
-# the two constructors above already carry: `getnquadpoints` is a cell-cache
-# contract, so an algebraic-sized inner must never be queried for it even when
-# `has_internal_state` — its `jac_cfg_q`/`Kq` stay `nothing` unconditionally.
+# `supports_q_bootstrap`: the generic `Consistent` combination is cell-only (see
+# `condense_algebraic!`) and its `:q` config is sized from `getnquadpoints`, a
+# cell-cache contract — so an algebraic inner keeps `jac_cfg_q`/`Kq` at `nothing`
+# whatever it declares.
 function _create_ad_element_buffers(inner, vₑ, re, supports_q_bootstrap::Bool)
     T   = eltype(re)
     tag       = ForwardDiff.Tag{FerriteOperatorsADTag, T}()
@@ -170,8 +155,7 @@ function _create_ad_element_buffers(inner, vₑ, re, supports_q_bootstrap::Bool)
         chunk_q   = ForwardDiff.Chunk(qseed)
         jac_cfg_q = ForwardDiff.JacobianConfig(nothing, re, qseed, chunk_q, tag)
         Kq        = zeros(T, ndofs, nqp)
-        # The local conditions are nqp-valued, so their ∂/∂q configuration is
-        # square where `jac_cfg_q` is ndofs × nqp and cannot be shared.
+        # ∂L/∂q is nqp × nqp, so the ndofs × nqp `jac_cfg_q` cannot be shared.
         Lₑ        = zeros(T, nqp)
         L_cfg     = ForwardDiff.JacobianConfig(nothing, Lₑ, qseed, chunk_q, tag)
         Lq        = zeros(T, nqp, nqp)
@@ -197,8 +181,7 @@ end
     weighted_seed_buffers!(buf::ADElementBuffers, nslots) -> Vector of Dual buffers
 
 Grow the weighted sweep's Dual slot buffers to `nslots` entries, one per
-participating slot. Sized once per worker on the first sweep of a given slot
-count; the Dual type is fixed by the sweep's ∂F/∂u configuration.
+participating slot. The Dual type is fixed by the sweep's ∂F/∂u configuration.
 """
 function weighted_seed_buffers!(buf::ADElementBuffers, nslots::Int)
     while length(buf.wdual) < nslots
@@ -207,23 +190,21 @@ function weighted_seed_buffers!(buf::ADElementBuffers, nslots::Int)
     return buf.wdual
 end
 
-# The flat parameter copy: input to the AD closure, hence decorator-owned
-# (unlike Bₑ/gθ, its outputs, which live on the engine's SensitivityBuffers).
+# The flat parameter copy: an AD-closure input, hence decorator-owned.
 function _theta!(buf::ADElementBuffers, nθ::Int)
     length(buf.θ) == nθ || (buf.θ = Vector{eltype(buf.θ)}(undef, nθ))
     return buf.θ
 end
 
-# ∂L/∂θ, sized like every other parameter-sized member: nθ is call-time
-# knowledge, so the block is grown on first use of a given seed dimension.
+# ∂L/∂θ: nθ is call-time knowledge, so the block is grown on first use.
 function _local_theta_block!(buf::ADElementBuffers, nθ::Int)
     size(buf.Lθ, 2) == nθ || (buf.Lθ = Matrix{eltype(buf.Lθ)}(undef, size(buf.Lθ, 1), nθ))
     return buf.Lθ
 end
 
-# slot-sized differentiation config: :q needs its own (nqp generally ≠ ndofs);
-# every other slot shares the :u-sized config, matching today's assumption
-# that non-condensed state slots are all field-dof-shaped.
+# Slot-sized config: `:q` needs its own (nqp generally ≠ ndofs); every other
+# slot shares the `:u`-sized one, assuming non-condensed state slots are all
+# field-dof-shaped.
 _jac_config_for(buf::ADElementBuffers, ::Val{:q}) = buf.jac_cfg_q
 _jac_config_for(buf::ADElementBuffers, ::Val{slot}) where {slot} = buf.jac_cfg
 
@@ -233,32 +214,26 @@ _jac_config_for(buf::ADElementBuffers, ::Val{slot}) where {slot} = buf.jac_cfg
     ADElementCache(inner, ndofs::Int, ::Type{T} = Float64; backend = ForwardDiffAD())
 
 Decorates `inner`'s mandatory residual kernel with automatic differentiation,
-serving every request `inner` does not provide analytically — per request,
-`inner`'s own kernel where declared ([`provides_analytic`](@ref) forwards) or
-ForwardDiff otherwise; the engine never forks between the two itself. Which
-kernel is differentiated follows from the args record: `assemble_cell!` for a
-[`CellArgs`](@ref), `assemble_algebraic!` for an [`AlgebraicArgs`](@ref), so one
-decorator serves both item families.
+serving per request whatever `inner` does not provide analytically
+([`provides_analytic`](@ref) forwards); the engine never forks between the two
+itself. The differentiated kernel follows from the args record —
+`assemble_cell!` for a [`CellArgs`](@ref), `assemble_algebraic!` for an
+[`AlgebraicArgs`](@ref) — so one decorator serves both item families.
 
-For a condensed `inner` ([`has_internal_state`](@ref)) the `Consistent`
-Jacobian/JacobianResidual has a generic path: `∂F/∂ū|_q` and `∂F/∂q` by AD,
-combined with the `dq/dū` block from [`condensed_corrector`](@ref) —
-`Jₑ = ∂F/∂ū|_q + ∂F/∂q · dq/dū`. Without an analytic kernel or
-`condensed_corrector`, admissibility rejects it, naming the missing correction.
-
-The parameter and time kinds have the same shape of generic path, from
-[`local_conditions!`](@ref) instead of a stored block: `∂L/∂q` (factorized once
-per item), `∂L/∂θ` and `∂L/∂t` by AD of the hook give `dq/dθ` and `dq/dt`
-through the implicit function theorem, and the same `∂F/∂q` block completes
-the total. Without the hook those kinds stay rejected for a condensed inner.
+AD-from-residual on a condensed `inner` ([`has_internal_state`](@ref)) computes
+the frozen-q PARTIAL, so the totals are completed generically: `Consistent`
+Jacobian/JacobianResidual as `Jₑ = ∂F/∂ū|_q + ∂F/∂q · dq/dū` with the block
+[`condensed_corrector`](@ref) supplies; the parameter and time kinds with
+`dq/dθ`/`dq/dt` derived from [`local_conditions!`](@ref) through the implicit
+function theorem. Lacking corrector or hook, admissibility rejects the kind,
+naming the missing correction.
 
 `n_global_dofs` pads the seeds and configs by the subdomain's
 [`global_dofs`](@ref) count, so the differentiated system is the FULL augmented
 one — `setup_operator` passes it. The `ndofs` form sizes the buffers from a dof
 count alone, for an item family that has no `SubDofHandler` to allocate against.
 
-`setup_operator` wraps automatically (`ad_backend = nothing` opts out);
-hand-constructing an instance wraps a specific cache or tests the decorator.
+`setup_operator` wraps automatically (`ad_backend = nothing` opts out).
 """
 struct ADElementCache{Inner, Backend, Buffers} <: AbstractElementCacheDecorator{Inner}
     inner::Inner
@@ -272,11 +247,8 @@ end
 ADElementCache(inner, ndofs::Int, ::Type{T} = Float64; backend = ForwardDiffAD()) where {T} =
     ADElementCache(inner, backend, create_ad_element_buffers(inner, ndofs, T))
 
-# The generic `Consistent` combination multiplies the padded ∂F/∂q block by the
-# `nq × ndofs_per_cell` corrector `condensed_corrector` returns — the FIELD
-# space, while the padded partials span the augmented system, so the product is
-# not even conformable. Rejected where the decorator is built rather than as a
-# `DimensionMismatch` deep inside a sweep.
+# Rejected where the decorator is built, rather than as a `DimensionMismatch`
+# deep inside a sweep.
 function _reject_condensed_global_dofs(inner, n_global_dofs::Int)
     (n_global_dofs == 0 || !has_internal_state(typeof(inner))) && return nothing
     provides_analytic(typeof(inner), JacobianKind{:u, Consistent}()) && return nothing
@@ -297,33 +269,27 @@ duplicate_for_device(device, ad::ADElementCache) =
     condensed_corrector(cache, args) -> AbstractMatrix
 
 The completed `nq × ndofs` `dq/dū` block a condensed cache exposes for
-`ADElementCache`'s generic `Consistent` combination. Only needed to admit the
-generic bootstrap; a cache serving `Consistent` analytically never needs this.
-No default.
+`ADElementCache`'s generic `Consistent` combination. No default; a cache
+serving `Consistent` analytically never needs it.
 
-This is the decorator's corrector ACCESS POINT, and it takes the item's
-[`CellArgs`](@ref) rather than an item id so that both
+Takes the item's [`CellArgs`](@ref) rather than an item id so that both
 [`CorrectorElection`](@ref)s can be served through it: a `Stored()` cache reads
 its store keyed by `cellid(args.cell)`, a [`Recompute`](@ref) one re-derives
-the block from `args.states`. The decorator does not know which, and the
-combination `∂F/∂ū|_q + ∂F/∂q · dq/dū` is the same either way.
+the block from `args.states`. The combination is the same either way.
 """
 function condensed_corrector end
 
-# Capability: plain AD-from-residual is exact for every kind whose fallback
-# does not differentiate through a condensed inner's local state —
-# same rule `requires_admissibility_check` names. The ONE kind this decorator
-# ALSO covers generically for a condensed inner is the state Consistent
-# Jacobian, given the inner's stored corrector block.
+# Capability: plain AD-from-residual is exact for every kind whose fallback does
+# not differentiate through a condensed inner's local state — the rule
+# `requires_admissibility_check` names.
 #
-# `requires_admissibility_check` is false for `TimeSensitivityKind` because
-# setup cannot know whether the AD path even runs (FiniteDifferenceSensitivity
-# is a call-time escape) — it does NOT mean the plain AD fallback is
-# admissible on a condensed inner, so it gets an explicit override instead of
-# the shortcut every other exempt kind uses.
+# TRAP: that flag is false for `TimeSensitivityKind` only because setup cannot
+# know whether the AD path even runs (FiniteDifferenceSensitivity is a call-time
+# escape); it does NOT mean plain AD is admissible on a condensed inner, hence
+# the explicit override below instead of the shortcut.
 _ad_covers(Inner, kind) = !requires_admissibility_check(kind) || !has_internal_state(Inner) || internal_state_insensitive(Inner, kind)
-# The θ/t kinds gain the THIRD acceptance branch: a declared `local_conditions!`
-# lets the decorator derive `dq/dθ`/`dq/dt` and complete the total itself.
+# The θ/t kinds gain a THIRD branch: a declared `local_conditions!` lets the
+# decorator derive `dq/dθ`/`dq/dt` and complete the total itself.
 _ad_covers(Inner, ::TimeSensitivityKind) =
     !has_internal_state(Inner) || internal_state_insensitive(Inner, TimeSensitivityKind()) || _has_local_conditions(Inner)
 _ad_covers(Inner, ::ParameterJacobianKind) =
@@ -336,30 +302,21 @@ _ad_covers(Inner, ::JacobianResidualKind{Consistent}) =
     !has_internal_state(Inner) || internal_state_insensitive(Inner, JacobianResidualKind{Consistent}()) || _has_condensed_corrector(Inner)
 
 # Author-written-method probes, so the subject is the `unwrap` fixpoint —
-# `Inner` is itself a decorator whenever a split-analytic cache was fused
-# first, and the shared forwarding layer answers for any inner.
-#
-# Probed against `CellArgs` specifically: the generic combination needs the
-# `:q` Jacobian config, which only the cell-sized buffer constructor builds
-# (`supports_q_bootstrap`), so an algebraic cache's method — written against
-# `AlgebraicArgs` — must not be read as coverage. Same reasoning for the
-# local-conditions hook, whose `L` argument is Dual-valued under the sweeps
-# that differentiate it and so can be typed no tighter than `AbstractVector`.
+# `Inner` is itself a decorator whenever a split-analytic cache was fused first.
+# Probed against `CellArgs` specifically: the generic combination needs the `:q`
+# config, which only the cell-sized constructor builds, so an algebraic cache's
+# method must not be read as coverage. `L` is typed `AbstractVector` because it
+# is Dual-valued under the sweeps that differentiate the hook.
 _has_condensed_corrector(Inner) = hasmethod(condensed_corrector, Tuple{unwrap(Inner), CellArgs})
 _has_local_conditions(Inner) = hasmethod(local_conditions!, Tuple{AbstractVector, unwrap(Inner), CellArgs})
 
-# `true` for every kind `inner` serves analytically (forwarded), plus every
-# kind this decorator's own AD path covers — every kind except the
-# `Consistent` state Jacobian/JacobianResidual on a condensed `inner` lacking
-# both the analytic kernel and `condensed_corrector`/`internal_state_insensitive`.
 provides_analytic(::Type{<:ADElementCache{Inner}}, kind) where {Inner} =
     provides_analytic(Inner, kind) || _ad_covers(Inner, kind)
-# `WeightedJacobianKind` is exempt from the AD-admissibility broadening: two
-# call sites (`_check_differentiated_slot`'s AffineRate-with-AD rejection,
-# `_fused_weighted_route`) read `provides_analytic` as "has a REAL analytic
-# kernel", not "is AD admissible" — `_fused_weighted_route` already carries
-# its own `!has_internal_state`/`internal_state_insensitive` fallback, so
-# nothing needs this decorator to also claim coverage here.
+# `WeightedJacobianKind` is exempt from the AD-admissibility broadening:
+# `_check_differentiated_slot` and `_fused_weighted_route` read
+# `provides_analytic` as "has a REAL analytic kernel", not "is AD admissible",
+# and the latter carries its own
+# `!has_internal_state`/`internal_state_insensitive` fallback.
 provides_analytic(::Type{<:ADElementCache{Inner}}, kind::WeightedJacobianKind) where {Inner} =
     provides_analytic(Inner, kind)
 
@@ -367,29 +324,23 @@ provides_analytic(::Type{<:ADElementCache{Inner}}, kind::WeightedJacobianKind) w
 ## The seeding entries
 ####################################
 
-# The decorator differentiates a residual kernel, and WHICH kernel that is
-# follows from the args record: a cell item reaches `inner` through
-# `assemble_cell!`, an algebraic item through `assemble_algebraic!`. Routing the
-# inner call here is what makes one set of AD paths serve both item families.
+# Routing the inner call on the args record is what makes one set of AD paths
+# serve both item families.
 _inner_kernel!(req, cache, args::CellArgs) = assemble_cell!(req, cache, args)
 _inner_kernel!(req, cache, args::AlgebraicArgs) = assemble_algebraic!(req, cache, args)
 
-# What `query_cell_parameters` is keyed on: the geometry cache of a cell item,
-# the item record of an algebraic one.
+# The subject `query_cell_parameters` is keyed on, per item family.
 _parameter_subject(args::CellArgs) = args.cell
 _parameter_subject(args::AlgebraicArgs) = args.item
 
-# The two public entry points of the decorator, one per item family; both
-# resolve into the same seeding bodies below.
+# Both public entry points resolve into the same seeding bodies below.
 assemble_cell!(req::AbstractAssemblyRequest, ad::ADElementCache, args) = _ad_assemble!(req, ad, args)
 assemble_algebraic!(req::AbstractAssemblyRequest, ad::ADElementCache, args) = _ad_assemble!(req, ad, args)
 
-# A downstream request type outside the ones this decorator knows how to
-# differentiate (e.g. a custom kind riding `primal_cell_sweep!`) has no AD
-# fallback here — forward to `inner`, exactly like the mandatory residual
-# kernel. `Inner`'s own `provides_analytic` is what setup-time validation
-# checks (`_assert_trait_backed` redirects to `Inner`), so an unbacked claim
-# still fails loudly there rather than as an opaque `MethodError` here.
+# A request type this decorator cannot differentiate (a downstream kind riding
+# `primal_cell_sweep!`) forwards to `inner` like the residual kernel. An
+# unbacked `provides_analytic` claim still fails loudly at setup, where
+# `_assert_trait_backed` redirects to `Inner`, not as a `MethodError` here.
 _ad_assemble!(req::AbstractAssemblyRequest, ad::ADElementCache, args) = _inner_kernel!(req, ad.inner, args)
 
 # Evaluate the item's local residual for `args`, overwriting `r`.
@@ -399,10 +350,9 @@ function evaluate_item_residual!(r, cache, args)
     return r
 end
 
-# `:q` is the one slot whose config is conditional — only the cell-sized buffer
-# constructor builds it (`supports_q_bootstrap`) — so an algebraic cache
-# reaches an AD `:q` sweep with `nothing` and is told so here instead of
-# failing inside ForwardDiff. The branch is on a field TYPE and folds away.
+# An algebraic cache reaches an AD `:q` sweep with no config and is told so here
+# instead of failing inside ForwardDiff. The branch is on a field TYPE and folds
+# away.
 _require_slot_config(cfg, ::Val, ad) = cfg
 _require_slot_config(::Nothing, ::Val{slot}, ad::ADElementCache{Inner}) where {slot, Inner} = throw(ArgumentError(
     "$(nameof(unwrap(Inner))) has no ForwardDiff configuration for the `:$slot` " *
@@ -410,11 +360,10 @@ _require_slot_config(::Nothing, ::Val{slot}, ad::ADElementCache{Inner}) where {s
     "item family described by a dof count alone (an algebraic item) has none: serve " *
     "`JacobianKind{:$slot}` with the analytic `assemble_algebraic!` kernel instead."))
 
-# ∂F/∂slot — writes the Jacobian into K, overwriting `y` with the primal
-# residual as a byproduct. Only the named slot is seeded; every other slot
-# stays at its primal value — including `AffineRate`-reconstructed slots,
-# which are formed at gather time. Tag checking is off: the config carries the
-# package tag, not the closure's.
+# ∂F/∂slot — writes K, overwriting `y` with the primal residual. Only the named
+# slot is seeded; every other stays primal, including `AffineRate`-reconstructed
+# slots, which are formed at gather time. Tag checking is off because the config
+# carries the package tag, not the closure's.
 function ad_state_jacobian!(K, y, ad::ADElementCache, args, ::Val{slot} = Val(:u)) where {slot}
     cfg = _require_slot_config(_jac_config_for(ad.buffers, Val(slot)), Val(slot), ad)
     inner = ad.inner
@@ -425,8 +374,7 @@ function ad_state_jacobian!(K, y, ad::ADElementCache, args, ::Val{slot} = Val(:u
 end
 
 # The generic Consistent combination for a condensed inner: AD gives both
-# partials, `condensed_corrector` gives the dq/dū block — read from a store or
-# re-derived from `args`, which is the inner's election to make.
+# partials, `condensed_corrector` the dq/dū block.
 function _condensed_consistent_jacobian!(K, y, ad::ADElementCache, args)
     buf = ad.buffers
     ad_state_jacobian!(K, y, ad, args, Val(:u))
@@ -474,11 +422,10 @@ function _ad_assemble!(req::JacobianResidualRequest{C}, ad::ADElementCache{Inner
     return req
 end
 
-# Σₛ wₛ ∂F/∂s in ONE sweep: the seed variable `x` is the weighted variation
-# itself, so every participating slot enters as `sₑ + wₛ·x` and the derivative
-# w.r.t. `x` at `x = 0` is exactly the weighted combination. Slots outside
-# `weights` (including `AffineRate` reconstructions) stay at their primal
-# value, matching the frozen-slot contract of `JacobianKind`.
+# Σₛ wₛ ∂F/∂s in ONE sweep: the seed `x` is the weighted variation itself, so
+# each participating slot enters as `sₑ + wₛ·x` and d/dx at `x = 0` is exactly
+# the weighted combination. Slots outside `weights` (including `AffineRate`
+# reconstructions) stay primal, matching `JacobianKind`'s frozen-slot contract.
 function _ad_assemble!(req::WeightedJacobianRequest{C}, ad::ADElementCache{Inner}, args) where {C, Inner}
     kind = WeightedJacobianKind{keys(req.weights), C}(req.weights)
     if provides_analytic(Inner, kind)
@@ -500,11 +447,10 @@ function _ad_assemble!(req::WeightedJacobianRequest{C}, ad::ADElementCache{Inner
     return req.K
 end
 
-# ∂F/∂θ — dense local parameter Jacobian. The parameter sweep re-queries the
-# element parameters from the Dual-rebuilt global `p` (`req.p`, NOT `args.p` —
-# already the element-local view) so wrappers forward Duals transparently.
-# For a condensed inner this is the FROZEN-q partial; the total needs the
-# `∂F/∂q · dq/dθ` block a declared `local_conditions!` supplies.
+# ∂F/∂θ — dense local parameter Jacobian, re-queried from the Dual-rebuilt
+# global `p` (`req.p`, NOT the already element-local `args.p`) so wrappers
+# forward Duals transparently. For a condensed inner this is the FROZEN-q
+# partial; the total needs the `∂F/∂q · dq/dθ` block `local_conditions!` supplies.
 function _ad_assemble!(req::ParameterJacobianRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, ParameterJacobianKind())
         return _inner_kernel!(req, ad.inner, args)
@@ -550,11 +496,9 @@ function _ad_parameter_vjp!(g, ad::ADElementCache, args, λₑ, p)
     return g
 end
 
-# ∂F/∂t — explicit time dependence, seeded through the context channel: the
-# sweep's ctx is rebuilt with a Dual evaluation time, so an element reading
-# `evaluation_time(args.ctx)` differentiates exactly. The preallocated config
-# is typed for the residual eltype; exotic time types fall back to a per-call
-# config.
+# ∂F/∂t — the ctx is rebuilt with a Dual evaluation time, so an element reading
+# `evaluation_time(args.ctx)` differentiates exactly. The preallocated config is
+# typed for the residual eltype; exotic time types fall back to a per-call one.
 function _ad_assemble!(req::TimeSensitivityRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, TimeSensitivityKind())
         return _inner_kernel!(req, ad.inner, args)
@@ -583,17 +527,14 @@ end
 ####################################
 #
 # Post-condensation the residual kernel is pure, so the AD paths above compute
-# frozen-q PARTIALS. The kinds carrying no `CorrectionMode` are always totals,
-# and the missing block is `∂F/∂q · dq/dseed` with `dq/dseed` given by the
-# implicit function theorem on the element's declared local conditions. Both
-# factors already exist: `∂F/∂q` is the `:q` slot Jacobian the Kq machinery
-# assembles, and `∂L/∂q`/`∂L/∂seed` come from differentiating the hook.
+# frozen-q PARTIALS, while the kinds carrying no `CorrectionMode` are always
+# totals. The missing block is `∂F/∂q · dq/dseed`, with `dq/dseed` given by the
+# implicit function theorem on the element's declared local conditions.
 
-# ∂L/∂q at the condensed state, factorized in place — the local inverse every
-# seed of the sweep goes through, and the reason the hook is worth its cost:
-# ONE factorization per item serves all nθ parameter directions. It is redone
-# per sweep, not retained across sweeps: retaining it is corrector storage
-# again, which is what `CorrectorElection` exists to let a user refuse.
+# ∂L/∂q at the condensed state, factorized in place — the reason the hook is
+# worth its cost: ONE factorization per item serves all nθ directions. Redone
+# per sweep rather than retained, since retaining it is corrector storage again,
+# which is what `CorrectorElection` exists to let a user refuse.
 function _local_operator_factorization(ad::ADElementCache, args)
     buf = ad.buffers
     inner = ad.inner
@@ -651,9 +592,8 @@ function _add_local_time_correction!(g, ad::ADElementCache, args)
     return g
 end
 
-# (∂F/∂u)·v — one directional-Dual sweep through the residual kernel: the
-# MFEM NONE level, no matrices anywhere. The perturbed state is written into
-# the per-worker Dual buffer instead of allocating per cell.
+# (∂F/∂u)·v — one directional-Dual sweep, no matrices anywhere (the MFEM NONE
+# level). The perturbed state goes into the per-worker Dual buffer.
 function _ad_assemble!(req::StateJVPRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, StateJVPKind(nothing))
         return _inner_kernel!(req, ad.inner, args)
@@ -670,8 +610,8 @@ function _ad_assemble!(req::StateJVPRequest, ad::ADElementCache{Inner}, args) wh
     return req.Jv
 end
 
-# (∂F/∂u)ᵀλₑ — gradient of the scalar λₑ·rₑ(u) w.r.t. the element state, with
-# the Dual residual evaluated into the per-worker buffer.
+# (∂F/∂u)ᵀλₑ — gradient of the scalar λₑ·rₑ(u), with the Dual residual evaluated
+# into the per-worker buffer.
 function _ad_assemble!(req::StateVJPRequest, ad::ADElementCache{Inner}, args) where {Inner}
     if provides_analytic(Inner, StateVJPKind(nothing))
         return _inner_kernel!(req, ad.inner, args)
@@ -697,8 +637,8 @@ end
 
 Mini-decorator for a cache that serves `JacobianKind` and the mandatory
 residual analytically but not the fused `JacobianResidualKind`: issues the two
-split analytic kernels back to back instead of falling back to AD. Chosen
-once, at construction (`decorate_element_cache`).
+split analytic kernels back to back instead of falling back to AD. Chosen at
+construction (`decorate_element_cache`).
 """
 struct FusedFromSplit{Inner} <: AbstractElementCacheDecorator{Inner}
     inner::Inner
@@ -725,5 +665,5 @@ provides_analytic(::Type{<:FusedFromSplit{Inner}}, kind) where {Inner} = provide
 provides_analytic(::Type{<:FusedFromSplit{Inner}}, ::JacobianResidualKind{C}) where {Inner, C <: CorrectionMode} = true
 
 # Construction-time wrapping (`decorate_element_cache`, `needs_ad_decoration`,
-# `fully_analytic`) lives in operators/ad_decoration.jl — it is setup_operator's
-# decision, not part of the decorator types themselves.
+# `fully_analytic`) is setup_operator's decision, not part of the decorator
+# types themselves; it lives in operators/ad_decoration.jl.

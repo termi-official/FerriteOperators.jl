@@ -8,21 +8,16 @@ operator hosts different physics per subdomain. The keys are names of
 **volumetric cellsets** in the grid's cellset registry.
 
 A name resolves *both* the element cache and the boundary cache of the
-subdomain it claims: the sub-integrator that owns a subdomain's cells also
-owns that subdomain's facet terms, and facetset names play no part in the
-resolution. Which facets actually carry a term is decided per facet by
-[`is_facet_in_cache`](@ref), as for any other surface cache.
+subdomain it claims; facetset names play no part. Which facets actually carry a
+term is decided per facet by [`is_facet_in_cache`](@ref), as for any other
+surface cache.
 
-Each subdomain must lie entirely within one declared cellset. **Production
-mode assumes this holds and does not verify it**: a subdomain's claim is
-determined by its first cell alone, so a subdomain straddling two declared
-cellsets, or one only partially covered by the declaration, is resolved by
-that first cell without complaint. Enabling
-[`FerriteOperators.debug_mode`](@ref) replaces the sample with an exhaustive
-check of every cell.
+Each subdomain must lie entirely within one declared cellset. **Production mode
+assumes this holds and does not verify it** — a subdomain's first cell alone
+decides its claim. [`FerriteOperators.debug_mode`](@ref) replaces the sample
+with an exhaustive check of every cell.
 
-Resolution runs once per operator setup. These are `ArgumentError`s in **both**
-modes:
+Resolution runs once per operator setup. `ArgumentError`s in **both** modes:
 
 - a declared name that is not a cellset of the grid,
 - a subdomain whose first cell is owned by no declared name,
@@ -35,9 +30,9 @@ Debug mode additionally rejects, naming the offending cell:
 - a subdomain with any cell owned by no declared name,
 - a subdomain whose cells span several declared names.
 
-There is deliberately no lenient fallback — an unclaimed subdomain assembling
-nothing, or a mistyped name silently contributing nothing, is precisely what
-setup-time validation exists to catch.
+There is deliberately no lenient fallback: an unclaimed subdomain, or a
+mistyped name silently contributing nothing, is what setup-time validation
+exists to catch.
 
 Sub-integrators must share the operator's sink: a nonlinear router accepts
 nonlinear *and* bilinear sub-integrators — the operator a bilinear form induces
@@ -60,34 +55,30 @@ end
 
 const AnyMultiDomainIntegrator = Union{NonlinearMultiDomainIntegrator, BilinearMultiDomainIntegrator, LinearMultiDomainIntegrator}
 
-# The engine builds all subdomain caches in one go, so resolution is hoisted to
-# the plural hooks: it runs twice per operator setup (elements, boundaries)
-# instead of once per subdomain and hook. Decoration is per-subdomain — a
-# subdomain's own sub-integrator may or may not need it, independent of its
-# neighbours.
+# Resolution is hoisted to the plural hooks: twice per operator setup (elements,
+# boundaries) instead of once per subdomain and hook. Decoration stays
+# per-subdomain, since neighbouring sub-integrators may differ in needing it.
 function setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler, ad_backend, n_global_dofs)
     resolved = zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers, n_global_dofs)
     needs_ad_decoration(integrator) || return [setup_element_cache(sub, sdh) for (sub, sdh, _) in resolved]
     return [decorate_element_cache(setup_element_cache(sub, sdh), sdh, ad_backend, n) for (sub, sdh, n) in resolved]
 end
 
-# A subdomain's global dofs are its sub-integrator's, like its element and its
-# boundary cache.
+# A subdomain's global dofs are its sub-integrator's, like its caches.
 global_dofs(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     global_dofs(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
 
 setup_boundaries(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler) =
     [setup_boundary_cache(sub, sdh) for (sub, sdh) in zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers)]
 
-# A subdomain's facet items, like its boundary cache, are its sub-integrator's:
-# each subdomain routes its own facet set through its own surface cache.
+# Each subdomain routes its own facet set through its own surface cache.
 facet_items(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     facet_items(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
 setup_facet_item_cache(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     setup_facet_item_cache(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
 
-# The per-subdomain hooks stay available for direct use; each pays a full
-# resolution, so the plural hooks above are what the engine calls.
+# Available for direct use, but each pays a full resolution — the engine calls
+# the plural hooks above.
 setup_element_cache(element_model::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     setup_element_cache(subintegrator_for_subdomain(element_model.subintegrators, sdh), sdh)
 setup_boundary_cache(element_model::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
@@ -105,9 +96,8 @@ subintegrators_per_subdomain(integrator::AnyMultiDomainIntegrator, dh::AbstractD
 """
     subintegrator_for_subdomain(subintegrators::Dict{String}, sdh::SubDofHandler)
 
-The sub-integrator claiming `sdh`. Validates the whole `DofHandler`'s
-subdomain mapping, so every setup hook reaches the same verdict regardless of
-which subdomain is being set up.
+The sub-integrator claiming `sdh`. Validates the whole `DofHandler`'s subdomain
+mapping, so every setup hook reaches the same verdict.
 """
 function subintegrator_for_subdomain(subintegrators::Dict{String}, sdh::SubDofHandler)
     dh = sdh.dh
@@ -122,18 +112,16 @@ end
     resolve_subdomain_claims(subintegrators::Dict{String}, dh) -> Vector{String}
 
 The declared name claiming each subdomain of `dh`, in `dh.subdofhandlers`
-order. Dispatches to the exhaustive form under
-[`FerriteOperators.debug_mode`](@ref) and to the sampling form otherwise; the
-flag is a compile-time constant, so the unused form is not reachable code.
+order. Exhaustive under [`FerriteOperators.debug_mode`](@ref), sampling
+otherwise; the flag is a compile-time constant, so the unused form is not
+reachable code.
 """
 resolve_subdomain_claims(subintegrators::Dict{String}, dh::AbstractDofHandler) =
     resolve_subdomain_claims(subintegrators, dh, DEBUG ? Val(:full) : Val(:sample))
 
-# `Val(:sample)` — the production form. One membership query per subdomain
-# against the declared cellsets: nothing scales with the cell count.
-# `Val(:full)` — the debug form. Two linear passes: one filling a transient
-# cell → owner array from the declared cellsets, one reading it per subdomain.
-# The owner array is not retained.
+# `Val(:sample)` — production: one membership query per subdomain, so nothing
+# scales with the cell count. `Val(:full)` — debug: two linear passes over a
+# transient cell → owner array, which is not retained.
 function resolve_subdomain_claims(subintegrators::Dict{String}, dh::AbstractDofHandler, mode::Union{Val{:full}, Val{:sample}})
     grid = get_grid(dh)
     cellsets = Ferrite.getcellsets(grid)
@@ -207,9 +195,8 @@ function fill_subdomain_owners(grid, cellsets, declared::Vector{String})
     return owner
 end
 
-# Pass two of the debug form: one scan of the subdomain's cells. Distinct
-# owners are collected with the first cell exhibiting each, so every rejection
-# can name a cell.
+# Pass two of the debug form: one scan, collecting distinct owners with the
+# first cell exhibiting each, so every rejection can name a cell.
 function scanned_name_id(sdh::SubDofHandler, owner::Vector, declared::Vector{String}, index::Int)
     seen = Int[]
     witness = Int[]

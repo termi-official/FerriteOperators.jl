@@ -9,10 +9,9 @@ index_type(::AbstractDevice{<:Any, IndexType}) where IndexType = IndexType
 """
     execute_on_device!(task, device, workspaces, items)
 
-Execute a task on a device. Workspaces store the worker-specific
-scratches for the tasks. The items is a simple nested list of task-specific
-indices, where the tasks identified by the inner list are guaranteed to be
-executable in parallel.
+Execute a task on a device. `workspaces` holds the per-worker scratch; `items`
+is a nested list of task-specific indices whose inner lists are guaranteed to
+be executable in parallel.
 """
 function execute_on_device!(task, device::AbstractDevice, workspaces, items)
     throw(ArgumentError(
@@ -24,15 +23,12 @@ end
 """
     reduce_on_device(task, device, workspaces, items) -> value
 
-The VALUE-RETURNING execution shape, the counterpart of
-[`execute_on_device!`](@ref) for tasks whose per-item kernel returns its
-contribution instead of scattering it. Nothing is written into the workspaces,
-so this is the shape a scalar or tensor evaluation runs in.
-
-Per worker the item values fold in item order through [`fold_items`](@ref);
-across workers the partials reduce in worker order. Both orders are fixed, so
-the result is deterministic for a fixed worker count. `nothing` means nothing
-contributed.
+The VALUE-RETURNING counterpart of [`execute_on_device!`](@ref), for tasks
+whose per-item kernel returns its contribution instead of scattering it —
+nothing is written into the workspaces, so this is the shape a scalar or tensor
+evaluation runs in. Values fold per worker in item order through
+[`fold_items`](@ref) and the partials reduce in worker order, so the result is
+deterministic for a fixed worker count. `nothing` means nothing contributed.
 """
 function reduce_on_device(task, device::AbstractDevice, workspaces, items)
     throw(ArgumentError(
@@ -45,14 +41,11 @@ end
     initial_partial(kind) -> zero(T) or `nothing`
 
 The seed of a worker's fold: `zero(T)` for a kind declaring
-[`functional_value_type`](@ref) `T`, and `nothing` for one that does not,
-whose accumulator type is fixed by the first item that contributes instead.
-
-`zero(T)` is the additive identity of the reduction, which is what lets a
-worker seeded with it stand for "has seen nothing yet": a worker whose items
-all return `nothing` returns `zero(T)`, and the host reduction adding it in is
-a no-op. Every consumer of this seed relies on that, so a reduction over a
-non-additive combiner would need its own neutral element.
+[`functional_value_type`](@ref) `T`, `nothing` for one that does not, whose
+accumulator type the first contributing item fixes instead. The additive
+identity doubles as "has seen nothing yet" — a worker whose items all return
+`nothing` hands back `zero(T)`, a no-op in the host reduction. Every consumer
+relies on that, so a non-additive combiner would need its own neutral element.
 """
 initial_partial(kind) = _initial_partial(functional_value_type(kind))
 _initial_partial(::Type{Nothing}) = nothing
@@ -62,16 +55,14 @@ _initial_partial(::Type{T}) where {T} = zero(T)
     fold_items(task, ws, items, acc = initial_partial(task.kind)) -> value
 
 One worker's partial: run `task` over `items` in order on the workspace `ws`
-and sum what the per-item kernels return into `acc`, `nothing` from a kernel
-meaning "contributed nothing". Pass the previous partial back in to continue a
-worker's fold over the next barrier of its partition, so a worker's whole
-contribution accumulates in one sequence whatever the partition's shape.
+and sum what the per-item kernels return into `acc`, a `nothing` return
+contributing nothing. Pass the previous partial back in to continue the fold
+over the next barrier of the worker's partition.
 
-With a declared [`functional_value_type`](@ref) the accumulator is `T`-typed
-from the first item and the fold returns `T`. Without one it returns
-`Union{Nothing, T}`: the first non-`nothing` value fixes the accumulator's
-type through the function barrier below. Either way the loop doing the work
-carries a concrete accumulator and dispatches nothing per item.
+With a declared [`functional_value_type`](@ref) the fold returns `T`; without
+one it returns `Union{Nothing, T}`, the first non-`nothing` value fixing the
+accumulator's type through the function barrier below — which keeps the loop
+doing the work concretely typed and dispatch-free either way.
 """
 fold_items(task, ws, items) = fold_items(task, ws, items, initial_partial(task.kind))
 
@@ -98,10 +89,10 @@ function _fold_items_from(task, ws, items, start, acc, ::Type{T}) where {T}
     return acc
 end
 
-# The declared value type is a contract with the kernels: without this a
+# The declared value type is a contract with the kernels: unchecked, a
 # disagreeing kernel would either widen the reduction silently or fail deep
-# inside the accumulation. `Nothing` is the undeclared marker — nothing to
-# disagree with — and both branches fold away against a concrete `val`.
+# inside the accumulation. `Nothing` marks undeclared, and both branches fold
+# away against a concrete `val`.
 @inline _checked_contribution(kind, ::Type{Nothing}, val) = val
 @inline function _checked_contribution(kind, ::Type{T}, val) where {T}
     val isa T && return val
@@ -120,11 +111,11 @@ _reduce_partials(a, b) = a + b
 """
     setup_device_instances(device, object, n_instances)
 
-Create a device scratch by duplicating `object` for `n_instances` parallel workers.
-For [`SequentialCPUDevice`](@ref), returns a 1-element tuple `(object,)`.
-For threaded CPU devices, returns a `Vector` of `n_instances` independent copies
-produced by `duplicate_for_device`.
-For GPU devices this should return a struct of arrays variant of `object`.
+Device scratch: `object` duplicated for `n_instances` parallel workers.
+[`SequentialCPUDevice`](@ref) returns the 1-element tuple `(object,)`, a
+threaded CPU device a `Vector` of `n_instances` independent
+`duplicate_for_device` copies, and a GPU device should return a
+struct-of-arrays variant.
 """
 function setup_device_instances(device::AbstractDevice, obj, n_instances)
     throw(ArgumentError(
@@ -189,8 +180,8 @@ PolyesterDevice(i::Int) = PolyesterDevice{Float64, Int}(i)
 """
     CudaDevice(threads, blocks)
 
-Placeholder for a future GPU device axis. Not implemented: no CUDA extension
-is declared, and every entry point throws `ArgumentError`.
+Placeholder for a future GPU device axis. Not implemented — no CUDA extension
+is declared and every entry point throws `ArgumentError`.
 """
 struct CudaDevice{ValueType, IndexType} <: AbstractGPUDevice{ValueType, IndexType}
     threads::Union{IndexType, Nothing}

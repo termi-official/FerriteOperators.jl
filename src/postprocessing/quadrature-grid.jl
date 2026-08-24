@@ -1,9 +1,8 @@
 """
     VTKQuadratureGrid{T, sdim}
 
-A VTK-compatible "grid" where every node is a quadrature point and every
-cell is a single-node `VTK_VERTEX`. Used as the mesh backing a
-[`VTKQuadratureFile`](@ref).
+A VTK-compatible "grid" where every node is a quadrature point and every cell a
+single-node `VTK_VERTEX` — the mesh backing a [`VTKQuadratureFile`](@ref).
 
 Build with [`VTKQuadratureGrid(dh, qrc)`](@ref).
 """
@@ -23,10 +22,9 @@ end
 """
     VTKQuadratureGrid(dh::AbstractDofHandler, qrc) -> VTKQuadratureGrid
 
-Build a quadrature-point "grid" from `dh` and `qrc`.  Nodes are emitted in
-ascending cell-ID order (matching the layout of a [`QVector`](@ref) built
-with the same `dh`/`qrc`), so the flat `QVector` data maps directly to VTK
-point data without reordering.
+Build a quadrature-point "grid" from `dh` and `qrc`. Nodes are emitted in
+ascending cell-ID order, matching a [`QVector`](@ref) built with the same
+`dh`/`qrc`, so its flat data maps to VTK point data without reordering.
 """
 function VTKQuadratureGrid(dh::AbstractDofHandler, qrc)
     grid   = get_grid(dh)

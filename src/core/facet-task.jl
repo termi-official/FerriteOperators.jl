@@ -3,12 +3,12 @@
 ####################################
 #
 # A term restricted to a facet SET gets its own item family instead of riding
-# the cell sweep: one work item is one owning cell together with all of that
-# cell's declared facets, and the declared set IS the traversal. It coexists
-# with the fused route (`boundary_kernel!`), and which one a term takes is a
-# declaration rather than an element rewrite: the kernels are the same
-# `assemble_facet!(req, cache, args::FacetArgs, lfi)` methods over the same
-# [`FacetArgs`](@ref), and one surface cache serves either route.
+# the cell sweep: one work item is one owning cell with all of that cell's
+# declared facets, and the declared set IS the traversal. It coexists with the
+# fused route (`boundary_kernel!`); choosing between them is a declaration, not
+# an element rewrite, since both run the same
+# `assemble_facet!(req, cache, args::FacetArgs, lfi)` methods off one surface
+# cache.
 #
 # The element-facing half of the family (`facet_items`,
 # `setup_facet_item_cache`) lives with the other element contracts, in
@@ -23,8 +23,8 @@
 
 One work item of the facet family: the owning cell and the local indices of
 its declared facets, ascending. Facets of one cell are never split across
-items — that is what keeps two facets sharing the owning cell's dofs on one
-worker, and it is what makes a facet item's local system owning-cell-shaped.
+items — that keeps facets sharing the owning cell's dofs on one worker, and
+makes a facet item's local system owning-cell-shaped.
 """
 struct FacetItem
     cellid::Int
@@ -38,13 +38,11 @@ Work-item provider of the facet family: the resolved [`FacetItem`](@ref)s of
 one `SubDofHandler`, addressed by index.
 
 Both partitions are DERIVED from the owning cells. [`SequentialScheduling`](@ref)
-hands out one chunk; two neighbouring cells' facets do share dofs, and the
-atomic scatter a parallel device runs under this policy is what resolves that
-(`dof_scatter_needs_atomic`). [`ColoredScheduling`](@ref) colors the
-OWNING CELLS with Ferrite's cell coloring restricted to that set: items of one
-color share no dofs precisely because their owning cells do not, so the
-promise the policy makes about a barrier holds for facet items exactly as it
-holds for cells.
+hands out one chunk and lets the atomic scatter resolve the dofs neighbouring
+cells' facets share (`dof_scatter_needs_atomic`). [`ColoredScheduling`](@ref)
+colors the OWNING CELLS with Ferrite's cell coloring restricted to that set:
+items of one color share no dofs precisely because their owning cells do not,
+so the policy's barrier promise holds for facet items as it does for cells.
 """
 struct FacetItems{SDH <: SubDofHandler, I}
     sdh::SDH
@@ -71,17 +69,16 @@ Per-worker workspace of the facet item family: [`AssemblyWorkspace`](@ref)'s
 buffers with the surface cache in the element slot and the item declaration
 added. A facet local system is OWNING-CELL-shaped, so `Ke`/`re`/the slot
 buffers are sized exactly like the cell family's — including the
-[`global_dofs`](@ref) padding, which is what lets a facet term couple to a dof
-no cell owns (the tying shape).
+[`global_dofs`](@ref) padding, which lets a facet term couple to a dof no cell
+owns (the tying shape).
 
 `Ferrite.reinit!(ws, index)` positions it on an item: the geometry cache is
-reinitialized on the item's owning cell and the augmented dof vector's head
-refreshed from it, so [`item_dofs`](@ref)/[`scatter_address`](@ref) and every
-slot gather resolve exactly as they do on the cell route.
+reinitialized on the owning cell and the augmented dof vector's head refreshed
+from it, so [`item_dofs`](@ref)/[`scatter_address`](@ref) and every slot gather
+resolve as on the cell route.
 
 `current` is a `Ref{Int}` for the same reason [`AlgebraicWorkspace`](@ref)
-carries one — the item is resolved through the declaration between `reinit!`
-and the kernel.
+carries one.
 """
 @concrete struct FacetItemWorkspace <: AbstractWorkspace
     Ke
@@ -122,10 +119,8 @@ end
     create_facet_item_workspace(cache, items, sdh, ivh, slots; needs_sensitivity = true, global_dofs = ())
 
 Create a single [`FacetItemWorkspace`](@ref). Buffer sizing is
-[`create_assembly_workspace`](@ref)'s — the same `allocate_element_*` hooks on
-the surface cache, padded by the [`global_dofs`](@ref) declaration — because a
-facet local system spans the owning cell's dofs plus that declared tail and
-nothing else.
+[`create_assembly_workspace`](@ref)'s: the same `allocate_element_*` hooks on
+the surface cache, padded by the [`global_dofs`](@ref) declaration.
 """
 function create_facet_item_workspace(cache, items, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
         needs_sensitivity::Bool = true, global_dofs = ()) where {N}
@@ -156,18 +151,16 @@ execute_single_task!(task::AssemblyTask, ws::FacetItemWorkspace) = execute_kind!
 
 The facet walk of one item: `req` over the item's declared facets, in
 declaration order, with the facet parameters queried SEPARATELY per facet —
-the same per-facet contract `boundary_kernel!` implements for the fused route,
-and the same `assemble_facet!` kernels.
+the same per-facet contract `boundary_kernel!` implements for the fused route.
 
-[`is_facet_in_cache`](@ref) is NOT consulted here. That gate exists so the
-fused sweep can rediscover membership while walking every facet of every cell;
-on this route the declared set IS the membership statement, so a cache whose
-gate and declaration disagree contributes on what it DECLARED.
+[`is_facet_in_cache`](@ref) is NOT consulted here: that gate exists so the
+fused sweep can rediscover membership, while on this route the declared set IS
+the membership statement. A cache whose gate and declaration disagree
+contributes on what it DECLARED.
 
-There is no [`reinit_values!`](@ref) call either, on this route as on the
-fused one: a facet kernel reinitializes its own `FacetValues` for the local
-facet index it was handed, since which values a facet needs is per facet and
-not per item.
+No [`reinit_values!`](@ref) call either, on this route as on the fused one: a
+facet kernel reinitializes its own `FacetValues` for the local facet index it
+was handed.
 """
 function facet_item_walk!(req, task, ws, statesₑ)
     for lfi in current_facets(ws)
@@ -184,11 +177,9 @@ execute_kind!(kind::PrimalKind, task, ws::FacetItemWorkspace) = primal_facet_ite
 
 The primal driver body of the facet item family: [`primal_cell_sweep!`](@ref)
 with the volumetric kernel taken out and the facet walk restricted to the
-item's own facets. Zero the buffers [`assembles_matrix`](@ref)/
-[`assembles_vector`](@ref) name, gather the state slots iff
-[`depends_on_unknowns`](@ref), run [`facet_item_walk!`](@ref), and scatter ONCE
-per item through [`scatter_local!`](@ref) — one scatter for all of a cell's
-declared facets, which is what the item shape buys.
+item's own facets. Scatters ONCE per item through [`scatter_local!`](@ref) —
+one scatter for all of a cell's declared facets, which is what the item shape
+buys.
 """
 function primal_facet_item_sweep!(kind, task, ws)
     assembles_matrix(kind) && fill!(ws.Ke, zero(eltype(ws.Ke)))
@@ -208,14 +199,13 @@ execute_kind!(kind::SensitivityKind, task, ws::FacetItemWorkspace) = sensitivity
     sensitivity_facet_item_sweep!(kind, task, ws)
 
 The [`sensitivity_cell_sweep!`](@ref) counterpart of the facet item family: a
-facet-item term DOES enter the sensitivity sweeps. Gather the trial state,
-bind the request over [`SensitivityBuffers`](@ref), walk the item's facets, and
-scatter through [`scatter_request!`](@ref). Nothing is written back into `u`.
+facet-item term DOES enter the sensitivity sweeps. The request is bound over
+[`SensitivityBuffers`](@ref) and scattered through [`scatter_request!`](@ref);
+nothing is written back into `u`.
 
 Analytic only — facet kernels have no automatic-differentiation fallback in any
-sweep, so the cache serves the sensitivity request itself. Declaring the kind
-makes [`validate_facet_item_cache`](@ref) demand the kernel at setup instead of
-letting the sweep reach a missing method.
+sweep. Declaring the kind makes [`validate_facet_item_cache`](@ref) demand the
+kernel at setup instead of letting the sweep reach a missing method.
 """
 function sensitivity_facet_item_sweep!(kind, task, ws)
     statesₑ = load_slots!(ws, task.states)
@@ -225,11 +215,10 @@ function sensitivity_facet_item_sweep!(kind, task, ws)
     return nothing
 end
 
-# A facet functional is a surface integral over the declared set, which needs
-# a facet hook of its own next to `evaluate_cell_functional`; the volumetric
-# reduction cannot stand in for it. The family therefore contributes nothing,
-# and `evaluate_functional` over an operator carrying facet items sums the cell
-# contributions alone.
+# A facet functional needs a surface hook of its own next to
+# `evaluate_cell_functional`, which does not exist; the volumetric reduction
+# cannot stand in for it. The family contributes nothing, so
+# `evaluate_functional` sums the cell contributions alone.
 execute_kind!(::FunctionalKind, task, ws::FacetItemWorkspace) = nothing
 
 # Condensed internal state on facet items is not supported: `q` is per owning
@@ -245,10 +234,9 @@ execute_kind!(::JacobianKind{:q}, task, ws::FacetItemWorkspace) = nothing
 # the cell family's own sweep over that same cell already does.
 execute_kind!(::QuadratureEvaluationKind, task, ws::FacetItemWorkspace) = nothing
 
-# The structural-reduction answer mirrors the bodies above: for the kinds the
-# family declines, a facet domain can never contribute, so a reduction whose
-# every domain is facet-shaped (or otherwise empty) fails the structural
-# precondition instead of silently reducing over nothing.
+# Mirrors the declined kinds above: a reduction whose every domain is
+# facet-shaped (or otherwise empty) fails the structural precondition instead of
+# silently reducing over nothing.
 _may_contribute(::FacetItemDomain, ::Union{FunctionalKind, CondensationKind}) = false
 
 ####################################
@@ -264,9 +252,9 @@ what makes the item order — and with it the coloring, the scatter order and
 the floating-point summation — reproducible from a `Set{FacetIndex}`, whose
 own iteration order is not.
 
-Validated loudly: every facet's cell must lie in `sdh.cellset` (a facet whose
-cell this subdomain does not own has no local system here), its local index
-must exist on that cell, and no facet may be declared twice.
+Throws unless every facet's cell lies in `sdh.cellset` (a facet whose cell this
+subdomain does not own has no local system here), its local index exists on
+that cell, and no facet is declared twice.
 """
 function resolve_facet_items(index::Int, sdh::SubDofHandler, declared)
     grid = get_grid(sdh.dh)
@@ -303,10 +291,9 @@ Setup-time consistency check for facet item caches, the
 [`provides_analytic`](@ref) claims must have a matching
 [`assemble_facet!`](@ref) method.
 
-A DECLARED sensitivity kind is checked harder: the kernel must actually exist,
-not merely be trait-consistent. Facet contributions have no
-automatic-differentiation fallback, so there is nothing behind a missing
-sensitivity kernel to compute the term — unlike a volumetric cache, whose
+A DECLARED sensitivity kind is checked harder — the kernel must exist, not
+merely be trait-consistent — because facet contributions have no
+automatic-differentiation fallback, unlike a volumetric cache whose
 [`ADElementCache`](@ref) decoration would serve it from the residual.
 
 The probes run against [`unwrap`](@ref), the type an author would have written
@@ -351,8 +338,8 @@ declares [`facet_items`](@ref): resolve and validate the declaration, build the
 cache [`setup_facet_item_cache`](@ref) names, derive the partition, and build
 the shared [`FacetItemWorkspace`](@ref).
 
-Nothing is resolved before the [`InternalVariableHandler`](@ref) here, unlike
-the algebraic family: a facet item owns no condensed internal state of its own
+Unlike the algebraic family, nothing has to be resolved before the
+[`InternalVariableHandler`](@ref): a facet item owns no condensed internal state
 (its owning cell's `q` belongs to the cell family's item for that cell), so the
 declaration cannot change the `[ū | q_cells | q_items]` layout.
 """

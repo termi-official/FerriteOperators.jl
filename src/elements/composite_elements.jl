@@ -1,9 +1,8 @@
 """
 Per-inner parameter views produced by a composite cache's
 [`query_cell_parameters`](@ref) / [`query_facet_parameters`](@ref). The fan-out
-re-seeds `args.p` per inner from this bundle; any other `p` object reaches
-every inner unchanged, so a hand-built [`CellArgs`](@ref)/[`FacetArgs`](@ref)
-still works.
+re-seeds `args.p` per inner from this bundle; any other `p` reaches every inner
+unchanged, so a hand-built [`CellArgs`](@ref)/[`FacetArgs`](@ref) still works.
 """
 struct CompositeParameters{Views <: Tuple}
     views::Views
@@ -18,17 +17,14 @@ times) or scattered into different targets (term-split operators, IMEX row
 blocks) are separate sweeps over separate integrators, not inners of one
 composite.
 
-No values objects are shared by construction through this path — each inner
-sets up and reinitializes its own. Deliberate sharing between elements is an
-element-side concern and stays the sharing element's responsibility.
-
-Composition is pure iteration: the request carries the buffers, so one generic
-fan-out serves every request type. Each inner is handed its OWN parameter
-view, produced by that inner's [`query_cell_parameters`](@ref).
+No values objects are shared by construction — each inner sets up and
+reinitializes its own; deliberate sharing stays the sharing element's
+responsibility. Each inner is handed its OWN parameter view, produced by that
+inner's [`query_cell_parameters`](@ref).
 
 The composite is analytic for a kind iff every inner is; otherwise the whole
 composite falls back to AD over the fused residual (one Dual sweep, one
-geometry pass for the fused Jacobian). That routing is all-or-nothing.
+geometry pass). That routing is all-or-nothing.
 
 Inners carrying condensed internal state are rejected at setup — see
 [`validate_element_cache`](@ref).
@@ -76,9 +72,9 @@ function _all_stateful_insensitive(::Type{T}, kind) where {T <: Tuple}
         _all_stateful_insensitive(Base.tuple_type_tail(T), kind)
 end
 
-# The composite's blanket fan-out method would satisfy any hasmethod check,
-# so validation must recurse into the inner caches — each inner is its own
-# validation subject, kernels and admissibility alike.
+# The blanket fan-out method satisfies any `hasmethod` check, so validation must
+# recurse: each inner is its own validation subject, kernels and admissibility
+# alike.
 function _validate_element_kernels(composite::CompositeVolumetricElementCache, declared_requests::Tuple)
     stateful = filter(inner -> has_internal_state(typeof(inner)), composite.inner_caches)
     isempty(stateful) || throw(ArgumentError(
@@ -92,8 +88,8 @@ function _validate_element_kernels(composite::CompositeVolumetricElementCache, d
     return nothing
 end
 
-# Naming the inners is what turns a composed-admissibility rejection into an
-# actionable one: the failure is a property of specific inners, not the whole.
+# The failure is a property of specific inners, not of the whole, so the
+# rejection names them.
 function assert_sensitivity_admissible(::Type{CompositeVolumetricElementCache{CT}}, kind) where {CT <: Tuple}
     has_internal_state(CompositeVolumetricElementCache{CT}) || return nothing
     provides_analytic(CompositeVolumetricElementCache{CT}, kind) && return nothing
@@ -116,8 +112,8 @@ function _inner_types_without(::Type{T}, kind) where {T <: Tuple}
 end
 _cache_names(caches::Tuple) = map(c -> nameof(typeof(c)), caches)
 
-# Values instances deliberately shared between inners are reinitialized once
-# per inner that holds them.
+# Values deliberately shared between inners are reinitialized once per inner
+# holding them.
 reinit_values!(composite::CompositeVolumetricElementCache, cell) =
     _composite_reinit!(composite.inner_caches, cell)
 reinit_values!(composite::CompositeVolumetricElementCache, cell, kind) =
@@ -133,8 +129,7 @@ end
     end
 end
 
-# Quadrature-point queries address ONE quadrature rule, so the inners must
-# agree on it. Empty inners carry no rule and are ignored.
+# Empty inners carry no rule and are ignored; the rest must agree.
 function Ferrite.getnquadpoints(composite::CompositeVolumetricElementCache)
     contributing = drop_empty_caches(composite.inner_caches)
     isempty(contributing) && return 0
@@ -156,8 +151,8 @@ end
 """
 Combines multiple element caches over the same surface. The boundary driver
 gates on the composite (`is_facet_in_cache` = any inner covers the facet); the
-fan-out re-gates per inner cache, since inner caches may cover different facet
-sets. Each inner is handed its own per-facet parameter view.
+fan-out re-gates per inner, since inners may cover different facet sets. Each
+inner is handed its own per-facet parameter view.
 
 Same scope bound as [`CompositeVolumetricElementCache`](@ref): one domain, one
 context, one sink, no values objects shared by construction.
@@ -218,8 +213,8 @@ end
 
 Combine per-inner caches into the cache the engine sees. Empty caches carry no
 term and are dropped, so an all-empty composition collapses to the empty cache
-and a single surviving cache is returned unwrapped — the engine's empty-cache
-and single-cache fast paths therefore survive composition.
+and a single survivor is returned unwrapped — the engine's empty-cache and
+single-cache fast paths survive composition.
 """
 compose_element_caches(caches::Tuple) = _collapse(drop_empty_caches(caches), EmptyVolumetricElementCache(), CompositeVolumetricElementCache)
 
@@ -250,21 +245,19 @@ _drop_empty_head(cache, rest::Tuple) = (cache, drop_empty_caches(rest)...)
     LinearCompositeIntegrator(subintegrators::Tuple)
 
 Integrator stacking several sub-integrators over the SAME domain into one
-element: element and boundary cache setup map every sub-integrator over the
-subdomain and combine the results through [`compose_element_caches`](@ref) /
+element: cache setup maps every sub-integrator over the subdomain and combines
+the results through [`compose_element_caches`](@ref) /
 [`compose_boundary_caches`](@ref).
 
-Scope bound: one domain, one evaluation context, one scatter target — the same
-bound as [`CompositeVolumetricElementCache`](@ref). The type carries exactly
-one field: terms needing their own context, weight or domain are separate
-operator terms, not inners.
+Scope bound: one domain, one evaluation context, one scatter target — as for
+[`CompositeVolumetricElementCache`](@ref). Hence the single field: terms needing
+their own context, weight or domain are separate operator terms, not inners.
 
-Nested composite integrators are flattened at construction. Composition is
-rejected loudly at construction for an empty tuple, for any sub-integrator
-carrying condensed internal state, and for cross-sink mixes. A **bilinear**
-sub-integrator inside a nonlinear composite is legitimate — the operator its
-form induces scatters into the same matrix and residual, its residual being
-the element matrix acting on the element vector — whereas an
+Nested composites are flattened at construction, which also rejects an empty
+tuple, a sub-integrator carrying condensed internal state, and cross-sink
+mixes. A **bilinear** sub-integrator inside a nonlinear composite is legitimate
+— the operator its form induces scatters into the same matrix and residual, its
+residual being the element matrix acting on the element vector — whereas an
 [`AbstractLinearIntegrator`](@ref) describes a load form, whose sink is a
 vector alone, and never composes into a nonlinear or bilinear operator.
 
@@ -325,8 +318,8 @@ setup_boundary_cache(element_model::LinearCompositeIntegrator, sdh::SubDofHandle
     compose_boundary_caches(map(sub -> setup_boundary_cache(sub, sdh), element_model.subintegrators))
 
 # The inners share one local system, so they share its tail: a composite
-# declares what its inners declare. Silent inners (the default `()`) simply
-# read the tail an inner that declares one puts there.
+# declares what its inners declare, and silent inners (the default `()`) read
+# the tail a declaring inner puts there.
 function global_dofs(integrator::AnyCompositeIntegrator, sdh::SubDofHandler)
     declared = filter(!isempty, map(sub -> global_dofs(sub, sdh), integrator.subintegrators))
     isempty(declared) && return ()

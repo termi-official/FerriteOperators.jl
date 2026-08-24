@@ -1,7 +1,7 @@
 """
 Material parameters of the standard linear solid used by
-[`SimpleCondensedLinearViscoelasticity`](@ref): the two spring moduli `E₀`,
-`E₁`, the shear modulus `μ`, the dashpot viscosity `η₁` and Poisson's ratio `ν`.
+[`SimpleCondensedLinearViscoelasticity`](@ref): spring moduli `E₀`, `E₁`, shear
+modulus `μ`, dashpot viscosity `η₁` and Poisson's ratio `ν`.
 """
 @kwdef struct MaxwellParameters
     E₀::Float64 = 70e3
@@ -17,17 +17,16 @@ end
 
 Linear viscoelasticity (standard linear solid) with the viscous strain εᵛ as a
 condensed per-quadrature-point internal variable. The element owns the LOCAL
-stage problem for εᵛ (scaled by `stage_scaling(ctx)`), solved once per
-quadrature point by [`condense_cell!`](@ref) — [`condense_internal!`](@ref)
-must run before any evaluation sweep. The Mandel factorization `A` of the
-local operator is what the `Consistent` kernel needs.
+stage problem for εᵛ (scaled by `stage_scaling(ctx)`), a direct solve per
+quadrature point in [`condense_cell!`](@ref) — [`condense_internal!`](@ref) must
+run before any evaluation sweep.
 
-`corrector` elects where `A` comes from ([`CorrectorElection`](@ref)):
+`corrector` elects where the Mandel factorization `A` of the local operator, the
+`Consistent` kernel's input, comes from ([`CorrectorElection`](@ref)):
 `Stored()` retains it per quadrature point, `Recompute()` re-forms it in the
-kernel from the same `ℂ` and `γ̃` — a 6×6 matrix per quadrature point saved
-against one Mandel assembly per Jacobian sweep. Because the recomputing path
-reads `stage_scaling(args.ctx)`, a `Recompute()` Jacobian sweep requires a
-context where a `Stored()` one does not.
+kernel from the same `ℂ` and `γ̃` — a 6×6 matrix per quadrature point against one
+Mandel assembly per Jacobian sweep. Only the recomputing path reads
+`stage_scaling(args.ctx)`, so only it requires a context.
 """
 struct SimpleCondensedLinearViscoelasticity{Corr <: CorrectorElection} <: AbstractCondensedNonlinearIntegrator
     material_parameters::MaxwellParameters
@@ -46,11 +45,11 @@ end
 FerriteOperators.corrector_election(integrator::SimpleCondensedLinearViscoelasticity) = integrator.corrector
 
 """
-The cache associated with [`SimpleCondensedLinearViscoelasticity`](@ref). It
-carries the per-quadrature-point Mandel factorization `A` the `Consistent`
-kernel reads (`correctors`, populated by [`condense_cell!`](@ref)) under a
-[`Stored`](@ref) election, and `nothing` under [`Recompute`](@ref), where the
-kernel re-forms `A` instead. Declares [`has_internal_state`](@ref).
+The cache associated with [`SimpleCondensedLinearViscoelasticity`](@ref). Under
+a [`Stored`](@ref) election `correctors` holds the per-quadrature-point Mandel
+factorization `A` that [`condense_cell!`](@ref) wrote and the `Consistent`
+kernel reads; under [`Recompute`](@ref) it is `nothing` and the kernel re-forms
+`A`. Declares [`has_internal_state`](@ref).
 """
 struct SimpleCondensedLinearViscoelasticityCache{NQP, CV <: CellValues, S} <: AbstractVolumetricElementCache
     material_parameters::MaxwellParameters
@@ -63,8 +62,8 @@ SimpleCondensedLinearViscoelasticityCache{NQP}(mat, cv::CV, c::S) where {NQP, CV
     SimpleCondensedLinearViscoelasticityCache{NQP, CV, S}(mat, cv, c)
 
 # The election, read off the cache: no store means `A` is re-formed. The `CV`
-# bound is spelled rather than left `<:Any`, which would make every method
-# below ambiguous against its unparameterized sibling instead of more specific.
+# bound is spelled rather than left `<:Any`, which would make the methods below
+# ambiguous against their unparameterized siblings.
 const _SLSRecomputing{NQP} = SimpleCondensedLinearViscoelasticityCache{NQP, <:CellValues, Nothing}
 
 Ferrite.getnquadpoints(e::SimpleCondensedLinearViscoelasticityCache) = getnquadpoints(e.cv)
@@ -93,8 +92,8 @@ end
 # Nothing is stored, so nothing can be stale — the framework default.
 FerriteOperators.invalidate_correctors!(::_SLSRecomputing) = nothing
 
-# The elastic stiffness (unit modulus) — shared by predictor and corrector,
-# and by the pure residual kernel (no local-solve dependence).
+# The elastic stiffness (unit modulus): a pure function of ε with no
+# local-solve dependence, so every kernel may recompute it freely.
 @inline function _sls_unit_stiffness(ε, ν)
     I = one(ε)
     c₁ = ν / ((ν + 1) * (1 - 2ν)) * I ⊗ I
@@ -113,8 +112,7 @@ end
 # Local stage problem (backward-Euler form scaled by γ̃):
 #     dεᵛdt = E₁/η₁ ℂ : (ε - εᵛ)
 # <=> (𝐈/γ̃ + E₁/η₁ ℂ) : εᵛ₁ = εᵛ₀/γ̃ + E₁/η₁ ℂ : ε
-# Returns (ℂ, A, εᵛ₁); A is the Mandel matrix of the local operator, retained
-# by `condense_cell!` under `Stored()` and reused by the consistent tangent.
+# Returns `(ℂ, A, εᵛ₁)`.
 @inline function _sls_local_solve(cache::SimpleCondensedLinearViscoelasticityCache, ε, εᵛ₀, γ̃)
     (; E₁, η₁, ν) = cache.material_parameters
     ℂ = _sls_unit_stiffness(ε, ν)
@@ -125,8 +123,7 @@ end
 end
 
 # The corrector ACCESS POINT the `Consistent` kernel calls, resolved once per
-# cell. Only the recomputing branch needs the stage scaling, so a `Stored()`
-# sweep still runs without a context.
+# cell. Only the recomputing branch needs the stage scaling.
 _sls_correctors(cache::SimpleCondensedLinearViscoelasticityCache, args) =
     (FerriteOperators.item_state(cache.correctors, cellid(args.cell)), nothing)
 _sls_correctors(::_SLSRecomputing, args) = (nothing, _sls_stage_scaling(args.ctx))
@@ -134,8 +131,7 @@ _sls_correctors(::_SLSRecomputing, args) = (nothing, _sls_stage_scaling(args.ctx
 @inline _sls_factor(As::SVector, qp, cache, ℂ, γ̃) = As[qp]
 @inline _sls_factor(::Nothing, qp, cache, ℂ, γ̃) = _sls_local_operator(cache, ℂ, γ̃)
 
-# Consistent (algorithmic) tangent through the local solve, formed from the
-# local operator `A`.
+# Consistent (algorithmic) tangent through the local solve, formed from `A`.
 @inline function _sls_consistent_tangent(cache::SimpleCondensedLinearViscoelasticityCache, ℂ, A)
     (; E₀, E₁, η₁) = cache.material_parameters
     B = tomandel(SMatrix, E₁ / η₁ * ℂ)
@@ -144,7 +140,7 @@ _sls_correctors(::_SLSRecomputing, args) = (nothing, _sls_stage_scaling(args.ctx
     return (E₀ + E₁) * ℂ + ∂σ∂q ⊡ dqdε
 end
 # The FrozenQ partial: dq/dε = 0, so only the elastic + relaxed-branch term
-# survives — three lines, the same expression with the correction dropped.
+# survives.
 @inline function _sls_frozen_tangent(cache::SimpleCondensedLinearViscoelasticityCache, ℂ)
     (; E₀, E₁) = cache.material_parameters
     return (E₀ + E₁) * ℂ
@@ -160,8 +156,8 @@ end
 """
     condense_cell!(cache::SimpleCondensedLinearViscoelasticityCache, args, weights) -> CondensationReport
 
-Solve the local viscous-strain problem at every quadrature point (a direct
-linear solve — always converged, zero inner iterations), write the trial εᵛ
+Solve the local viscous-strain problem at every quadrature point — a direct
+linear solve, always converged with zero inner iterations — write the trial εᵛ
 and retain the Mandel factorization `A`.
 """
 function FerriteOperators.condense_cell!(cache::SimpleCondensedLinearViscoelasticityCache{NQP}, args::CellArgs, weights::NamedTuple) where {NQP}
@@ -201,8 +197,7 @@ const _SLSJacobianLike = Union{JacobianRequest{:u, Consistent}, JacobianRequest{
 const _SLSFrozenLike   = Union{JacobianRequest{:u, FrozenQ}, JacobianResidualRequest{FrozenQ}}
 
 # Pure evaluation at the FROZEN εᵛ the last `condense_internal!` wrote: no
-# solve, no write-back, ℂ recomputed freely (a pure function of ε, no local
-# solve dependence). Under `Stored()` the corrector access point throws,
+# solve, no write-back. Under `Stored()` the corrector access point throws,
 # naming the cell, if `condense_internal!` never ran for it.
 function _sls_assemble!(req::Union{ResidualRequest, _SLSJacobianLike}, cache::SimpleCondensedLinearViscoelasticityCache{NQP}, args::CellArgs) where {NQP}
     (; E₀, E₁, ν) = cache.material_parameters

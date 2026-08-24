@@ -5,22 +5,18 @@
 """
     ItemStates{S}(nitems)
 
-Per-item state slots of element type `S`, indexed by item. Provider-agnostic:
-any integer item index works, not only patch ids. Two uses, one mechanism —
-they differ only in the caller's invalidation policy:
+Per-item state slots of element type `S`, indexed by any integer item index,
+not only patch ids. Two uses, one mechanism, differing only in the caller's
+invalidation policy: *item-lifetime state* that must survive across sweeps (a
+retained factorization, a reduction snapshot), and the *solve→scatter payload
+channel* within one sweep.
 
-- *item-lifetime state* that must survive across sweeps (a retained
-  factorization, a reduction snapshot),
-- the *solve→scatter payload channel* within one sweep (what a local solve
-  hands to the phase that emits its result).
-
-Freshness contract: FO never writes and never invalidates these slots. The
-caller stores with [`set_item_state!`](@ref), tests with
-[`has_item_state`](@ref), and drops stale content with
-[`invalidate_item_state!`](@ref) when whatever the slot was derived from
-changes. Slots are indexed by ITEM, so items processed by different workers
-touch disjoint slots — item lifetime is not worker lifetime, and a slot must
-never be handed to a worker-lifetime cache.
+Freshness is the caller's: FO never writes and never invalidates a slot. Store
+with [`set_item_state!`](@ref), test with [`has_item_state`](@ref), and drop
+stale content with [`invalidate_item_state!`](@ref) when whatever the slot was
+derived from changes. Slots are indexed by ITEM, so items processed by
+different workers touch disjoint slots — item lifetime is not worker lifetime,
+and a slot must never be handed to a worker-lifetime cache.
 """
 struct ItemStates{S}
     slots::Vector{S}
@@ -36,8 +32,8 @@ has_item_state(st::ItemStates, i::Int) = st.valid[i]
 """
     item_state(st, i)
 
-Item `i`'s state. Throws when the slot is empty or was invalidated — guard
-with [`has_item_state`](@ref).
+Item `i`'s state. Throws when the slot is empty or invalidated — guard with
+[`has_item_state`](@ref).
 """
 function item_state(st::ItemStates, i::Int)
     st.valid[i] || throw(ArgumentError("item $i has no valid state; check `has_item_state` first"))
@@ -53,7 +49,7 @@ invalidate_item_state!(st::ItemStates, i::Int) = (st.valid[i] = false; st)
 "Drop every item's state."
 invalidate_item_states!(st::ItemStates) = (fill!(st.valid, false); st)
 
-# Entries are indexed by ITEM, and the cell partition assigns each item to
-# exactly one worker at a time, so per-worker copies would only duplicate
-# memory without adding safety — every worker shares the same backing arrays.
+# Entries are indexed by ITEM and the partition assigns each item to exactly
+# one worker at a time, so per-worker copies would duplicate memory without
+# adding safety — every worker shares the same backing arrays.
 duplicate_for_device(device, st::ItemStates) = st

@@ -6,24 +6,19 @@
     AbstractSchemeProtocol
 
 A typed, DECLARATIONS-ONLY description of what a scheme asks of an operator,
-passed positionally: `setup_operator(strategy, problem, dh, protocol)`.
+passed positionally: `setup_operator(strategy, problem, dh, protocol)`. It
+declares [`get_declared_slots`](@ref) and [`get_declared_kinds`](@ref), which
+size the per-worker slot buffers and pull the trait ↔ kernel and
+internal-state admissibility checks forward to setup time.
+[`ADElementCache`](@ref) decoration is decided separately and structurally by
+[`needs_ad_decoration`](@ref).
 
-A protocol declares exactly what setup consumes: [`get_declared_slots`](@ref)
-(the state slot names sweeps may carry) and [`get_declared_kinds`](@ref) (the
-request kinds the operator will be asked to compute). Those declarations size
-the per-worker slot buffers and drive the setup-time trait ↔ kernel and
-internal-state admissibility checks. Which element caches carry
-[`ADElementCache`](@ref) decoration is decided separately, structurally, by
-[`needs_ad_decoration`](@ref) — not by protocol declarations.
-
-Protocols carry NO coefficients — γ, tableaus, and weights are per-evaluation
-solver data, not declarations — and nothing term-shaped: no per-term contexts,
-no domain algebra, no weight symbolism. Term-shaped data belongs to
-integrators; anything needing its own context or sink is its own sweep.
+Protocols carry NO coefficients (γ, tableaus and weights are per-evaluation
+solver data) and nothing term-shaped — that belongs to integrators, and
+anything needing its own context or sink is its own sweep.
 
 Declaring is a hint, not a capability restriction: an undeclared kind stays
-usable and simply runs its checks at the call-time entry points instead of at
-setup; a declaration only ever adds eager machinery and eager checks.
+usable and runs its checks at the call-time entry points instead.
 """
 abstract type AbstractSchemeProtocol end
 
@@ -32,7 +27,7 @@ abstract type AbstractSchemeProtocol end
 
 The state slot names sweeps of this protocol may carry; the engine allocates
 one per-worker slot buffer per name. Slot type tags are reserved vocabulary —
-names are the whole declaration today.
+names are the whole declaration.
 """
 function get_declared_slots end
 
@@ -40,9 +35,9 @@ function get_declared_slots end
     get_declared_kinds(protocol) -> Tuple of request-kind types
 
 The request kinds this protocol declares, as their UnionAll bases
-(`JacobianKind`, `ParameterVJPKind`, …). Declared kinds run their trait ↔
-kernel and admissibility checks at setup instead of on first use, and select
-the per-worker sweep-state families built eagerly.
+(`JacobianKind`, `ParameterVJPKind`, …). Declaring one moves its trait ↔ kernel
+and admissibility checks to setup and builds its per-worker sweep-state family
+eagerly.
 """
 function get_declared_kinds end
 
@@ -50,11 +45,9 @@ function get_declared_kinds end
     DefaultProtocol(; slots = (:u,), requests = ())
 
 The protocol the keyword form of [`setup_operator`](@ref) lowers to — its
-constructor arguments ARE those keywords, so
-`setup_operator(strategy, integrator, dh; slots, requests)` and
-`setup_operator(strategy, integrator, dh, DefaultProtocol(; …))` build the
-same operator. Declares no context type and no slot tags: the default world is
-`integrator + dh`, and a scheme that needs more declares its own protocol.
+constructor arguments ARE those keywords, so the two forms build the same
+operator. Declares no context type and no slot tags: the default world is
+`integrator + dh`, and a scheme needing more declares its own protocol.
 """
 struct DefaultProtocol{slots, K <: Tuple} <: AbstractSchemeProtocol
     kinds::K       # a tuple of request-kind TYPES cannot ride in a type parameter
@@ -72,14 +65,10 @@ _kind_type(r) = Base.typename(r isa Type ? r : typeof(r)).wrapper
 get_declared_slots(::DefaultProtocol{slots}) where {slots} = slots
 get_declared_kinds(protocol::DefaultProtocol) = protocol.kinds
 
-# A sensitivity sweep over the CELL family runs the volumetric kernel only, so
-# a boundary term riding that sweep contributes nothing to the result. That is
-# correct for the common case (parameter- and time-independent tractions) and
-# silently incomplete otherwise, which is a warning rather than an error. The
-# omission is the FUSED route's alone: a term declared through
-# [`facet_items`](@ref) is its own traversal and enters the sensitivity sweeps.
-# Once per (declared kind set × boundary cache type) — the operator is what
-# carries the combination, not the individual sweep.
+# The omission the message names belongs to the FUSED route alone, and it is a
+# warning rather than an error because the common case (parameter- and
+# time-independent tractions) is correct. Keyed once per (declared kind set ×
+# boundary cache type): the operator carries that combination, not the sweep.
 function _warn_boundary_sensitivity(requests::Tuple, boundary_caches)
     any(K -> K <: SensitivityKind, requests) || return nothing
     surface = findfirst(c -> !(c isa EmptySurfaceElementCache), boundary_caches)
@@ -104,15 +93,14 @@ end
     create_system_matrix(strategy, dh)
 
 Allocate the operator's global matrix over the sparsity pattern the strategy's
-operator specification declares: the pattern is initialized
-([`StandardOperatorSpecification`](@ref) → `SparsityPattern`,
-[`BlockedOperatorSpecification`](@ref) → `BlockSparsityPattern`), the entries
-are added by Ferrite's `add_sparsity_entries!` from the specification's
-`algebraic_couplings` and `constraint_handler`, and the result is allocated as
-`matrix_type(strategy)`.
+operator specification declares ([`StandardOperatorSpecification`](@ref) →
+`SparsityPattern`, [`BlockedOperatorSpecification`](@ref) →
+`BlockSparsityPattern`), with entries added by Ferrite's
+`add_sparsity_entries!` from the specification's `algebraic_couplings` and
+`constraint_handler`, allocated as `matrix_type(strategy)`.
 
 The constraint handler contributes SPARSITY ENTRIES only; applying the
-constraints to the assembled system remains the caller's, through Ferrite's
+constraints to the assembled system stays the caller's, through Ferrite's
 `apply!`/`apply_assemble!`.
 """
 create_system_matrix(strategy, dh) = _create_system_matrix(strategy, strategy.form.operator_specification, dh)
@@ -121,9 +109,8 @@ create_system_vector(strategy, dh) = allocate_vector(vector_type(strategy), dh)
 function _create_system_matrix(strategy, spec, dh)
     sp = init_operator_sparsity_pattern(spec, dh)
     couplings = spec.algebraic_couplings
-    # The `algebraic_couplings` keyword only exists on Ferrite versions
-    # carrying mesh-free algebraic variables, so it is passed only when
-    # something is declared.
+    # The `algebraic_couplings` keyword exists only on Ferrite versions with
+    # mesh-free algebraic variables, so it is passed only when non-empty.
     if isempty(couplings)
         add_sparsity_entries!(sp, dh, spec.constraint_handler)
     else
@@ -153,23 +140,21 @@ function _cell_internal_offsets(integrator, element_caches, dh)
         end
     end
     @assert all(num_dofs_per_element .≥ 0) "Number of internal dofs must be non-negative!"
-    # `num_dofs_per_element` is padded with a leading zero, so the cumulative sum is exactly the
-    # `ncells+1` block relative offsets the handler expects.
+    # The leading zero pad makes the cumulative sum exactly the `ncells+1`
+    # block-relative offsets the handler expects.
     return cumsum(num_dofs_per_element)
 end
 
 # `has_internal_state` alone is not a safe signal that a cache needs a REAL
-# internal-dof block allocated: a cache may declare it purely to opt into the
-# sensitivity-admissibility rules (served by `internal_state_insensitive`,
-# never actually condensing anything — the "Stale-q admissibility hole" test
-# double is exactly this) without implementing the count hook at all.
+# internal-dof block: it may be declared purely to opt into the
+# sensitivity-admissibility rules (`internal_state_insensitive`) and never
+# condense anything, without implementing the count hook at all.
 #
-# The probe is an author-written-method one, so its subject is the `unwrap`
-# fixpoint — a decorator's forwarding method answers for every inner. Its
-# ARGUMENT types are the concrete ones the later call passes, since a method
-# an author annotated (`(::MyIntegrator, ::MyCache, ::SubDofHandler)`) is not
-# matched by an `Any` probe, and missing it hands the operator a placeholder
-# internal-variable handler that fails inside `condense_cell!` instead.
+# The probe subject is the `unwrap` fixpoint, so a decorator's forwarding
+# method answers for its inner, and the ARGUMENT types must be the concrete
+# ones the later call passes — an author-annotated method is not matched by an
+# `Any` probe, and missing it hands the operator a placeholder handler that
+# fails inside `condense_cell!` instead.
 _declares_internal_dofs(hook, integrator, cache, arg) =
     has_internal_state(typeof(cache)) &&
     hasmethod(hook, Tuple{typeof(integrator), typeof(unwrap(cache)), typeof(arg)})
@@ -178,16 +163,16 @@ _declares_internal_dofs(hook, integrator, cache, arg) =
     setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
 
 Build the [`InternalVariableHandler`](@ref) from what the resolved caches
-actually declare — `algebraic_domain` is `resolve_algebraic_domain`'s result,
-`nothing` where the integrator declares no algebraic items. Whether a block is
-REAL (an offsets array) or the placeholder (`nothing`) is decided per block by
-the cache — [`has_internal_state`](@ref) AND an implemented dof-count hook
+declare; `algebraic_domain` is `resolve_algebraic_domain`'s result, `nothing`
+where the integrator declares no algebraic items.
+
+Whether a block is REAL (an offsets array) or the placeholder (`nothing`) is
+decided per block by the cache — [`has_internal_state`](@ref) AND an
+implemented dof-count hook
 ([`get_number_of_internal_dofs_per_element`](@ref) /
 [`get_number_of_internal_dofs_per_algebraic_item`](@ref)) — not by the
-integrator's type: an operator whose cells are plain but whose algebraic cache
-is condensed gets a real item block same as one with condensed cells and a
-plain algebraic cache, and either or both blocks can be real at once (the
-layout-collision case).
+integrator's type: the cell and item blocks are independent, and either or
+both can be real at once (the layout-collision case).
 """
 function setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
     needs_cells = any(zip(dh.subdofhandlers, element_caches)) do (sdh, cache)
@@ -223,8 +208,8 @@ function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, 
 end
 
 # The `global_dofs` declaration is resolved once per subdomain, before any
-# cache exists, and validated here rather than as an out-of-bounds scatter or a
-# doubly assembled entry later on.
+# cache exists, and validated here rather than surfacing later as an
+# out-of-bounds scatter or a doubly assembled entry.
 function resolve_global_dof_sets(strategy, integrator, dh)
     sets = [global_dofs(integrator, sdh) for sdh in dh.subdofhandlers]
     all(isempty, sets) && return sets
@@ -258,9 +243,8 @@ function _validate_global_dofs(index, sdh, gdofs, ndofs_total)
         "Subdomain $index declares the global dofs $(collect(gdofs)), which are not unique. " *
         "The declaration is the ordered tail of the element-local system, so a repeated dof " *
         "would receive the same contribution twice."))
-    # Cheap sample: a global dof that is ALSO a cell dof would be assembled
-    # once through the head and once through the tail. The first cell of the
-    # subdomain witnesses the overlap for the uniform-field case this covers.
+    # Cheap sample: the first cell witnesses a head/tail overlap for the
+    # uniform-field case this covers.
     isempty(sdh.cellset) && return nothing
     cdofs = celldofs(sdh.dh, first(sdh.cellset))
     for d in gdofs
@@ -277,25 +261,20 @@ end
     setup_engine(strategy, integrator, dh, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
 
 Build the [`AssemblyEngine`](@ref) shared by all operator kinds from the
-protocol's declarations: slot names size the per-worker slot buffers, and
-declared kinds run their trait ↔ kernel and internal-state admissibility
-checks eagerly (instead of on first use).
+protocol's declarations ([`AbstractSchemeProtocol`](@ref)).
 
-Element caches lacking analytic coverage of some AD-decorator kind are
-wrapped in [`ADElementCache`](@ref) — construction IS the resolution, for
-every kind the integrator might issue, not only declared ones — decided
-STRUCTURALLY by [`needs_ad_decoration`](@ref): a bilinear or linear operator
-carries no AD/sensitivity machinery whatever an element does or does not
-implement analytically. `ad_backend = nothing` opts out of wrapping.
+Element caches lacking analytic coverage of some AD-decorator kind are wrapped
+in [`ADElementCache`](@ref) at construction, for every kind the integrator
+might issue and not only the declared ones, decided STRUCTURALLY by
+[`needs_ad_decoration`](@ref). `ad_backend = nothing` opts out of wrapping.
 
-The caches of the facet item family ([`facet_items`](@ref)) and then of the
-algebraic item family ([`algebraic_items`](@ref)) are appended after the cell
-subdomains — mesh-supported families first, the mesh-free one last — so a
-sweep's traversal order is fixed by the declarations and does not depend on
-which families are present. The algebraic domain is resolved (declared,
-cached, validated) BEFORE the [`InternalVariableHandler`](@ref) is built, since
-a condensed algebraic cache's item block needs the resolved items and cache to
-size itself; it is decorated afterwards, alongside the cell caches.
+Facet item ([`facet_items`](@ref)) and then algebraic item
+([`algebraic_items`](@ref)) caches are appended after the cell subdomains, so
+traversal order follows the declarations rather than which families are
+present. The algebraic domain is resolved BEFORE the
+[`InternalVariableHandler`](@ref) is built, since a condensed algebraic cache's
+item block sizes itself from the resolved items and cache, and decorated
+afterwards alongside the cell caches.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol;
         ad_backend = ForwardDiffAD())
@@ -319,9 +298,8 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
                                                 global_dof_sets)
     algebraic_caches  = setup_algebraic_caches(operator_strategy, algebraic_domain, protocol, ad_backend,
                                                needs_sensitivity, ivh)
-    # The families carry different domain types, so the combined vector is only
-    # widened where something is declared — an operator without facet or
-    # algebraic items keeps the element type it has today.
+    # The families carry different domain types; widening only where something
+    # is declared keeps a cells-only operator's element type concrete.
     subdomain_caches  = (isempty(facet_caches) && isempty(algebraic_caches)) ? cell_caches :
         vcat(Vector{SubdomainCache}(cell_caches), facet_caches, algebraic_caches)
     return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, protocol)
@@ -332,11 +310,10 @@ end
     setup_operator(strategy, problem, dh; slots = (:u,), requests = (), ad_backend = ForwardDiffAD())
 
 Build the operator for `problem` (an integrator) over `dh`. The positional
-form takes the scheme's declarations as a protocol
-([`AbstractSchemeProtocol`](@ref)); the keyword form is sugar whose keywords
-are the [`DefaultProtocol`](@ref) constructor arguments, and it lowers to the
-positional form here. `ad_backend` selects the [`ADElementCache`](@ref)
-backend wrapping caches that lack analytic coverage (`nothing` opts out).
+form takes the scheme's declarations as an [`AbstractSchemeProtocol`](@ref);
+the keyword form is sugar for [`DefaultProtocol`](@ref) and lowers to the
+positional one. `ad_backend` selects the [`ADElementCache`](@ref) backend
+wrapping caches that lack analytic coverage (`nothing` opts out).
 
 Transfer and patch operators keep their own constructors
 ([`setup_transfer_operator`](@ref), [`assemble_patches!`](@ref)).
@@ -348,8 +325,7 @@ function setup_operator(strategy::AbstractAssemblyStrategy, integrator::Abstract
 end
 
 # A matrix specification on an operator that holds no matrix is a
-# misconfiguration, not a degraded mode: the layout would be declared and then
-# silently dropped.
+# misconfiguration, not a degraded mode: the layout would be silently dropped.
 function _reject_blocked_specification(strategy::AssemblyStrategy{<:FullAssembly})
     strategy.form.operator_specification isa BlockedOperatorSpecification || return nothing
     throw(ArgumentError(
@@ -381,7 +357,7 @@ setup_operator(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHa
     init_transfer_sparsity_pattern(dh_row::DofHandler, dh_col::DofHandler)
 
 Build a `Ferrite.SparsityPattern` of size `(ndofs(dh_row) × ndofs(dh_col))` covering all
-DoF pairs `(rdof, cdof)` that share a cell.  Both DofHandlers must live on the same grid
+DoF pairs `(rdof, cdof)` that share a cell. Both DofHandlers must live on the same grid
 and have the same number of subdomains.
 """
 function init_transfer_sparsity_pattern(dh_row::DofHandler, dh_col::DofHandler)
@@ -437,15 +413,13 @@ end
 """
     setup_transfer_operator(strategy, integrator, dh_row, dh_col)
 
-Set up a [`TransferFerriteOperator`](@ref) for assembling a rectangular sparse matrix of
-size `(ndofs(dh_row) × ndofs(dh_col))`.
-
-`dh_row` and `dh_col` must live on the **same** grid and their subdomain lists must
-correspond 1-to-1 (same length, same cellsets at each index).
+Set up a [`TransferFerriteOperator`](@ref) assembling a rectangular sparse matrix of
+size `(ndofs(dh_row) × ndofs(dh_col))`. `dh_row` and `dh_col` must live on the **same**
+grid with 1-to-1 subdomain lists (same length, same cellsets at each index).
 
 `integrator` must be an [`AbstractTransferIntegrator`](@ref); its
-`setup_transfer_element_cache(integrator, sdh_row, sdh_col)` method is called once per
-subdomain pair.
+`setup_transfer_element_cache(integrator, sdh_row, sdh_col)` runs once per subdomain
+pair.
 
 !!! warning "Experimental surface"
     The transfer constructors and operator types may change in a minor release;
@@ -461,7 +435,6 @@ function setup_transfer_operator(
     @assert get_grid(dh_row) === get_grid(dh_col) "Both DofHandlers must share the same grid"
     @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) "Mismatch in number of subdomains"
 
-    # Build rectangular sparse matrix with the correct sparsity pattern
     Tv = value_type(strategy.device)
     sp = init_transfer_sparsity_pattern(dh_row, dh_col)
     P  = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
@@ -476,9 +449,8 @@ end
     init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)
 
 Build a `Ferrite.SparsityPattern` of size `(ndofs(dh_fine) × ndofs(dh_coarse))` for a
-nested-grid transfer operator.  The sparsity is determined by the `fine2coarse` mapping:
-a (rdof, cdof) entry is added whenever `rdof` belongs to fine cell `i` and `cdof` belongs
-to its parent coarse cell `fine2coarse[i]`.
+nested-grid transfer operator: entry `(rdof, cdof)` is added whenever `rdof` belongs to
+fine cell `i` and `cdof` to its parent coarse cell `fine2coarse[i]`.
 """
 function init_nested_transfer_sparsity_pattern(
         dh_fine::DofHandler,
@@ -507,11 +479,10 @@ end
 """
     setup_nested_transfer_operator(strategy, integrator, dh_fine, dh_coarse, fine2coarse, child_ref_coords)
 
-Set up a [`NestedTransferFerriteOperator`](@ref) for assembling a rectangular sparse
-matrix of size `(ndofs(dh_fine) × ndofs(dh_coarse))`.
-
-`dh_fine` and `dh_coarse` must live on **different** grids where every fine cell is a
-child of exactly one coarse cell, as encoded by `fine2coarse` and `child_ref_coords`.
+Set up a [`NestedTransferFerriteOperator`](@ref) assembling a rectangular sparse matrix
+of size `(ndofs(dh_fine) × ndofs(dh_coarse))`. `dh_fine` and `dh_coarse` must live on
+**different** grids where every fine cell is a child of exactly one coarse cell, as
+encoded by `fine2coarse` and `child_ref_coords`.
 
 !!! warning "Experimental surface"
     The transfer constructors and operator types may change in a minor release;

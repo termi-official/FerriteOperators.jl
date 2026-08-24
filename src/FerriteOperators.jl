@@ -31,19 +31,18 @@ import Ferrite: reference_shape_value
 import Ferrite: IntegerCollection
 import Ferrite: nnodes_per_cell, cellnodes!, getcoordinates!
 
-include("core/device.jl")    # Utilities to manage devices (e.g. CPU threads or GPUs)
-include("core/strategy.jl")  # Utilities to control the assembly strategy
+include("core/device.jl")    # Device abstraction: CPU threads, GPUs
+include("core/strategy.jl")  # Assembly strategies
 include("core/requests.jl")           # Assembly requests: the element kernel contract
 include("core/element_interface.jl")  # Cache supertypes + the empty caches
-include("core/tasks.jl")              # Contains the basic task system
-include("core/iterators.jl")          # Transfer cell iterators for two-DofHandler assembly
+include("core/tasks.jl")              # Assembly kinds and the task system
+include("core/iterators.jl")          # Two-DofHandler cell iterators
 
-include("core/utils.jl")             # Internal helpers
+include("core/utils.jl")
 include("core/qvector.jl")           # Flat per-cell quadrature data storage
 
-# These are
-#   1. addons to make life with Ferrite easier
-#   2. dispatches missing from Ferrite.jl, pirated here
+# Conveniences for working with Ferrite, plus dispatches missing from
+# Ferrite.jl and pirated here.
 include("core/ferrite-addons/collections.jl")
 include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
@@ -54,16 +53,14 @@ include("core/ferrite-addons/internal_variable_handler.jl")
     AbstractBilinearIntegrator
 
 Supertype of integrators describing a **bilinear form** `a(u, v)`: the element
-kernel fills an element matrix that does not depend on the state. The operator
-that form induces is a linear one, so its assembled matrix IS that operator's
-Jacobian — linearizing is assembling — and its residual is the action
-`F(u) = A·u`.
+kernel fills a state-independent element matrix. The operator that form induces
+is linear, so its assembled matrix IS that operator's Jacobian and its residual
+is the action `F(u) = A·u`.
 
-The family is a structural declaration and not a performance hint: an operator
-built for a bilinear integrator issues no sensitivity kind, so it carries
-neither the [`ADElementCache`](@ref) decoration nor the per-worker
-[`SensitivityBuffers`](@ref), whatever its element caches implement
-analytically ([`needs_ad_decoration`](@ref)).
+A structural declaration, not a performance hint: such an operator issues no
+sensitivity kind, so it carries neither the [`ADElementCache`](@ref) decoration
+nor the per-worker [`SensitivityBuffers`](@ref), whatever its element caches
+implement analytically ([`needs_ad_decoration`](@ref)).
 """
 abstract type AbstractBilinearIntegrator end
 
@@ -73,14 +70,13 @@ abstract type AbstractBilinearIntegrator end
 Supertype of integrators describing a state-dependent residual form — the
 general case, and the only family whose operators carry differentiation
 machinery. The residual kernel is mandatory; every other request is served
-analytically where [`provides_analytic`](@ref) declares it and by
-differentiating the residual kernel otherwise, which is what the
-[`ADElementCache`](@ref) decoration and the per-worker
-[`SensitivityBuffers`](@ref) exist for.
+analytically where [`provides_analytic`](@ref) declares it, otherwise by
+differentiating that kernel — what the [`ADElementCache`](@ref) decoration and
+the per-worker [`SensitivityBuffers`](@ref) exist for.
 
 A bilinear sub-integrator composes into this family (the operator its form
-induces scatters into the same matrix and residual); a linear one does not,
-its sink being a vector alone.
+induces scatters into the same matrix and residual); a linear one does not, its
+sink being a vector alone.
 """
 abstract type AbstractNonlinearIntegrator end
 
@@ -89,34 +85,33 @@ abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrato
 """
     AbstractLinearIntegrator
 
-Supertype of integrators describing a **linear form** `l(v)`: the element
-kernel fills the load vector of that form, and the operator holds that vector
-and no matrix. The form has no state to depend on, so this family too carries
-no AD or sensitivity machinery, and a [`BlockedOperatorSpecification`](@ref) on
-such an operator is rejected at `setup_operator` — there is no matrix to lay
-out.
+Supertype of integrators describing a **linear form** `l(v)`: the element kernel
+fills the form's load vector, and the operator holds that vector and no matrix.
+The form has no state to depend on, so this family too carries no AD or
+sensitivity machinery, and a [`BlockedOperatorSpecification`](@ref) on such an
+operator is rejected at `setup_operator` — there is no matrix to lay out.
 """
 abstract type AbstractLinearIntegrator end
 
-include("elements/composite_elements.jl")     # This is the key component to allow high level composition of operators
+include("elements/composite_elements.jl")     # High-level composition of operators
 include("elements/ad_element.jl")             # ADElementCache: AD as an element cache decorator
 
-include("operators/general.jl")         # Some general operators which might be handy
-include("operators/matrix_free.jl")     # Everything related to the fundamental decomposition
-include("operators/nonlinear.jl")       # Here are all the tasks to handle the assembly and action of operators
+include("operators/general.jl")         # Domain descriptors, NullOperator, DiagonalOperator
+include("operators/matrix_free.jl")     # Element-assembly storage and matrix-free products
+include("operators/nonlinear.jl")       # Assembly and action tasks
 include("operators/bilinear.jl")
 include("operators/linear.jl")
-include("operators/transfer.jl")        # Transfer (prolongation/restriction) operators
-include("elements/prolongators.jl")     # Transfer integrators assembling mass-based prolongators
+include("operators/transfer.jl")        # Prolongation/restriction operators
+include("elements/prolongators.jl")     # Mass-based prolongator integrators
 include("operators/ad_decoration.jl")   # Construction-time ADElementCache/FusedFromSplit wrapping policy
-include("operators/setup.jl")           # Nitty gritty helpers to handle the setup of operators without poking into internals
-include("elements/domain_elements.jl")  # Subdomain routing; specializes setup.jl's per-DofHandler cache setup seam
+include("operators/setup.jl")           # Operator setup, so callers need not poke into internals
+include("elements/domain_elements.jl")  # Subdomain routing; specializes setup.jl's per-DofHandler cache seam
 include("operators/components.jl")      # Component bags over a shared sparsity pattern + combine!
-include("operators/stage_block.jl")     # Stage-block operator for fully implicit Runge-Kutta schemes
+include("operators/stage_block.jl")     # Fully implicit Runge-Kutta stage blocks
 include("operators/verification.jl")    # check_derivatives: FD referee for analytic kernels and AD paths
 include("operators/condensation.jl")    # condense_internal!: element-local solves up front, pure evaluation after
 
-include("core/quadrature-task.jl")      # Task + operator for evaluating functions at quadrature points
+include("core/quadrature-task.jl")      # Evaluating functions at quadrature points
 include("core/item_states.jl")          # ItemStates: provider-agnostic per-item persistent storage
 include("core/patch-task.jl")           # Patch items: multi-cell work items with patch-local scatter (experimental)
 include("core/facet-task.jl")           # Facet items: facet-set-restricted boundary terms as their own traversal
