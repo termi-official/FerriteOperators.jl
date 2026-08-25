@@ -46,15 +46,17 @@ end
 """
     global_dofs(integrator, sdh) -> AbstractVector{Int}
 
-The GLOBAL dofs an element of `sdh` carries in its local system beyond
-`celldofs` — dofs of `sdh.dh` that belong to no cell (Ferrite's
-`algebraic_dofs(sdh.dh, :name)`) or that are shared by every item of the
-subdomain (a lumped chamber pressure). Ordered; resolved once at setup.
+The GLOBAL dofs a CELL of `sdh` carries in its local system beyond `celldofs` —
+dofs of `sdh.dh` that belong to no cell (Ferrite's
+`algebraic_dofs(sdh.dh, :name)`) and that every cell of the subdomain couples
+to (a stress-driven RVE's macroscopic strain). Ordered; resolved once at setup.
 Defaults to `()`.
 
-The declaration lives on the INTEGRATOR, one per subdomain, and is shared by
-that subdomain's volumetric AND boundary kernel. The local system is then, by
-contract,
+The declaration lives on the INTEGRATOR, one per subdomain, and augments the
+CELL family alone: the subdomain's volumetric kernel and the boundary kernel
+riding its sweep. A term supported on a facet SET declares its own tail through
+[`facet_item_global_dofs`](@ref), which leaves the cell sweep in the pure field
+space. The local system is then, by contract,
 
     [ celldofs(cell) ; the declared global dofs, in declaration order ]
 
@@ -65,7 +67,8 @@ engine sizes `Ke`/`re`/the slot buffers to the augmented length and scatters
 through the augmented dof vector; the AD fallback differentiates the full
 augmented system.
 
-Two restrictions, both raised at setup: a declaration excludes
+Two restrictions, both raised at setup and shared with
+[`facet_item_global_dofs`](@ref): a declaration excludes
 [`ColoredScheduling`](@ref) (a dof shared by every item cannot be isolated by
 coloring — the parallel route is atomic scatter under
 [`SequentialScheduling`](@ref)) and the [`ElementAssembly`](@ref) form (its dof
@@ -236,6 +239,40 @@ function setup_facet_item_cache(integrator, sdh)
         "declared facet of the subdomain, and it is the same kind of cache " *
         "`setup_boundary_cache` returns."))
 end
+
+"""
+    facet_item_global_dofs(integrator, sdh) -> AbstractVector{Int}
+
+The [`global_dofs`](@ref) counterpart of the facet item family: the GLOBAL dofs
+a FACET ITEM of `sdh` carries beyond `celldofs` of its owning cell — the lumped
+chamber pressure a tying surface couples to. Ordered; resolved once at setup;
+defaults to `()`. The local system is
+`[celldofs(cell); the declared dofs]`, whose tail is
+[`facet_item_global_dof_range`](@ref).
+
+Each family sizes its own local system from its OWN declaration, which is what
+this hook buys over declaring [`global_dofs`](@ref): the facet items'
+`Ke`/`re`/slot buffers and their scatter are augmented, the subdomain's CELL
+sweep stays in the pure field space. The coupling sparsity can then be declared
+over the tying facets alone (Ferrite's `FacetCoupling`) instead of every cell of
+the subdomain, and a condensed volumetric element may sit beside the tying term
+— the rejection in [`ADElementCache`](@ref) applies to the cell declaration.
+
+The restrictions of [`global_dofs`](@ref) hold here too: the declaration
+excludes [`ColoredScheduling`](@ref) and the [`ElementAssembly`](@ref) form, and
+the sparsity entries are the caller's coupling descriptor, never inferred.
+"""
+facet_item_global_dofs(integrator, sdh) = ()
+
+"""
+    facet_item_global_dof_range(integrator, sdh) -> UnitRange{Int}
+
+Where [`facet_item_global_dofs`](@ref) sits in a facet item's local system, the
+[`global_dof_range`](@ref) counterpart: a facet item's local system is its
+owning cell's, so the tail starts after `ndofs_per_cell(sdh)` here as well.
+"""
+facet_item_global_dof_range(integrator, sdh) =
+    ndofs_per_cell(sdh) .+ (1:length(facet_item_global_dofs(integrator, sdh)))
 
 """
 Supertype for all caches to integrate over interfaces (facet pairs). No

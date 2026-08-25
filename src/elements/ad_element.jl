@@ -230,8 +230,11 @@ naming the missing correction.
 
 `n_global_dofs` pads the seeds and configs by the subdomain's
 [`global_dofs`](@ref) count, so the differentiated system is the FULL augmented
-one — `setup_operator` passes it. The `ndofs` form sizes the buffers from a dof
-count alone, for an item family that has no `SubDofHandler` to allocate against.
+one — `setup_operator` passes it. It is the CELL family's declaration:
+[`facet_item_global_dofs`](@ref) augments the facet items alone, which is what
+lets a condensed volumetric element sit on a subdomain carrying a tying term.
+The `ndofs` form sizes the buffers from a dof count alone, for an item family
+that has no `SubDofHandler` to allocate against.
 
 `setup_operator` wraps automatically (`ad_backend = nothing` opts out).
 """
@@ -259,7 +262,9 @@ function _reject_condensed_global_dofs(inner, n_global_dofs::Int)
         "block spans the FIELD space while the AD partials span the augmented system — the " *
         "combination is not defined for this pair. Implement the analytic " *
         "`assemble_cell!(::JacobianRequest{:u, Consistent}, …)` kernel (declared through " *
-        "`provides_analytic`), or drop the `global_dofs` declaration on this subdomain."))
+        "`provides_analytic`), or drop the `global_dofs` declaration on this subdomain — a " *
+        "tying term whose tail is declared through `facet_item_global_dofs` leaves the cell " *
+        "system in the field space and is not affected."))
 end
 
 duplicate_for_device(device, ad::ADElementCache) =

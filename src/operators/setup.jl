@@ -207,52 +207,58 @@ function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, 
         zip(dh.subdofhandlers, element_caches, boundary_caches, global_dof_sets)]
 end
 
-# The `global_dofs` declaration is resolved once per subdomain, before any
-# cache exists, and validated here rather than surfacing later as an
+# Each family's global-dof declaration is resolved once per subdomain, before
+# any cache exists, and validated here rather than surfacing later as an
 # out-of-bounds scatter or a doubly assembled entry.
-function resolve_global_dof_sets(strategy, integrator, dh)
-    sets = [global_dofs(integrator, sdh) for sdh in dh.subdofhandlers]
+resolve_global_dof_sets(strategy, integrator, dh) = _resolve_global_dof_sets(
+    strategy, dh, [global_dofs(integrator, sdh) for sdh in dh.subdofhandlers], "global_dofs")
+
+resolve_facet_item_global_dof_sets(strategy, integrator, dh) = _resolve_global_dof_sets(
+    strategy, dh, [facet_item_global_dofs(integrator, sdh) for sdh in dh.subdofhandlers],
+    "facet_item_global_dofs")
+
+function _resolve_global_dof_sets(strategy, dh, sets, declaration)
     all(isempty, sets) && return sets
-    _reject_unsupported_global_dof_strategy(strategy)
+    _reject_unsupported_global_dof_strategy(strategy, declaration)
     for (index, (sdh, gdofs)) in enumerate(zip(dh.subdofhandlers, sets))
-        _validate_global_dofs(index, sdh, gdofs, ndofs(dh))
+        _validate_global_dofs(index, sdh, gdofs, ndofs(dh), declaration)
     end
     return sets
 end
 
-function _reject_unsupported_global_dof_strategy(strategy::AssemblyStrategy)
+function _reject_unsupported_global_dof_strategy(strategy::AssemblyStrategy, declaration)
     strategy.scheduling isa ColoredScheduling && throw(ArgumentError(
-        "An element declaring `global_dofs` cannot be assembled under `ColoredScheduling`: " *
+        "A subdomain declaring `$declaration` cannot be assembled under `ColoredScheduling`: " *
         "coloring makes a scatter race-free by giving no two items of a color a shared dof, " *
-        "and a declared global dof is shared by every item of its subdomain, so no coloring " *
+        "and a declared global dof is shared by every item that carries it, so no coloring " *
         "isolates it. Use `SequentialScheduling`, whose parallel route is the atomic scatter."))
     strategy.form isa Union{ElementAssembly, ElementAssemblyData} && throw(ArgumentError(
-        "An element declaring `global_dofs` cannot be assembled in the `ElementAssembly` " *
+        "A subdomain declaring `$declaration` cannot be assembled in the `ElementAssembly` " *
         "form: its per-element storage and dof maps are built from `celldofs`, which by " *
         "construction never contains a global dof. Use `FullAssembly`."))
     return nothing
 end
 
-function _validate_global_dofs(index, sdh, gdofs, ndofs_total)
+function _validate_global_dofs(index, sdh, gdofs, ndofs_total, declaration)
     for d in gdofs
         1 <= d <= ndofs_total || throw(ArgumentError(
-            "Subdomain $index declares the global dof $d, which is out of bounds for a " *
-            "DofHandler with $ndofs_total dofs."))
+            "Subdomain $index declares the global dof $d through `$declaration`, which is out " *
+            "of bounds for a DofHandler with $ndofs_total dofs."))
     end
     allunique(gdofs) || throw(ArgumentError(
-        "Subdomain $index declares the global dofs $(collect(gdofs)), which are not unique. " *
-        "The declaration is the ordered tail of the element-local system, so a repeated dof " *
-        "would receive the same contribution twice."))
+        "Subdomain $index declares the global dofs $(collect(gdofs)) through `$declaration`, " *
+        "which are not unique. The declaration is the ordered tail of the element-local system, " *
+        "so a repeated dof would receive the same contribution twice."))
     # Cheap sample: the first cell witnesses a head/tail overlap for the
     # uniform-field case this covers.
     isempty(sdh.cellset) && return nothing
     cdofs = celldofs(sdh.dh, first(sdh.cellset))
     for d in gdofs
         d in cdofs && throw(ArgumentError(
-            "Subdomain $index declares the global dof $d, which is also a cell dof (found on " *
-            "cell $(first(sdh.cellset))). The local system is `[celldofs(cell); global dofs]`, " *
-            "so such a dof would receive every contribution twice. Only the first cell of the " *
-            "subdomain is sampled."))
+            "Subdomain $index declares the global dof $d through `$declaration`, which is also " *
+            "a cell dof (found on cell $(first(sdh.cellset))). The local system is " *
+            "`[celldofs(cell); global dofs]`, so such a dof would receive every contribution " *
+            "twice. Only the first cell of the subdomain is sampled."))
     end
     return nothing
 end
@@ -280,6 +286,7 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
         ad_backend = ForwardDiffAD())
     requests          = get_declared_kinds(protocol)
     global_dof_sets   = resolve_global_dof_sets(strategy, integrator, dh)
+    facet_item_sets   = resolve_facet_item_global_dof_sets(strategy, integrator, dh)
     operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
     foreach(cache -> validate_element_cache(cache, requests), element_caches)
@@ -296,7 +303,7 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     facet_caches      = setup_facet_item_caches(operator_strategy, integrator, dh, protocol, ivh;
                                                 slots = get_declared_slots(protocol),
                                                 needs_sensitivity,
-                                                global_dof_sets)
+                                                facet_item_global_dof_sets = facet_item_sets)
     algebraic_caches  = setup_algebraic_caches(operator_strategy, algebraic_domain, protocol, ad_backend,
                                                needs_sensitivity, ivh)
     # The families carry different domain types; widening only where something

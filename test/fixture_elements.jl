@@ -516,7 +516,7 @@ if isdefined(Ferrite, :AlgebraicVariable)
     #
     # with the matching symmetric off-diagonal blocks. There is deliberately no
     # volumetric term: what the fixture witnesses is the facet-item traversal
-    # composed with the `global_dofs` machinery, nothing else.
+    # composed with the `facet_item_global_dofs` machinery, nothing else.
 
     struct TyingFacetIntegrator <: AbstractNonlinearIntegrator
         field_name::Symbol
@@ -530,7 +530,7 @@ if isdefined(Ferrite, :AlgebraicVariable)
         range_p::UnitRange{Int}
     end
 
-    FerriteOperators.global_dofs(m::TyingFacetIntegrator, sdh::SubDofHandler) =
+    FerriteOperators.facet_item_global_dofs(m::TyingFacetIntegrator, sdh::SubDofHandler) =
         algebraic_dofs(sdh.dh, m.variable_name)
     FerriteOperators.setup_element_cache(::TyingFacetIntegrator, ::SubDofHandler) =
         FerriteOperators.EmptyVolumetricElementCache()
@@ -540,7 +540,7 @@ if isdefined(Ferrite, :AlgebraicVariable)
         ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
         fqr    = FacetQuadratureRule{Ferrite.getrefshape(ip)}(2)
         return TyingFacetCache(FacetValues(fqr, ip, ip_geo),
-                               dof_range(sdh, m.field_name), global_dof_range(m, sdh))
+                               dof_range(sdh, m.field_name), facet_item_global_dof_range(m, sdh))
     end
     FerriteOperators.duplicate_for_device(device, c::TyingFacetCache) =
         TyingFacetCache(FerriteOperators.duplicate_for_device(device, c.fv), c.range_u, c.range_p)
@@ -577,9 +577,14 @@ if isdefined(Ferrite, :AlgebraicVariable)
     FerriteOperators.provides_analytic(::Type{<:TyingFacetCache}, ::Union{JacobianKind{:u}, JacobianResidualKind}) = true
 
     """
-    Grid, DofHandler, coupling descriptor and integrator of the facet tying
+    Grid, DofHandler, coupling descriptors and integrator of the facet tying
     problem. The declared set is the union of two boundary facetsets, so the
     corner cell owns TWO declared facets — the grouping a facet item exists for.
+
+    Two descriptors for the same term: `coupling` couples the pressure to every
+    cell of the mesh, `facet_coupling` to the tying facets alone. The tying dofs
+    being the facet items' own declaration, the narrow one carries the whole
+    scatter.
     """
     function tying_facet_testbed(dims = (3, 3); field_name = :u, variable_name = :p)
         grid = generate_grid(Quadrilateral, dims)
@@ -589,7 +594,8 @@ if isdefined(Ferrite, :AlgebraicVariable)
         close!(dh)
         facets   = union(Set(getfacetset(grid, "right")), Set(getfacetset(grid, "top")))
         coupling = CellCoupling(1:getncells(grid); algebraic_coupling = ((field_name, variable_name),))
-        return (; grid, dh, facets, coupling,
+        facet_coupling = FacetCoupling(facets; algebraic_coupling = ((field_name, variable_name),))
+        return (; grid, dh, facets, coupling, facet_coupling,
                   integrator = TyingFacetIntegrator(field_name, variable_name, facets),
                   pdof = only(algebraic_dofs(dh, variable_name)))
     end

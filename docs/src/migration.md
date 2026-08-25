@@ -302,8 +302,10 @@ local problems](elements.md)).
   wrong adjoint, never a blanket rejection.
 - **Elements with global dofs**: `global_dofs(integrator, sdh)` appends dofs
   that belong to no cell — an RVE's macroscopic strain, a lumped pressure — to
-  the local system as `[celldofs(cell); global dofs]`, resolved through
-  `global_dof_range`. Everything the engine sizes follows the declaration, AD
+  the CELL family's local system as `[celldofs(cell); global dofs]`, resolved
+  through `global_dof_range`; a facet-set term declares its own tail through
+  `facet_item_global_dofs`/`facet_item_global_dof_range` and leaves the cell
+  sweep un-augmented. Everything a family sizes follows its own declaration, AD
   seeds included; the coupling's sparsity is declared on the operator
   specification (see [Elements with global dofs](elements.md#Elements-with-global-dofs)).
 - **Facet items**: `facet_items` + `setup_facet_item_cache` give a term

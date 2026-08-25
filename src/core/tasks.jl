@@ -406,7 +406,8 @@ end
     item_dofs(ws) -> AbstractVector{Int}
 
 The global dof indices of the current item's local system: `celldofs(cell)`
-where the integrator declares no [`global_dofs`](@ref), and the augmented
+where the item's family declares no global dofs ([`global_dofs`](@ref) for
+cells, [`facet_item_global_dofs`](@ref) for facet items), and the augmented
 `[celldofs(cell); global dofs]` vector the workspace carries otherwise. Every
 gather of a sweep addresses through this, so the augmented tail reaches the
 slot buffers and the adjoint payloads. On an [`AlgebraicWorkspace`](@ref) it is
@@ -419,8 +420,8 @@ the item's own dof vector, that family having no cell dofs to start from.
 """
     scatter_address(ws)
 
-What a scatter of the current item addresses. Without declared
-[`global_dofs`](@ref) it is the geometry cache, which every assembler in the
+What a scatter of the current item addresses. Without a global-dof declaration
+for the item's family it is the geometry cache, which every assembler in the
 package takes — the element-indexed [`ElementAssembly`](@ref) one reads
 `cellid` from it, the dof-scattered ones read `celldofs`. With them the local
 system spans dofs no cell owns, so the augmented dof vector is the only address

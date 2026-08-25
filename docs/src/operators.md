@@ -81,8 +81,9 @@ default — gives a monolithic `SparseMatrixCSC`, and both specifications take t
 same two pattern declarations:
 
 - `algebraic_couplings`, Ferrite coupling descriptors (`CellCoupling`,
-  `FacetCoupling`, `AlgebraicCoupling`) for the entries an element's
-  [`global_dofs`](@ref) couple into — see
+  `FacetCoupling`, `AlgebraicCoupling`) for the entries a
+  [`global_dofs`](@ref) or [`facet_item_global_dofs`](@ref) declaration couples
+  into — see
   [Elements with global dofs](elements.md#Elements-with-global-dofs) — and for
   those an [`algebraic_items`](@ref) declaration needs, see
   [Algebraic terms](elements.md#Algebraic-terms-(items-with-no-mesh-support));

@@ -68,9 +68,10 @@ end
 Per-worker workspace of the facet item family: [`AssemblyWorkspace`](@ref)'s
 buffers with the surface cache in the element slot and the item declaration
 added. A facet local system is OWNING-CELL-shaped, so `Ke`/`re`/the slot
-buffers are sized exactly like the cell family's — including the
-[`global_dofs`](@ref) padding, which lets a facet term couple to a dof no cell
-owns (the tying shape).
+buffers are sized like the cell family's — padded by this family's own
+[`facet_item_global_dofs`](@ref) declaration, which lets a facet term couple to
+a dof no cell owns (the tying shape) without augmenting the subdomain's cell
+sweep.
 
 `Ferrite.reinit!(ws, index)` positions it on an item: the geometry cache is
 reinitialized on the owning cell and the augmented dof vector's head refreshed
@@ -120,7 +121,7 @@ end
 
 Create a single [`FacetItemWorkspace`](@ref). Buffer sizing is
 [`create_assembly_workspace`](@ref)'s: the same `allocate_element_*` hooks on
-the surface cache, padded by the [`global_dofs`](@ref) declaration.
+the surface cache, padded by the [`facet_item_global_dofs`](@ref) declaration.
 """
 function create_facet_item_workspace(cache, items, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
         needs_sensitivity::Bool = true, global_dofs = ()) where {N}
@@ -331,7 +332,7 @@ function _assert_facet_analytic(D::Type, kind)
 end
 
 """
-    setup_facet_item_caches(strategy, integrator, dh, protocol, ivh; slots, needs_sensitivity, global_dof_sets)
+    setup_facet_item_caches(strategy, integrator, dh, protocol, ivh; slots, needs_sensitivity, facet_item_global_dof_sets)
 
 The `SubdomainCache`s of the facet item family, one per subdomain that
 declares [`facet_items`](@ref): resolve and validate the declaration, build the
@@ -344,10 +345,10 @@ Unlike the algebraic family, nothing has to be resolved before the
 declaration cannot change the `[ū | q_cells | q_items]` layout.
 """
 function setup_facet_item_caches(strategy, integrator, dh, protocol, ivh;
-        slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, global_dof_sets)
+        slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, facet_item_global_dof_sets)
     device = strategy.device
     caches = SubdomainCache[]
-    for (index, (sdh, gdofs)) in enumerate(zip(dh.subdofhandlers, global_dof_sets))
+    for (index, (sdh, gdofs)) in enumerate(zip(dh.subdofhandlers, facet_item_global_dof_sets))
         declared = facet_items(integrator, sdh)
         isempty(declared) && continue
         items = resolve_facet_items(index, sdh, declared)

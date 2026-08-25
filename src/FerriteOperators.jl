@@ -193,7 +193,7 @@ export MassProlongatorIntegrator
 export NestedMassProlongatorIntegrator
 export setup_element_cache, setup_boundary_cache
 export global_dofs, global_dof_range
-export facet_items, setup_facet_item_cache
+export facet_items, setup_facet_item_cache, facet_item_global_dofs, facet_item_global_dof_range
 export algebraic_items, setup_algebraic_cache, assemble_algebraic!, evaluate_algebraic_functional
 export AlgebraicItem, AlgebraicArgs
 export TransferFerriteOperator, setup_transfer_operator, init_transfer_sparsity_pattern

@@ -217,9 +217,13 @@ enforcing an integral constraint. Ferrite gives them dofs through
 FerriteOperators.global_dofs(m::MyIntegrator, sdh::SubDofHandler) = algebraic_dofs(sdh.dh, :εbar)
 ```
 
-The declaration lives on the **integrator**, one per subdomain, shared by the
-volumetric and the boundary kernel of that subdomain, and is resolved once at
-setup — before any cache is built. The local layout is then a contract:
+The declaration lives on the **integrator**, one per subdomain, and is resolved
+once at setup — before any cache is built. It augments the **cell family**: the
+subdomain's volumetric kernel and the boundary kernel riding its sweep. A term
+supported on a facet *set* declares its own tail through
+[`facet_item_global_dofs`](@ref) instead (see [Facet items](#Facet-items)),
+which is what keeps this sweep in the field space. The local layout is then a
+contract:
 
 ```
 [ celldofs(cell) ; the declared global dofs, in declaration order ]
@@ -354,22 +358,31 @@ which makes the barrier promise hold for facet items exactly as it holds for
 cells.
 
 The local system is **owning-cell-shaped**: `Ke`, `re` and the slot buffers are
-sized like the cell family's, including the [`global_dofs`](@ref) padding. That
-is what makes the tying shape work — a facet term whose local system is
+sized like the cell family's, padded by this family's own
+[`facet_item_global_dofs`](@ref) declaration. That is what makes the tying shape
+work — a facet term whose local system is
 `[celldofs(cell); one lumped pressure dof]` writes its coupling rows and
 columns through the augmented tail, and the engine scatters through the
 augmented dof vector:
 
 ```julia
-FerriteOperators.global_dofs(m::MyTyingIntegrator, sdh::SubDofHandler) = algebraic_dofs(sdh.dh, :p)
+FerriteOperators.facet_item_global_dofs(m::MyTyingIntegrator, sdh::SubDofHandler) = algebraic_dofs(sdh.dh, :p)
 
 function FerriteOperators.assemble_facet!(req::JacobianResidualRequest, c::MyTyingCache, args::FacetArgs, lfi::Int)
     reinit!(c.fv, args.cell, lfi)
-    P = first(c.range_p)                       # `global_dof_range`, resolved at setup
+    P = first(c.range_p)                       # `facet_item_global_dof_range`, resolved at setup
     p = args.states.u[P]
     # ... req.r[I] += p * ∫Nᵢ ; req.K[I, P] += ∫Nᵢ ; req.K[P, I] += ∫Nᵢ ...
 end
 ```
+
+**Its own declaration, not the cell family's.** Each family sizes its local
+system from its own hook, so a tying term leaves the subdomain's cell sweep in
+the field space. Two consequences: the coupling sparsity is declarable over the
+tying facets alone (Ferrite's `FacetCoupling`) instead of every cell of the
+subdomain, and a condensed volumetric element may sit beside the tying term —
+the [`ADElementCache`](@ref) rejection of condensed elements applies to
+[`global_dofs`](@ref).
 
 **Sensitivities.** A facet-item term *does* enter the sensitivity sweeps — the
 fused route's omission (see [Sensitivities](operators.md#Sensitivities)) does
@@ -515,8 +528,8 @@ this family's standing limitation.
 | | cell items | facet items ([`facet_items`](@ref)) | algebraic items ([`algebraic_items`](@ref)) |
 |---|---|---|---|
 | an item is | one cell of the subdomain | one owning cell with all of its declared facets | one vector of global dofs, no mesh support |
-| local system | `[celldofs(cell); global dofs]` | the same, owning-cell-shaped | `n × n` over the item's own `n` dofs |
-| [`ColoredScheduling`](@ref) | Ferrite's cell coloring; rejected once [`global_dofs`](@ref) are declared | the owning cells' coloring, restricted to the declared set | derived as one item per barrier |
+| local system | `[celldofs(cell); global dofs]` ([`global_dofs`](@ref)) | the same, owning-cell-shaped ([`facet_item_global_dofs`](@ref)) | `n × n` over the item's own `n` dofs |
+| [`ColoredScheduling`](@ref) | Ferrite's cell coloring; rejected once [`global_dofs`](@ref) are declared | the owning cells' coloring, restricted to the declared set; rejected once [`facet_item_global_dofs`](@ref) are declared | derived as one item per barrier |
 | sensitivities | analytic kernel or the [`ADElementCache`](@ref) fallback | included, but **analytic-only** | analytic kernel or the [`ADElementCache`](@ref) fallback |
 | functional hook | [`evaluate_cell_functional`](@ref) | none — the family contributes nothing | [`evaluate_algebraic_functional`](@ref) |
 | condensation | [`condense_cell!`](@ref) | not supported: `q` belongs to the cell family's item for that same cell | [`condense_algebraic!`](@ref) |

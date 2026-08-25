@@ -1,6 +1,7 @@
 using FerriteOperators
 using Test
 using Polyester
+using SparseArrays
 
 include(joinpath(@__DIR__, "fixture_elements.jl"))
 
@@ -272,6 +273,31 @@ if !isdefined(Ferrite, :AlgebraicVariable)
     @info "Skipping the facet-item tying test: this Ferrite has no `AlgebraicVariable`, " *
           "so a DofHandler cannot carry dofs outside the mesh."
 else
+    # Records the width of the local system every volumetric kernel call is
+    # handed, which is what discriminates the two global-dof declarations.
+    struct CellWidthProbeCache <: AbstractVolumetricElementCache
+        widths::Vector{Int}
+    end
+    FerriteOperators.duplicate_for_device(device, c::CellWidthProbeCache) = c
+    FerriteOperators.reinit_values!(::CellWidthProbeCache, cell) = nothing
+    function FerriteOperators.assemble_cell!(req::ResidualRequest, c::CellWidthProbeCache, args::CellArgs)
+        push!(c.widths, length(args.states.u))
+        return nothing
+    end
+
+    # The tying integrator with a volumetric term on the same subdomain.
+    struct CellWidthProbe <: AbstractNonlinearIntegrator
+        tying::TyingFacetIntegrator
+        widths::Vector{Int}
+    end
+    CellWidthProbe(tying) = CellWidthProbe(tying, Int[])
+    FerriteOperators.setup_element_cache(m::CellWidthProbe, ::SubDofHandler) = CellWidthProbeCache(m.widths)
+    FerriteOperators.facet_item_global_dofs(m::CellWidthProbe, sdh::SubDofHandler) =
+        facet_item_global_dofs(m.tying, sdh)
+    FerriteOperators.facet_items(m::CellWidthProbe, sdh::SubDofHandler) = facet_items(m.tying, sdh)
+    FerriteOperators.setup_facet_item_cache(m::CellWidthProbe, sdh::SubDofHandler) =
+        setup_facet_item_cache(m.tying, sdh)
+
     @testset "Facet items coupling to a global dof (the tying shape)" begin
         testbed = tying_facet_testbed()
         (; dh, coupling, integrator, pdof) = testbed
@@ -300,9 +326,51 @@ else
 
         # The local system is `[celldofs(cell); the pressure dof]`, and the
         # workspace addresses through it.
+        sdh = dh.subdofhandlers[1]
+        nc  = ndofs_per_cell(sdh)
         ws = first(last(op.engine.subdomain_caches).device_cache)
-        @test length(FerriteOperators.item_dofs(ws)) == ndofs_per_cell(dh) + 1
+        @test length(FerriteOperators.item_dofs(ws)) == nc + 1
         @test last(FerriteOperators.item_dofs(ws)) == pdof
+        @test size(ws.Ke) == (nc + 1, nc + 1)
+
+        # The declaration belongs to the facet items alone: the same subdomain's
+        # CELL sweep keeps the field-local system, buffers included.
+        ws_cell = first(first(op.engine.subdomain_caches).device_cache)
+        @test isempty(global_dofs(integrator, sdh))
+        @test ws_cell.dofs === nothing
+        @test length(FerriteOperators.item_dofs(ws_cell)) == nc
+        @test size(ws_cell.Ke) == (nc, nc)
+        @test length(ws_cell.re) == nc
+        @test length(ws_cell.slot_buffers.u) == nc
+
+        # ... and what the volumetric KERNEL is handed is that same system, on
+        # every call of a linearization sweep (the AD passes included).
+        probe = CellWidthProbe(integrator)
+        opw = setup_operator(AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), SequentialCPUDevice()),
+                             probe, dh)
+        rw = zeros(n)
+        update_linearization!(opw, rw, u, nothing)
+        @test !isempty(probe.widths)
+        @test all(==(nc), probe.widths)
+        # A volumetric term contributing nothing changes no value either.
+        @test opw.J ≈ Kref
+        @test rw ≈ rref
+
+        # The narrowed sparsity the un-augmented cell sweep permits: the same
+        # numbers over the tying facets' entries alone.
+        narrow = StandardOperatorSpecification(; algebraic_couplings = (testbed.facet_coupling,))
+        opn = setup_operator(AssemblyStrategy(FullAssembly(narrow), SequentialScheduling(), SequentialCPUDevice()),
+                             integrator, dh)
+        rn = zeros(n)
+        update_linearization!(opn, rn, u, nothing)
+        @test opn.J ≈ Kref
+        @test rn ≈ rref
+        # Only the dofs of the cells owning a declared facet couple to the
+        # pressure, plus its own diagonal.
+        adjacent = unique!(reduce(vcat, [celldofs(dh, facet[1]) for facet in testbed.facets]))
+        @test length(nzrange(opn.J, pdof)) == length(adjacent) + 1
+        @test length(nzrange(opn.J, pdof)) < length(nzrange(op.J, pdof))
+        @test nnz(opn.J) < nnz(op.J)
 
         # A declared global dof rules out coloring, so the parallel route is the
         # atomic scatter — and every worker's duplicated workspace has to

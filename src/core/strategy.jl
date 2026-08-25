@@ -8,8 +8,9 @@ The operator's global matrix as a monolithic
 [`FullAssembly`](@ref)'s default):
 
 - `algebraic_couplings` — Ferrite coupling descriptors (`CellCoupling`,
-  `FacetCoupling`, `AlgebraicCoupling`) for the entries an element's
-  [`global_dofs`](@ref) couple into, never inferred from the dof declaration.
+  `FacetCoupling`, `AlgebraicCoupling`) for the entries a
+  [`global_dofs`](@ref) or [`facet_item_global_dofs`](@ref) declaration couples
+  into, never inferred from the dof declaration.
   A missing descriptor surfaces as Ferrite's missing-sparsity-entry error on
   the first assembly.
 - `constraint_handler` — sparsity room for the constraint entries
@@ -129,8 +130,9 @@ end
     SequentialAssemblyStrategy(device)
 
 [`FullAssembly`](@ref) under [`SequentialScheduling`](@ref), i.e. one chunk.
-The default composition, and the only one that admits [`global_dofs`](@ref) and
-the algebraic item family.
+The default composition, and the only one that admits the global-dof
+declarations ([`global_dofs`](@ref), [`facet_item_global_dofs`](@ref)) and the
+algebraic item family.
 """
 SequentialAssemblyStrategy(device) = AssemblyStrategy(FullAssembly(), SequentialScheduling(), device)
 
@@ -147,8 +149,8 @@ PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = AssemblyS
     ElementAssemblyStrategy(device)
 
 [`ElementAssembly`](@ref) under [`SequentialScheduling`](@ref). Its per-element
-dof maps come from `celldofs`, so an element declaring [`global_dofs`](@ref) is
-rejected at setup.
+dof maps come from `celldofs`, so a subdomain declaring [`global_dofs`](@ref) or
+[`facet_item_global_dofs`](@ref) is rejected at setup.
 """
 ElementAssemblyStrategy(device) = AssemblyStrategy(ElementAssembly(), SequentialScheduling(), device)
 

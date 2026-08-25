@@ -64,9 +64,12 @@ function setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHan
     return [decorate_element_cache(setup_element_cache(sub, sdh), sdh, ad_backend, n) for (sub, sdh, n) in resolved]
 end
 
-# A subdomain's global dofs are its sub-integrator's, like its caches.
+# A subdomain's global dofs are its sub-integrator's, like its caches — one
+# forward per family, since each family sizes its local system from its own.
 global_dofs(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     global_dofs(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
+facet_item_global_dofs(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
+    facet_item_global_dofs(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
 
 setup_boundaries(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler) =
     [setup_boundary_cache(sub, sdh) for (sub, sdh) in zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers)]
