@@ -1,34 +1,19 @@
 # Adaption of the API presented in Ferrite.jl#1070 to general devices; essentially an Adapt.jl wrapper.
-function duplicate_for_device(device, asm::Ferrite.CSCAssembler{T, Ti, TK, atomic}) where {T, Ti, TK, atomic}
-    return Ferrite.CSCAssembler{T, Ti, TK, atomic}(
-        asm.K,
-        asm.f,
-        duplicate_for_device(device, asm.rowpermutation),
-        duplicate_for_device(device, asm.colpermutation),
-        duplicate_for_device(device, asm.sortedrowdofs),
-        duplicate_for_device(device, asm.sortedcoldofs),
-    )
-end
-function duplicate_for_device(device, asm::Ferrite.SymmetricCSCAssembler{T, Ti, TK, atomic}) where {T, Ti, TK, atomic}
-    return Ferrite.SymmetricCSCAssembler{T, Ti, TK, atomic}(
-        asm.K,
-        asm.f,
-        duplicate_for_device(device, asm.rowpermutation),
-        duplicate_for_device(device, asm.colpermutation),
-        duplicate_for_device(device, asm.sortedrowdofs),
-        duplicate_for_device(device, asm.sortedcoldofs),
-    )
-end
-
-function duplicate_for_device(device, asm::Ferrite.CSRAssembler{T, Ti, TK, atomic}) where {T, Ti, TK, atomic}
-    return Ferrite.CSRAssembler{T, Ti, TK, atomic}(
-        asm.K,
-        asm.f,
-        duplicate_for_device(device, asm.rowpermutation),
-        duplicate_for_device(device, asm.colpermutation),
-        duplicate_for_device(device, asm.sortedrowdofs),
-        duplicate_for_device(device, asm.sortedcoldofs),
-    )
+# The assemblers reconstruct through `typeof(asm)`: the concrete type carries its own parameters, so
+# the duplication survives Ferrite adding or reordering type parameters as long as the field set
+# (shared matrix and vector, four permutation scratches) is stable.
+duplicate_for_device(device, ::Nothing) = nothing
+for Assembler in (:CSCAssembler, :SymmetricCSCAssembler, :CSRAssembler)
+    @eval function duplicate_for_device(device, asm::Ferrite.$Assembler)
+        return typeof(asm)(
+            asm.K,
+            asm.f,
+            duplicate_for_device(device, asm.rowpermutation),
+            duplicate_for_device(device, asm.colpermutation),
+            duplicate_for_device(device, asm.sortedrowdofs),
+            duplicate_for_device(device, asm.sortedcoldofs),
+        )
+    end
 end
 
 function duplicate_for_device(device, fv::FacetValues)
