@@ -156,17 +156,6 @@ Evaluate the residual `F(u)` into `residual` without updating the Jacobian.
 function evaluate! end
 
 
-"""
-Supertype for block-structured operators. Carries no subtypes in this package;
-it exists for downstream operators assembled into hand-built block systems.
-
-!!! warning "Slated for removal"
-    Do not subtype this in new code. Block-structured targets are served by
-    [`BlockedOperatorSpecification`](@ref); this supertype is removed once its
-    remaining downstream consumers migrate.
-"""
-abstract type AbstractBlockOperator <: AbstractNonlinearOperator end
-
 get_matrix(op) = error("Operator matrix is not explicitly accessible for given operator")
 
 function *(op::AbstractNonlinearOperator, x::AbstractVector)
