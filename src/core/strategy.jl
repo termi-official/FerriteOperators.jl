@@ -394,12 +394,19 @@ end
 """
     n_workers(strategy, device, partition) -> Int
 
-Number of parallel workers for this strategy, device and partition.
+Number of parallel workers for this strategy, device and partition — the size
+of the per-worker device cache [`setup_device_instances`](@ref) builds.
+
+A [`PolyesterDevice`](@ref) can occupy at most `Threads.nthreads()` of them at
+once, and `chunksize` is the granularity below which splitting is not worth it,
+so the count is the smaller of the thread count and the number of chunks the
+largest barrier of `partition` holds. Workspaces are therefore per WORKER, not
+per chunk: a worker walks the chunks it was given with the one workspace it owns.
 """
 n_workers(strategy, ::SequentialCPUDevice, partition) = 1
 function n_workers(strategy, device::PolyesterDevice, partition)
     ncellsmax = maximum(length, partition)
-    return ceil(Int, ncellsmax / device.chunksize)
+    return min(Threads.nthreads(), cld(ncellsmax, device.chunksize))
 end
 
 function n_workers(strategy, device::AbstractGPUDevice, partition)

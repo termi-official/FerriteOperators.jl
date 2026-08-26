@@ -660,3 +660,29 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
 
     print_timer()
 end
+
+# `@allocated` has to be measured from inside a function: at testset scope the
+# operator is a captured variable and the boxing of that capture is charged to
+# the call being measured rather than to the sweep.
+function polyester_sweep_allocations(dims)
+    grid = generate_grid(Quadrilateral, dims)
+    dh   = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    op = setup_operator(SequentialAssemblyStrategy(PolyesterDevice(1)),
+                        SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
+    for _ in 1:3   # warmup: compilation, and Polyester's own first-batch setup
+        update_operator!(op, nothing)
+    end
+    return @allocated update_operator!(op, nothing)
+end
+
+@testset "A threaded sweep allocates per worker, not per item" begin
+    # The per-worker workspaces are setup-time state and the task's scatter
+    # target is duplicated once per worker, so what one sweep allocates is fixed
+    # by the worker count — a 32× larger mesh must not move it. Both meshes
+    # carry more cells than there are threads, so both run the same number of
+    # workers at `chunksize = 1`.
+    nt = Threads.nthreads()
+    @test polyester_sweep_allocations((nt, 8)) == polyester_sweep_allocations((nt, 256))
+end

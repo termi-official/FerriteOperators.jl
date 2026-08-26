@@ -168,6 +168,10 @@ end
     PolyesterDevice(chunksize)
 
 Threaded algorithms via Polyester.jl. Load Polyester.jl to activate this device.
+
+`chunksize` is the granularity a barrier's items are split at: a worker never
+takes a fraction of a chunk, so a barrier holding fewer than `chunksize` items
+per thread runs on fewer workers than there are threads.
 """
 struct PolyesterDevice{ValueType, IndexType} <: AbstractCPUDevice{ValueType, IndexType}
     chunksize::IndexType
