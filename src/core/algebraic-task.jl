@@ -180,7 +180,8 @@ function sensitivity_algebraic_sweep!(kind, task, ws)
     return nothing
 end
 
-execute_kind!(kind::FunctionalKind, task, ws::AlgebraicWorkspace) = functional_algebraic_sweep(kind, task, ws)
+_item_family(ws::AlgebraicWorkspace) = :algebraic
+_family_reduction_sweep(kind, task, ws::AlgebraicWorkspace) = functional_algebraic_sweep(kind, task, ws)
 
 """
     functional_algebraic_sweep(kind, task, ws) -> value

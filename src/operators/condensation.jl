@@ -192,7 +192,12 @@ end
 CondensationKind(weights::NamedTuple) = CondensationKind{Float64, typeof(weights)}(weights)
 
 functional_value_type(::CondensationKind{T}) where {T} = CondensationReport{T}
-sweep_family(::Type{<:CondensationKind}) = FunctionalFamily()
+# Value-returning over the two families that own condensed internal state; a
+# facet item's `q` belongs to its owning cell, so that family declines
+# structurally. The driver bodies are the kind's own (write-back, which no
+# built-in reduction driver does), so the declaration answers the structural
+# questions here and `execute_kind!` stays spelled out.
+reduction_families(::Type{<:CondensationKind}) = (:cells, :algebraic)
 # Served by `condense_cell!`, not `assemble_cell!` — there is no cell request
 # to validate, exactly like `FunctionalKind`.
 has_cell_request(::Type{<:CondensationKind}) = false

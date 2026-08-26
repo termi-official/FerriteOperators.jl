@@ -686,3 +686,123 @@ end
     nt = Threads.nthreads()
     @test polyester_sweep_allocations((nt, 8)) == polyester_sweep_allocations((nt, 256))
 end
+
+# A cache that opts into the request protocol without the mandatory residual
+# kernel — what setup-time validation exists to catch.
+struct BareEvaluationCache <: AbstractVolumetricElementCache end
+struct BareEvaluationIntegrator <: AbstractBilinearIntegrator end
+FerriteOperators.setup_element_cache(::BareEvaluationIntegrator, ::SubDofHandler) = BareEvaluationCache()
+
+@testset "Payload-free evaluation operator" begin
+    grid = generate_grid(Quadrilateral, (3, 3))
+    dh   = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+    qrc        = QuadratureRuleCollection(2)
+    integrator = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+
+    op  = setup_operator(strategy, integrator, dh)
+    eop = setup_evaluation_operator(strategy, integrator, dh)
+
+    @testset "the engine is the one setup_operator builds" begin
+        # Same caches through the same family dispatch, and no payload field.
+        @test typeof(eop.engine) === typeof(op.engine)
+        @test propertynames(eop) === (:engine, :integrator)
+        @test length(eop.engine.subdomain_caches) == length(op.engine.subdomain_caches)
+    end
+
+    @testset "the evaluation entry points work off the engine" begin
+        u = sin.(0.3 .* (1:ndofs(dh)))
+        q = setup_qvector(Float64, dh, qrc)
+        evaluate_quadrature!(q, eop, u, nothing, (uₑ, qp, cell, cache, pₑ, ctx) -> Float64(cellid(cell)))
+        qref = setup_qvector(Float64, dh, qrc)
+        evaluate_quadrature!(qref, op, u, nothing, (uₑ, qp, cell, cache, pₑ, ctx) -> Float64(cellid(cell)))
+        @test q.data == qref.data
+    end
+
+    @testset "the assembly entry points are a contract error" begin
+        u = zeros(ndofs(dh))
+        @test_throws ArgumentError update_operator!(eop, nothing)
+        @test_throws ArgumentError update_linearization!(eop, u, nothing)
+        @test_throws ArgumentError evaluate!(eop, zeros(ndofs(dh)), u, nothing)
+        @test_throws ArgumentError evaluate!(eop, zeros(ndofs(dh)), (u = u,), nothing, nothing)
+    end
+
+    @testset "setup validation runs as for other operators" begin
+        @test_throws ArgumentError setup_evaluation_operator(strategy, BareEvaluationIntegrator(), dh)
+    end
+end
+
+# A subdomain with no volumetric kernel; its boundary cache stays at the empty
+# default, so the pair is what makes an assembly traversal pointless.
+struct SilentSubdomainIntegrator <: AbstractBilinearIntegrator end
+FerriteOperators.setup_element_cache(::SilentSubdomainIntegrator, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+
+# The assembly the engine would run without the skip: every subdomain, in
+# subdomain order, which is `execute_on_subdomains!` minus its gate.
+function unskipped_assembly!(A, op, kind)
+    assembler = start_assemble(op.engine.strategy, A)
+    task = FerriteOperators.AssemblyTask(kind, assembler, (;), nothing, nothing)
+    for sc in op.engine.subdomain_caches
+        FerriteOperators.execute_on_device!(
+            task, op.engine.strategy.device, sc.device_cache, sc.partition)
+    end
+    FerriteOperators.finalize_assembly!(assembler)
+    return A
+end
+
+@testset "an assembly sweep skips the subdomains that cannot contribute" begin
+    grid = generate_grid(Quadrilateral, (4, 4))
+    addcellset!(grid, "right_cells", x -> x[1] ≥ 0.0)
+    addcellset!(grid, "left_cells",  x -> x[1] ≤ 0.0)
+    dh = DofHandler(grid)
+    for name in ("right_cells", "left_cells")
+        sdh = SubDofHandler(dh, getcellset(grid, name))
+        add!(sdh, :u, Lagrange{RefQuadrilateral, 1}())
+    end
+    close!(dh)
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    qrc      = QuadratureRuleCollection(2)
+
+    op = setup_operator(strategy, BilinearMultiDomainIntegrator(Dict(
+        "right_cells" => SimpleBilinearDiffusionIntegrator(1.0, qrc, :u),
+        "left_cells"  => SilentSubdomainIntegrator(),
+    )), dh)
+    live, silent = op.engine.subdomain_caches
+
+    # The verdict is structural and taken once, at setup.
+    @test live.contributes
+    @test !silent.contributes
+
+    silent_ws = first(silent.device_cache)
+    live_ws   = first(live.device_cache)
+    parked    = cellid(silent_ws.cell)
+
+    update_operator!(op, nothing)
+    A_skipped = copy(op.A)
+
+    # The declining subdomain was never positioned on a cell, while the
+    # contributing one was.
+    @test cellid(silent_ws.cell) == parked
+    @test cellid(live_ws.cell) != parked
+
+    # Bit-identical to the traversal that visits it: an empty cache's kernel
+    # writes nothing, so its scatter only ever added zeros.
+    A_reference = unskipped_assembly!(similar(op.A), op, FerriteOperators.BilinearKind())
+    @test A_skipped == A_reference
+    @test !iszero(A_skipped)
+
+    # An empty ELEMENT cache alone is not the verdict: the fused boundary route
+    # rides the cell sweep, so a subdomain carrying a surface cache is traversed.
+    t̄  = 3.25
+    nop = setup_operator(strategy, LinearMultiDomainIntegrator(Dict(
+        "right_cells" => LinearNeumannProbe(t̄, :u, Set(getfacetset(grid, "right"))),
+        "left_cells"  => SimpleLinearIntegrator(0.0, qrc, :u),
+    )), dh)
+    @test first(nop.engine.subdomain_caches).domain.element isa FerriteOperators.EmptyVolumetricElementCache
+    @test all(sc -> sc.contributes, nop.engine.subdomain_caches)
+    update_operator!(nop, nothing)
+    @test sum(nop.b) ≈ t̄ * 2.0 rtol = 1e-12       # |Γ_right| = 2 on the [-1, 1]² grid
+end

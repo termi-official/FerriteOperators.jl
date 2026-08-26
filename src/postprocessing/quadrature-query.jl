@@ -48,24 +48,25 @@ function prepare_quadrature_query(::Type{T}, proto::QuadratureDataQuery) where {
 end
 
 """
-    process_query!(query::QuadratureDataQuery, op, u, p, f)
-    process_query!(multi::QuadratureDataMultiQuery, op, u, p, fs)
+    process_query!(query::QuadratureDataQuery, op, u, p, f; ctx = nothing)
+    process_query!(multi::QuadratureDataMultiQuery, op, u, p, fs; ctx = nothing)
 
-Evaluate `f(qe, ue, cell, element_cache, pe)` at every quadrature point into
+Evaluate `f(ue, qp, cell, element_cache, pe, ctx)` at every quadrature point into
 `query.buffer`. A non-`nothing` `query.set` restricts evaluation to those cells;
-all others retain their current (typically zero) values.
+all others retain their current (typically zero) values. `ctx` is the sweep's
+context, passed through to [`evaluate_quadrature!`](@ref).
 
 The multi-query form calls `process_query!` once per `(query, f)` pair.
 """
-function process_query!(query::QuadratureDataQuery, op, u, p, f)
-    evaluate_quadrature!(query.buffer, op, u, p, f, query.set)
+function process_query!(query::QuadratureDataQuery, op, u, p, f; ctx = nothing)
+    evaluate_quadrature!(query.buffer, op, u, p, f, query.set; ctx)
     return query
 end
 
-function process_query!(multi::QuadratureDataMultiQuery, op, u, p, fs)
+function process_query!(multi::QuadratureDataMultiQuery, op, u, p, fs; ctx = nothing)
     # TODO fuse fs into a single f, so we do not need to iterate multiple times
     for (query, f) in zip(multi.queries, fs)
-        process_query!(query, op, u, p, f)
+        process_query!(query, op, u, p, f; ctx)
     end
     return multi
 end

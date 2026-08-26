@@ -216,7 +216,8 @@ function sensitivity_facet_item_sweep!(kind, task, ws)
     return nothing
 end
 
-execute_kind!(kind::FunctionalKind, task, ws::FacetItemWorkspace) = functional_facet_item_sweep(kind, task, ws)
+_item_family(ws::FacetItemWorkspace) = :facets
+_family_reduction_sweep(kind, task, ws::FacetItemWorkspace) = functional_facet_item_sweep(kind, task, ws)
 
 """
     functional_facet_item_sweep(kind, task, ws) -> value
@@ -244,7 +245,10 @@ end
 
 # Condensed internal state on facet items is not supported: `q` is per owning
 # CELL, and a facet item shares its cell with the cell family's own item for
-# that cell, so both condensing would write the same range twice.
+# that cell, so both condensing would write the same range twice. The kind's
+# `reduction_families` declaration says the same thing structurally; the decline
+# is spelled here too because its own cell driver is more specific than the
+# derived route.
 execute_kind!(::CondensationKind, task, ws::FacetItemWorkspace) = nothing
 
 # ∂F/∂q is the block over the CONDENSED internal state, which no facet item
@@ -254,12 +258,6 @@ execute_kind!(::JacobianKind{:q}, task, ws::FacetItemWorkspace) = nothing
 # Quadrature evaluation writes the per-quadrature-point data of a cell, which
 # the cell family's own sweep over that same cell already does.
 execute_kind!(::QuadratureEvaluationKind, task, ws::FacetItemWorkspace) = nothing
-
-# Mirrors the declined kind above: a condensation whose every domain is
-# facet-shaped (or otherwise empty) fails the structural precondition instead of
-# silently reducing over nothing. A FUNCTIONAL is served here (see
-# `functional_facet_item_sweep`), so the family answers the default `true` for it.
-_may_contribute(::FacetItemDomain, ::CondensationKind) = false
 
 ####################################
 ## Setup

@@ -362,6 +362,30 @@ setup_operator(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHa
     setup_operator(strategy, integrator, dh, DefaultProtocol(; slots, requests); ad_backend)
 
 """
+    setup_evaluation_operator(strategy, integrator, dh, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
+    setup_evaluation_operator(strategy, integrator, dh; slots = (:u,), requests = (), ad_backend = ForwardDiffAD())
+
+Build the [`EvaluationFerriteOperator`](@ref) for `integrator` over `dh`: the
+same engine [`setup_operator`](@ref) builds — same element, boundary, facet-item
+and algebraic caches through the same family dispatch, same setup-time
+validation — and no matrix or vector.
+
+This is the route for a term that is only ever EVALUATED: a functional reduced
+over the domain ([`evaluate_functional`](@ref)), a per-quadrature-point
+evaluation ([`evaluate_quadrature!`](@ref)). Any integrator family may take it;
+what the operator does not do is assemble, and the assembly entry points say so.
+"""
+function setup_evaluation_operator(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler,
+        protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
+    engine = setup_engine(strategy, integrator, dh, protocol; ad_backend)
+    return EvaluationFerriteOperator(engine, integrator)
+end
+
+setup_evaluation_operator(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler;
+        slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD()) =
+    setup_evaluation_operator(strategy, integrator, dh, DefaultProtocol(; slots, requests); ad_backend)
+
+"""
     init_transfer_sparsity_pattern(dh_row::DofHandler, dh_col::DofHandler)
 
 Build a `Ferrite.SparsityPattern` of size `(ndofs(dh_row) × ndofs(dh_col))` covering all

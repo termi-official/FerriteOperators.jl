@@ -83,6 +83,62 @@ struct EmptyCacheIntegrator <: AbstractNonlinearIntegrator end
 FerriteOperators.setup_element_cache(::EmptyCacheIntegrator, sdh::SubDofHandler) =
     FerriteOperators.EmptyVolumetricElementCache()
 
+####################################
+## Downstream reduction kinds
+####################################
+# The Dirichlet energy again, as a kind of its own: one declaration, no
+# `execute_kind!`, no `sweep_family`, no per-family declines.
+struct CellEnergyKind end
+FerriteOperators.reduction_families(::Type{CellEnergyKind}) = (:cells,)
+FerriteOperators.functional_value_type(::CellEnergyKind) = Float64
+FerriteOperators.evaluate_cell_functional(::CellEnergyKind, cache::FunctionalTestCache, args) =
+    FerriteOperators.evaluate_cell_functional(FunctionalKind(:energy), cache, args)
+
+# A declaration naming a family that does not exist: without the check it would
+# decline every subdomain and read as a correctly declared empty domain.
+struct MisspelledFamilyKind end
+FerriteOperators.reduction_families(::Type{MisspelledFamilyKind}) = (:cell,)
+FerriteOperators.functional_value_type(::MisspelledFamilyKind) = Float64
+
+# Value-returning by the legacy spelling and with neither a declaration nor a
+# driver body — the sweep has no route to take.
+struct UnroutableKind end
+FerriteOperators.sweep_family(::Type{UnroutableKind}) = FerriteOperators.FunctionalFamily()
+FerriteOperators.functional_value_type(::UnroutableKind) = Float64
+
+# Two subdomains, one carrying the functional's element and one carrying
+# nothing — the mixed operator the traversal skip is asserted on.
+function mixed_domain_testbed(qrc)
+    grid = generate_grid(Quadrilateral, (4, 4))
+    addcellset!(grid, "right_cells", x -> x[1] ≥ 0.0)
+    addcellset!(grid, "left_cells",  x -> x[1] ≤ 0.0)
+    dh = DofHandler(grid)
+    for name in ("right_cells", "left_cells")
+        sdh = SubDofHandler(dh, getcellset(grid, name))
+        add!(sdh, :u, Lagrange{RefQuadrilateral, 1}())
+    end
+    close!(dh)
+    integrator = NonlinearMultiDomainIntegrator(Dict(
+        "right_cells" => FunctionalTestIntegrator(qrc, :u),
+        "left_cells"  => EmptyCacheIntegrator(),
+    ))
+    return (; grid, dh, integrator)
+end
+
+# The reduction the engine would run without the skip: every subdomain, folded
+# in subdomain order, which is `reduce_on_subdomains` minus its `_may_contribute`
+# gate.
+function unskipped_reduction(op, kind, states)
+    task  = FerriteOperators.AssemblyTask(kind, nothing, states, nothing, nothing)
+    total = FerriteOperators.initial_partial(kind)
+    for sc in op.engine.subdomain_caches
+        partial = FerriteOperators.reduce_on_device(
+            task, op.engine.strategy.device, sc.device_cache, sc.partition)
+        total = FerriteOperators._reduce_partials(total, partial)
+    end
+    return total
+end
+
 @testset "Functional value requests" begin
     (; dh, n, qrc, strategy) = scalar_quad_testbed()
     op = setup_operator(strategy, FunctionalTestIntegrator(qrc, :u), dh)
@@ -193,4 +249,79 @@ FerriteOperators.setup_element_cache(::EmptyCacheIntegrator, sdh::SubDofHandler)
         @test_throws MethodError evaluate_functional(op, FunctionalKind(:enthalpy), u, nothing)
         @test_throws ArgumentError evaluate_functional(op, FunctionalKind(:energy), (u = u, uprev = copy(u)), nothing, nothing)
     end
+end
+
+@testset "a reduction needs no payload" begin
+    (; dh, n, qrc, strategy) = scalar_quad_testbed()
+    u   = sin.(0.3 .* (1:n))
+    op  = setup_operator(strategy, FunctionalTestIntegrator(qrc, :u), dh)
+    eop = setup_evaluation_operator(strategy, FunctionalTestIntegrator(qrc, :u), dh)
+    # The reduction reads the engine and writes nowhere the operator owns, so
+    # the payload-free operator answers exactly as the assembling one.
+    @test evaluate_functional(eop, FunctionalKind(:energy), u, nothing) ===
+          evaluate_functional(op, FunctionalKind(:energy), u, nothing)
+    @test evaluate_functional(eop, FunctionalKind(:gradient_volume), u, nothing) ===
+          evaluate_functional(op, FunctionalKind(:gradient_volume), u, nothing)
+end
+
+@testset "reduction_families is the whole declaration" begin
+    (; dh, n, qrc, strategy) = scalar_quad_testbed()
+    op = setup_operator(strategy, FunctionalTestIntegrator(qrc, :u), dh)
+    u  = sin.(0.3 .* (1:n))
+
+    @testset "one declaration routes the sweep" begin
+        # Value-returning, and reaching the cell family's driver body, off the
+        # declaration alone.
+        @test FerriteOperators.sweep_family(CellEnergyKind) === FerriteOperators.FunctionalFamily()
+        @test evaluate_functional(op, CellEnergyKind(), u, nothing) ===
+              evaluate_functional(op, FunctionalKind(:energy), u, nothing)
+    end
+
+    @testset "the families it does not name decline structurally" begin
+        fd = FerriteOperators.FacetItemDomain(nothing, nothing, nothing)
+        ad = FerriteOperators.AlgebraicDomain(nothing, nothing)
+        @test !FerriteOperators._may_contribute(fd, CellEnergyKind())
+        @test !FerriteOperators._may_contribute(ad, CellEnergyKind())
+        # A request-carrying kind declares no families and restricts nothing.
+        @test FerriteOperators._may_contribute(fd, JacobianKind())
+        @test FerriteOperators.sweep_family(ResidualKind) === FerriteOperators.NoFamily()
+    end
+
+    @testset "the built-in kinds carry their reality" begin
+        # Every item family serves a `FunctionalKind`; condensed internal state
+        # belongs to the two families that own it.
+        @test FerriteOperators.reduction_families(FunctionalKind{:energy}) === (:cells, :facets, :algebraic)
+        @test FerriteOperators.reduction_families(FerriteOperators.CondensationKind) === (:cells, :algebraic)
+    end
+
+    @testset "an unusable declaration is loud" begin
+        # A tag no family answers to, and a kind with neither a declaration nor
+        # a driver body.
+        @test_throws ArgumentError evaluate_functional(op, MisspelledFamilyKind(), u, nothing)
+        @test_throws ArgumentError evaluate_functional(op, UnroutableKind(), u, nothing)
+    end
+end
+
+@testset "a reduction skips the subdomains that cannot contribute" begin
+    (; qrc, strategy) = scalar_quad_testbed()
+    (; dh, integrator) = mixed_domain_testbed(qrc)
+    op = setup_operator(strategy, integrator, dh)
+    u  = sin.(0.3 .* (1:ndofs(dh)))
+
+    empty_ws = first(last(op.engine.subdomain_caches).device_cache)
+    live_ws  = first(first(op.engine.subdomain_caches).device_cache)
+    @test !FerriteOperators._may_contribute(last(op.engine.subdomain_caches).domain, FunctionalKind(:energy))
+    parked = cellid(empty_ws.cell)
+
+    Φ = evaluate_functional(op, FunctionalKind(:energy), u, nothing)
+
+    # The declining subdomain was never positioned on an item, while the
+    # contributing one was — the probe reports on itself.
+    @test cellid(empty_ws.cell) == parked
+    @test cellid(live_ws.cell) != parked
+
+    # Same value to the bit: only zero contributions were removed, and the fold
+    # order among the contributing subdomains is untouched.
+    @test Φ === unskipped_reduction(op, FunctionalKind(:energy), (u = u,))
+    @test Φ > 0
 end

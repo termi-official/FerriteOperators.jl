@@ -246,16 +246,52 @@ struct NoFamily end
 @doc (@doc NoFamily) struct FunctionalFamily end
 
 """
+    reduction_families(::Type{K}) -> Tuple of family tags
+
+The item families a reduction of kind `K` integrates over, spelled with the
+tags `:cells`, `:facets` and `:algebraic`. This is the ONE declaration a
+downstream reduction kind writes:
+
+    FerriteOperators.reduction_families(::Type{<:MyFunctional}) = (:cells,)
+
+The engine derives the rest from it — [`sweep_family`](@ref) (a declaring kind
+is value-returning), the `execute_kind!` routing (a declared family runs that
+family's reduction driver body, an undeclared one contributes nothing to the
+sweep) and the structural half of the reduction precondition (a family the
+kind does not name cannot contribute, so its subdomains are neither required
+nor traversed).
+
+The empty default means "not a reduction": every request-carrying kind, whose
+sweeps fill the workspace buffers and scatter through an assembler.
+
+The per-family hooks stay the underlying reality and an explicit method still
+wins, being strictly more specific than the derived route — which is how a kind
+whose family bodies are NOT the built-in reduction drivers
+([`CondensationKind`](@ref)) declares its families here and keeps its own
+`execute_kind!` methods.
+
+Queried on the TYPE, like [`sweep_family`](@ref). Return a literal: the routing
+and the precondition then fold to constants.
+"""
+reduction_families(::Type) = ()
+reduction_families(::Type{<:FunctionalKind}) = (:cells, :facets, :algebraic)
+
+# The tags `reduction_families` may name, checked once per reduction sweep
+# (`_check_reduction_domain`): a misspelled tag would otherwise decline every
+# family and reduce over nothing.
+const REDUCTION_FAMILY_TAGS = (:cells, :facets, :algebraic)
+
+"""
     sweep_family(::Type{K}) -> family singleton
 
 The per-worker family a sweep of kind `K` reads. Queried on the TYPE, because
 declarations carry kind types (normalized to their `UnionAll` base) while
 sweeps carry instances — one overload point serves both. `FunctionalFamily()`
 routes the kind to the value-returning driver ([`run_reduction`](@ref)); every
-other kind is `NoFamily()`. The default derives the answer from the built-in
-kind and folds to a constant.
+other kind is `NoFamily()`. The default derives the answer from
+[`reduction_families`](@ref) and folds to a constant.
 """
-sweep_family(::Type{K}) where {K} = K <: FunctionalKind ? FunctionalFamily() : NoFamily()
+sweep_family(::Type{K}) where {K} = isempty(reduction_families(K)) ? NoFamily() : FunctionalFamily()
 
 """
     request_type(kind) -> Type
@@ -626,7 +662,36 @@ end
 # carry no condensed tail, unlike the slot gathers).
 _gather_residual_dofs!(dest, src, dofs) = dest .= @view src[dofs]
 
-execute_kind!(kind::FunctionalKind, task, ws) = functional_cell_sweep(kind, task, ws)
+# The derived reduction routing, and the LEAST specific `execute_kind!` method
+# there is: a kind declaring [`reduction_families`](@ref) runs the driver body
+# of every family it names and contributes nothing to the others, so it needs
+# no per-workspace method of its own. A kind declaring nothing has no route.
+function execute_kind!(kind, task, ws)
+    families = reduction_families(typeof(kind))
+    isempty(families) && _throw_unroutable_kind(kind, ws)
+    return _item_family(ws) in families ? _family_reduction_sweep(kind, task, ws) : nothing
+end
+
+@noinline _throw_unroutable_kind(kind, ws) = throw(ArgumentError(
+    "$(nameof(typeof(kind))) has no `execute_kind!` method for a $(nameof(typeof(ws))) and " *
+    "declares no `reduction_families`. A reduction kind names the item families it integrates " *
+    "over — `FerriteOperators.reduction_families(::Type{<:$(nameof(typeof(kind)))}) = (:cells,)` " *
+    "— and the engine routes it from that; a request-carrying kind implements `execute_kind!` " *
+    "itself."))
+
+"""
+    _item_family(ws) -> family tag
+    _family_reduction_sweep(kind, task, ws) -> value
+
+The two halves an item family contributes to the derived reduction routing:
+the tag [`reduction_families`](@ref) names it by, and the driver body a
+declaring kind runs on it. One method each per family, beside that family's
+other drivers; `nothing` marks a workspace no reduction traverses.
+"""
+_item_family(ws) = nothing
+
+_item_family(ws::AssemblyWorkspace) = :cells
+_family_reduction_sweep(kind, task, ws::AssemblyWorkspace) = functional_cell_sweep(kind, task, ws)
 
 """
     functional_cell_sweep(kind, task, ws) -> value
@@ -748,9 +813,9 @@ workspace state is read or written. `nothing` means no item contributed.
 
 Which shape a kind runs in is [`sweep_family`](@ref): only a `FunctionalFamily`
 kind is value-returning, so this is the entry point a downstream scalar or
-tensor kind reaches once it declares that family and gives `execute_kind!` a
-body returning the item's contribution ([`functional_cell_sweep`](@ref) is the
-built-in one).
+tensor kind reaches once it declares [`reduction_families`](@ref) — which is
+also what routes it to the reduction driver body of every family it names
+([`functional_cell_sweep`](@ref) is the cell family's).
 """
 run_reduction(kind, op, states::NamedTuple, p, ctx) =
     run_reduction(sweep_family(typeof(kind)), kind, op, states, p, ctx)
@@ -770,6 +835,7 @@ end
 # cache TYPE, never cell data.
 function _check_reduction_domain(kind, engine)
     caches = engine.subdomain_caches
+    _check_reduction_families(kind)
     sum(sc -> sum(length, sc.partition; init = 0), caches; init = 0) == 0 && throw(ArgumentError(
         "$(nameof(typeof(kind))) reduces over an empty item set: the operator's " *
         "$(length(caches)) subdomain partition(s) carry no items between them, so there is " *
@@ -784,11 +850,23 @@ function _check_reduction_domain(kind, engine)
     return nothing
 end
 
+# A tag no family answers to would decline every subdomain, which reads exactly
+# like a correct declaration whose caches are all empty. Folds away: the
+# declaration is a literal.
+function _check_reduction_families(kind)
+    for family in reduction_families(typeof(kind))
+        family in REDUCTION_FAMILY_TAGS || throw(ArgumentError(
+            "$(nameof(typeof(kind))) declares the item family `:$family`, which no family " *
+            "answers to. `reduction_families` names any of $(REDUCTION_FAMILY_TAGS)."))
+    end
+    return nothing
+end
+
 run_reduction(family, kind, op, states::NamedTuple, p, ctx) = throw(ArgumentError(
     "$(nameof(typeof(kind))) declares $(nameof(typeof(family))), whose sweeps fill the " *
     "workspace buffers and scatter through an assembler — there is no value to return. " *
-    "A value-returning kind declares " *
-    "`sweep_family(::Type{<:$(nameof(typeof(kind)))}) = FunctionalFamily()`."))
+    "A value-returning kind declares the item families it integrates over: " *
+    "`reduction_families(::Type{<:$(nameof(typeof(kind)))}) = (:cells,)`."))
 
 """
     evaluate_functional(op, kind, states, p, ctx = nothing)
@@ -797,7 +875,7 @@ run_reduction(family, kind, op, states::NamedTuple, p, ctx) = throw(ArgumentErro
 Evaluate the functional named by `kind` over the operator's domain: the sum of
 the per-item contributions its kernels return (a `Number` or a Tensors tensor).
 `kind` is a [`FunctionalKind`](@ref) or any downstream kind declaring
-[`sweep_family`](@ref) `FunctionalFamily()`; anything else is rejected by
+[`reduction_families`](@ref); anything else is rejected by
 [`run_reduction`](@ref). Contributions fold per worker in item order and
 the per-worker partials reduce in a fixed order — results are deterministic for
 a fixed worker count. Nothing is written into the operator, so an operator

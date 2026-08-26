@@ -148,17 +148,22 @@ a sensitivity-shaped kind binds it; see the five built-in sensitivity kinds
 for the pattern.
 
 A kind computing a global scalar or tensor rather than something scattered
-declares `FunctionalFamily()` instead, which routes it to the
+declares the item families it integrates over instead, which routes it to the
 **value-returning** driver: the per-item kernel *returns* its contribution and
 the sweep folds the returned values, so there is no request type, no
 assembler, and no workspace state at either end.
 
+That one declaration replaces the per-family spelling above.
+[`reduction_families`](@ref) answers `execute_kind!` for every family (the
+named ones run that family's reduction driver body, the rest contribute
+nothing), `sweep_family` (a declaring kind is value-returning) and the
+structural precondition that decides which subdomains a reduction requires and
+traverses.
+
 ```julia
 struct MyFunctionalKind end
-FerriteOperators.sweep_family(::Type{<:MyFunctionalKind}) = FerriteOperators.FunctionalFamily()
+FerriteOperators.reduction_families(::Type{<:MyFunctionalKind}) = (:cells,)
 FerriteOperators.has_cell_request(::Type{<:MyFunctionalKind}) = false
-FerriteOperators.execute_kind!(kind::MyFunctionalKind, task, ws::FerriteOperators.AssemblyWorkspace) =
-    FerriteOperators.functional_cell_sweep(kind, task, ws)
 
 # The type the reduction accumulates in. Optional on a sequential device, where
 # the first contributing item fixes it; REQUIRED on a parallel one, whose
@@ -178,6 +183,13 @@ that sees no contribution hands back the reduction's additive identity rather
 than a "nothing yet" marker, and a kernel returning some other type is an
 `ArgumentError` naming the declaration instead of a silently widened
 accumulator.
+
+A reduction whose family bodies are NOT the provided ones keeps its own
+`execute_kind!` methods — they are strictly more specific than the derived
+route — and still declares `reduction_families` for the structural half.
+[`CondensationKind`](@ref) is that case: value-returning over cells and
+algebraic items, with a write-back its driver bodies do and no provided body
+has.
 
 [`FunctionalKind`](@ref) is exactly this with a tag, and
 [`evaluate_functional`](@ref) is its entry point.

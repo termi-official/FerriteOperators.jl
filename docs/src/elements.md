@@ -761,7 +761,7 @@ differently:
 
 | situation | when it is decided | result |
 |---|---|---|
-| the operator's partitions carry no items, or every subdomain's cache is an `EmptyVolumetricElementCache` | **structural**, checked before any cell runs | `ArgumentError` — misconfiguration, whatever the kind declares |
+| the operator's partitions carry no items; every subdomain's cache is an `EmptyVolumetricElementCache`; or no subdomain belongs to an item family the kind names ([`reduction_families`](@ref)) | **structural**, checked before any cell runs | `ArgumentError` — misconfiguration, whatever the kind declares |
 | the sweep runs and every kernel returns `nothing` | **data-dependent** | `zero(T)` when the value type is declared; `ArgumentError` when it is not |
 
 ## Unit-testing a kernel

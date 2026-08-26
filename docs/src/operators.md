@@ -383,13 +383,37 @@ Per-quadrature-point evaluation runs through the same engine as assembly:
 
 ```julia
 q = setup_qvector(Float64, dh, qrc)
-evaluate_quadrature!(q, op, u, p, (uₑ, qp, cell, cache, pₑ) -> ...)
+evaluate_quadrature!(q, op, u, p, (uₑ, qp, cell, cache, pₑ, ctx) -> ...)
+evaluate_quadrature!(q, op, u, p, f; ctx = TimeIntegrationContext(t, Δt, γ̃))
 ```
 
 with [`QVector`](@ref) as the flat storage, cell-set filtering, query/store
 hooks for element-owned layouts, and the VTK export layer
 ([`VTKQuadratureGrid`](@ref), [`VTKQuadratureFile`](@ref),
 [`write_quadrature_data`](@ref)) for visualization at quadrature points.
+
+The per-quadrature-point kernel carries the sweep's context in its last slot,
+the same channel a request-shaped kernel reads its time from
+([`evaluation_time`](@ref)); `ctx = nothing` — the default — is the stationary
+evaluation. `p` stays configuration, as everywhere else.
+
+## Evaluating without assembling
+
+An integrator whose term is never assembled — a functional integrand, a
+quadrature-point postprocessing kernel — takes
+[`setup_evaluation_operator`](@ref) instead:
+
+```julia
+op = setup_evaluation_operator(strategy, integrator, dh)
+Φ  = evaluate_functional(op, MyFunctional(), (u = u,), p)
+evaluate_quadrature!(q, op, u, p, f)
+```
+
+The engine is the one [`setup_operator`](@ref) builds, with the same caches and
+the same setup-time validation; the difference is that no matrix and no vector
+are allocated, and the assembly entry points (`update_operator!`,
+`update_linearization!`, `evaluate!`) reject the call rather than assemble into
+a payload the term has no use for.
 
 ## Transfer operators
 

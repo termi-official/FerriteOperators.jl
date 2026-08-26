@@ -101,6 +101,7 @@ include("operators/matrix_free.jl")     # Element-assembly storage and matrix-fr
 include("operators/nonlinear.jl")       # Assembly and action tasks
 include("operators/bilinear.jl")
 include("operators/linear.jl")
+include("operators/evaluation.jl")      # Payload-free operator: the engine alone
 include("operators/transfer.jl")        # Prolongation/restriction operators
 include("elements/prolongators.jl")     # Mass-based prolongator integrators
 include("operators/ad_decoration.jl")   # Construction-time ADElementCache/FusedFromSplit wrapping policy
@@ -132,6 +133,7 @@ export VTKQuadratureGrid, VTKQuadratureFile, write_quadrature_data
 export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, process_query!
 
 export setup_operator, update_operator!, update_linearization!, evaluate!
+export setup_evaluation_operator, EvaluationFerriteOperator
 export AbstractSchemeProtocol, DefaultProtocol
 export get_declared_slots, get_declared_kinds
 export assemble_slot_jacobian!, assemble_weighted_jacobian!
@@ -155,7 +157,7 @@ export WeightedJacobianRequest
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
 export ResidualKind, JacobianKind, JacobianResidualKind, WeightedJacobianKind
 export ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind
-export FunctionalKind, evaluate_functional, evaluate_cell_functional
+export FunctionalKind, evaluate_functional, evaluate_cell_functional, reduction_families
 export PatchItems, npatches, patch_dofs, patch_ndofs, patch_cells, patch_cell_groups, assemble_patch_matrices!
 export patch_free_dofs, patch_prescribed_dofs, augment_prescribed_dofs!, patch_vertices, patch_vertex_dofs
 export WholePatch, CellGroup, PatchTerm, patch_term_active, any_patch_term_active

@@ -334,10 +334,14 @@ else
         @test size(ws.Ke) == (nc + 1, nc + 1)
 
         # The declaration belongs to the facet items alone: the same subdomain's
-        # CELL sweep keeps the field-local system, buffers included.
+        # CELL sweep keeps the field-local system, buffers included. Its dof
+        # vector is the geometry cache's, so the workspace is positioned by hand
+        # — this subdomain carries neither a volumetric nor a boundary kernel,
+        # and no assembly sweep traverses it.
         ws_cell = first(first(op.engine.subdomain_caches).device_cache)
         @test isempty(global_dofs(integrator, sdh))
         @test ws_cell.dofs === nothing
+        reinit!(ws_cell, first(sdh.cellset))
         @test length(FerriteOperators.item_dofs(ws_cell)) == nc
         @test size(ws_cell.Ke) == (nc, nc)
         @test length(ws_cell.re) == nc

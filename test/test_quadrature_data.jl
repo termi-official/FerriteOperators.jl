@@ -28,13 +28,34 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
         # f stores QP index (1..nqp) in each slot, so the probe sees the
         # within-cell ordering and not just the value it stored
         evaluate_quadrature!(q, qop, u, nothing,
-            (ue, qp, cell, element_cache, pe) -> qp
+            (ue, qp, cell, element_cache, pe, ctx) -> qp
         )
 
         nqp = getnquadpoints(QuadratureRule{RefHexahedron}(2))
         for cellid in 1:getncells(grid)
             @test get_range_for_cell(q, cellid) == collect(1:nqp)
         end
+    end
+
+    # --- The sweep's context reaches the per-quadrature-point kernel ---
+    @testset "evaluate_quadrature! carries the context" begin
+        qop = setup_operator(strategy, integrator, dh)
+        q   = setup_qvector(Float64, dh, qrc)
+        u   = zeros(ndofs(dh))
+        f   = (ue, qp, cell, element_cache, pe, ctx) -> ctx === nothing ? -1.0 : evaluation_time(ctx)
+
+        # Without one the kernel sees `nothing` — the stationary evaluation.
+        evaluate_quadrature!(q, qop, u, nothing, f)
+        @test all(==(-1.0), q.data)
+
+        # With one it reads the time exactly as an element kernel does.
+        evaluate_quadrature!(q, qop, u, nothing, f; ctx = TimeIntegrationContext(2.5, 0.1, 1.0))
+        @test all(==(2.5), q.data)
+
+        # The cell-set restriction and the context are independent.
+        evaluate_quadrature!(q, qop, u, nothing, f, Set([1]); ctx = TimeIntegrationContext(4.0, 0.1, 1.0))
+        @test all(==(4.0), get_range_for_cell(q, 1))
+        @test all(==(2.5), get_range_for_cell(q, 2))
     end
 
     # --- Polyester (threaded) device produces the same result ---
@@ -48,9 +69,9 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
         u       = zeros(ndofs(dh))
 
         evaluate_quadrature!(q_seq, qop_seq, u, nothing,
-            (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
+            (ue, qp, cell, element_cache, pe, ctx) -> Float64(cellid(cell)))
         evaluate_quadrature!(q_par, qop_par, u, nothing,
-            (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
+            (ue, qp, cell, element_cache, pe, ctx) -> Float64(cellid(cell)))
         @test q_seq == q_par
     end
 end
@@ -70,7 +91,7 @@ end
     q          = setup_qvector(Float64, dh, qrc)
     u          = zeros(ndofs(dh))
     evaluate_quadrature!(q, qop, u, nothing,
-        (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
+        (ue, qp, cell, element_cache, pe, ctx) -> Float64(cellid(cell)))
 
     # --- VTKQuadratureGrid is constructable from (dh, qrc) ---
     @testset "VTKQuadratureGrid construction" begin
@@ -94,7 +115,7 @@ end
         @testset "write_quadrature_data with Vec{3}" begin
             qv = setup_qvector(Vec{3, Float64}, dh, qrc)
             evaluate_quadrature!(qv, qop, u, nothing,
-                (ue, qp, cell, element_cache, pe) -> Vec{3}(x -> Float64(cellid(cell))))
+                (ue, qp, cell, element_cache, pe, ctx) -> Vec{3}(x -> Float64(cellid(cell))))
             VTKQuadratureFile(joinpath(tmpdir, "vec_data"), qgrid) do vtk
                 write_quadrature_data(vtk, qv, "coords")
             end
@@ -105,7 +126,7 @@ end
         @testset "write_quadrature_data from QuadratureDataQuery" begin
             query = prepare_quadrature_query(Float64, qop)
             process_query!(query, qop, u, nothing,
-                (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell)))
+                (ue, qp, cell, element_cache, pe, ctx) -> Float64(cellid(cell)))
             VTKQuadratureFile(joinpath(tmpdir, "from_query"), qgrid) do vtk
                 write_quadrature_data(vtk, query, "cell_id")
             end
@@ -129,7 +150,7 @@ end
     strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
     qop        = setup_operator(strategy, integrator, dh)
     u          = zeros(ndofs(dh))
-    f_cellid   = (ue, qp, cell, element_cache, pe) -> Float64(cellid(cell))
+    f_cellid   = (ue, qp, cell, element_cache, pe, ctx) -> Float64(cellid(cell))
 
     # --- prepare_quadrature_query builds a QVector-backed query ---
     @testset "prepare_quadrature_query" begin
@@ -168,8 +189,8 @@ end
         multi = QuadratureDataMultiQuery([q1, q2, q3])
         fs    = [
             f_cellid,
-            (ue, qp, cell, element_cache, pe) -> 2.0,
-            (ue, qp, cell, element_cache, pe) -> Vec{3, Float64}((1.0,1.0,1.0)),
+            (ue, qp, cell, element_cache, pe, ctx) -> 2.0,
+            (ue, qp, cell, element_cache, pe, ctx) -> Vec{3, Float64}((1.0,1.0,1.0)),
         ]
         process_query!(multi, qop, u, nothing, fs)
         @test all(q -> q > 0.0, q1.buffer)

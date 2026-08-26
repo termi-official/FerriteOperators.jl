@@ -24,7 +24,8 @@ patterns marked ⚠ below.
 | `op.dh`, `op.strategy`, `op.subdomain_caches` | `op.engine.dh`, `op.engine.strategy`, `op.engine.subdomain_caches` |
 | `op.J` / `op.A` / `op.b`, `residual_size`, `unknown_size` | unchanged |
 | `residual!(op, r, u, p)` | `evaluate!(op, r, u, p)` |
-| `setup_quadrature_operator` / `FerriteQuadratureOperator` | any operator works: `evaluate_quadrature!(q, op, u, p, f)` |
+| `setup_quadrature_operator` / `FerriteQuadratureOperator` | any operator works: `evaluate_quadrature!(q, op, u, p, f)`, or `setup_evaluation_operator` for a term that is only ever evaluated |
+| quadrature kernel `f(uₑ, qp, cell, cache, pₑ)` ⚠ | `f(uₑ, qp, cell, cache, pₑ, ctx)` — the sweep's context in the last slot, passed as `evaluate_quadrature!(…; ctx = …)` |
 | silent `setup_element_cache` fallback | missing method **throws at setup** |
 | `reinit!` inside every cell-kernel body | engine calls `reinit_values!(cache, cell, kind)` once per cell and sweep |
 | `Ferrite.getnquadpoints`/`reinit!` via `.cv`/`.fv` field fallback | define `Ferrite.getnquadpoints` and `reinit_values!` explicitly on your cache |

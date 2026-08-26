@@ -50,18 +50,57 @@ _assert_domain_trait_backed(domain, kind) =
 _assert_domain_sensitivity_admissible(domain, kind) =
     assert_sensitivity_admissible(typeof(domain.element), kind, kernel_entry(domain)...)
 
-# Structural half of the reduction precondition, per kind. The facet family's
-# answer lives in facet-task.jl beside its `execute_kind!` bodies; algebraic
-# domains answer `true` (`hasmethod` cannot see an `evaluate_algebraic_functional`
-# override past the untyped default).
-_may_contribute(domain, kind) = true
-_may_contribute(domain::AssemblyDomain, kind) = !(domain.element isa EmptyVolumetricElementCache)
+# The family tag a domain's items belong to, mirroring `_item_family` on the
+# workspaces; `nothing` for a domain no reduction traverses.
+_domain_family(domain) = nothing
+_domain_family(::AssemblyDomain) = :cells
+_domain_family(::FacetItemDomain) = :facets
+_domain_family(::AlgebraicDomain) = :algebraic
 
+# Structural half of the reduction precondition, per kind, and what
+# `reduce_on_subdomains` skips on. Two independent reasons a subdomain cannot
+# contribute: its FAMILY is one the kind does not name ([`reduction_families`](@ref);
+# an undeclared kind restricts nothing), and — for the cell family — its element
+# cache returns no contribution by construction. The fused boundary route takes
+# no part in a reduction, so the volumetric cache is the whole cell-family story
+# here (unlike `contributes` below).
+_may_contribute(domain, kind) = _family_named(domain, kind)
+_may_contribute(domain::AssemblyDomain, kind) =
+    _family_named(domain, kind) && !(domain.element isa EmptyVolumetricElementCache)
+
+_family_named(domain, kind) =
+    (families = reduction_families(typeof(kind)); isempty(families) || _domain_family(domain) in families)
+
+"""
+    SubdomainCache(domain, device_cache, partition)
+
+One subdomain's traversal: its item-family domain descriptor (`AssemblyDomain`,
+[`FacetItemDomain`](@ref), [`AlgebraicDomain`](@ref)), the per-worker device
+scratch and the partition of its items.
+
+`contributes` is the structural verdict of whether an ASSEMBLY sweep can reach
+any kernel here, decided once from the caches' types (`_domain_assembles`) and
+skipped on by [`execute_on_subdomains!`](@ref). Reductions decide separately
+and per kind, through `_may_contribute`.
+"""
 @concrete struct SubdomainCache
     domain
     device_cache
     partition
+    contributes::Bool
 end
+SubdomainCache(domain, device_cache, partition) =
+    SubdomainCache(domain, device_cache, partition, _domain_assembles(domain))
+
+# A cell subdomain with neither a volumetric nor a boundary kernel has nothing
+# any assembly sweep could reach: the element cache returns without writing, the
+# fused facet gate never opens, and the scatter that follows adds zeros. An empty
+# ELEMENT cache alone is NOT enough — the fused boundary route rides the cell
+# sweep, so a subdomain carrying a surface cache must be traversed.
+_domain_assembles(domain) = true
+_domain_assembles(domain::AssemblyDomain) = !(
+    domain.element isa EmptyVolumetricElementCache &&
+    domain.boundary_element isa EmptySurfaceElementCache)
 
 """
     AssemblyEngine
@@ -80,8 +119,17 @@ Operators are payload (matrices/vectors) plus an engine plus their integrator.
     protocol    # the setup-time declarations
 end
 
+"""
+    execute_on_subdomains!(task, engine)
+
+Run `task` over every subdomain that can contribute to an assembly sweep,
+skipping the ones whose caches make a contribution structurally impossible
+(`SubdomainCache.contributes`) rather than paying their geometry reinit, slot
+gather and zero scatter per item.
+"""
 function execute_on_subdomains!(task, strategy, subdomain_caches)
     for (subdomain_id, sc) in enumerate(subdomain_caches)
+        sc.contributes || continue
         @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
     end
 end
@@ -91,15 +139,22 @@ execute_on_subdomains!(task, engine::AssemblyEngine) =
 """
     reduce_on_subdomains(task, engine) -> value
 
-The value-returning counterpart of `execute_on_subdomains!`: run `task` over
-every subdomain and reduce the per-subdomain partials in subdomain order.
-Within a subdomain [`reduce_on_device`](@ref) reduces the per-worker partials
-in worker order, so the reduction order is fixed by the partition and the
-result is deterministic for a fixed worker count.
+The value-returning counterpart of [`execute_on_subdomains!`](@ref): run `task`
+over every subdomain that can contribute to the task's kind and reduce the
+per-subdomain partials in subdomain order. Within a subdomain
+[`reduce_on_device`](@ref) reduces the per-worker partials in worker order, so
+the reduction order is fixed by the partition and the result is deterministic
+for a fixed worker count.
+
+A subdomain `_may_contribute` declines is skipped whole — a surface functional
+pays no `reinit!` over the mesh's cells. Only zero contributions are removed and
+the fold order among the contributing subdomains is untouched, so the value is
+the one an unskipped traversal computes.
 """
 function reduce_on_subdomains(task, strategy, subdomain_caches)
     total = initial_partial(task.kind)
     for (subdomain_id, sc) in enumerate(subdomain_caches)
+        _may_contribute(sc.domain, task.kind) || continue
         partial = @timeit_debug "reduce subdomain $subdomain_id" reduce_on_device(task, strategy.device, sc.device_cache, sc.partition)
         total = _reduce_partials(total, partial)
     end
