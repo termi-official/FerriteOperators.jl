@@ -401,7 +401,9 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
     end
 
     @testset "Transfer with different Dof Handlers" begin
-        grid = generate_grid(Hexahedron, (1,1,1))
+        # Multi-cell on purpose: row dofs shared between cells are where a
+        # local per-cell projection needs the valence normalization.
+        grid = generate_grid(Hexahedron, (2,2,1))
         Ferrite.transform_coordinates!(grid, x->Vec{3}(sign.(x.-0.5) .* (x.-0.5).^2))
 
         dh2 = DofHandler(grid)
@@ -421,8 +423,82 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         u2 = zeros(ndofs(dh2))
         apply_analytical!(u1, dh1, :u, x->1.0)
         apply_analytical!(u2, dh2, :u, x->1.0)
-
         @test u2 ≈ op.P * u1
+
+        # Linear reproduction needs affine geometry (on the curved grid above
+        # the P1 interpolant of a linear is not that linear, so the P2
+        # interpolant is the wrong reference). A P1 field lies inside the P2
+        # row space elementwise, so its interpolant must prolongate exactly.
+        grid_affine = generate_grid(Hexahedron, (2,2,1))
+        dh2a = DofHandler(grid_affine); add!(dh2a, :u, Lagrange{RefHexahedron,2}()); close!(dh2a)
+        dh1a = DofHandler(grid_affine); add!(dh1a, :u, Lagrange{RefHexahedron,1}()); close!(dh1a)
+        opa = setup_transfer_operator(strategy, integrator, dh2a, dh1a)
+        update_operator!(opa, nothing)
+        u1a = zeros(ndofs(dh1a)); u2a = zeros(ndofs(dh2a))
+        apply_analytical!(u1a, dh1a, :u, x->x[1] + 2x[2] - x[3])
+        apply_analytical!(u2a, dh2a, :u, x->x[1] + 2x[2] - x[3])
+        @test u2a ≈ opa.P * u1a
+    end
+
+    @testset "Nested transfer (geometric multigrid)" begin
+        # Two coarse cells, each uniformly refined 2×2 into 4 conforming fine
+        # cells — the minimal nested hierarchy the operator needs. FO ships no
+        # refinement utility, so the fine grid, the fine→coarse cell map and
+        # each fine cell's node positions in its parent's reference element
+        # (`child_ref_coords`) are hand-built from the structured layout
+        # `generate_grid` produces.
+        coarse_dims = (2, 1)
+        refine      = 2
+        fine_dims   = (coarse_dims[1] * refine, coarse_dims[2] * refine)
+
+        coarse_grid = generate_grid(Quadrilateral, coarse_dims)
+        fine_grid   = generate_grid(Quadrilateral, fine_dims)
+
+        dh_coarse = DofHandler(coarse_grid)
+        add!(dh_coarse, :u, Lagrange{RefQuadrilateral, 1}())
+        close!(dh_coarse)
+        dh_fine = DofHandler(fine_grid)
+        add!(dh_fine, :u, Lagrange{RefQuadrilateral, 1}())
+        close!(dh_fine)
+
+        ncol_f, ncol_c   = fine_dims[1], coarse_dims[1]
+        fine2coarse      = Vector{Int}(undef, getncells(fine_grid))
+        child_ref_coords = Vector{Vector{Vec{2, Float64}}}(undef, getncells(fine_grid))
+        for fid in 1:getncells(fine_grid)
+            col, row   = mod(fid - 1, ncol_f) + 1, div(fid - 1, ncol_f) + 1
+            ccol, crow = div(col - 1, refine) + 1, div(row - 1, refine) + 1
+            fine2coarse[fid] = (crow - 1) * ncol_c + ccol
+
+            # This fine cell's quadrant (qx, qy) in its parent's [-1,1]²
+            # reference element, its own corners (Ferrite's BL/BR/TR/TL node
+            # order) placed at that quadrant's corners.
+            qx, qy = mod(col - 1, refine), mod(row - 1, refine)
+            dξ     = 2 / refine
+            x0, x1 = -1 + qx * dξ, -1 + (qx + 1) * dξ
+            y0, y1 = -1 + qy * dξ, -1 + (qy + 1) * dξ
+            child_ref_coords[fid] = [Vec((x0, y0)), Vec((x1, y0)), Vec((x1, y1)), Vec((x0, y1))]
+        end
+
+        integrator = FerriteOperators.NestedMassProlongatorIntegrator(QuadratureRuleCollection(4), :u)
+        strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+        op = setup_nested_transfer_operator(strategy, integrator, dh_fine, dh_coarse, fine2coarse, child_ref_coords)
+        update_operator!(op, nothing)
+
+        # Polynomial reproduction: matching P1 spaces means the prolongated
+        # coarse nodal values must equal the fine nodal values EXACTLY for a
+        # constant and for each linear monomial — the defining property of the
+        # projection, and the property a naive per-cell assembly breaks at
+        # every fine dof shared between several fine cells.
+        for f in (x -> 1.0, x -> x[1], x -> x[2])
+            u_coarse = zeros(ndofs(dh_coarse))
+            u_fine   = zeros(ndofs(dh_fine))
+            apply_analytical!(u_coarse, dh_coarse, :u, f)
+            apply_analytical!(u_fine,   dh_fine,   :u, f)
+            @test op.P * u_coarse ≈ u_fine atol = 1e-12
+        end
+
+        @test_throws ArgumentError setup_nested_transfer_operator(
+            PerColorAssemblyStrategy(SequentialCPUDevice()), integrator, dh_fine, dh_coarse, fine2coarse, child_ref_coords)
     end
 
     @testset "Operator sizes" begin

@@ -16,6 +16,8 @@ struct MassProlongatorElementCache{CV1 <: CellValues, CV2 <: CellValues, K} <: A
     cv2::CV2
     Mₑbuf::K
     Pₑbuf::K
+    # Row-dof multiplicity; see `_row_dof_valence`.
+    valence::Vector{Int}
 end
 
 function duplicate_for_device(device, cache::MassProlongatorElementCache)
@@ -24,11 +26,12 @@ function duplicate_for_device(device, cache::MassProlongatorElementCache)
         duplicate_for_device(device, cache.cv2),
         similar(cache.Mₑbuf),
         similar(cache.Pₑbuf),
+        cache.valence,  # immutable, safe to share across threads
     )
 end
 
 function assemble_transfer_element!(Pₑ::AbstractMatrix, cell, element_cache::MassProlongatorElementCache, p)
-    (; cv1, cv2, Mₑbuf, Pₑbuf) = element_cache
+    (; cv1, cv2, Mₑbuf, Pₑbuf, valence) = element_cache
     n1 = getnbasefunctions(cv1)
     n2 = getnbasefunctions(cv2)
 
@@ -56,6 +59,11 @@ function assemble_transfer_element!(Pₑ::AbstractMatrix, cell, element_cache::M
     # In-place Cholesky: Mₑbuf's upper triangle is overwritten by the factor.
     C = cholesky!(Symmetric(Mₑbuf))
     ldiv!(Pₑ, C, Pₑbuf)
+
+    rdofs = getrowdofs(cell)
+    @inbounds for i in 1:n1
+        Pₑ[i, :] ./= valence[rdofs[i]]
+    end
 end
 
 function setup_transfer_element_cache(element_model::MassProlongatorIntegrator, sdh_row::SubDofHandler, sdh_col::SubDofHandler)
@@ -66,7 +74,8 @@ function setup_transfer_element_cache(element_model::MassProlongatorIntegrator, 
     ip_geo     = geometric_subdomain_interpolation(sdh_row)
     Mₑ = zeros(getnbasefunctions(ip1), getnbasefunctions(ip1))
     Pₑ = zeros(getnbasefunctions(ip1), getnbasefunctions(ip2))
-    return MassProlongatorElementCache(CellValues(qr, ip1, ip_geo), CellValues(qr, ip2, ip_geo), Mₑ, Pₑ)
+    return MassProlongatorElementCache(CellValues(qr, ip1, ip_geo), CellValues(qr, ip2, ip_geo), Mₑ, Pₑ,
+                                       _row_dof_valence(sdh_row))
 end
 
 @doc raw"""
@@ -100,6 +109,8 @@ struct NestedMassProlongatorElementCache{CV_fine, IP_coarse, IP_geo, K} <: Abstr
     ip_geo_fine::IP_geo    # scalar geometric interpolation of fine element (for ref-space map)
     Mₑbuf::K
     Pₑbuf::K
+    # Row-dof multiplicity; see `_row_dof_valence`.
+    valence::Vector{Int}
 end
 
 function duplicate_for_device(device, cache::NestedMassProlongatorElementCache)
@@ -109,7 +120,25 @@ function duplicate_for_device(device, cache::NestedMassProlongatorElementCache)
         cache.ip_geo_fine,  # immutable, safe to share across threads
         similar(cache.Mₑbuf),
         similar(cache.Pₑbuf),
+        cache.valence,      # immutable, safe to share across threads
     )
+end
+
+# Number of row-space cells owning each row dof (within the subdomain). The
+# per-cell prolongator block is a LOCAL projection, so a row dof shared between
+# several cells would otherwise be summed once per owning cell instead of
+# assembled once; dividing each row by its valence turns that sum into the
+# average, which is exact for any field representable in both spaces (every
+# owning cell computes the same nodal value for it).
+function _row_dof_valence(sdh_row::SubDofHandler)
+    dh      = sdh_row.dh
+    valence = zeros(Int, ndofs(dh))
+    dofs    = zeros(Int, ndofs_per_cell(sdh_row))
+    for cellid in sdh_row.cellset
+        celldofs!(dofs, dh, cellid)
+        valence[dofs] .+= 1
+    end
+    return valence
 end
 
 function setup_transfer_element_cache(
@@ -127,7 +156,8 @@ function setup_transfer_element_cache(
     n_fine      = getnbasefunctions(ip_fine)
     n_coarse    = getnbasefunctions(ip_coarse)
     return NestedMassProlongatorElementCache(cv_fine, ip_coarse, ip_geo_fine,
-                                             zeros(n_fine, n_fine), zeros(n_fine, n_coarse))
+                                             zeros(n_fine, n_fine), zeros(n_fine, n_coarse),
+                                             _row_dof_valence(sdh_fine))
 end
 
 function assemble_transfer_element!(
@@ -136,7 +166,7 @@ function assemble_transfer_element!(
         cache::NestedMassProlongatorElementCache,
         p,
     )
-    (; cv_fine, ip_coarse, ip_geo_fine, Mₑbuf, Pₑbuf) = cache
+    (; cv_fine, ip_coarse, ip_geo_fine, Mₑbuf, Pₑbuf, valence) = cache
     n_fine   = getnbasefunctions(cv_fine)
     n_coarse = getnbasefunctions(ip_coarse)
 
@@ -172,4 +202,9 @@ function assemble_transfer_element!(
 
     C = cholesky!(Symmetric(Mₑbuf))
     ldiv!(Pₑ, C, Pₑbuf)
+
+    rdofs = getrowdofs(tc)
+    @inbounds for i in 1:n_fine
+        Pₑ[i, :] ./= valence[rdofs[i]]
+    end
 end
