@@ -386,10 +386,166 @@ else
     end
 end
 
+####################################
+## Reductions over declared facets
+####################################
+# A surface cache whose reason to exist is its reductions: the area of the
+# declared set and the state- and position-dependent flux ∫ u (x⋅n) dΓ. The
+# VOLUMETRIC cache is empty, so the facet items are the only family that can
+# contribute — which is what makes the numbers below statements about this
+# family's own traversal.
+
+struct FacetFunctionalCache{FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+    fv::FV
+end
+
+struct FacetFunctionalProbe <: AbstractNonlinearIntegrator
+    field_name::Symbol
+    facetset::Set{FacetIndex}
+end
+
+FerriteOperators.setup_element_cache(::FacetFunctionalProbe, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+FerriteOperators.facet_items(m::FacetFunctionalProbe, ::SubDofHandler) = m.facetset
+function FerriteOperators.setup_facet_item_cache(m::FacetFunctionalProbe, sdh::SubDofHandler)
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    fqr    = FacetQuadratureRule{Ferrite.getrefshape(ip)}(2)
+    return FacetFunctionalCache(FacetValues(fqr, ip, ip_geo))
+end
+FerriteOperators.duplicate_for_device(device, c::FacetFunctionalCache) =
+    FacetFunctionalCache(FerriteOperators.duplicate_for_device(device, c.fv))
+# The mandatory residual kernel, contributing nothing.
+FerriteOperators.assemble_facet!(::ResidualRequest, ::FacetFunctionalCache, args::FacetArgs, lfi::Int) = nothing
+
+function FerriteOperators.evaluate_facet_functional(::FunctionalKind{:facet_area},
+        c::FacetFunctionalCache, args::FacetArgs, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    a = 0.0
+    for qp in 1:getnquadpoints(c.fv)
+        a += getdetJdV(c.fv, qp)
+    end
+    return a
+end
+function FerriteOperators.evaluate_facet_functional(::FunctionalKind{:facet_flux},
+        c::FacetFunctionalCache, args::FacetArgs, lfi::Int)
+    reinit!(c.fv, args.cell, lfi)
+    coords = getcoordinates(args.cell)
+    uₑ = args.states.u
+    f = 0.0
+    for qp in 1:getnquadpoints(c.fv)
+        x = spatial_coordinate(c.fv, qp, coords)
+        f += function_value(c.fv, qp, uₑ) * (x ⋅ getnormal(c.fv, qp)) * getdetJdV(c.fv, qp)
+    end
+    return f
+end
+
+FerriteOperators.functional_value_type(::FunctionalKind{:facet_area}) = Float64
+FerriteOperators.functional_value_type(::FunctionalKind{:facet_flux}) = Float64
+
+# The same integrands under undeclared tags, so the accumulator-type scan stays
+# covered and can be compared against the typed route.
+FerriteOperators.evaluate_facet_functional(::FunctionalKind{:facet_area_undeclared},
+        c::FacetFunctionalCache, args::FacetArgs, lfi::Int) =
+    FerriteOperators.evaluate_facet_functional(FunctionalKind(:facet_area), c, args, lfi)
+FerriteOperators.evaluate_facet_functional(::FunctionalKind{:facet_flux_undeclared},
+        c::FacetFunctionalCache, args::FacetArgs, lfi::Int) =
+    FerriteOperators.evaluate_facet_functional(FunctionalKind(:facet_flux), c, args, lfi)
+
+# Kernels that run on every declared facet and contribute nothing: an empty sum,
+# which only the declared tag can answer.
+FerriteOperators.functional_value_type(::FunctionalKind{:facet_quiet}) = Float64
+FerriteOperators.evaluate_facet_functional(::FunctionalKind{:facet_quiet},
+        ::FacetFunctionalCache, args::FacetArgs, lfi::Int) = nothing
+FerriteOperators.evaluate_facet_functional(::FunctionalKind{:facet_quiet_undeclared},
+        ::FacetFunctionalCache, args::FacetArgs, lfi::Int) = nothing
+
+# The area and the flux of the declared set, by a hand-rolled `FacetIterator`
+# loop over the same facets.
+function facet_functional_reference(dh, facets, u)
+    sdh    = dh.subdofhandlers[1]
+    ip     = Ferrite.getfieldinterpolation(sdh, :u)
+    fv     = FacetValues(FacetQuadratureRule{RefQuadrilateral}(2), ip,
+                         Ferrite.geometric_interpolation(Quadrilateral))
+    uₑ     = zeros(ndofs_per_cell(sdh))
+    area, flux = 0.0, 0.0
+    for facet in FacetIterator(sdh, facets)
+        reinit!(fv, facet)
+        coords = getcoordinates(facet)
+        uₑ .= @view u[celldofs(facet)]
+        for qp in 1:getnquadpoints(fv)
+            dΓ = getdetJdV(fv, qp)
+            area += dΓ
+            flux += function_value(fv, qp, uₑ) *
+                    (spatial_coordinate(fv, qp, coords) ⋅ getnormal(fv, qp)) * dΓ
+        end
+    end
+    return (; area, flux)
+end
+
+@testset "Facet functionals" begin
+    (; grid, dh, facets) = corner_testbed()
+    u = sin.(0.4 .* (1:ndofs(dh)))
+    probe = FacetFunctionalProbe(:u, facets)
+    op = setup_operator(sequential_strategy(), probe, dh)
+    reference = facet_functional_reference(dh, facets, u)
+
+    @testset "the declared facets are the domain of integration" begin
+        # No cell can contribute here, so these ARE the facet family's numbers.
+        @test evaluate_functional(op, FunctionalKind(:facet_area), u, nothing) ≈ reference.area rtol = 1.0e-14
+        @test reference.area ≈ 4.0                       # |Γ| = 2 + 2 on the [-1, 1]² grid
+        @test evaluate_functional(op, FunctionalKind(:facet_flux), u, nothing) ≈ reference.flux rtol = 1.0e-13
+        @test abs(reference.flux) > 0
+        @test evaluate_functional(op, FunctionalKind(:facet_area), u, nothing) isa Float64
+    end
+
+    @testset "declared value type reproduces the scan path" begin
+        @test evaluate_functional(op, FunctionalKind(:facet_area), u, nothing) ===
+              evaluate_functional(op, FunctionalKind(:facet_area_undeclared), u, nothing)
+        @test evaluate_functional(op, FunctionalKind(:facet_flux), u, nothing) ===
+              evaluate_functional(op, FunctionalKind(:facet_flux_undeclared), u, nothing)
+    end
+
+    @testset "parallel workers reduce to the same value" begin
+        # Chunk size 1 over the coloring, so the barriers are handed to genuine
+        # per-worker folds rather than to one worker walking everything.
+        pop = setup_operator(AssemblyStrategy(FullAssembly(), ColoredScheduling(), PolyesterDevice(1)),
+                             FacetFunctionalProbe(:u, facets), dh)
+        psc = last(pop.engine.subdomain_caches)
+        @test length(psc.device_cache) == min(Threads.nthreads(), maximum(length, psc.partition))
+        @test evaluate_functional(pop, FunctionalKind(:facet_area), u, nothing) ≈ reference.area rtol = 1.0e-12
+        @test evaluate_functional(pop, FunctionalKind(:facet_flux), u, nothing) ≈ reference.flux rtol = 1.0e-12
+        # The parallel route allocates its partials up front, so an undeclared
+        # kind cannot run there — the facet family's answer is the cell family's.
+        @test_throws ArgumentError evaluate_functional(pop, FunctionalKind(:facet_area_undeclared), u, nothing)
+    end
+
+    @testset "an all-quiet sweep is an empty sum" begin
+        @test evaluate_functional(op, FunctionalKind(:facet_quiet), u, nothing) === 0.0
+        @test_throws ArgumentError evaluate_functional(op, FunctionalKind(:facet_quiet_undeclared), u, nothing)
+    end
+
+    @testset "structural emptiness fails before any facet runs" begin
+        # No items to reduce over, whatever the kind declares.
+        sc = last(op.engine.subdomain_caches)
+        empty_partition = (engine = FerriteOperators.AssemblyEngine(
+            op.engine.strategy,
+            [FerriteOperators.SubdomainCache(sc.domain, sc.device_cache, (Int[],))],
+            op.engine.dh, op.engine.ivh, op.engine.protocol),)
+        @test_throws ArgumentError evaluate_functional(empty_partition, FunctionalKind(:facet_area), u, nothing)
+        @test_throws ArgumentError evaluate_functional(empty_partition, FunctionalKind(:facet_area_undeclared), u, nothing)
+    end
+
+    @testset "a missing facet kernel fails loudly" begin
+        @test_throws MethodError evaluate_functional(op, FunctionalKind(:facet_enthalpy), u, nothing)
+    end
+end
+
 @testset "structural reduction answer of the facet family" begin
-    # Facet domains decline reductions; an all-facet reduction must fail loudly.
+    # Facet domains serve reductions and decline condensation; the declared set
+    # is the domain of integration, so no cache-type refinement narrows this.
     fd = FerriteOperators.FacetItemDomain(nothing, nothing, nothing)
-    @test !FerriteOperators._may_contribute(fd, FunctionalKind(:probe))
+    @test FerriteOperators._may_contribute(fd, FunctionalKind(:probe))
     @test !FerriteOperators._may_contribute(fd, FerriteOperators.CondensationKind((u = 1.0,)))
     @test FerriteOperators._may_contribute(fd, JacobianKind())
 end

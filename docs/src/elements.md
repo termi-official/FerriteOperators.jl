@@ -392,13 +392,17 @@ Declaring the kind (`setup_operator(...; requests = (ParameterJacobianKind,))`)
 makes setup demand that kernel loudly, instead of letting a sweep reach a
 missing method.
 
-Two things a facet item deliberately does not do. It never calls
+One thing a facet item deliberately does not do: it never calls
 [`reinit_values!`](@ref) — a facet kernel reinitializes its own `FacetValues`
 for the local facet index it was handed, on this route exactly as on the fused
-one. And it contributes nothing to [`evaluate_functional`](@ref): a facet
-functional is a surface integral over the declared set, which needs a facet
-hook of its own next to [`evaluate_cell_functional`](@ref); the family has
-none.
+one.
+
+**Functionals.** A surface integral over the declared set is a reduction of the
+facet-item family, served by [`evaluate_facet_functional`](@ref) — the
+[`evaluate_cell_functional`](@ref) counterpart, with the local facet index
+appended. The FUSED route takes no part in it: it rides the cell sweep, which is
+request-shaped, so a surface term joins a reduction by being declared as facet
+items.
 
 ## Algebraic terms (items with no mesh support)
 
@@ -531,7 +535,7 @@ this family's standing limitation.
 | local system | `[celldofs(cell); global dofs]` ([`global_dofs`](@ref)) | the same, owning-cell-shaped ([`facet_item_global_dofs`](@ref)) | `n × n` over the item's own `n` dofs |
 | [`ColoredScheduling`](@ref) | Ferrite's cell coloring; rejected once [`global_dofs`](@ref) are declared | the owning cells' coloring, restricted to the declared set; rejected once [`facet_item_global_dofs`](@ref) are declared | derived as one item per barrier |
 | sensitivities | analytic kernel or the [`ADElementCache`](@ref) fallback | included, but **analytic-only** | analytic kernel or the [`ADElementCache`](@ref) fallback |
-| functional hook | [`evaluate_cell_functional`](@ref) | none — the family contributes nothing | [`evaluate_algebraic_functional`](@ref) |
+| functional hook | [`evaluate_cell_functional`](@ref) | [`evaluate_facet_functional`](@ref), over the declared facets alone | [`evaluate_algebraic_functional`](@ref) |
 | condensation | [`condense_cell!`](@ref) | not supported: `q` belongs to the cell family's item for that same cell | [`condense_algebraic!`](@ref) |
 
 ## Condensed elements (internal variables)
@@ -724,17 +728,23 @@ production and a checked, cell-exact rejection under
 FerriteOperators.evaluate_cell_functional(::FunctionalKind{:energy}, cache::MyCache, args) =
     # return this cell's ∫ contribution (a Number or a Tensors tensor)
 
+FerriteOperators.evaluate_facet_functional(::FunctionalKind{:flux}, cache::MySurfaceCache, args, lfi) =
+    # return this facet's ∫ contribution, or `nothing`
+
 FerriteOperators.functional_value_type(::FunctionalKind{:energy}) = Float64
 
 Φ = evaluate_functional(op, FunctionalKind(:energy), states, p, ctx)
 ```
 
-Global reductions (energies for line searches, dissipation, quantities of
-interest) are request kinds whose kernels *return* their cell contribution;
-the engine sums per worker and reduces in a fixed order, so results are
-deterministic for a fixed worker count. Cell items contribute through the hook
-above and algebraic items through [`evaluate_algebraic_functional`](@ref);
-facet items contribute nothing.
+Global reductions (energies for line searches, dissipation, chamber volumes,
+quantities of interest) are request kinds whose kernels *return* their item's
+contribution; the engine sums per worker and reduces in a fixed order, so
+results are deterministic for a fixed worker count. All three item families
+serve them: cell items through the hook above, DECLARED facet items through
+[`evaluate_facet_functional`](@ref) — the facets of one item folding in
+declaration order — and algebraic items through
+[`evaluate_algebraic_functional`](@ref). The fused boundary route is the one
+exclusion, being request-shaped rather than value-returning.
 
 [`FerriteOperators.functional_value_type`](@ref) declares the type the
 reduction accumulates in. It is **required under a parallel device** — the

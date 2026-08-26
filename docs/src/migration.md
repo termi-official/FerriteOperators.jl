@@ -295,8 +295,10 @@ local problems](elements.md)).
   check runs only with a context, its weighted-Jacobian checks only with
   `weights = (…)`; the rest are skipped with the reason recorded.
 - **Functionals**: `evaluate_functional(op, FunctionalKind(:energy), states, p, ctx)`
-  reduces per-cell contributions returned by `evaluate_cell_functional`
-  kernels — global scalars/tensors without hand-rolled loops.
+  reduces per-item contributions returned by `evaluate_cell_functional`,
+  `evaluate_facet_functional` (over declared facet items) and
+  `evaluate_algebraic_functional` kernels — global scalars/tensors without
+  hand-rolled loops.
 - Admissibility with internal state is per cache and per kind: analytic
   kernel, `internal_state_insensitive` declaration, or FD — never a silent
   wrong adjoint, never a blanket rejection.

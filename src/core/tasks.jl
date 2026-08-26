@@ -166,9 +166,10 @@ end
     FunctionalKind(tag::Symbol)
 
 Names a functional (reduction) query: a global scalar or Tensors tensor
-integrated from per-cell contributions (energy, dissipation, …). Elements
-implement [`evaluate_cell_functional`](@ref) dispatching on the tag; solvers
-evaluate through [`evaluate_functional`](@ref).
+integrated from per-item contributions (energy, dissipation, a surface flux, …).
+Element caches implement [`evaluate_cell_functional`](@ref),
+[`evaluate_facet_functional`](@ref) or [`evaluate_algebraic_functional`](@ref)
+dispatching on the tag; solvers evaluate through [`evaluate_functional`](@ref).
 """
 struct FunctionalKind{tag} end
 FunctionalKind(tag::Symbol) = FunctionalKind{tag}()
@@ -776,9 +777,10 @@ function _check_reduction_domain(kind, engine)
     all(sc -> !_may_contribute(sc.domain, kind), caches) && throw(ArgumentError(
         "No subdomain can contribute to $(nameof(typeof(kind))): every subdomain either " *
         "carries an `EmptyVolumetricElementCache`, which returns no contribution by " *
-        "construction, or belongs to an item family whose traversal has no body for this kind " *
-        "(a facet item contributes to no functional). Set the operator up with an integrator " *
-        "whose caches implement `evaluate_cell_functional`."))
+        "construction, or belongs to an item family whose traversal has no body for this kind. " *
+        "Set the operator up with an integrator whose caches implement " *
+        "`evaluate_cell_functional`, `evaluate_facet_functional` or " *
+        "`evaluate_algebraic_functional`."))
     return nothing
 end
 
@@ -789,20 +791,23 @@ run_reduction(family, kind, op, states::NamedTuple, p, ctx) = throw(ArgumentErro
     "`sweep_family(::Type{<:$(nameof(typeof(kind)))}) = FunctionalFamily()`."))
 
 """
-    evaluate_functional(op, kind::FunctionalKind, states, p, ctx = nothing)
-    evaluate_functional(op, kind::FunctionalKind, u::AbstractVector, p)
+    evaluate_functional(op, kind, states, p, ctx = nothing)
+    evaluate_functional(op, kind, u::AbstractVector, p)
 
 Evaluate the functional named by `kind` over the operator's domain: the sum of
-the per-cell contributions returned by [`evaluate_cell_functional`](@ref) (a
-`Number` or a Tensors tensor). Contributions fold per worker in item order and
+the per-item contributions its kernels return (a `Number` or a Tensors tensor).
+`kind` is a [`FunctionalKind`](@ref) or any downstream kind declaring
+[`sweep_family`](@ref) `FunctionalFamily()`; anything else is rejected by
+[`run_reduction`](@ref). Contributions fold per worker in item order and
 the per-worker partials reduce in a fixed order — results are deterministic for
 a fixed worker count. Nothing is written into the operator, so an operator
 declaring no functional kind serves one just as well.
 
-Cell items contribute through [`evaluate_cell_functional`](@ref) and algebraic
-items through [`evaluate_algebraic_functional`](@ref); the facet item family
-contributes nothing, a surface functional being a hook this package does not
-have.
+Cell items contribute through [`evaluate_cell_functional`](@ref), DECLARED facet
+items through [`evaluate_facet_functional`](@ref) and algebraic items through
+[`evaluate_algebraic_functional`](@ref). The fused boundary route takes no part:
+it rides the cell sweep, which is request-shaped, so a surface term joins a
+reduction by being declared as [`facet_items`](@ref).
 
 Two failure modes are kept apart. STRUCTURAL emptiness — no items in the
 operator's partitions, or no subdomain whose element cache can contribute — is
@@ -812,12 +817,13 @@ empty sum, which a kind declaring [`functional_value_type`](@ref) answers with
 `zero(T)` and an undeclared kind cannot answer at all (there is no `T` to take
 the identity of) and reports as an `ArgumentError`.
 """
-function evaluate_functional(op, kind::FunctionalKind, states::NamedTuple, p, ctx = nothing)
+function evaluate_functional(op, kind, states::NamedTuple, p, ctx = nothing)
     total = run_reduction(kind, op, states, p, ctx)
     total === nothing && throw(ArgumentError(
-        "No element contributed to $(typeof(kind)). Implement " *
-        "`evaluate_cell_functional` for the operator's element caches."))
+        "No item contributed to $(typeof(kind)). Implement `evaluate_cell_functional`, " *
+        "`evaluate_facet_functional` or `evaluate_algebraic_functional` for the operator's " *
+        "caches."))
     return total
 end
-evaluate_functional(op, kind::FunctionalKind, u::AbstractVector, p) =
+evaluate_functional(op, kind, u::AbstractVector, p) =
     evaluate_functional(op, kind, (u = u,), p, nothing)

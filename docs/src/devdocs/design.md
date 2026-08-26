@@ -137,7 +137,7 @@ unannotated `execute_kind!(::MyKind, task, ws)` is the only candidate for every
 family and hands a `FacetItemWorkspace` to `primal_cell_sweep!`. Give the kind
 one method per family it must serve, and an explicit `= nothing` for each
 family it deliberately does not — which is exactly how the built-in kinds
-declare that facet items contribute to no functional.
+declare that facet items carry no condensed internal state.
 
 A kind whose sweep needs per-worker scratch beyond `ws.Ke`/`ws.re` reads
 [`SensitivityBuffers`](@ref) through `ws.sensitivity` — structurally present
@@ -189,12 +189,12 @@ Declaring it (`setup_operator(...; requests = (MyKind,))`, or a protocol whose
 `get_declared_kinds` names it) selects its sweep-state family and runs its
 setup-time trait ↔ kernel validation.
 
-Twelve provided bodies exist, across the four workspace types:
+Thirteen provided bodies exist, across the four workspace types:
 
 | item family | workspace | provided bodies |
 |---|---|---|
 | cells | `AssemblyWorkspace` | [`primal_cell_sweep!`](@ref) (buffer zeroing, values reinit, slot gather, cell and facet kernels, scatter — no write-back: [`condense_internal!`](@ref) is the only writer of `q`); [`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to `sensitivity_kernel!`); [`functional_cell_sweep`](@ref) (slot gather, no write-back, RETURN what the kernel hook gives); [`condensation_cell_sweep!`](@ref) (slot gather, dispatch to [`condense_cell!`](@ref), RETURN the [`CondensationReport`](@ref) AND write the trial `q` back — the one combination the others don't have); [`internal_jacobian_cell_sweep!`](@ref) (the rectangular ∂F/∂q block) |
-| facet items | `FacetItemWorkspace` | [`primal_facet_item_sweep!`](@ref); [`sensitivity_facet_item_sweep!`](@ref). Functionals, condensation, `JacobianKind{:q}` and quadrature evaluation are explicit `nothing` methods — the family has no body for them |
+| facet items | `FacetItemWorkspace` | [`primal_facet_item_sweep!`](@ref); [`sensitivity_facet_item_sweep!`](@ref); [`functional_facet_item_sweep`](@ref) (slot gather, no write-back, fold what the facet hook gives over the item's declared facets). Condensation, `JacobianKind{:q}` and quadrature evaluation are explicit `nothing` methods — the family has no body for them |
 | algebraic items | `AlgebraicWorkspace` | [`primal_algebraic_sweep!`](@ref); [`sensitivity_algebraic_sweep!`](@ref); [`functional_algebraic_sweep`](@ref); [`condensation_algebraic_sweep!`](@ref); [`internal_jacobian_algebraic_sweep!`](@ref) |
 | patches | `PatchAssemblyWorkspace` | the `PatchAssemblyKind` and `PatchCallbackKind` bodies, reached through [`assemble_patches!`](@ref) / [`foreach_patch`](@ref) rather than the operator entry points |
 

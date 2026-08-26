@@ -181,10 +181,27 @@ states its facet set here instead of re-deriving it per kernel call.
 """
 function is_facet_in_cache end
 
+"""
+    evaluate_facet_functional(kind::FunctionalKind, cache, args, local_facet_index) -> value
+
+The [`evaluate_cell_functional`](@ref) counterpart of the facet-item family:
+returns this facet's contribution to the functional named by `kind` — a
+`Number` or a Tensors tensor, summed across facets — or `nothing` for no
+contribution. `args` is a [`FacetArgs`](@ref), and the kernel reinitializes its
+own `FacetValues` for `local_facet_index`, exactly as [`assemble_facet!`](@ref)
+does.
+
+Only the facets [`facet_items`](@ref) declares reach this hook: the FUSED
+boundary route rides the cell sweep, which is request-shaped, so a surface term
+joins a reduction by being declared as facet items.
+"""
+function evaluate_facet_functional end
+
 "Utility to execute noop assembly."
 struct EmptySurfaceElementCache <: AbstractSurfaceElementCache end
 assemble_facet!(req::AbstractAssemblyRequest, ::EmptySurfaceElementCache, args, local_facet_index::Int) = nothing
 @inline is_facet_in_cache(::FacetIndex, cell, ::EmptySurfaceElementCache) = false
+evaluate_facet_functional(kind, ::EmptySurfaceElementCache, args, local_facet_index::Int) = nothing
 Ferrite.getnquadpoints(::EmptySurfaceElementCache) = 0
 Ferrite.reinit!(::EmptySurfaceElementCache, cell) = nothing
 

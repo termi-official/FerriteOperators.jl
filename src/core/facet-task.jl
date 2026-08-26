@@ -216,11 +216,31 @@ function sensitivity_facet_item_sweep!(kind, task, ws)
     return nothing
 end
 
-# A facet functional needs a surface hook of its own next to
-# `evaluate_cell_functional`, which does not exist; the volumetric reduction
-# cannot stand in for it. The family contributes nothing, so
-# `evaluate_functional` sums the cell contributions alone.
-execute_kind!(::FunctionalKind, task, ws::FacetItemWorkspace) = nothing
+execute_kind!(kind::FunctionalKind, task, ws::FacetItemWorkspace) = functional_facet_item_sweep(kind, task, ws)
+
+"""
+    functional_facet_item_sweep(kind, task, ws) -> value
+
+The [`functional_cell_sweep`](@ref) counterpart of the facet item family:
+gathers the state slots without writing anything back and folds what
+[`evaluate_facet_functional`](@ref) returns over the item's declared facets, in
+declaration order. The item contributes `nothing` when every one of its facets
+does, which is what keeps the untyped fold's type scan going.
+
+The per-facet parameter query and the absent [`reinit_values!`](@ref) call are
+[`facet_item_walk!`](@ref)'s; only the destination differs — a returned value
+instead of the request buffers.
+"""
+function functional_facet_item_sweep(kind, task, ws)
+    statesₑ = load_slots!(ws, task.states)
+    total = initial_partial(kind)
+    for lfi in current_facets(ws)
+        pᵦ = query_facet_parameters(ws.element, ws.cell, lfi, task.p)
+        val = evaluate_facet_functional(kind, ws.element, _facet_args(ws, statesₑ, pᵦ, task.ctx), lfi)
+        val === nothing || (total = _reduce_partials(total, val))
+    end
+    return total
+end
 
 # Condensed internal state on facet items is not supported: `q` is per owning
 # CELL, and a facet item shares its cell with the cell family's own item for
@@ -235,10 +255,11 @@ execute_kind!(::JacobianKind{:q}, task, ws::FacetItemWorkspace) = nothing
 # the cell family's own sweep over that same cell already does.
 execute_kind!(::QuadratureEvaluationKind, task, ws::FacetItemWorkspace) = nothing
 
-# Mirrors the declined kinds above: a reduction whose every domain is
+# Mirrors the declined kind above: a condensation whose every domain is
 # facet-shaped (or otherwise empty) fails the structural precondition instead of
-# silently reducing over nothing.
-_may_contribute(::FacetItemDomain, ::Union{FunctionalKind, CondensationKind}) = false
+# silently reducing over nothing. A FUNCTIONAL is served here (see
+# `functional_facet_item_sweep`), so the family answers the default `true` for it.
+_may_contribute(::FacetItemDomain, ::CondensationKind) = false
 
 ####################################
 ## Setup
