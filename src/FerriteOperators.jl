@@ -226,4 +226,6 @@ export NestedTransferFerriteOperator, setup_nested_transfer_operator, init_neste
 export NonlinearMultiDomainIntegrator, BilinearMultiDomainIntegrator, LinearMultiDomainIntegrator
 export NonlinearCompositeIntegrator, BilinearCompositeIntegrator, LinearCompositeIntegrator
 
+include("precompile.jl")
+
 end
