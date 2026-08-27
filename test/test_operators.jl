@@ -544,6 +544,19 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         @test all(d -> d.x == 7, dc_poly)
     end
 
+    @testset "default_strategy resolves to the loaded Polyester ext" begin
+        # This file `using Polyester`s above, which activates `FerriteOperatorsPolyesterExt` for the
+        # rest of the process — so the parallel branch is the only one this file can observe. The
+        # no-Polyester fallback is not exercised here: `ParallelTestRunner` reuses worker processes
+        # across test files, so a file that itself avoids `using Polyester` cannot guarantee the
+        # extension is still unloaded by the time it runs.
+        strategy = default_strategy()
+        @test strategy isa AssemblyStrategy
+        @test strategy.form isa FullAssembly
+        @test strategy.scheduling isa SequentialScheduling
+        @test strategy.device isa PolyesterDevice
+    end
+
     @testset "Transfer setup validation" begin
         grid = generate_grid(Hexahedron, (1,1,1))
         dh2 = DofHandler(grid)

@@ -160,6 +160,24 @@ dof maps come from `celldofs`, so a subdomain declaring [`global_dofs`](@ref) or
 """
 ElementAssemblyStrategy(device) = AssemblyStrategy(ElementAssembly(), SequentialScheduling(), device)
 
+"""
+    default_strategy()
+
+The recommended shared-memory [`AssemblyStrategy`](@ref) for whatever is currently loaded:
+[`SequentialAssemblyStrategy`](@ref) over a [`PolyesterDevice`](@ref) once Polyester.jl is loaded
+(`using Polyester` activates `FerriteOperatorsPolyesterExt`, which is what gives `PolyesterDevice` its
+`execute_on_device!`/`reduce_on_device` methods — without the extension the struct exists but has no
+execution route), and over a [`SequentialCPUDevice`](@ref) otherwise. A setup-time call: the extension
+check is a runtime lookup, not a compile-time constant, so it reflects whatever is loaded when it runs.
+
+Load Polyester to get the parallel default. What this returns MAY CHANGE between minor versions as
+better defaults become available — a caller that needs a strategy that does not move under it should
+construct one explicitly instead.
+"""
+default_strategy() = Base.get_extension(FerriteOperators, :FerriteOperatorsPolyesterExt) === nothing ?
+    SequentialAssemblyStrategy(SequentialCPUDevice()) :
+    SequentialAssemblyStrategy(PolyesterDevice())
+
 function setup_operator_strategy_cache(strategy::AssemblyStrategy{ElementAssembly, <:AbstractSchedulingPolicy, <:AbstractCPUDevice}, integrator, dh)
     return AssemblyStrategy(ElementAssemblyData(EAVector(dh)), strategy.scheduling, strategy.device)
 end
