@@ -108,6 +108,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         nullop = NullOperator{Float64,5,5}()
         @test eltype(nullop) == Float64
         @test length(vin)  == size(nullop, 1)
+        @test size(nullop) == (5, 5)
 
         mul!(vout, nullop, vin)
         @test vout == zeros(5)
@@ -155,6 +156,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
 
         @test length(vin)  == size(nullop_rect, 1)
         @test length(vout) == size(nullop_rect, 2)
+        @test size(nullop_rect) == (4, 5)
 
         @test get_matrix(nullop_rect) ≈ zeros(4,5)
 

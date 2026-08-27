@@ -1,9 +1,43 @@
 abstract type AbstractDevice{ValueType, IndexType} end
+
+"""
+    AbstractCPUDevice{ValueType, IndexType} <: AbstractDevice{ValueType, IndexType}
+
+Dispatch anchor for CPU devices ([`SequentialCPUDevice`](@ref), [`PolyesterDevice`](@ref)):
+`duplicate_for_device`'s per-worker copies are plain Julia objects, as opposed
+to a GPU device's struct-of-arrays layout.
+"""
 abstract type AbstractCPUDevice{ValueType, IndexType} <: AbstractDevice{ValueType, IndexType} end
+
+"""
+    AbstractGPUDevice{ValueType, IndexType} <: AbstractDevice{ValueType, IndexType}
+
+Dispatch anchor for GPU devices: a downstream device implementation subtypes
+this to pick up the GPU-shaped [`setup_device_instances`](@ref)/
+[`duplicate_for_device`](@ref) contract instead of the CPU one.
+"""
 abstract type AbstractGPUDevice{ValueType, IndexType} <: AbstractDevice{ValueType, IndexType} end
 
+"""
+    value_type(device) -> Type
+
+The scalar element type `device` assembles with (the `ValueType` type
+parameter of its `AbstractDevice`).
+"""
 value_type(::AbstractDevice{ValueType}) where ValueType = ValueType
 index_type(::AbstractDevice{<:Any, IndexType}) where IndexType = IndexType
+
+"""
+    duplicate_for_device(device, x)
+
+`x`'s per-worker counterpart for `device`: an independent copy of mutable
+per-worker scratch, the same object shared read-only where sharing is safe, or
+(GPU) a device-resident layout. Every cache/workspace type reachable from a
+[`setup_operator`](@ref) call needs a method — there is no fallback, so a
+missing one surfaces as a `MethodError` at setup rather than an aliasing bug
+at assembly time.
+"""
+function duplicate_for_device end
 
 
 """

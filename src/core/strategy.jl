@@ -48,6 +48,12 @@ BlockedOperatorSpecification(block_sizes, matrix_type::Type;
         algebraic_couplings = (), constraint_handler = nothing) =
     BlockedOperatorSpecification(block_sizes, matrix_type, algebraic_couplings, constraint_handler)
 
+"""
+    AbstractAssemblyStrategy
+
+Dispatch anchor for an operator's assembly strategy; [`AssemblyStrategy`](@ref)
+is the sole concrete composition of the form/scheduling/device axes below.
+"""
 abstract type AbstractAssemblyStrategy end
 
 ####################################

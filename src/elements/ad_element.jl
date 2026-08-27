@@ -273,9 +273,17 @@ duplicate_for_device(device, ad::ADElementCache) =
 """
     condensed_corrector(cache, args) -> AbstractMatrix
 
-The completed `nq × ndofs` `dq/dū` block a condensed cache exposes for
-`ADElementCache`'s generic `Consistent` combination. No default; a cache
-serving `Consistent` analytically never needs it.
+The completed `nq × ndofs` `dq/dū` block [`ADElementCache`](@ref)'s generic
+`Consistent` combination reads to complete a condensed cache's AD partial into
+`Jₑ = ∂F/∂ū|_q + ∂F/∂q · dq/dū`. No default; this is the seam for THAT
+combination only.
+
+A cache serving `Consistent` kinds analytically never implements it — it
+reads and writes the same per-item corrector directly, through
+[`item_state`](@ref)/[`set_item_state!`](@ref) on its own [`ItemStates`](@ref)
+field, from inside its own `assemble_cell!` kernel. Implement
+`condensed_corrector` only where the generic AD combination is the route
+actually taken.
 
 Takes the item's [`CellArgs`](@ref) rather than an item id so that both
 [`CorrectorElection`](@ref)s can be served through it: a `Stored()` cache reads

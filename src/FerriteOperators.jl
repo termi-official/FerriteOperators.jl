@@ -80,6 +80,15 @@ sink being a vector alone.
 """
 abstract type AbstractNonlinearIntegrator end
 
+"""
+    AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator
+
+Supertype of [`AbstractNonlinearIntegrator`](@ref)s whose elements condense
+internal state ([`has_internal_state`](@ref)): the dispatch anchor a
+downstream integrator subtypes to opt into the condensation machinery
+([`condense_internal!`](@ref), the `InternalVariableHandler` block, the
+admissibility checks that reject an AD fallback over hidden state).
+"""
 abstract type AbstractCondensedNonlinearIntegrator <: AbstractNonlinearIntegrator end
 
 """
@@ -125,6 +134,8 @@ export QuadratureRuleCollection, InternalVariableHandler
 export internal_variable_offset, internal_variable_range
 export getquadraturerule
 export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
+export AbstractCondensedNonlinearIntegrator
+export get_number_of_internal_dofs_per_element, setup_internal_variable_handler
 
 export QVector, setup_qvector, get_range_for_cell
 export evaluate_quadrature!
@@ -134,6 +145,7 @@ export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, 
 
 export setup_operator, update_operator!, update_linearization!, evaluate!
 export setup_evaluation_operator, EvaluationFerriteOperator
+export BilinearFerriteOperator, LinearFerriteOperator
 export AbstractSchemeProtocol, DefaultProtocol
 export get_declared_slots, get_declared_kinds
 export assemble_slot_jacobian!, assemble_weighted_jacobian!
@@ -145,6 +157,7 @@ export state_jvp!, state_vjp!, StateJVPRequest, StateVJPRequest
 export check_derivatives
 export parameter_vector, rebuild_parameters
 export TimeIntegrationContext, evaluation_time, with_time, stage_scaling, CellArgs, FacetArgs, assemble_cell!
+export with_states, with_parameters, with_context
 export AffineRate, InternalSource
 export CorrectionMode, Consistent, FrozenQ
 export CondensationReport, condense_internal!, condense_cell!, condense_algebraic!, CondensationKind
@@ -157,7 +170,7 @@ export WeightedJacobianRequest
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
 export ResidualKind, JacobianKind, JacobianResidualKind, WeightedJacobianKind
 export ParameterJacobianKind, ParameterVJPKind, TimeSensitivityKind, StateJVPKind, StateVJPKind
-export FunctionalKind, evaluate_functional, evaluate_cell_functional, reduction_families
+export FunctionalKind, evaluate_functional, evaluate_cell_functional, reduction_families, functional_value_type
 export PatchItems, npatches, patch_dofs, patch_ndofs, patch_cells, patch_cell_groups, assemble_patch_matrices!
 export patch_free_dofs, patch_prescribed_dofs, augment_prescribed_dofs!, patch_vertices, patch_vertex_dofs
 export WholePatch, CellGroup, PatchTerm, patch_term_active, any_patch_term_active
@@ -175,12 +188,16 @@ export ADElementCache, AbstractElementCacheDecorator, unwrap, ForwardDiffAD, Fus
 export decorate_element_cache, needs_ad_decoration, fully_analytic
 
 export residual_size, unknown_size
+export get_dof_handler, get_strategy, get_subdomain_caches
 
-export NullOperator, DiagonalOperator
+export NullOperator, DiagonalOperator, LinearNullOperator
+export AbstractNonlinearOperator
 
 export SequentialCPUDevice, PolyesterDevice
+export AbstractCPUDevice, AbstractGPUDevice
+export value_type, duplicate_for_device
 export SequentialAssemblyStrategy, ElementAssemblyStrategy, PerColorAssemblyStrategy
-export AssemblyStrategy, AbstractAssemblyForm, FullAssembly, ElementAssembly
+export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAssembly, ElementAssembly, ElementAssemblyData
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling
 export StandardOperatorSpecification, BlockedOperatorSpecification
 
@@ -190,12 +207,15 @@ export NestedGridCellCache, NestedGridCellIterator
 export getrowdofs, getcolumndofs
 export get_fine_coordinates, get_coarse_coordinates, get_child_ref_coords
 export AbstractTransferIntegrator, AbstractTransferElementCache
-export AbstractVolumetricElementCache
+export AbstractVolumetricElementCache, AbstractSurfaceElementCache
+export EmptyVolumetricElementCache, EmptySurfaceElementCache
 export MassProlongatorIntegrator
 export NestedMassProlongatorIntegrator
 export setup_element_cache, setup_boundary_cache
+export compose_element_caches, compose_boundary_caches
 export global_dofs, global_dof_range
 export facet_items, setup_facet_item_cache, facet_item_global_dofs, facet_item_global_dof_range
+export FacetItemDomain
 export evaluate_facet_functional
 export algebraic_items, setup_algebraic_cache, assemble_algebraic!, evaluate_algebraic_functional
 export AlgebraicItem, AlgebraicArgs

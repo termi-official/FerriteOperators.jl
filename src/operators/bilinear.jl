@@ -1,3 +1,10 @@
+"""
+    BilinearFerriteOperator <: AbstractBilinearOperator
+
+The operator [`setup_operator`](@ref) returns for an [`AbstractBilinearIntegrator`](@ref):
+the assembled matrix `op.A` plus the [`AssemblyEngine`](@ref) and integrator
+that built it. The matrix IS the Jacobian (see [`AbstractBilinearOperator`](@ref)).
+"""
 @concrete struct BilinearFerriteOperator <: AbstractBilinearOperator
     A
     engine

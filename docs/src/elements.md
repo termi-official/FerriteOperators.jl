@@ -629,10 +629,18 @@ pure residual seeding `ū` and `q` separately and combines them with the
 `dq/dū` block, read through [`condensed_corrector`](@ref) — `Jₑ =
 ∂F/∂ū|_q + ∂F/∂q · dq/dū`. This is the getting-started path (bigger than the
 compact Tier-1 corrector most analytic kernels read, since the framework needs
-the completed `nq × ndofs` block); an element serving `Consistent` kinds
-analytically never needs to implement it. `condensed_corrector` receives the
+the completed `nq × ndofs` block). `condensed_corrector` receives the
 item's [`CellArgs`](@ref), so it serves either election — read the store, or
 re-derive the block from `args.states`.
+
+Two patterns transport a corrector, and they answer different questions. An
+element that goes through `ADElementCache`'s generic combination implements
+[`condensed_corrector`](@ref) — the seam that path reads. An element serving
+`Consistent` kinds analytically never implements it: it reads and writes the
+same per-item corrector directly, through
+[`item_state`](@ref)/[`set_item_state!`](@ref) on its own [`ItemStates`](@ref)
+field, from inside its own analytic kernel — the same storage an
+[`ItemStates`](@ref) field always is, with no generic combination in between.
 
 The parameter and time sensitivities have the same shape of generic path, out
 of the element's LOCAL CONDITIONS rather than a stored block:

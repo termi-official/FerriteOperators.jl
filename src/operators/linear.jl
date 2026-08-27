@@ -1,3 +1,10 @@
+"""
+    LinearFerriteOperator <: AbstractLinearOperator
+
+The operator [`setup_operator`](@ref) returns for an [`AbstractLinearIntegrator`](@ref):
+the assembled load vector `op.b` plus the [`AssemblyEngine`](@ref) and
+integrator that built it.
+"""
 @concrete struct LinearFerriteOperator <: AbstractLinearOperator
     b
     engine

@@ -164,6 +164,31 @@ reduce_on_subdomains(task, engine::AssemblyEngine) =
     reduce_on_subdomains(task, engine.strategy, engine.subdomain_caches)
 
 """
+    get_dof_handler(op) -> AbstractDofHandler
+
+The `DofHandler` `op` assembles against (`op.engine.dh`).
+"""
+get_dof_handler(op) = op.engine.dh
+
+"""
+    get_strategy(op) -> AssemblyStrategy
+
+The [`AssemblyStrategy`](@ref) `op` was set up with (`op.engine.strategy`).
+"""
+get_strategy(op) = op.engine.strategy
+
+"""
+    get_subdomain_caches(op) -> Vector{SubdomainCache}
+
+The per-subdomain caches `op`'s engine assembles over (`op.engine.subdomain_caches`).
+Each entry's `.domain` names what the subdomain serves — a
+[`FacetItemDomain`](@ref) for tying facets, a cell/boundary or algebraic
+descriptor otherwise — so downstream code can filter subdomains by served
+domain (e.g. which chambers a coupler ties).
+"""
+get_subdomain_caches(op) = op.engine.subdomain_caches
+
+"""
     AbstractNonlinearOperator
 
 Models of a nonlinear function `F(u)v`, where `v` is a test function.
@@ -269,6 +294,7 @@ end
 mul!(out::AbstractVector, op::NullOperator, in::AbstractVector) = out .= 0.0
 mul!(out::AbstractVector, op::NullOperator, in::AbstractVector, α, β) = out .= β*out
 Base.eltype(op::NullOperator{T}) where {T} = T
+Base.size(op::NullOperator{T,S1,S2}) where {T,S1,S2} = (S1, S2)
 Base.size(op::NullOperator{T,S1,S2}, axis) where {T,S1,S2} = axis == 1 ? S1 : (axis == 2 ? S2 : error("faulty axis!"))
 
 get_matrix(op::NullOperator{T, SIN, SOUT}) where {T, SIN, SOUT} = spzeros(T,SIN,SOUT)
