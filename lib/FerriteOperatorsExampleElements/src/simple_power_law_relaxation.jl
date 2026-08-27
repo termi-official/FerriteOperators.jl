@@ -320,6 +320,59 @@ function FerriteOperators.condense_cell!(cache::SimpleCondensedPowerLawRelaxatio
     return CondensationReport(converged, NQP, total_iterations, worst_iterations, worst_cell, worst_qp, worst_residual, 1.0)
 end
 
+"""
+    condense_cell!(cache::SimpleCondensedPowerLawRelaxationCache, args, ::Nothing) -> CondensationReport
+
+The residual-only election: the same local solves writing the same trial `q`,
+with neither slope formed. `condense_internal!` has already dropped the stores,
+so the `Consistent` kernels refuse until a weighted condensation refills them.
+"""
+function FerriteOperators.condense_cell!(cache::SimpleCondensedPowerLawRelaxationCache{NQP}, args::CellArgs, ::Nothing) where {NQP}
+    cv  = cache.cv
+    mat = _plr_params(cache, args.p)
+    γ̃   = stage_scaling(args.ctx)
+    tol = _plr_tolerance(cache, args.ctx)
+    id  = cellid(args.cell)
+
+    dₑ     = args.states.u
+    qₑ     = args.states.q
+    qₑprev = args.states.qprev
+
+    converged        = true
+    total_iterations = 0
+    worst_iterations = 0
+    worst_cell       = 0
+    worst_qp         = 0
+    worst_residual   = 0.0
+
+    @inbounds for qp in 1:NQP
+        u = function_value(cv, qp, dₑ)
+        q, _, iterations, resid, ok = _plr_local_solve(cache, mat, u, qₑprev[qp], γ̃, tol)
+        qₑ[qp] = q
+
+        converged &= ok
+        total_iterations += iterations
+        if iterations > worst_iterations
+            worst_iterations = iterations
+            worst_cell = id
+            worst_qp = qp
+        end
+        worst_residual = max(worst_residual, resid)
+    end
+
+    return CondensationReport(converged, NQP, total_iterations, worst_iterations, worst_cell, worst_qp, worst_residual, 1.0)
+end
+
+# The election is unavailable to a recomputing cache, and the reason is this element's own: it
+# re-derives its slopes at the point of use from the chain-rule weight `condense_cell!` retained, so
+# the weight is stored corrector data under another name. `invalidate_correctors!` is a no-op here,
+# so a silently kept stale weight is exactly what the election is supposed to prevent.
+FerriteOperators.condense_cell!(::_PLRRecomputing, args::CellArgs, ::Nothing) = throw(ArgumentError(
+    "A `Recompute()` power-law relaxation cache cannot be condensed residual-only: its " *
+    "`Consistent` kernels re-derive their slopes from the chain-rule weight this hook retains, " *
+    "and a residual-only condensation carries no weight to retain. Pass the stage weights, or " *
+    "construct the cache with the `Stored()` election."))
+
 function _plr_store_correctors!(cache::SimpleCondensedPowerLawRelaxationCache, id, dqdu, dqdθ)
     FerriteOperators.set_item_state!(cache.correctors, id, dqdu)
     FerriteOperators.set_item_state!(cache.param_correctors, id, dqdθ)

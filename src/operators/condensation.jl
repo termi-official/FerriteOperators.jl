@@ -72,8 +72,30 @@ function Base.:+(a::CondensationReport{T}, b::CondensationReport{T}) where {T}
     )
 end
 
+# The fold's argmax carriers decoded back into the item they name -- what a
+# caller reporting a failed condensation has to say, and the only place the
+# sign convention on `worst_cell` is turned back into words. `worst_*` is the
+# argmax over ITERATIONS, so it names the failing item exactly when failure is
+# by iteration exhaustion, which is how a local Newton usually fails and is not
+# a guarantee.
+function Base.show(io::IO, r::CondensationReport)
+    print(io, "CondensationReport(", r.converged ? "converged" : "NOT converged",
+        ", solves = ", r.solves, ", iterations = ", r.iterations)
+    if r.worst_cell > 0
+        print(io, ", worst cell ", r.worst_cell, " qp ", r.worst_qp)
+    elseif r.worst_cell < 0
+        print(io, ", worst algebraic item ", -r.worst_cell)
+    end
+    r.worst_iterations > 0 && print(io, " at ", r.worst_iterations, " iterations")
+    print(io, ", worst local residual ", r.worst_residual)
+    r.dt_factor < one(r.dt_factor) && print(io, ", dt_factor = ", r.dt_factor)
+    print(io, ")")
+    return nothing
+end
+
 """
     condense_cell!(cache, args::CellArgs, weights::NamedTuple) -> CondensationReport
+    condense_cell!(cache, args::CellArgs, ::Nothing) -> CondensationReport
 
 Element hook run once per item by [`condense_internal!`](@ref): solve every
 quadrature point's local problem, write the trial state into `args.states.q`
@@ -87,6 +109,15 @@ local model (e.g. a rate slot under Newmark), chained into the corrector
 INSIDE the local inverse, where post-hoc weighting of separated partial
 Jacobians cannot put them; being per-sweep solver data rather than item data,
 a recomputing element retains them per cache.
+
+`weights === nothing` is the RESIDUAL-ONLY election: solve for `q` and form no
+corrector at all. It exists because a sweep that only evaluates the residual
+reads `q` and never a corrector, so forming one is wasted work — see
+[`condense_internal!`](@ref) for the staleness the election buys with it. The
+`q` this branch writes must be BIT-IDENTICAL to the one the weighted branch
+writes: the election governs what is formed *after* the local solve, never the
+solve. Implementing it is optional — an element without a `::Nothing` method
+simply cannot be condensed residual-only, and says so as a `MethodError`.
 
 This is the only hook allowed to EVOLVE a condensed element's state:
 `assemble_cell!` kernels are pure evaluations at the `q` this hook wrote and
@@ -110,6 +141,9 @@ kernel reads — item-keyed (an `ItemStates` store indexed by `args.item.index`,
 the mechanism a condensed cell cache uses with a cellid), or nothing at all
 under a [`Recompute`](@ref) election. `weights` are the solver's chain-rule
 scalars, exactly as for [`condense_cell!`](@ref).
+
+`weights === nothing` is the residual-only election, with the same meaning it
+has for [`condense_cell!`](@ref): solve for `q`, form no corrector.
 
 Report the item in `worst_cell` as `-args.item.index` (see
 [`CondensationReport`](@ref)'s family-disambiguation convention), never the
@@ -182,14 +216,16 @@ The kind [`condense_internal!`](@ref) rides: a `FunctionalFamily` kind whose
 kernel ALSO writes back — the one combination the three built-in driver
 bodies ([`primal_cell_sweep!`](@ref), [`sensitivity_cell_sweep!`](@ref),
 [`functional_cell_sweep`](@ref)) don't have. `weights` are
-[`condense_cell!`](@ref)'s per-slot scalars; `T` fixes the report's
+[`condense_cell!`](@ref)'s per-slot scalars, or `nothing` for the
+residual-only election; `T` fixes the report's
 [`functional_value_type`](@ref) so a device reduction can preallocate typed
 partials.
 """
-struct CondensationKind{T, W <: NamedTuple}
+struct CondensationKind{T, W <: Union{NamedTuple, Nothing}}
     weights::W
 end
-CondensationKind(weights::NamedTuple) = CondensationKind{Float64, typeof(weights)}(weights)
+CondensationKind(weights::Union{NamedTuple, Nothing}) =
+    CondensationKind{Float64, typeof(weights)}(weights)
 
 functional_value_type(::CondensationKind{T}) where {T} = CondensationReport{T}
 # Value-returning over the two families that own condensed internal state; a
@@ -244,7 +280,7 @@ function condensation_cell_sweep!(kind::CondensationKind, task, ws)
 end
 
 """
-    condense_internal!(op, weights::NamedTuple, states::NamedTuple, p, ctx) -> CondensationReport
+    condense_internal!(op, weights::Union{NamedTuple, Nothing}, states::NamedTuple, p, ctx) -> CondensationReport
     condense_internal!(op, states, p, ctx)
 
 Solve every condensed element's local problem over the WHOLE domain, write the
@@ -266,17 +302,36 @@ and the ordering requirement is the caller's alone.
 `weights` are the solver's chain-rule scalars passed through to
 [`condense_cell!`](@ref); the 4-argument form defaults them to `(u = 1.0,)`.
 
+`weights === nothing` elects a RESIDUAL-ONLY condensation: every local problem
+is still solved and `q` is still written — bit-identically, the election never
+touches the solve — but no corrector is formed. A residual sweep reads `q` and
+no corrector, so on that route the corrector is pure waste. What the election
+costs is the corrector's validity: every element's store is invalidated up
+front, so a `Consistent` sweep at this state throws through
+[`item_state`](@ref) instead of combining correctors belonging to some earlier
+trial point. Condensing again WITH weights restores them.
+
+A [`Recompute`](@ref) cache has no store for the invalidation to act on, so the
+election protects it only as far as it is genuinely stateless. An element that
+retains ANY per-sweep solver data to recompute from — the weights themselves,
+typically — holds corrector state under another name and should refuse the
+election rather than recompute from a weight no residual-only sweep supplied.
+
 Value-returning WITH write-back, riding `FunctionalFamily` through
 [`fold_items`](@ref)/[`reduce_on_device`](@ref)/[`reduce_on_subdomains`](@ref),
 so the deterministic fold order and the `_check_reduction_domain` structural
 checks hold for it too. Always its own domain traversal, run before the
 evaluation sweeps it feeds.
 """
-function condense_internal!(op, weights::NamedTuple, states::NamedTuple, p, ctx)
+function condense_internal!(op, weights::Union{NamedTuple, Nothing}, states::NamedTuple, p, ctx)
     _check_declared_slots(op.engine, states)
     _check_rate_slots(states)
     kind = CondensationKind(weights)
     _check_reduction_domain(kind, op.engine)
+    # Before the sweep, not after: a residual-only sweep leaves every slot
+    # untouched, so whatever is stamped valid afterwards is exactly what was
+    # valid before — correctors of a trial point this call has now moved off.
+    weights === nothing && _invalidate_all_correctors!(op)
     task = AssemblyTask(kind, nothing, states, p, ctx)
     report = reduce_on_subdomains(task, op.engine)
     return report === nothing ? zero(CondensationReport{Float64}) : report
@@ -318,10 +373,17 @@ from that pair is the committed point's own.
 """
 function rollback_state!(op, u::AbstractVector, committed::AbstractVector)
     u .= committed
+    _invalidate_all_correctors!(op)
+    return u
+end
+
+# Every element cache of every subdomain on every device, since a corrector
+# store is item-keyed and shared across workers rather than partitioned.
+function _invalidate_all_correctors!(op)
     for sc in op.engine.subdomain_caches, ws in sc.device_cache
         invalidate_correctors!(ws.element)
     end
-    return u
+    return nothing
 end
 
 """

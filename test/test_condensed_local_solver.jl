@@ -325,6 +325,57 @@ end
     check_freshness_contract(op, states, u, ctx)
 end
 
+@testset "Residual-only condensation" begin
+    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    qrc      = QuadratureRuleCollection(2)
+    mat      = NortonRelaxationParameters()
+
+    @testset "solves the same problem and forms no corrector" begin
+        (; op, u, states, ctx) = relaxation_case(strategy, qrc; material = mat)
+        r = zeros(residual_size(op))
+
+        # Both routes have to start from the same point: `q` is written into the
+        # very vector `u` is read from, so a second condensation would warm start
+        # off the first one's answer and the comparison would be of two
+        # different problems.
+        u0 = copy(u)
+        weighted = condense_internal!(op, (u = 1.0,), states, nothing, ctx)
+        q_weighted = copy(u)
+        r_weighted = zeros(residual_size(op))
+        evaluate!(op, r_weighted, states, nothing, ctx)
+
+        u .= u0
+        residual_only = condense_internal!(op, nothing, states, nothing, ctx)
+        evaluate!(op, r, states, nothing, ctx)
+
+        # Bitwise, not to a tolerance: the election governs what is formed after
+        # the local solve and must not reach the solve at all.
+        @test u == q_weighted
+        @test r == r_weighted
+        @test residual_only.converged == weighted.converged
+        @test residual_only.solves == weighted.solves
+        @test residual_only.iterations == weighted.iterations
+
+        # And what it costs: the correctors this state had are gone, so the
+        # tangent refuses rather than combining the previous trial point's.
+        err = @test_throws ArgumentError update_linearization!(op, r, states, nothing, ctx)
+        @test occursin("has no valid state", err.value.msg)
+        condense_internal!(op, (u = 1.0,), states, nothing, ctx)
+        update_linearization!(op, r, states, nothing, ctx)   # restored
+    end
+
+    @testset "refused by an element that recomputes from retained weights" begin
+        # `Recompute()` has no store for the up-front invalidation to act on, so
+        # the election is only safe for an element that truly keeps nothing. This
+        # one keeps the chain-rule weight, which is corrector state under another
+        # name, and says so instead of recomputing from a stale one.
+        (; op, states, ctx) =
+            relaxation_case(strategy, qrc; material = mat, corrector = Recompute())
+        err = @test_throws ArgumentError condense_internal!(op, nothing, states, nothing, ctx)
+        @test occursin("cannot be condensed residual-only", err.value.msg)
+    end
+end
+
 @testset "FrozenQ election" begin
     strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)

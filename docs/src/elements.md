@@ -549,6 +549,18 @@ report = condense_internal!(op, weights, states, p, ctx)   # solves every q, sto
 update_linearization!(op, r, states, p, ctx)                # pure evaluation at frozen q
 ```
 
+A sweep that only evaluates the residual reads `q` and no corrector, so passing
+`weights = nothing` elects a residual-only condensation: the same local solves,
+the same `q` down to the bit, no corrector formed. It invalidates the corrector
+stores as it goes, so a `Consistent` sweep at that state throws instead of
+combining an earlier trial point's corrections; condensing again with weights
+restores them.
+
+```julia
+condense_internal!(op, nothing, states, p, ctx)            # solves every q, forms no corrector
+evaluate!(op, r, states, p, ctx)                           # the only sweep this state admits
+```
+
 [`condense_internal!`](@ref) is the ONLY writer of `q`: it runs once over the
 whole domain, solves each quadrature point's local problem in
 [`condense_cell!`](@ref) — the one element hook allowed to evolve internal
