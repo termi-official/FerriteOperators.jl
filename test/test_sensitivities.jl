@@ -177,7 +177,7 @@ stationary_ctx(t) = TimeIntegrationContext(t, 1.0, 1.0)
     end
 
     @testset "parallel strategy consistency" begin
-        pstrategy = PerColorAssemblyStrategy(PolyesterDevice(2))
+        pstrategy = AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling())
         pop = setup_operator(pstrategy, SourceDiffusionIntegrator(qrc, :u), dh)
         Bs = zeros(n, 1); update_parameter_jacobian!(Bs, op, u, p)
         Bp = zeros(n, 1); update_parameter_jacobian!(Bp, pop, u, p)
@@ -336,7 +336,7 @@ end
         @test Jv ≈ hop.J * hv rtol = 1e-10
         @test hu == hu_before
 
-        pop = setup_operator(PerColorAssemblyStrategy(PolyesterDevice(2)), hint, hdh)
+        pop = setup_operator(AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()), hint, hdh)
         Jvp = zeros(hn)
         state_jvp!(Jvp, pop, hv, hu, 0.0)
         @test Jvp ≈ Jv rtol = 1e-13
@@ -351,7 +351,7 @@ end
     qrc  = QuadratureRuleCollection(2)
     n    = ndofs(dh)
 
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     integrator = SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
     op = setup_operator(strategy, integrator, dh)
 
@@ -455,7 +455,7 @@ end
 
 @testset "Preallocated AD sweeps" begin
     qrc = QuadratureRuleCollection(2)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
 
     @testset "chunked AD Jacobian (local size > chunk) equals assembled stiffness" begin
         # 27 dofs per cell forces ForwardDiff's chunk mode through the

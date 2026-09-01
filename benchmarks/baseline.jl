@@ -144,7 +144,7 @@ function benchmark_assembly_ferriteoperators(N = 20)
     close!(dh)
 
     ## Setup the operator
-    op = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+    op = setup_operator(AssemblyStrategy(SequentialCPUDevice()), integrator, dh)
     u = zeros(ndofs(op.engine.dh))
     g = zeros(ndofs(op.engine.dh))
     update_linearization!(op, g, u, 0.5)

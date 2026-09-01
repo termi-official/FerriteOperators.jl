@@ -61,7 +61,7 @@ using TimerOutputs
         close!(dh)
         qrc        = QuadratureRuleCollection(2)
         integrator = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
-        strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+        strategy   = AssemblyStrategy(SequentialCPUDevice())
         op         = setup_operator(strategy, integrator, dh)
 
         qv_op = setup_qvector(Float64, op)

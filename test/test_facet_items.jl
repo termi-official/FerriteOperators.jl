@@ -5,7 +5,7 @@ using SparseArrays
 
 include(joinpath(@__DIR__, "fixture_elements.jl"))
 
-sequential_strategy() = SequentialAssemblyStrategy(SequentialCPUDevice())
+sequential_strategy() = AssemblyStrategy(SequentialCPUDevice())
 
 # A scalar field on a quad grid plus the facet set two boundary facetsets make
 # together — the corner cell owns TWO declared facets, which is what a facet

@@ -12,7 +12,7 @@ else
 
     include(joinpath(@__DIR__, "fixture_elements.jl"))
 
-    sequential_strategy() = SequentialAssemblyStrategy(SequentialCPUDevice())
+    sequential_strategy() = AssemblyStrategy(SequentialCPUDevice())
 
     # A condensed algebraic cache that records the local tolerance its
     # condensation was asked for and reports the convergence verdict a test

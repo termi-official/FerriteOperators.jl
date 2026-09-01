@@ -20,6 +20,9 @@ patterns marked ⚠ below.
 | — (volumetric `pₑ` reused on facets) | `query_facet_parameters(cache, cell, lfi, p)` per facet |
 | `query_element_unknown_buffer(cache, ue)` | removed — slot buffers are workspace-owned |
 | `SequentialAssemblyStrategy{Dev}` as a **type** ⚠ | `AssemblyStrategy{<:FullAssembly, SequentialScheduling, Dev}` |
+| `SequentialAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device)` |
+| `PerColorAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device; scheduling = ColoredScheduling())` |
+| `ElementAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device; form = ElementAssembly())` |
 | `ElementAssemblyOperatorStrategy` | `AssemblyStrategy{<:ElementAssemblyData}` |
 | `op.dh`, `op.strategy`, `op.subdomain_caches` | `op.engine.dh`, `op.engine.strategy`, `op.engine.subdomain_caches` |
 | `op.J` / `op.A` / `op.b`, `residual_size`, `unknown_size` | unchanged |
@@ -42,9 +45,12 @@ patterns marked ⚠ below.
 | `(op::LinearizedFerriteOperator)(residual, u, p)` (callable) | `evaluate!(op, residual, u, p)` |
 | bilinear/nonlinear operator under `ElementAssemblyStrategy` ⚠ | rejected at setup — the `ElementAssembly` form holds no matrix and serves vector-target (linear) operators only |
 
-Constructor *calls* like `SequentialAssemblyStrategy(device)` still work — the
-names are convenience constructors for the common strategy compositions. Only
-**dispatch on them as types** breaks.
+`SequentialAssemblyStrategy`, `PerColorAssemblyStrategy` and
+`ElementAssemblyStrategy` are removed outright — 0.4.0 is unreleased, so there
+is no deprecation shim for the constructor *calls* either. Use the keyword
+convenience constructor instead: `AssemblyStrategy(device)`,
+`AssemblyStrategy(device; scheduling = ColoredScheduling())`,
+`AssemblyStrategy(device; form = ElementAssembly())`.
 
 ## Example elements
 

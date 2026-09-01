@@ -5,7 +5,7 @@ CurrentModule = FerriteOperators
 # Operators and entry points
 
 ```julia
-strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+strategy = AssemblyStrategy(SequentialCPUDevice())
 op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev))
 
 # canonical states/ctx forms; u-vector conveniences exist for stationary use

@@ -231,7 +231,7 @@ end
     end
 
     @testset "condensed operator: consistent tangent vs FD, inadmissible kinds skipped" begin
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        strategy = AssemblyStrategy(SequentialCPUDevice())
         vop = visco_testbed(strategy, QuadratureRuleCollection(2)).op
         vu = 1e-3 .* sin.(0.2 .* (1:unknown_size(vop)))
         vuprev = zeros(unknown_size(vop))

@@ -134,39 +134,25 @@ struct AssemblyStrategy{F <: AbstractAssemblyForm, S <: AbstractSchedulingPolicy
 end
 
 """
-    SequentialAssemblyStrategy(device)
+    AssemblyStrategy(device; form = FullAssembly(), scheduling = SequentialScheduling())
 
-[`FullAssembly`](@ref) under [`SequentialScheduling`](@ref), i.e. one chunk.
-The default composition, and the only one that admits the global-dof
-declarations ([`global_dofs`](@ref), [`facet_item_global_dofs`](@ref)) and the
-algebraic item family.
+Keyword convenience over the 3-arg constructor: the form/scheduling/device
+axes are the model, and the defaults here cover the common composition
+([`FullAssembly`](@ref) under [`SequentialScheduling`](@ref), i.e. one chunk —
+the only composition that admits the global-dof declarations
+([`global_dofs`](@ref), [`facet_item_global_dofs`](@ref)) and the algebraic
+item family). Pass `scheduling = ColoredScheduling()` for a parallel device
+without atomic support, or `form = ElementAssembly()` for the per-element
+linear-operator path.
 """
-SequentialAssemblyStrategy(device) = AssemblyStrategy(FullAssembly(), SequentialScheduling(), device)
-
-"""
-    PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream)
-
-[`FullAssembly`](@ref) under [`ColoredScheduling`](@ref), each color a barrier
-the parallel `device` runs without atomics. `alg` is the Ferrite coloring
-algorithm.
-"""
-PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = AssemblyStrategy(FullAssembly(), ColoredScheduling(alg), device)
-
-"""
-    ElementAssemblyStrategy(device)
-
-[`ElementAssembly`](@ref) under [`SequentialScheduling`](@ref), for a linear
-operator. Its per-element dof maps come from `celldofs`, so a subdomain
-declaring [`global_dofs`](@ref) or [`facet_item_global_dofs`](@ref) is rejected
-at setup, as is a bilinear or nonlinear operator (the form holds no matrix).
-"""
-ElementAssemblyStrategy(device) = AssemblyStrategy(ElementAssembly(), SequentialScheduling(), device)
+AssemblyStrategy(device::AbstractDevice; form = FullAssembly(), scheduling = SequentialScheduling()) =
+    AssemblyStrategy(form, scheduling, device)
 
 """
     default_strategy()
 
 The recommended shared-memory [`AssemblyStrategy`](@ref) for whatever is currently loaded:
-[`SequentialAssemblyStrategy`](@ref) over a [`PolyesterDevice`](@ref) once Polyester.jl is loaded
+[`AssemblyStrategy`](@ref) over a [`PolyesterDevice`](@ref) once Polyester.jl is loaded
 (`using Polyester` activates `FerriteOperatorsPolyesterExt`, which is what gives `PolyesterDevice` its
 `execute_on_device!`/`reduce_on_device` methods — without the extension the struct exists but has no
 execution route), and over a [`SequentialCPUDevice`](@ref) otherwise. A setup-time call: the extension
@@ -177,8 +163,8 @@ better defaults become available — a caller that needs a strategy that does no
 construct one explicitly instead.
 """
 default_strategy() = Base.get_extension(FerriteOperators, :FerriteOperatorsPolyesterExt) === nothing ?
-    SequentialAssemblyStrategy(SequentialCPUDevice()) :
-    SequentialAssemblyStrategy(PolyesterDevice())
+    AssemblyStrategy(SequentialCPUDevice()) :
+    AssemblyStrategy(PolyesterDevice())
 
 function setup_operator_strategy_cache(strategy::AssemblyStrategy{ElementAssembly, <:AbstractSchedulingPolicy, <:AbstractCPUDevice}, integrator, dh)
     return AssemblyStrategy(ElementAssemblyData(EAVector(dh)), strategy.scheduling, strategy.device)

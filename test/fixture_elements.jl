@@ -29,7 +29,7 @@ function scalar_quad_testbed(dims = (4, 3); order = 2)
     add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
     close!(dh)
     return (; grid, dh, n = ndofs(dh), qrc = QuadratureRuleCollection(order),
-              strategy = SequentialAssemblyStrategy(SequentialCPUDevice()))
+              strategy = AssemblyStrategy(SequentialCPUDevice()))
 end
 
 # Compressible Neo-Hookean strain energy, the material the bundled

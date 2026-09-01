@@ -8,9 +8,10 @@
 # unregistered lib/FerriteOperatorsExampleElements, which depends on core and
 # so cannot be depended on back), so the workload below defines its own
 # throwaway diffusion double. It runs `execute_on_device!`/`reduce_on_device`
-# only for (SequentialAssemblyStrategy, SequentialCPUDevice): PolyesterDevice's
-# methods live in the weak-dependency extension FerriteOperatorsPolyesterExt,
-# which core cannot load, so that device has no route to precompile from here.
+# only for (FullAssembly, SequentialScheduling, SequentialCPUDevice):
+# PolyesterDevice's methods live in the weak-dependency extension
+# FerriteOperatorsPolyesterExt, which core cannot load, so that device has no
+# route to precompile from here.
 #
 # Set the `precompile_workload` preference to `false` to skip the workload,
 # e.g. for a fast development rebuild:
@@ -117,7 +118,7 @@ if Preferences.@load_preference("precompile_workload", true)
         add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
         close!(dh)
         qrc      = QuadratureRuleCollection(2)
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        strategy = AssemblyStrategy(SequentialCPUDevice())
         u = zeros(ndofs(dh))
         r = zeros(ndofs(dh))
 

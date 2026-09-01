@@ -116,7 +116,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
                 :u
             )
         ]
-            bilinop_base = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+            bilinop_base = setup_operator(AssemblyStrategy(SequentialCPUDevice()), integrator, dh)
             # Check that assembly works
             @test norm(bilinop_base.A) ≈ 0.0
             update_operator!(bilinop_base, 0.0)
@@ -134,9 +134,9 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
             @test rb ≈ bilinop_base.A * ub rtol = 1e-13
 
             @testset "Strategy $strategy" for strategy in (
-                    PerColorAssemblyStrategy(SequentialCPUDevice()),
-                    PerColorAssemblyStrategy(PolyesterDevice(1)),
-                    PerColorAssemblyStrategy(PolyesterDevice(2)),
+                    AssemblyStrategy(SequentialCPUDevice(); scheduling = ColoredScheduling()),
+                    AssemblyStrategy(PolyesterDevice(1); scheduling = ColoredScheduling()),
+                    AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()),
             )
                 bilinop = setup_operator(strategy, integrator, dh)
                 # Consistency
@@ -155,7 +155,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
         close!(dh)
         qrc = QuadratureRuleCollection(2)
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        strategy = AssemblyStrategy(SequentialCPUDevice())
         ctx = TimeIntegrationContext(2.0, 0.1, 0.1)
 
         Mop = setup_operator(strategy, SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
@@ -195,7 +195,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         apply_analytical!(u, dh, :u, x->0.01x.^2)
 
         integrator = SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), QuadratureRuleCollection(2), :u)
-        nlop_base = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+        nlop_base = setup_operator(AssemblyStrategy(SequentialCPUDevice()), integrator, dh)
 
         # Check that assembly works
         @test norm(nlop_base.J) ≈ 0.0
@@ -228,10 +228,10 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         residual_baseline = copy(residual)
 
         @testset "Full Assembly Strategy $strategy" for strategy in (
-            SequentialAssemblyStrategy(SequentialCPUDevice()),
-            PerColorAssemblyStrategy(SequentialCPUDevice()),
-            PerColorAssemblyStrategy(PolyesterDevice(1)),
-            PerColorAssemblyStrategy(PolyesterDevice(2)),
+            AssemblyStrategy(SequentialCPUDevice()),
+            AssemblyStrategy(SequentialCPUDevice(); scheduling = ColoredScheduling()),
+            AssemblyStrategy(PolyesterDevice(1); scheduling = ColoredScheduling()),
+            AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()),
         )
             nlop = setup_operator(strategy, integrator, dh)
             # Consistency: each of the three entry points against the baseline.
@@ -254,17 +254,17 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         # no matrix, so a matrix-target operator is rejected at setup rather
         # than built with a matrix it can never fill.
         @testset "Element Assembly Strategy rejects matrix targets $strategy" for strategy in (
-            ElementAssemblyStrategy(SequentialCPUDevice()),
-            ElementAssemblyStrategy(PolyesterDevice(1)),
+            AssemblyStrategy(SequentialCPUDevice(); form = ElementAssembly()),
+            AssemblyStrategy(PolyesterDevice(1); form = ElementAssembly()),
         )
             @test_throws ArgumentError setup_operator(strategy, integrator, dh)
         end
     end
 
     @testset "Element Assembly Strategy (vector target) $strategy" for strategy in (
-        ElementAssemblyStrategy(SequentialCPUDevice()),
-        ElementAssemblyStrategy(PolyesterDevice(1)),
-        ElementAssemblyStrategy(PolyesterDevice(2)),
+        AssemblyStrategy(SequentialCPUDevice(); form = ElementAssembly()),
+        AssemblyStrategy(PolyesterDevice(1); form = ElementAssembly()),
+        AssemblyStrategy(PolyesterDevice(2); form = ElementAssembly()),
     )
         # The per-element accumulation collapses into exactly the vector full
         # assembly scatters directly.
@@ -274,7 +274,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         close!(dh)
 
         m   = SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u)
-        ref = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), m, dh)
+        ref = setup_operator(AssemblyStrategy(SequentialCPUDevice()), m, dh)
         update_operator!(ref, nothing)
 
         op = setup_operator(strategy, m, dh)
@@ -288,7 +288,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
 
     @testset "Condensed Elements" begin
         qrc = QuadratureRuleCollection(2)
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        strategy = AssemblyStrategy(SequentialCPUDevice())
         tb = visco_testbed(strategy, qrc, (3, 3, 3);
                            transform = x->Vec{3}(sign.(x.-0.5) .* (x.-0.5).^2))
         nlop, dh, grid = tb.op, tb.dh, tb.grid
@@ -349,7 +349,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         close!(dh1)
 
         integrator = FerriteOperators.MassProlongatorIntegrator(QuadratureRuleCollection(4), :u)
-        strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+        strategy   = AssemblyStrategy(SequentialCPUDevice())
         op         = setup_transfer_operator(strategy, integrator, dh2, dh1)
         update_operator!(op, nothing)
 
@@ -414,7 +414,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         end
 
         integrator = FerriteOperators.NestedMassProlongatorIntegrator(QuadratureRuleCollection(4), :u)
-        strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+        strategy   = AssemblyStrategy(SequentialCPUDevice())
         op = setup_nested_transfer_operator(strategy, integrator, dh_fine, dh_coarse, fine2coarse, child_ref_coords)
         update_operator!(op, nothing)
 
@@ -432,7 +432,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         end
 
         @test_throws ArgumentError setup_nested_transfer_operator(
-            PerColorAssemblyStrategy(SequentialCPUDevice()), integrator, dh_fine, dh_coarse, fine2coarse, child_ref_coords)
+            AssemblyStrategy(SequentialCPUDevice(); scheduling = ColoredScheduling()), integrator, dh_fine, dh_coarse, fine2coarse, child_ref_coords)
     end
 
     @testset "Operator sizes" begin
@@ -462,7 +462,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         @test_throws ArgumentError FerriteOperators.setup_device_instances(device, FerriteOperators.EAIndexWorkspace(0), 1)
         @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, device, nothing, [])
         @test_throws ArgumentError FerriteOperators.setup_operator_strategy_cache(
-            ElementAssemblyStrategy(device), nothing, nothing)
+            AssemblyStrategy(device; form = ElementAssembly()), nothing, nothing)
     end
 
     @testset "Generic setup_device_instances" begin
@@ -505,7 +505,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         add!(dh1, :u, Lagrange{RefHexahedron,1}())
         close!(dh1)
         integrator = FerriteOperators.MassProlongatorIntegrator(QuadratureRuleCollection(4), :u)
-        @test_throws ArgumentError setup_transfer_operator(PerColorAssemblyStrategy(SequentialCPUDevice()), integrator, dh2, dh1)
+        @test_throws ArgumentError setup_transfer_operator(AssemblyStrategy(SequentialCPUDevice(); scheduling = ColoredScheduling()), integrator, dh2, dh1)
     end
 
     @testset "Dummy Multi-Physics" begin
@@ -513,7 +513,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         addcellset!(grid, "right_cells", x -> x[1] ≥ 0.0)
         addcellset!(grid, "left_cells", x -> x[1] ≤ 0.0)
 
-        strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+        strategy = AssemblyStrategy(SequentialCPUDevice())
 
         dh = DofHandler(grid)
         sdh1 = SubDofHandler(dh, getcellset(grid, "right_cells"))
@@ -699,7 +699,7 @@ function polyester_sweep_allocations(dims)
     dh   = DofHandler(grid)
     add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
     close!(dh)
-    op = setup_operator(SequentialAssemblyStrategy(PolyesterDevice(1)),
+    op = setup_operator(AssemblyStrategy(PolyesterDevice(1)),
                         SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
     for _ in 1:3   # warmup: compilation, and Polyester's own first-batch setup
         update_operator!(op, nothing)
@@ -728,7 +728,7 @@ FerriteOperators.setup_element_cache(::BareEvaluationIntegrator, ::SubDofHandler
     dh   = DofHandler(grid)
     add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
     close!(dh)
-    strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy   = AssemblyStrategy(SequentialCPUDevice())
     qrc        = QuadratureRuleCollection(2)
     integrator = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
 
@@ -793,7 +793,7 @@ end
         add!(sdh, :u, Lagrange{RefQuadrilateral, 1}())
     end
     close!(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
 
     op = setup_operator(strategy, BilinearMultiDomainIntegrator(Dict(

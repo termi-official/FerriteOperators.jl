@@ -17,7 +17,7 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
     close!(dh)
     qrc        = QuadratureRuleCollection(2)
     integrator = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
-    strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy   = AssemblyStrategy(SequentialCPUDevice())
 
     # --- Result is consistent with manual per-cell indexing ---
     @testset "evaluate_quadrature! consistent with per-cell access" begin
@@ -60,8 +60,8 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
 
     # --- Polyester (threaded) device produces the same result ---
     @testset "PolyesterDevice consistency" begin
-        strategy_seq = SequentialAssemblyStrategy(SequentialCPUDevice())
-        strategy_par = PerColorAssemblyStrategy(PolyesterDevice(4))
+        strategy_seq = AssemblyStrategy(SequentialCPUDevice())
+        strategy_par = AssemblyStrategy(PolyesterDevice(4); scheduling = ColoredScheduling())
         qop_seq = setup_operator(strategy_seq, integrator, dh)
         qop_par = setup_operator(strategy_par, integrator, dh)
         q_seq   = setup_qvector(Float64, dh, qrc)
@@ -86,7 +86,7 @@ end
     close!(dh)
     qrc        = QuadratureRuleCollection(2)
     integrator = SimpleHyperelasticityIntegrator(NeoHookean(10.0, 0.3), qrc, :u)
-    strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy   = AssemblyStrategy(SequentialCPUDevice())
     qop        = setup_operator(strategy, integrator, dh)
     q          = setup_qvector(Float64, dh, qrc)
     u          = zeros(ndofs(dh))
@@ -146,7 +146,7 @@ end
     close!(dh)
     qrc        = QuadratureRuleCollection(2)
     integrator = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
-    strategy   = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy   = AssemblyStrategy(SequentialCPUDevice())
     qop        = setup_operator(strategy, integrator, dh)
     u          = zeros(ndofs(dh))
     f_cellid   = (ue, qp, cell, element_cache, pe, ctx) -> Float64(cellid(cell))

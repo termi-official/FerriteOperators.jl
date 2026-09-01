@@ -21,7 +21,7 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
     right = Set(getfacetset(grid, "right"))
     integrator = LinearNeumannProbe(t̄, :u, right)
 
-    op = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+    op = setup_operator(AssemblyStrategy(SequentialCPUDevice()), integrator, dh)
     update_operator!(op, nothing)
     area = 4.0
     @test sum(op.b) ≈ t̄ * area rtol = 1e-12
@@ -29,7 +29,7 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
     @test count(!iszero, op.b) == 9
 
     # parallel path through the same driver
-    opp = setup_operator(PerColorAssemblyStrategy(PolyesterDevice(2)), integrator, dh)
+    opp = setup_operator(AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()), integrator, dh)
     update_operator!(opp, nothing)
     @test opp.b ≈ op.b rtol = 1e-13
 end
@@ -169,7 +169,7 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
     add!(dh, :u, Lagrange{RefHexahedron, 1}())
     close!(dh)
     sdh = first(dh.subdofhandlers)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc = QuadratureRuleCollection(2)
     n = ndofs(dh)
 
@@ -181,8 +181,8 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
         # does not: every inner contributes once, with its own view. The
         # parallel strategy is the composite through `duplicate_for_device`.
         @testset "$composite_strategy" for composite_strategy in (
-            SequentialAssemblyStrategy(SequentialCPUDevice()),
-            PerColorAssemblyStrategy(PolyesterDevice(2)),
+            AssemblyStrategy(SequentialCPUDevice()),
+            AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()),
         )
             op = setup_operator(composite_strategy, LinearCompositeIntegrator(
                 ParamProbeIntegrator(2.0, qrc, :u),
@@ -348,7 +348,7 @@ FerriteOperators.setup_element_cache(::StatelessNoAnalyticIntegrator, ::SubDofHa
     dh = DofHandler(grid)
     add!(dh, :u, Lagrange{RefHexahedron, 1}())
     close!(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
 
     # No analytic kernel and no insensitivity declaration: rejected at setup,
     # naming the actual remedies (never `FiniteDifferenceSensitivity` — that
@@ -387,7 +387,7 @@ FerriteOperators.get_number_of_internal_dofs_per_element(
     dh = DofHandler(grid)
     add!(dh, :u, Lagrange{RefHexahedron, 1}())
     close!(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
 
     op  = setup_operator(strategy, AnnotatedHookIntegrator(), dh)
     ivh = op.engine.ivh
@@ -441,7 +441,7 @@ FerriteOperators.setup_boundary_cache(::OverclaimingBoundaryProbe, ::SubDofHandl
     dh = DofHandler(grid)
     add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
     close!(dh)
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
 
     # The legitimate default validates trivially.
     @test FerriteOperators.validate_boundary_cache(FerriteOperators.EmptySurfaceElementCache()) === nothing

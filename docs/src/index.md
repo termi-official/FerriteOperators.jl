@@ -41,7 +41,7 @@ contract](devdocs/design.md) states that division of labour precisely.
 ```julia
 using FerriteOperators
 
-strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+strategy = AssemblyStrategy(SequentialCPUDevice())
 op = setup_operator(strategy, MyIntegrator(qrc, :u), dh; slots = (:u, :uprev))
 
 r = zeros(ndofs(dh))
@@ -71,9 +71,10 @@ axes are orthogonal: the *operator form* ([`FullAssembly`](@ref) /
 [`ElementAssembly`](@ref) — the MFEM assembly level), the *scheduling policy*
 ([`SequentialScheduling`](@ref) / [`ColoredScheduling`](@ref) — how parallel
 work is made race-safe), and the *device* (sequential CPU, threaded via
-Polyester). `SequentialAssemblyStrategy(device)`,
-`PerColorAssemblyStrategy(device)` and `ElementAssemblyStrategy(device)` are
-convenience constructors for the common compositions.
+Polyester). [`AssemblyStrategy`](@ref)`(device; form, scheduling)` is the
+keyword convenience constructor for the common compositions: `AssemblyStrategy(device)`,
+`AssemblyStrategy(device; scheduling = ColoredScheduling())`, and
+`AssemblyStrategy(device; form = ElementAssembly())`.
 
 [`FullAssembly`](@ref) assembles the global matrix and vector and serves every
 operator family. [`ElementAssembly`](@ref) accumulates per-element vector

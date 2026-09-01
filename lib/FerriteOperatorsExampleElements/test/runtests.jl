@@ -25,7 +25,7 @@ using Test
     close!(dh)
 
     op = setup_operator(
-        SequentialAssemblyStrategy(SequentialCPUDevice()),
+        AssemblyStrategy(SequentialCPUDevice()),
         SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u),
         dh,
     )

@@ -195,7 +195,6 @@ export AbstractNonlinearOperator
 export SequentialCPUDevice, PolyesterDevice
 export AbstractCPUDevice, AbstractGPUDevice
 export value_type, duplicate_for_device
-export SequentialAssemblyStrategy, ElementAssemblyStrategy, PerColorAssemblyStrategy
 export default_strategy
 export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAssembly, ElementAssembly, ElementAssemblyData
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling

@@ -211,7 +211,7 @@ FerriteOperators.setup_element_cache(m::ForwardingIntegrator{h}, sdh::SubDofHand
     ForwardingCache{h}(FerriteOperators.setup_element_cache(m.inner, sdh), m.ncalls)
 
 @testset "Condensed element with a nonlinear local solve" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     mat      = NortonRelaxationParameters(κ = 1.0, α = 1.0, η = 1.0, n = 3.0)
 
@@ -295,7 +295,7 @@ FerriteOperators.setup_element_cache(m::ForwardingIntegrator{h}, sdh::SubDofHand
         # Per-worker partials fold to the same totals under PolyesterDevice(2)
         # — CondensationReport is a monoid (& / + / max-with-argmax / max /
         # min componentwise), so this is a report merge, not a stats reset.
-        par = relaxation_case(PerColorAssemblyStrategy(PolyesterDevice(2)), qrc; spread...)
+        par = relaxation_case(AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()), qrc; spread...)
         preport = condense_internal!(par.op, par.states, nothing, par.ctx)
         @test preport.solves == report.solves
         @test preport.iterations == report.iterations
@@ -319,14 +319,14 @@ FerriteOperators.setup_element_cache(m::ForwardingIntegrator{h}, sdh::SubDofHand
 end
 
 @testset "Condensation freshness" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     (; op, u, states, ctx) = relaxation_case(strategy, qrc; material = NortonRelaxationParameters())
     check_freshness_contract(op, states, u, ctx)
 end
 
 @testset "Residual-only condensation" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     mat      = NortonRelaxationParameters()
 
@@ -377,7 +377,7 @@ end
 end
 
 @testset "FrozenQ election" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     (; op, states, ctx) = relaxation_case(strategy, qrc; material = NortonRelaxationParameters())
     condense_internal!(op, states, nothing, ctx)
@@ -419,7 +419,7 @@ end
 end
 
 @testset "Recompute() keeps no corrector store and matches Stored()" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     mat      = NortonRelaxationParameters(κ = 1.3, α = 0.8, η = 1.4, n = 2.5)
     ctx      = TimeIntegrationContext(0.0, 0.4, 0.4)
@@ -484,7 +484,7 @@ end
 end
 
 @testset "Recompute() freshness: the q contract survives, the corrector class does not" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     (; op, n, u, states, ctx) = relaxation_case(strategy, qrc;
                                                 material = NortonRelaxationParameters(), corrector = Recompute())
@@ -568,7 +568,7 @@ end
 end
 
 @testset "JacobianKind{:q} assembled into the rectangular field × internal target" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     mat      = NortonRelaxationParameters(κ = 1.3, α = 0.8, η = 1.4, n = 2.5)
     (; op, dh, grid, u, uprev, states, ctx) =
@@ -613,7 +613,7 @@ end
 end
 
 @testset "q as a slot" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     (; op, dh, grid, n, u, states, ctx) =
         relaxation_case(strategy, qrc; material = NortonRelaxationParameters(), field = 1.0, γ̃ = 0.5)
@@ -631,7 +631,7 @@ end
 end
 
 @testset "local_conditions! admits the θ/t totals on a condensed cache" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
 
     @testset "∂F/∂θ and ∂F/∂t against the FD referee, through the hook" begin
@@ -784,7 +784,7 @@ end
 end
 
 @testset "Parameter-sensitivity payoff: exact ∂F/∂θ total on a condensed element" begin
-    strategy = SequentialAssemblyStrategy(SequentialCPUDevice())
+    strategy = AssemblyStrategy(SequentialCPUDevice())
     qrc      = QuadratureRuleCollection(2)
     mat      = NortonRelaxationParameters(κ = 1.3, α = 0.8, η = 1.4, n = 2.5)
     (; op, states, ctx) = relaxation_case(strategy, qrc; material = mat, frequency = 0.6)
