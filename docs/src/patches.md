@@ -13,58 +13,12 @@ for error estimators, localized-orthogonal-decomposition correctors, and other
 methods whose systems live on a neighbourhood rather than on one cell. The
 cell kernels are reused unchanged; only the scatter target is patch-local.
 
-```julia
-provider = PatchItems(sdh, cellsets)                 # one patch per cell set
-dest = [zeros(patch_ndofs(provider, i), patch_ndofs(provider, i)) for i in eachindex(cellsets)]
-assemble_patch_matrices!(dest, op, provider, states, p, ctx)
-```
-
-Rows and columns of `dest[i]` follow [`patch_dofs`](@ref), the injection from
-patch-local into global numbering.
-
-Solving the delivered local system is deliberately **not** part of the
-contract: the caller owns the solve. [`patch_free_dofs`](@ref) /
-[`patch_prescribed_dofs`](@ref) describe the interior/boundary split, and
-[`ItemStates`](@ref) is the item-lifetime storage a retained
-factorization belongs in — neither per-worker scratch nor operator-global
-frozen data. [Driving the patches yourself](@ref) is where that loop is
-written.
-
-## Requests, terms and sinks
-
-A patch request is a kind ([`PatchMatrixKind`](@ref) or
-[`PatchVectorKind`](@ref)) carrying a tuple of [`PatchTerm`](@ref)s and a
-sink. Every term of one request is evaluated in a single pass over the patch's
-cells and accumulates into the same element buffer in tuple order — the
-accumulation order is part of the contract. A term's restriction is
-[`WholePatch`](@ref) or [`CellGroup`](@ref), and its `data` payload selects
-either the element's ordinary cell kernel (`nothing`) or an
-[`assemble_patch_cell!`](@ref) term kernel.
-
-The sink is the scatter mode: [`PatchLocalSink`](@ref) writes into a
-patch-local matrix or vector per item, [`PatchAssemblerSink`](@ref) goes
-through a Ferrite assembler per item, [`PatchGlobalVectorSink`](@ref)
-accumulates back into a global vector, and [`PatchTripletSink`](@ref) collects
-triplets for a rectangular assembly. A sink is three methods —
-[`patch_target`](@ref), [`patch_scatter`](@ref), [`patch_emit!`](@ref) — so a
-downstream scatter mode is a new sink type, not a fork of the driver.
-
-Patch sweeps are pure evaluation: condensed element unknowns are gathered but
-never written back.
-
-## Driving the patches yourself
-
-[`assemble_patches!`](@ref) is one fixed pipeline: one request, one sink, all
-patches. A local BVP needs more than that per patch — assemble a matrix, solve
-against several right-hand sides, emit each result — so it takes the callback
-route instead. [`foreach_patch`](@ref) calls `f(pws, patchid)` once per patch,
-in item order, with the patch workspace already positioned on the patch, and
-[`assemble_patch_target!`](@ref) is the per-patch assembly primitive callable
-as often as the caller likes on that workspace.
+FO drives the sweep and assembles; everything a local BVP does per patch —
+factorize, solve, emit — happens in a callback the caller writes:
 
 ```julia
 provider = PatchItems(sdh, cellsets; prescribed_facets)
-sink     = PatchTripletSink()                    # column-less: emissions name their column
+sink     = PatchTripletSink()
 facts    = ItemStates{typeof(lu(zeros(1, 1)))}(npatches(provider))
 
 foreach_patch(op, provider, (u = u,), p) do pws, pid
@@ -86,26 +40,75 @@ end
 W = sparse(sink, ndofs(dh), npatches(provider) * ncols)
 ```
 
+Rows and columns of a patch-local target follow [`patch_dofs`](@ref), the
+injection from patch-local into global numbering. Solving the local system is
+deliberately **not** part of the contract: the caller owns the solve.
+[`patch_free_dofs`](@ref) / [`patch_prescribed_dofs`](@ref) describe the
+interior/boundary split, [`augment_prescribed_dofs!`](@ref) pins whatever else
+the local problem needs to be well posed, and [`ItemStates`](@ref) is the
+item-lifetime storage a retained factorization belongs in — neither per-worker
+scratch nor operator-global frozen data.
+
 The pieces and their contracts:
 
-- `assemble_patch_target!` **accumulates** into a target it never zeroes, so
-  the caller decides what a call adds to. Whether the element's Jacobian or
-  residual kernels run follows the target: a matrix (or a Ferrite assembler
-  over one) gets the Jacobian, a vector the residual.
+- [`foreach_patch`](@ref) calls `f(pws, patchid)` once per patch, in ascending
+  item order, with the patch workspace already positioned on the patch. Its
+  `items` argument names a subset (default: every patch); only those patches
+  are visited, which is what a partial re-solve needs — FO writes nothing
+  outside `f`, so what an untouched patch contributed to an earlier sweep stays
+  as it was.
+- [`assemble_patch_target!`](@ref) **accumulates** into a target it never
+  zeroes, so the caller decides what a call adds to. Whether the element's
+  Jacobian or residual kernels run follows the target: a matrix (or a Ferrite
+  assembler over one) gets the Jacobian, a vector the residual.
 - The target of one call is one column of the result. `N` right-hand sides are
   `N` calls with per-call term data and `N` [`emit_patch_column!`](@ref)
-  emissions — the sink's `columns` map exists for the pipeline tail only, which
-  is why the many-columns-per-patch case uses the column-less
-  [`PatchTripletSink`](@ref) and names its columns itself. Duplicate
-  `(row, col)` entries are summed by `sparse`, so overlapping patches
-  contributing to a shared column need no coordination.
-- [`ItemStates`](@ref) is the retained-state slot: a factorization lives
-  as long as the item, and FO never writes or invalidates it. Nothing about a
+  emissions. Duplicate `(row, col)` entries are summed by `sparse`, so
+  overlapping patches contributing to a shared column need no coordination.
+- [`ItemStates`](@ref) is the retained-state slot: a factorization lives as
+  long as the item, and FO never writes or invalidates it. Nothing about a
   patch is stored anywhere else.
-- The solve, the boundary treatment and the column layout are the caller's.
-  [`patch_free_dofs`](@ref) / [`patch_prescribed_dofs`](@ref) give the
-  interior/boundary split, and [`augment_prescribed_dofs!`](@ref) pins whatever
-  else the local problem needs to be well posed.
+
+Patch sweeps are pure evaluation: condensed element unknowns are gathered but
+never written back.
+
+## Terms, the patch context and sinks
+
+`assemble_patch_target!` takes a *tuple* of [`PatchTerm`](@ref)s. Every term of
+one call is evaluated in a single pass over the patch's cells and accumulates
+into the same element buffer in tuple order — the accumulation order is part of
+the contract. A term's restriction is [`WholePatch`](@ref) or
+[`CellGroup`](@ref), and its `data` payload selects either the element's
+ordinary cell kernel (`nothing`, over an ordinary [`CellArgs`](@ref)) or an
+[`assemble_patch_cell!`](@ref) term kernel. Terms that must fuse per quadrature
+point rather than per cell belong in ONE term whose `data` carries both
+sources.
+
+A term kernel receives a [`PatchArgs`](@ref): the four fields of `CellArgs`
+plus where in the patch the cell sits — the provider, the patch id, the cell's
+`group` tag, and `ldofs`, the cell's dofs in patch-local numbering. That last
+one is the window a payload indexes patch-local data through, so a term kernel
+needs no per-patch handle of its own:
+
+```julia
+function FerriteOperators.assemble_patch_cell!(req::ResidualRequest, cache::MyCache,
+                                               args::PatchArgs, data::MySource)
+    d = @view data.patch_field[args.ldofs]       # patch-local data on this cell
+    parent = args.group                          # e.g. the parent coarse cell
+    ...
+end
+```
+
+`args.ldofs` is the driver's scratch, refilled per cell and scattered through
+after the kernels run — read it, never retain it past the call.
+
+A sink is where a *finished* patch quantity goes, once the caller has assembled
+and solved it. [`PatchTripletSink`](@ref) collects triplets for a rectangular
+assembly through [`emit_patch_column!`](@ref), which names the column per call;
+[`PatchGlobalVectorSink`](@ref) accumulates a patch-local vector back into a
+global one through the injection ([`patch_emit!`](@ref)). A downstream scatter
+mode is a new sink type with its own `patch_emit!` method, not a fork of the
+per-patch body.
 
 ## Parallel patch sweeps
 
@@ -136,7 +139,8 @@ The contract:
 - **Chunks are contiguous and ascending.** [`patch_chunks`](@ref) splits the
   items that way; the workers may finish in any order, but merging the
   collectors in chunk order restores the item order a sequential sweep emits
-  in.
+  in. It takes the same `items` argument as `foreach_patch`, so a subset sweep
+  chunks and merges exactly like a full one.
 - **One workspace per worker.** [`patch_workspace`](@ref) builds an independent
   [`PatchAssemblyWorkspace`](@ref) per call, and `duplicate_for_device` copies
   an existing one. Two workspaces share only the provider, which patch sweeps
@@ -160,10 +164,9 @@ The contract:
   must be complete before the workers start; a sequential warm-up pass over the
   patches is the place for it.
 
-The kind × sink pipelines stay sequential and reject a parallel device loudly:
-the sink rides inside the shared `kind`, so every worker would scatter through
-the same sink object. [`foreach_patch`](@ref) is sequential for the collector
-reason above. Parallelism lives on the seams in this section, not behind a flag.
+[`foreach_patch`](@ref) itself is sequential for the collector reason above,
+and rejects a parallel device loudly. Parallelism lives on the seams in this
+section, not behind a flag.
 
 ## Two-grid data and foreign-space evaluation
 
@@ -191,6 +194,10 @@ cell's nodes expressed in the parent coarse reference element. Composing the
 fine cell's quadrature points through those coordinates gives the coarse
 reference points at which the coarse interpolation is evaluated — one
 `reference_shape_value` call per point and basis function, no geometric search.
+
+Which coarse cell a fine cell belongs to is also what a [`CellGroup`](@ref)
+restriction selects on and what `PatchArgs.group` reports, so a term restricted
+to one parent cell needs no map of its own.
 
 ## Patch API reference
 

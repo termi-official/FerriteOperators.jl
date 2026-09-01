@@ -262,9 +262,8 @@ else
                 StressDrivenIntegrator(sd.var, sd.E, sd.σ̄), sd.dh)
             provider = PatchItems(sdh, [[1, 2]])
             @test_throws ArgumentError patch_workspace(op, provider)
-            @test_throws ArgumentError assemble_patch_matrices!(
-                [zeros(patch_ndofs(provider, 1), patch_ndofs(provider, 1))],
-                op, provider, zeros(ndofs(sd.dh)), nothing)
+            @test_throws ArgumentError foreach_patch((ws, pid) -> nothing, op, provider,
+                (u = zeros(ndofs(sd.dh)),), nothing)
         end
     end
 

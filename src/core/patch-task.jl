@@ -61,10 +61,6 @@ struct PatchTerm{R, D}
 end
 PatchTerm(restriction) = PatchTerm(restriction, nothing)
 
-# The implicit request of the plain "assemble every cell with the element's own
-# kernel" entry points.
-const WHOLE_PATCH_TERMS = (PatchTerm(WholePatch(), nothing),)
-
 # Tuple recursions, unrolled by the compiler (terms are short, concrete
 # tuples): each term dispatches monomorphically, no term value reaches a kernel
 # as a `Union`.
@@ -276,33 +272,53 @@ function patch_vertex_dofs(provider::PatchItems, i::Int)
     return out
 end
 
-compute_partition(::SequentialScheduling, provider::PatchItems) = (collect(1:npatches(provider)),)
-
 # Coloring needs the ITEM adjacency graph, which a patch provider does not carry
 # (whether two patches share dofs is caller geometry). Say so instead of failing
 # with a missing method.
 compute_partition(::ColoredScheduling, provider::PatchItems) = throw(ArgumentError(
         "colored scheduling needs the adjacency of the items, which `PatchItems` does not carry. " *
-        "Use `SequentialScheduling()` and chunk the patches yourself (`patch_chunks`)."))
+        "Drive the patches yourself: `foreach_patch(...; items)` selects the subset, " *
+        "`patch_chunks` splits it for workers."))
 
-"""
-    patch_chunks(provider::PatchItems, nchunks::Int) -> Vector{UnitRange{Int}}
+# The item list of a sweep, ascending and duplicate free. `items` is whatever
+# the caller named; the ascending order is what makes a chunked sweep's merge
+# reproduce the sequential one.
+_patch_items(provider::PatchItems, items::AbstractUnitRange{<:Integer}) =
+    (_check_patch_items(provider, items); items)
+_patch_items(provider::PatchItems, items) =
+    (its = sort!(collect(Int, items)); _check_patch_items(provider, its); its)
 
-Split the items of `provider` into at most `nchunks` CONTIGUOUS ascending
-ranges of nearly equal length. Contiguity and order are contract: merging
-per-chunk collectors in chunk order reproduces a sequential sweep's item order
-exactly. Empty chunks are dropped, so fewer patches than chunks yields fewer
-ranges.
-"""
-function patch_chunks(provider::PatchItems, nchunks::Int)
-    nchunks >= 1 || throw(ArgumentError("need at least one chunk, got $nchunks"))
+function _check_patch_items(provider::PatchItems, its)
+    isempty(its) && return nothing
     n = npatches(provider)
-    chunks = UnitRange{Int}[]
+    (first(its) >= 1 && last(its) <= n) || throw(ArgumentError(
+            "`items` must be patch indices in 1:$n, got $(first(its)) … $(last(its))"))
+    allunique(its) || throw(ArgumentError("`items` must not name a patch twice"))
+    return nothing
+end
+
+"""
+    patch_chunks(provider::PatchItems, nchunks::Int; items = 1:npatches(provider))
+
+Split `items` (default: every patch) into at most `nchunks` CONTIGUOUS
+ascending pieces of nearly equal length. Contiguity and order are contract:
+merging per-chunk collectors in chunk order reproduces the item order of the
+sequential sweep over the same `items` exactly. Empty chunks are dropped, so
+fewer items than chunks yields fewer pieces.
+
+A chunk is a slice of the item list, so the default yields `UnitRange{Int}`s of
+patch indices and an explicit subset yields the ascending item ids themselves.
+"""
+function patch_chunks(provider::PatchItems, nchunks::Int; items = 1:npatches(provider))
+    nchunks >= 1 || throw(ArgumentError("need at least one chunk, got $nchunks"))
+    its = _patch_items(provider, items)
+    n = length(its)
+    chunks = typeof(its[1:0])[]
     lo = 1
     for c in 1:nchunks
         len = fld(n - lo + 1, nchunks - c + 1)
         len == 0 && continue
-        push!(chunks, lo:(lo + len - 1))
+        push!(chunks, its[lo:(lo + len - 1)])
         lo += len
     end
     return chunks
@@ -313,41 +329,18 @@ end
 ####################################
 
 """
-Supertype of the patch assembly sinks: where a patch's assembled matrix or
-vector goes. Matrix-vs-vector is the request dimension
-([`PatchMatrixKind`](@ref) / [`PatchVectorKind`](@ref)); the sink is the
-scatter mode within it.
+Supertype of the patch assembly sinks: where a patch's finished quantity goes
+once the caller has assembled (and solved) it — a whole patch-local vector
+through [`patch_emit!`](@ref), or one named column at a time through
+[`emit_patch_column!`](@ref). A downstream scatter mode is a new sink type, not
+a fork of the per-patch body.
 """
 abstract type AbstractPatchSink end
 
 """
-    PatchLocalSink(dest)
-
-Patch-local sink: patch `i` is assembled into `dest[i]` (patch-local indices,
-zeroed by the driver) — a matrix for a [`PatchMatrixKind`](@ref), a vector for
-a [`PatchVectorKind`](@ref). Scatter is by scalar indexing, so a sparse
-`dest[i]` GROWS its pattern for entries it does not yet hold.
-"""
-struct PatchLocalSink{D} <: AbstractPatchSink
-    dest::D
-end
-
-"""
-    PatchAssemblerSink(dest)
-
-Matrix sink through a Ferrite assembler per item (a cached column walk instead
-of a binary search per entry). `dest[i]` must be a sparse matrix over patch
-`i`'s dofs whose pattern already holds every element entry; use
-[`PatchLocalSink`](@ref) when the pattern must grow.
-"""
-struct PatchAssemblerSink{D} <: AbstractPatchSink
-    dest::D
-end
-
-"""
     PatchGlobalVectorSink(dest)
 
-Additive global-vector sink: patch `i`'s assembled vector is accumulated into
+Additive global-vector sink: patch `i`'s patch-local vector is accumulated into
 `dest` through the injection, `dest[patch_dofs(provider, i)[l]] += v[l]`.
 
 Not thread safe: overlapping patches read-modify-write the same entries of
@@ -359,33 +352,26 @@ struct PatchGlobalVectorSink{V <: AbstractVector} <: AbstractPatchSink
 end
 
 """
-    PatchTripletSink{Tv}(columns)
-    PatchTripletSink(columns)
     PatchTripletSink{Tv}()
+    PatchTripletSink()
 
-Ordered COO sink for vector-valued patch results: patch `i` emits
-`(patch_dofs(provider, i)[l], columns[i], v[l])` in ascending `l`, and
+Ordered COO sink for vector-valued patch results: every
+[`emit_patch_column!`](@ref) appends `(rows[l], col, values[l])` in order, and
 `sparse(sink, m, n)` SUMS duplicate `(row, col)` entries — what patch-additive
-quantities (a corrector basis over overlapping patches) rely on.
+quantities (a corrector basis over overlapping patches) rely on. The column is
+named per emission, so one patch may carry as many columns as its local
+problem has right-hand sides.
 
-`columns` is the item → column map [`assemble_patches!`](@ref) needs, one entry
-per patch. The column-less form is for callers emitting through
-[`emit_patch_column!`](@ref) themselves, which names the column per call and so
-carries a many-columns-per-patch result.
-
-Emission follows the item order, so a sequential sweep is reproducible
+Emission follows the sweep's item order, so a sequential sweep is reproducible
 bit-for-bit; parallel callers collect one sink per chunk and `append!` them
 back in chunk order to keep that.
 """
 struct PatchTripletSink{Tv} <: AbstractPatchSink
-    columns::Vector{Int}
     I::Vector{Int}
     J::Vector{Int}
     V::Vector{Tv}
 end
-PatchTripletSink{Tv}(columns) where {Tv} = PatchTripletSink(collect(Int, columns), Int[], Int[], Tv[])
-PatchTripletSink(columns) = PatchTripletSink{Float64}(columns)
-PatchTripletSink{Tv}() where {Tv} = PatchTripletSink{Tv}(Int[])
+PatchTripletSink{Tv}() where {Tv} = PatchTripletSink(Int[], Int[], Tv[])
 PatchTripletSink() = PatchTripletSink{Float64}()
 
 """
@@ -414,35 +400,6 @@ SparseArrays.sparse(s::PatchTripletSink, m::Int, n::Int) = sparse(s.I, s.J, s.V,
 ####################################
 
 """
-    PatchMatrixKind(terms, sink)
-
-Assemble a patch-local MATRIX from a tuple of [`PatchTerm`](@ref)s. Terms
-reach the element as `JacobianRequest{:u}` over the element buffer; a term
-with `nothing` data runs the element's ordinary Jacobian kernel (including the
-AD fallback), a term with data goes to [`assemble_patch_cell!`](@ref).
-"""
-struct PatchMatrixKind{T <: Tuple, S <: AbstractPatchSink}
-    terms::T
-    sink::S
-end
-
-"""
-    PatchVectorKind(terms, sink)
-
-Assemble a patch-local VECTOR from a tuple of [`PatchTerm`](@ref)s — the
-right-hand side of a local BVP. Terms reach the element as `ResidualRequest`
-over the element buffer; a term with `nothing` data runs the element's
-ordinary residual kernel, a term with data goes to
-[`assemble_patch_cell!`](@ref).
-"""
-struct PatchVectorKind{T <: Tuple, S <: AbstractPatchSink}
-    terms::T
-    sink::S
-end
-
-const PatchAssemblyKind = Union{PatchMatrixKind, PatchVectorKind}
-
-"""
     PatchCallbackKind(f)
 
 Request kind of the per-patch callback route: `f(ws, patchid)` runs once per
@@ -454,10 +411,8 @@ patch happens inside `f` — FO only drives the sweep.
     f
 end
 
-# The element request dimension: a patch request states it by type, a bare patch
-# target by being a matrix (or an assembler over one) rather than a vector.
-patch_element_kind(::PatchMatrixKind) = JacobianKind()
-patch_element_kind(::PatchVectorKind) = ResidualKind()
+# The element request dimension follows the target: a matrix (or an assembler
+# over one) gets the Jacobian kernels, a vector the residual kernels.
 patch_element_kind(::AbstractMatrix) = JacobianKind()
 patch_element_kind(::Ferrite.AbstractAssembler) = JacobianKind()
 patch_element_kind(::AbstractVector) = ResidualKind()
@@ -466,12 +421,48 @@ patch_element_kind(target) = throw(ArgumentError(
         "assembler over a patch-local matrix; got $(typeof(target))"))
 
 """
-    assemble_patch_cell!(req, cache, args, data)
+    PatchArgs(states, cell, p, ctx, provider, patch, group, ldofs)
+
+The argument bundle a patch term kernel's third parameter receives — the four
+fields of [`CellArgs`](@ref) plus where in the patch the cell sits:
+
+| field | meaning |
+|---|---|
+| `provider` | the [`PatchItems`](@ref) the sweep runs over |
+| `patch` | the item index of the patch being assembled |
+| `group` | the current cell's group tag, what a [`CellGroup`](@ref) restriction selects on |
+| `ldofs` | the current cell's dofs in PATCH-LOCAL numbering, aligned with `celldofs(args.cell)` |
+
+`ldofs` is the driver's scratch, refilled per cell and scattered through after
+the kernels run: read it, never retain it past the call — the same lifetime
+`args.cell` has. It is the window a term payload indexes patch-local data
+through, so a kernel needs no per-patch handle of its own.
+
+Closed, like `CellArgs` and `FacetArgs`: the patch item family's one args
+record, not an extension channel.
+"""
+struct PatchArgs{States <: NamedTuple, Cell, P, Ctx, Prov}
+    states::States
+    cell::Cell
+    p::P
+    ctx::Ctx
+    provider::Prov
+    patch::Int
+    group::Int
+    ldofs::Vector{Int}
+end
+
+"""
+    assemble_patch_cell!(req, cache, args::PatchArgs, data)
 
 Element kernel for one [`PatchTerm`](@ref) on one cell: accumulate the term's
 contribution into `req`'s buffer, exactly as `assemble_cell!` does. `data` is
-the term payload; `nothing` dispatches to the element's ordinary cell kernel,
-so unrestricted patch assembly reuses existing elements unchanged.
+the term payload; a term whose data is `nothing` bypasses this entry point and
+runs the element's ordinary cell kernel over [`CellArgs`](@ref) instead, so
+unrestricted patch assembly reuses existing elements unchanged.
+
+`args` is a [`PatchArgs`](@ref) — `CellArgs`'s four fields plus the patch, the
+cell's group tag and its patch-local dof window.
 
 Term kernels are analytic — no AD fallback for a custom payload.
 """
@@ -495,14 +486,13 @@ patch sweeps read and never write.
 
 `current` is a `Ref{Int}` because the item is resolved through the provider
 between `reinit!` and the kernels rather than handed to them. That makes it a
-CPU-scoped positioning mechanism — one reason patch sweeps are sequential CPU
-only ([`assemble_patches!`](@ref), [`foreach_patch`](@ref)).
+CPU-scoped positioning mechanism — one reason [`foreach_patch`](@ref) is
+sequential CPU only.
 """
 @concrete struct PatchAssemblyWorkspace <: AbstractWorkspace
     provider
     current   # Ref{Int}: the patch index of the item being processed
     inner     # the per-worker cell AssemblyWorkspace
-    buffer    # patch-sized scratch for sinks that do not own patch-local storage
     ldofs     # the current cell's dofs in patch-local numbering
 end
 
@@ -519,7 +509,6 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::PatchAssemblyWorksp
         ws.provider,                                    # shared: read-only during a sweep
         Ref(ws.current[]),
         duplicate_for_device(device, ws.inner),
-        copy(ws.buffer),
         copy(ws.ldofs),
     )
 end
@@ -538,10 +527,7 @@ function patch_workspace(op, provider::PatchItems)
     return _patch_workspace(provider, inner)
 end
 
-# The scratch buffer takes the inner element residual's eltype, since that is
-# what it accumulates.
-_patch_workspace(provider, inner) =
-    PatchAssemblyWorkspace(provider, Ref(0), inner, eltype(inner.re)[], Int[])
+_patch_workspace(provider, inner) = PatchAssemblyWorkspace(provider, Ref(0), inner, Int[])
 
 function _patch_subdomain(op, provider::PatchItems)
     i = findfirst(sc -> sc.domain isa AssemblyDomain && sc.domain.sdh === provider.sdh,
@@ -562,53 +548,13 @@ execute_single_task!(task::AssemblyTask, ws::PatchAssemblyWorkspace) = execute_k
 # --- sink protocol ---------------------------------------------------------
 
 """
-    patch_target(sink, ws, pid) -> target
+    patch_emit!(sink, provider, pid, v)
 
-The ZEROED patch-local accumulator patch `pid` is assembled into: the sink's
-own per-patch storage, or the patch-sized scratch of `ws` for sinks that hold
-none. One of the three methods a patch sink implements, with
-[`patch_scatter`](@ref) and [`patch_emit!`](@ref).
-"""
-function patch_target end
-
-"""
-    patch_scatter(sink, target) -> scatter
-
-The object cell contributions are scattered through — `target` itself, unless
-the sink assembles through a Ferrite assembler over it.
-"""
-function patch_scatter end
-
-"""
-    patch_emit!(sink, provider, pid, target)
-
-Publish patch `pid`'s finished quantity: a no-op for sinks whose `target`
-already is the destination, an injection into a global vector or a column of
-triplets otherwise.
+Publish patch `pid`'s finished patch-local vector `v` into `sink`, mapped
+through the injection. [`emit_patch_column!`](@ref) is the column-naming form a
+many-columns-per-patch result emits through instead.
 """
 function patch_emit! end
-
-function patch_target(sink::PatchLocalSink, ws, pid)
-    dest = sink.dest[pid]
-    fill!(dest, zero(eltype(dest)))
-    return dest
-end
-function patch_target(sink::PatchAssemblerSink, ws, pid)
-    dest = sink.dest[pid]
-    fill!(nonzeros(dest), zero(eltype(dest)))
-    return dest
-end
-patch_target(::Union{PatchGlobalVectorSink, PatchTripletSink}, ws, pid) =
-    (v = _patch_buffer(ws, pid); fill!(v, zero(eltype(v))); v)
-
-function _patch_buffer(ws::PatchAssemblyWorkspace, pid)
-    n = patch_ndofs(ws.provider, pid)
-    length(ws.buffer) < n && resize!(ws.buffer, n)
-    return view(ws.buffer, 1:n)
-end
-
-patch_scatter(::AbstractPatchSink, target) = target
-patch_scatter(::PatchAssemblerSink, target) = start_assemble(target; fillzero = false)
 
 @inline function scatter_patch_cell!(target::AbstractMatrix, ldofs, Ke)
     for (j, lj) in pairs(ldofs), (i, li) in pairs(ldofs)
@@ -625,42 +571,10 @@ end
     return nothing
 end
 
-patch_emit!(::Union{PatchLocalSink, PatchAssemblerSink}, provider, pid, target) = nothing
-function patch_emit!(sink::PatchGlobalVectorSink, provider, pid, target)
+function patch_emit!(sink::PatchGlobalVectorSink, provider, pid, v)
     for (l, g) in pairs(patch_dofs(provider, pid))
-        sink.dest[g] += target[l]
+        sink.dest[g] += v[l]
     end
-    return nothing
-end
-patch_emit!(sink::PatchTripletSink, provider, pid, target) =
-    (emit_patch_column!(sink, patch_dofs(provider, pid), sink.columns[pid], target); nothing)
-
-# Matrix-vs-vector is the request dimension; not every scatter mode exists in
-# both. Fail at the sweep, not with an unrelated method error per cell.
-_check_sink(::PatchMatrixKind, ::Union{PatchLocalSink, PatchAssemblerSink}) = nothing
-_check_sink(::PatchVectorKind, ::Union{PatchLocalSink, PatchGlobalVectorSink, PatchTripletSink}) = nothing
-_check_sink(kind, sink) = throw(ArgumentError("$(typeof(sink).name.name) is not a valid sink for $(typeof(kind).name.name)"))
-
-# The dimension also has to reach the sink's per-item dest: a `PatchMatrixKind`
-# over a vector-valued dest would scatter through the vector path and produce
-# garbage instead of failing. One check per sweep, on the first dest.
-_check_sink_dimension(kind, sink) = nothing
-function _check_sink_dimension(kind::PatchAssemblyKind, sink::Union{PatchLocalSink, PatchAssemblerSink})
-    isempty(sink.dest) && return nothing
-    wants_matrix = kind isa PatchMatrixKind
-    (first(sink.dest) isa AbstractMatrix) == wants_matrix || throw(ArgumentError(
-            "$(typeof(kind).name.name) assembles a patch-local $(wants_matrix ? "matrix" : "vector"), " *
-            "but the sink's dest holds $(typeof(first(sink.dest))). Match the dest to the kind's dimension."))
-    return nothing
-end
-
-# A sink indexed by item must span the provider. Fail at the sweep, not with a
-# BoundsError on whichever patch first runs past the end.
-_check_sink_extent(::AbstractPatchSink, provider) = nothing
-function _check_sink_extent(sink::PatchTripletSink, provider)
-    length(sink.columns) == npatches(provider) || throw(ArgumentError(
-            "the sink carries $(length(sink.columns)) column indices but the provider has " *
-            "$(npatches(provider)) patches; `PatchTripletSink` maps item → column."))
     return nothing
 end
 
@@ -679,16 +593,15 @@ cell accumulating into the element buffer before a single scatter. Callable
 directly: a local BVP assembles its matrix with one call and its `N` right-hand
 sides with `N` calls carrying per-column term data, on one workspace.
 
+Term payloads reach [`assemble_patch_cell!`](@ref) over a [`PatchArgs`](@ref)
+carrying the cell's group tag and patch-local dof window.
+
 Position `ws` with `Ferrite.reinit!(ws, patchid)` first;
 [`foreach_patch`](@ref) has already done that. Slot names are validated by the
 entry points once per sweep, not here.
 """
-assemble_patch_target!(target, terms, ws::PatchAssemblyWorkspace, states::NamedTuple, p, ctx = nothing) =
-    assemble_patch_target!(patch_element_kind(target), target, terms, ws, states, p, ctx)
-
-# The pipeline route takes the element kind from the request rather than from
-# the target, so the request's dimension stays authoritative there.
-function assemble_patch_target!(ekind, target, terms::Tuple, ws::PatchAssemblyWorkspace, states::NamedTuple, p, ctx)
+function assemble_patch_target!(target, terms::Tuple, ws::PatchAssemblyWorkspace, states::NamedTuple, p, ctx = nothing)
+    ekind = patch_element_kind(target)
     pid = ws.current[]
     provider = ws.provider
     dofmap = provider.dofmaps[pid]
@@ -698,16 +611,17 @@ function assemble_patch_target!(ekind, target, terms::Tuple, ws::PatchAssemblyWo
         group = provider.groups[pid][k]
         any_patch_term_active(terms, group) || continue
         reinit!(iws, cellid)
-        _zero_element_buffer!(ekind, iws)
-        reinit_values!(iws.element, iws.cell, ekind)
-        pₑ = query_cell_parameters(iws.element, iws.cell, p)
-        statesₑ = load_slots!(iws, states)
-        run_patch_terms!(ekind, terms, group, iws, statesₑ, pₑ, ctx)
         cdofs = celldofs(iws.cell)
         length(ldofs) == length(cdofs) || resize!(ldofs, length(cdofs))
         for (i, g) in pairs(cdofs)
             ldofs[i] = dofmap[g]
         end
+        _zero_element_buffer!(ekind, iws)
+        reinit_values!(iws.element, iws.cell, ekind)
+        pₑ = query_cell_parameters(iws.element, iws.cell, p)
+        statesₑ = load_slots!(iws, states)
+        args = PatchArgs(statesₑ, iws.cell, pₑ, ctx, provider, pid, group, ldofs)
+        run_patch_terms!(ekind, terms, iws, args)
         scatter_patch_cell!(target, ldofs, _element_buffer(ekind, iws))
     end
     return target
@@ -717,80 +631,41 @@ _element_buffer(::JacobianKind, iws) = iws.Ke
 _element_buffer(::ResidualKind, iws) = iws.re
 _zero_element_buffer!(ekind, iws) = fill!(_element_buffer(ekind, iws), 0.0)
 
-@inline run_patch_terms!(ekind, ::Tuple{}, group::Int, iws, statesₑ, pₑ, ctx) = nothing
-@inline function run_patch_terms!(ekind, terms::Tuple, group::Int, iws, statesₑ, pₑ, ctx)
+@inline run_patch_terms!(ekind, ::Tuple{}, iws, args::PatchArgs) = nothing
+@inline function run_patch_terms!(ekind, terms::Tuple, iws, args::PatchArgs)
     term = first(terms)
-    patch_term_active(term.restriction, group) &&
-        run_patch_term!(ekind, term.data, iws, statesₑ, pₑ, ctx)
-    return run_patch_terms!(ekind, Base.tail(terms), group, iws, statesₑ, pₑ, ctx)
+    patch_term_active(term.restriction, args.group) && run_patch_term!(ekind, term.data, iws, args)
+    return run_patch_terms!(ekind, Base.tail(terms), iws, args)
 end
 
 # Both payload routes reach the element through the same kind → request
-# association as the cell driver.
-@inline run_patch_term!(ekind, ::Nothing, iws, statesₑ, pₑ, ctx) =
-    cell_kernel!(ekind, iws.element, iws, statesₑ, pₑ, ctx)
-@inline run_patch_term!(ekind, data, iws, statesₑ, pₑ, ctx) =
-    assemble_patch_cell!(materialize_request(ekind, iws), iws.element,
-                         _cell_args(iws, statesₑ, pₑ, ctx), data)
+# association as the cell driver. A `nothing` payload is the element's ordinary
+# cell kernel, so it gets the ordinary `CellArgs`.
+@inline run_patch_term!(ekind, ::Nothing, iws, args::PatchArgs) =
+    cell_kernel!(ekind, iws.element, iws, args.states, args.p, args.ctx)
+@inline run_patch_term!(ekind, data, iws, args::PatchArgs) =
+    assemble_patch_cell!(materialize_request(ekind, iws), iws.element, args, data)
 
-# --- the drivers -----------------------------------------------------------
-
-function execute_kind!(kind::PatchAssemblyKind, task, ws::PatchAssemblyWorkspace)
-    pid = ws.current[]
-    target = patch_target(kind.sink, ws, pid)
-    assemble_patch_target!(patch_element_kind(kind), patch_scatter(kind.sink, target),
-                           kind.terms, ws, task.states, task.p, task.ctx)
-    patch_emit!(kind.sink, ws.provider, pid, target)
-    return nothing
-end
+# --- the driver ------------------------------------------------------------
 
 execute_kind!(kind::PatchCallbackKind, task, ws::PatchAssemblyWorkspace) =
     (kind.f(ws, ws.current[]); nothing)
 
 """
-    assemble_patches!(kind, op, provider::PatchItems, states, p, ctx = nothing)
+    foreach_patch(f, op, provider::PatchItems, states, p, ctx = nothing; items = 1:npatches(provider))
 
-Run one patch sweep of `kind` ([`PatchMatrixKind`](@ref) or
-[`PatchVectorKind`](@ref)) over every item of `provider`, reusing the
-operator's element caches. Each patch is visited once, its cells ascending, and
-the kind's sink receives the patch-local result.
-
-Sequential CPU only, structurally: the sink rides inside the shared `kind`, so
-every worker of a parallel device would scatter through the same object.
-Schedule through [`foreach_patch`](@ref), whose collectors the caller owns.
-
-Pure evaluation — condensed element unknowns are gathered but never written
-back, unlike the global sweeps.
-
-Experimental: part of the patch item family.
-"""
-function assemble_patches!(kind::PatchAssemblyKind, op, provider::PatchItems, states::NamedTuple, p, ctx = nothing)
-    _check_declared_slots(op.engine, states)
-    _check_sink(kind, kind.sink)
-    _check_sink_dimension(kind, kind.sink)
-    _check_sink_extent(kind.sink, provider)
-    op.engine.strategy.device isa SequentialCPUDevice || throw(
-        ArgumentError(
-            "`assemble_patches!` supports SequentialCPUDevice only (got $(typeof(op.engine.strategy.device))): " *
-            "the sink rides inside the shared kind. Drive the patches through `foreach_patch` and own the collectors."
-        )
-    )
-    ws = patch_workspace(op, provider)
-    task = AssemblyTask(kind, nothing, states, p, ctx)
-    execute_on_device!(task, op.engine.strategy.device, (ws,), compute_partition(op.engine.strategy, provider))
-    return kind.sink
-end
-
-"""
-    foreach_patch(f, op, provider::PatchItems, states, p, ctx = nothing)
-
-Call `f(ws, patchid)` once per patch of `provider`, in item order, with `ws` a
+Call `f(ws, patchid)` once per patch named by `items` (default: every patch of
+`provider`), in ascending item order, with `ws` a
 [`PatchAssemblyWorkspace`](@ref) already positioned on `patchid`. Inside `f` the
 caller owns the patch: assemble targets with [`assemble_patch_target!`](@ref)
 (passing `states`, `p` and `ctx` on), factorize, solve, retain the
 factorization in an [`ItemStates`](@ref) slot, and emit through a sink —
 [`emit_patch_column!`](@ref) writes one column per call, so an `N`-column local
 basis is `N` emissions.
+
+`items` is what a partial re-solve names: only those patches are visited, and
+what the untouched ones contributed to a previous sweep is untouched too, since
+FO writes nothing outside `f`.
 
 Sequential: FO cannot duplicate what `f` writes into, since the collectors and
 the retained state are the caller's — scheduling is the caller's too, through
@@ -799,7 +674,8 @@ the retained state are the caller's — scheduling is the caller's too, through
 
 Experimental: part of the patch item family.
 """
-function foreach_patch(f, op, provider::PatchItems, states::NamedTuple, p, ctx = nothing)
+function foreach_patch(f, op, provider::PatchItems, states::NamedTuple, p, ctx = nothing;
+                       items = 1:npatches(provider))
     _check_declared_slots(op.engine, states)
     op.engine.strategy.device isa SequentialCPUDevice || throw(
         ArgumentError(
@@ -808,31 +684,9 @@ function foreach_patch(f, op, provider::PatchItems, states::NamedTuple, p, ctx =
             "Schedule the patches yourself with `patch_chunks` and `patch_workspace`."
         )
     )
+    its = _patch_items(provider, items)
     ws = patch_workspace(op, provider)
     task = AssemblyTask(PatchCallbackKind(f), nothing, states, p, ctx)
-    execute_on_device!(task, op.engine.strategy.device, (ws,), compute_partition(op.engine.strategy, provider))
+    execute_on_device!(task, op.engine.strategy.device, (ws,), (its,))
     return nothing
 end
-
-"""
-    assemble_patch_matrices!(dest, op, provider::PatchItems, states, p, ctx = nothing)
-
-Assemble the patch-local Jacobian of every patch into `dest[i]`, a zeroed
-`patch_ndofs(provider, i)`-square matrix whose rows/columns follow
-[`patch_dofs`](@ref). Shorthand for `assemble_patches!` with one whole-patch
-term and a [`PatchLocalSink`](@ref).
-
-Experimental: part of the patch item family.
-"""
-function assemble_patch_matrices!(dest::AbstractVector, op, provider::PatchItems, states::NamedTuple, p, ctx = nothing)
-    length(dest) == npatches(provider) || throw(
-        DimensionMismatch(
-            "expected $(npatches(provider)) patch targets, got $(length(dest))"
-        )
-    )
-    assemble_patches!(PatchMatrixKind(WHOLE_PATCH_TERMS, PatchLocalSink(dest)), op, provider, states, p, ctx)
-    return dest
-end
-
-assemble_patch_matrices!(dest::AbstractVector, op, provider::PatchItems, u::AbstractVector, p) =
-    assemble_patch_matrices!(dest, op, provider, (u = u,), p, nothing)

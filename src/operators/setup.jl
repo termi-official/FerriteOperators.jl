@@ -323,8 +323,9 @@ the keyword form is sugar for [`DefaultProtocol`](@ref) and lowers to the
 positional one. `ad_backend` selects the [`ADElementCache`](@ref) backend
 wrapping caches that lack analytic coverage (`nothing` opts out).
 
-Transfer and patch operators keep their own constructors
-([`setup_transfer_operator`](@ref), [`assemble_patches!`](@ref)).
+Transfer operators keep their own constructor
+([`setup_transfer_operator`](@ref)); patch sweeps run on an ordinary operator
+through [`foreach_patch`](@ref).
 """
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler, protocol::AbstractSchemeProtocol; ad_backend = ForwardDiffAD())
     engine = setup_engine(strategy, integrator, dh, protocol; ad_backend)

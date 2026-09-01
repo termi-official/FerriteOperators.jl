@@ -47,8 +47,9 @@ function FerriteOperators.assemble_patch_cell!(
     return nothing
 end
 
-# Reference vector over a patch: the same term kernels, invoked directly, in
-# the same cell order and the same per-cell term order.
+# Reference vector over a patch: the same term kernels, invoked directly over a
+# hand-built `PatchArgs`, in the same cell order and the same per-cell term
+# order.
 function reference_patch_vector(provider, i, cache, dh, terms)
     v = zeros(patch_ndofs(provider, i))
     dofmap = Dict(g => l for (l, g) in pairs(patch_dofs(provider, i)))
@@ -59,12 +60,13 @@ function reference_patch_vector(provider, i, cache, dh, terms)
         fill!(re, 0.0)
         Ferrite.reinit!(cc, cellid)
         reinit_values!(cache, cc)
+        ldofs = [dofmap[g] for g in celldofs(cc)]
+        args = PatchArgs((;), cc, nothing, nothing, provider, i, group, ldofs)
         active = false
         for t in terms
             FerriteOperators.patch_term_active(t.restriction, group) || continue
             active = true
-            FerriteOperators.assemble_patch_cell!(ResidualRequest(re), cache,
-                CellArgs((;), cc, nothing, nothing), t.data)
+            FerriteOperators.assemble_patch_cell!(ResidualRequest(re), cache, args, t.data)
         end
         active || continue
         for (l, g) in pairs(celldofs(cc))
@@ -72,6 +74,26 @@ function reference_patch_vector(provider, i, cache, dh, terms)
         end
     end
     return v
+end
+
+# A term payload that reads the PATCH CONTEXT: it weights the constant source
+# by a patch-local field indexed through the cell's dof window, and logs what
+# the context reported on every cell.
+struct PatchContextSource{V <: AbstractVector}
+    w::V                 # patch-local, indexed by `args.ldofs`
+    seen::Vector{Any}
+end
+function FerriteOperators.assemble_patch_cell!(
+        req::ResidualRequest, cache::FerriteOperatorsExampleElements.SimpleBilinearDiffusionElementCache,
+        args, data::PatchContextSource
+    )
+    push!(data.seen, (patch = args.patch, group = args.group, cell = cellid(args.cell),
+            ldofs = copy(args.ldofs), provider = args.provider, p = args.p, ctx = args.ctx))
+    cv = cache.cellvalues
+    for qp in 1:getnquadpoints(cv), i in 1:getnbasefunctions(cv)
+        req.r[i] += data.w[args.ldofs[i]] * shape_value(cv, qp, i) * getdetJdV(cv, qp)
+    end
+    return nothing
 end
 
 # Per-column term payload of a local BVP with several right-hand sides:
@@ -151,11 +173,21 @@ end
         @test_throws ArgumentError PatchItems(sdh, [[1, 999]])
     end
 
+    # The whole-patch Jacobian of every patch, one `assemble_patch_target!` call
+    # per patch into a caller-owned dense matrix — the shape every local BVP
+    # starts from.
+    function patch_matrices(op, prov, states, p)
+        dest = [zeros(patch_ndofs(prov, i), patch_ndofs(prov, i)) for i in 1:npatches(prov)]
+        foreach_patch(op, prov, states, p) do pws, pid
+            assemble_patch_target!(dest[pid], PATCH_BVP_TERMS, pws, states, p)
+        end
+        return dest
+    end
+
     @testset "bilinear diffusion patches match direct kernel references" begin
         op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.3, qrc, :u), dh)
         u = zeros(ndofs(dh))
-        dest = [zeros(patch_ndofs(provider, i), patch_ndofs(provider, i)) for i in 1:3]
-        assemble_patch_matrices!(dest, op, provider, u, nothing)
+        dest = patch_matrices(op, provider, (u = u,), nothing)
         cache = first_element_cache(op)
         for i in 1:3
             KPref = reference_patch_matrix(provider, i, cache, dh, u, nothing)
@@ -173,27 +205,22 @@ end
         hop = setup_operator(strategy, hint, hdh)
         hu = 0.05 .* sin.(0.3 .* (1:ndofs(hdh)))
         hprovider = PatchItems(hdh.subdofhandlers[1], [[1, 2, 3, 4], [5, 6]])
-        dest = [zeros(patch_ndofs(hprovider, i), patch_ndofs(hprovider, i)) for i in 1:2]
-        assemble_patch_matrices!(dest, hop, hprovider, hu, 0.0)
+        dest = patch_matrices(hop, hprovider, (u = hu,), 0.0)
         cache = first_element_cache(hop)
         for i in 1:2
             KPref = reference_patch_matrix(hprovider, i, cache, hdh, hu, 0.0)
             @test dest[i] ≈ KPref rtol = 1e-13
         end
-        # re-running overwrites, not accumulates
-        first_result = deepcopy(dest[1])
-        assemble_patch_matrices!(dest, hop, hprovider, hu, 0.0)
-        @test dest[1] == first_result
+        # a patch sweep is pure evaluation: a second one over a target the
+        # caller zeroed gives the same matrix
+        @test patch_matrices(hop, hprovider, (u = hu,), 0.0)[1] == dest[1]
     end
 
     @testset "guards" begin
         op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
-        u = zeros(ndofs(dh))
-        @test_throws DimensionMismatch assemble_patch_matrices!([zeros(1, 1)], op, provider, u, nothing)
         odh = scalar_quad_testbed((2, 2)).dh
         foreign = PatchItems(odh.subdofhandlers[1], [[1]])
-        dest = [zeros(patch_ndofs(foreign, 1), patch_ndofs(foreign, 1))]
-        @test_throws ArgumentError assemble_patch_matrices!(dest, op, foreign, u, nothing)
+        @test_throws ArgumentError patch_workspace(op, foreign)
         @test_throws DimensionMismatch PatchItems(sdh, [[1, 2]]; groups = [[1]])
         @test_throws ArgumentError PatchItems(sdh, [[1, 2]]; prescribed_facets = [[FacetIndex(9, 1)]])
     end
@@ -204,39 +231,79 @@ end
         # cells 1,2 carry group 1; cells 5,6 carry group 2
         prov = PatchItems(sdh, [[1, 2, 5, 6]]; groups = [[1, 1, 2, 2]])
         terms = (PatchTerm(WholePatch(), WeightedSource(1.0)), PatchTerm(CellGroup(2), WeightedSource(10.0)))
-        dest = [zeros(patch_ndofs(prov, 1))]
-        assemble_patches!(PatchVectorKind(terms, PatchLocalSink(dest)), op, prov, (;), nothing)
-        @test dest[1] == reference_patch_vector(prov, 1, cache, dh, terms)
-        @test !iszero(dest[1])
+        only2 = (PatchTerm(CellGroup(2), WeightedSource(10.0)),)
+        onlyw = (PatchTerm(WholePatch(), WeightedSource(1.0)),)
+
+        both, d2, dw = zeros(patch_ndofs(prov, 1)), zeros(patch_ndofs(prov, 1)), zeros(patch_ndofs(prov, 1))
+        foreach_patch(op, prov, (;), nothing) do pws, pid
+            assemble_patch_target!(both, terms, pws, (;), nothing)
+            assemble_patch_target!(d2, only2, pws, (;), nothing)
+            assemble_patch_target!(dw, onlyw, pws, (;), nothing)
+        end
+        @test both == reference_patch_vector(prov, 1, cache, dh, terms)
+        @test !iszero(both)
 
         # A group-restricted term alone touches only its group's cells.
-        only2 = (PatchTerm(CellGroup(2), WeightedSource(10.0)),)
-        d2 = [zeros(patch_ndofs(prov, 1))]
-        assemble_patches!(PatchVectorKind(only2, PatchLocalSink(d2)), op, prov, (;), nothing)
-        @test d2[1] == reference_patch_vector(prov, 1, cache, dh, only2)
+        @test d2 == reference_patch_vector(prov, 1, cache, dh, only2)
         # cell 1's exclusive dofs (not shared with cells 5,6) stay untouched
         shared = union(celldofs(dh, 5), celldofs(dh, 6))
         exclusive = [prov.dofmaps[1][g] for g in celldofs(dh, 1) if !(g in shared)]
         @test !isempty(exclusive)
-        @test all(iszero, d2[1][exclusive])
+        @test all(iszero, d2[exclusive])
 
         # ... and the whole-patch term alone is the difference
-        onlyw = (PatchTerm(WholePatch(), WeightedSource(1.0)),)
-        dw = [zeros(patch_ndofs(prov, 1))]
-        assemble_patches!(PatchVectorKind(onlyw, PatchLocalSink(dw)), op, prov, (;), nothing)
-        @test dest[1] ≈ dw[1] .+ d2[1] rtol = 1e-14
+        @test both ≈ dw .+ d2 rtol = 1e-14
+    end
+
+    @testset "term kernels receive the patch context" begin
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        cache = first_element_cache(op)
+        # group tags that are neither cell ids nor 1-based, so a kernel reading
+        # `args.group` cannot accidentally agree with an index
+        prov = PatchItems(sdh, [[1, 2, 5, 6], [13, 14]]; groups = [[7, 7, 9, 9], [4, 4]])
+        weights = [collect(1.0:patch_ndofs(prov, i)) for i in 1:2]
+
+        seen = Any[]
+        dest = [zeros(patch_ndofs(prov, i)) for i in 1:2]
+        foreach_patch(op, prov, (;), 1.5, :mine) do pws, pid
+            assemble_patch_target!(dest[pid],
+                (PatchTerm(WholePatch(), PatchContextSource(weights[pid], seen)),), pws, (;), 1.5, :mine)
+        end
+
+        # the context names the patch, the cell's group tag and the cell's dofs
+        # in patch-local numbering, and carries the sweep's parameters on
+        expected = [(i, patch_cell_groups(prov, i)[k], c, [prov.dofmaps[i][g] for g in celldofs(dh, c)])
+                    for i in 1:2 for (k, c) in pairs(patch_cells(prov, i))]
+        @test [(e.patch, e.group, e.cell, e.ldofs) for e in seen] == expected
+        @test all(e -> e.provider === prov, seen)
+        @test all(e -> e.p == 1.5 && e.ctx === :mine, seen)
+
+        # ... and the window is usable: indexing patch-local data through it
+        # reproduces the direct-kernel reference
+        for i in 1:2
+            ref = reference_patch_vector(prov, i, cache, dh,
+                (PatchTerm(WholePatch(), PatchContextSource(weights[i], Any[])),))
+            @test dest[i] == ref
+            @test !iszero(dest[i])
+        end
     end
 
     @testset "sinks" begin
         op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
-        cache = first_element_cache(op)
         terms = (PatchTerm(WholePatch(), WeightedSource(2.0)),)
         local_dest = [zeros(patch_ndofs(provider, i)) for i in 1:3]
-        assemble_patches!(PatchVectorKind(terms, PatchLocalSink(local_dest)), op, provider, (;), nothing)
+        foreach_patch(op, provider, (;), nothing) do pws, pid
+            assemble_patch_target!(local_dest[pid], terms, pws, (;), nothing)
+        end
 
         @testset "additive global vector" begin
             g = zeros(ndofs(dh))
-            assemble_patches!(PatchVectorKind(terms, PatchGlobalVectorSink(g)), op, provider, (;), nothing)
+            sink = PatchGlobalVectorSink(g)
+            foreach_patch(op, provider, (;), nothing) do pws, pid
+                v = zeros(patch_ndofs(provider, pid))
+                assemble_patch_target!(v, terms, pws, (;), nothing)
+                patch_emit!(sink, provider, pid, v)
+            end
             ref = zeros(ndofs(dh))
             for i in 1:3, (l, gd) in pairs(patch_dofs(provider, i))
                 ref[gd] += local_dest[i][l]
@@ -246,9 +313,15 @@ end
         end
 
         @testset "duplicate-summing triplets" begin
-            # patches 1 and 2 share cell 6, so their columns overlap on rows
-            sink = PatchTripletSink([1, 1, 2])
-            assemble_patches!(PatchVectorKind(terms, sink), op, provider, (;), nothing)
+            # patches 1 and 2 emit into the same column and share cell 6, so
+            # their contributions overlap on rows
+            sink = PatchTripletSink()
+            cols = [1, 1, 2]
+            foreach_patch(op, provider, (;), nothing) do pws, pid
+                v = zeros(patch_ndofs(provider, pid))
+                assemble_patch_target!(v, terms, pws, (;), nothing)
+                emit_patch_column!(sink, patch_dofs(provider, pid), cols[pid], v)
+            end
             W = sparse(sink, ndofs(dh), 2)
             @test W[patch_dofs(provider, 3)[1], 2] == local_dest[3][1]
             shared = intersect(patch_dofs(provider, 1), patch_dofs(provider, 2))
@@ -259,39 +332,22 @@ end
                 @test W[gd, 1] == local_dest[1][l1] + local_dest[2][l2]
             end
             # emission order is the item order; a caller merges its own chunks
-            other = PatchTripletSink([1, 1, 2])
+            other = PatchTripletSink()
             emit_patch_column!(other, [3, 4], 7, [1.0, 2.0])
             @test (append!(other, sink); other.J == vcat([7, 7], sink.J))
         end
 
         @testset "matrix scatter modes agree" begin
             u = zeros(ndofs(dh))
-            dense = [zeros(patch_ndofs(provider, i), patch_ndofs(provider, i)) for i in 1:3]
-            assemble_patch_matrices!(dense, op, provider, u, nothing)
-            patterned = map(1:3) do i
-                n = patch_ndofs(provider, i)
-                sparse(ones(n, n))
+            dense = patch_matrices(op, provider, (u = u,), nothing)
+            # a Ferrite assembler over a patch-local pattern is the other target
+            patterned = map(i -> sparse(ones(patch_ndofs(provider, i), patch_ndofs(provider, i))), 1:3)
+            foreach_patch(op, provider, (u = u,), nothing) do pws, pid
+                assemble_patch_target!(start_assemble(patterned[pid]), PATCH_BVP_TERMS, pws, (u = u,), nothing)
             end
-            assemble_patches!(PatchMatrixKind(FerriteOperators.WHOLE_PATCH_TERMS, PatchAssemblerSink(patterned)),
-                op, provider, (u = u,), nothing)
             for i in 1:3
                 @test Matrix(patterned[i]) ≈ dense[i] rtol = 1e-14
             end
-        end
-
-        @testset "sink/kind guards" begin
-            g = zeros(ndofs(dh))
-            @test_throws ArgumentError assemble_patches!(
-                PatchMatrixKind(terms, PatchGlobalVectorSink(g)), op, provider, (;), nothing)
-            @test_throws ArgumentError assemble_patches!(
-                PatchVectorKind(terms, PatchAssemblerSink([spzeros(1, 1)])), op, provider, (;), nothing)
-
-            # …and the dest's dimension has to match the kind's, one direction each
-            @test_throws ArgumentError assemble_patches!(
-                PatchMatrixKind(terms, PatchLocalSink(local_dest)), op, provider, (u = zeros(ndofs(dh)),), nothing)
-            square = [zeros(patch_ndofs(provider, i), patch_ndofs(provider, i)) for i in 1:3]
-            @test_throws ArgumentError assemble_patches!(
-                PatchVectorKind(terms, PatchLocalSink(square)), op, provider, (;), nothing)
         end
     end
 
@@ -373,6 +429,66 @@ end
         @test_throws ArgumentError patch_chunks(provider, 0)
         # coloring has no meaning without item adjacency, and says so
         @test_throws ArgumentError FerriteOperators.compute_partition(ColoredScheduling(), provider)
+
+        @testset "over an item subset" begin
+            big = PatchItems(sdh, [[c] for c in 1:6])
+            @test patch_chunks(big, 2; items = [1, 3, 5]) == [[1], [3, 5]]
+            @test patch_chunks(big, 3; items = [5, 1, 3]) == [[1], [3], [5]]   # ascending
+            @test patch_chunks(big, 2; items = 2:5) == [2:3, 4:5]
+            @test reduce(vcat, patch_chunks(big, 3; items = [1, 3, 5])) == [1, 3, 5]
+            @test_throws ArgumentError patch_chunks(big, 2; items = [1, 7])
+            @test_throws ArgumentError patch_chunks(big, 2; items = [1, 1])
+        end
+    end
+
+    @testset "item-subset sweeps" begin
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        big = PatchItems(sdh, [[c] for c in 1:6])
+        terms = (PatchTerm(WholePatch(), WeightedSource(2.0)),)
+        subset = [2, 3, 5]
+
+        visited = Int[]
+        foreach_patch(op, big, (;), nothing; items = subset) do pws, pid
+            push!(visited, pid)
+            @test current_patch(pws) == pid
+        end
+        @test visited == subset
+
+        # an unsorted request is visited ascending, and the empty one is a no-op
+        visited2 = Int[]
+        foreach_patch((pws, pid) -> push!(visited2, pid), op, big, (;), nothing; items = [5, 2, 3])
+        @test visited2 == subset
+        foreach_patch((pws, pid) -> push!(visited2, pid), op, big, (;), nothing; items = Int[])
+        @test visited2 == subset
+
+        @test_throws ArgumentError foreach_patch((pws, pid) -> nothing, op, big, (;), nothing; items = [7])
+        @test_throws ArgumentError foreach_patch((pws, pid) -> nothing, op, big, (;), nothing; items = [2, 2])
+
+        # the chunked subset merge reproduces the sequential subset stream
+        seq = PatchTripletSink()
+        foreach_patch(op, big, (;), nothing; items = subset) do pws, pid
+            v = zeros(patch_ndofs(big, pid))
+            assemble_patch_target!(v, terms, pws, (;), nothing)
+            emit_patch_column!(seq, patch_dofs(big, pid), pid, v)
+        end
+        chunks = patch_chunks(big, 2; items = subset)
+        @test chunks == [[2], [3, 5]]
+        sinks = [PatchTripletSink() for _ in chunks]
+        wss = [patch_workspace(op, big) for _ in chunks]
+        @sync for c in eachindex(chunks)
+            Threads.@spawn for pid in chunks[c]
+                Ferrite.reinit!(wss[c], pid)
+                v = zeros(patch_ndofs(big, pid))
+                assemble_patch_target!(v, terms, wss[c], (;), nothing)
+                emit_patch_column!(sinks[c], patch_dofs(big, pid), pid, v)
+            end
+        end
+        merged = PatchTripletSink()
+        foreach(s -> append!(merged, s), sinks)
+        @test merged.I == seq.I
+        @test merged.J == seq.J
+        @test merged.V == seq.V
+        @test !isempty(seq.V)
     end
 
     @testset "per-patch callback: local BVP with several right-hand sides" begin
@@ -462,19 +578,6 @@ end
                 dup, 1, (u = u,), nothing, ncols)
             @test dsink.V == sinks[1].V          # chunk 1 is exactly patch 1
         end
-    end
-
-    @testset "item-indexed sink extent is validated at the sweep" begin
-        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
-        terms = (PatchTerm(WholePatch(), WeightedSource(1.0)),)
-        @test npatches(provider) == 3
-        @test_throws ArgumentError assemble_patches!(
-            PatchVectorKind(terms, PatchTripletSink([1, 2])), op, provider, (;), nothing)
-        @test_throws ArgumentError assemble_patches!(
-            PatchVectorKind(terms, PatchTripletSink()), op, provider, (;), nothing)
-        # the matching map goes through
-        sink = PatchTripletSink([1, 1, 2])
-        @test assemble_patches!(PatchVectorKind(terms, sink), op, provider, (;), nothing) === sink
     end
 
     @testset "assemble_patch_target! accumulates and rejects unusable targets" begin
