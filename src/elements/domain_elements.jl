@@ -80,6 +80,46 @@ facet_items(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
 setup_facet_item_cache(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     setup_facet_item_cache(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
 
+"""
+    algebraic_items(integrator::AnyMultiDomainIntegrator, dh)
+    setup_algebraic_cache(integrator::AnyMultiDomainIntegrator, dh)
+
+A routed integrator's algebraic declaration is the declaration of the one
+sub-integrator that makes one. The algebraic family is declared over the WHOLE
+`DofHandler`, not per subdomain, so there is no subdomain claim to route on the
+way the cache and dof hooks above do; and the single-declaration model
+([`algebraic_items`](@ref)) has no rule for merging two declarations, so
+several declaring sub-integrators are rejected rather than silently merged or
+silently dropped.
+"""
+function algebraic_items(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler)
+    sub = _algebraic_subintegrator(integrator, dh)
+    return sub === nothing ? () : algebraic_items(sub, dh)
+end
+
+function setup_algebraic_cache(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler)
+    sub = _algebraic_subintegrator(integrator, dh)
+    sub === nothing && throw(ArgumentError(
+        "No sub-integrator of this $(nameof(typeof(integrator))) declares `algebraic_items`, " *
+        "so there is no algebraic cache to build."))
+    return setup_algebraic_cache(sub, dh)
+end
+
+# The sub-integrator whose declaration is the router's, or `nothing` where none
+# declares. Names are visited in sorted order, so the rejection below names the
+# same offenders on every run.
+function _algebraic_subintegrator(integrator::AnyMultiDomainIntegrator, dh)
+    declaring = filter(sort!(collect(keys(integrator.subintegrators)))) do name
+        !isempty(algebraic_items(integrator.subintegrators[name], dh))
+    end
+    isempty(declaring) && return nothing
+    length(declaring) == 1 || throw(ArgumentError(
+        "The sub-integrators $(declaring) each declare `algebraic_items`. The declaration covers " *
+        "the whole DofHandler, so a multi-domain integrator carries at most one: merge them into " *
+        "a single declaration on one sub-integrator."))
+    return integrator.subintegrators[only(declaring)]
+end
+
 # Available for direct use, but each pays a full resolution — the engine calls
 # the plural hooks above.
 setup_element_cache(element_model::AnyMultiDomainIntegrator, sdh::SubDofHandler) =

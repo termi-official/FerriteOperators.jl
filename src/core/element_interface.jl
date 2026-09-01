@@ -202,8 +202,6 @@ struct EmptySurfaceElementCache <: AbstractSurfaceElementCache end
 assemble_facet!(req::AbstractAssemblyRequest, ::EmptySurfaceElementCache, args, local_facet_index::Int) = nothing
 @inline is_facet_in_cache(::FacetIndex, cell, ::EmptySurfaceElementCache) = false
 evaluate_facet_functional(kind, ::EmptySurfaceElementCache, args, local_facet_index::Int) = nothing
-Ferrite.getnquadpoints(::EmptySurfaceElementCache) = 0
-Ferrite.reinit!(::EmptySurfaceElementCache, cell) = nothing
 
 """
     setup_boundary_cache(integrator, sdh)
@@ -290,13 +288,6 @@ owning cell's, so the tail starts after `ndofs_per_cell(sdh)` here as well.
 """
 facet_item_global_dof_range(integrator, sdh) =
     ndofs_per_cell(sdh) .+ (1:length(facet_item_global_dofs(integrator, sdh)))
-
-"""
-Supertype for all caches to integrate over interfaces (facet pairs). No
-subtypes and no setup hook: nothing in this package traverses interfaces yet,
-so the type names the seam and nothing more.
-"""
-abstract type AbstractInterfaceElementCache end
 
 ####################################
 ## Algebraic items — terms with no mesh support

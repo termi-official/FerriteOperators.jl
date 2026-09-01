@@ -375,7 +375,7 @@ function setup_facet_item_caches(strategy, integrator, dh, protocol, ivh;
         validate_facet_item_cache(cache, get_declared_kinds(protocol))
         partition = compute_partition(strategy, FacetItems(sdh, items))
         ws = create_facet_item_workspace(cache, items, sdh, ivh, slots; needs_sensitivity, global_dofs = gdofs)
-        dc = setup_device_instances(device, ws, n_workers(strategy, device, partition))
+        dc = setup_device_instances(device, ws, n_workers(device, partition))
         push!(caches, SubdomainCache(FacetItemDomain(sdh, cache, items), dc, partition))
     end
     return caches

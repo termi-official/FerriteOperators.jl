@@ -48,59 +48,6 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
 
 @testset "Operators" begin
     reset_timer!()
-    @testset "Element Assembly Matrix" begin
-        Aₑ = [1.0 -1.0; -1.0 1.0]
-        Aₑflat = [1.0, -1.0, -1.0, 1.0]
-        N = 10
-
-        # Assemble reference
-        A = zeros(N,N)
-        for i in 1:N-1
-            A[i:i+1,i:i+1] .+= Aₑ
-        end
-        x = collect(1.0:N).^2
-        yref = A*x
-
-        # Generic action of H1 discretization
-        vindices = FerriteOperators.GenericIndexedData(
-            [1+(i ÷ 2) for i in 1:2N],
-            [FerriteOperators.GenericEAVectorIndex(2i-1, 2) for i in 1:N],
-        )
-        mindices = [
-            FerriteOperators.GenericEAMatrixIndex(4i-3, 2, 2) for i in 1:(N-1)
-        ]
-
-        # 
-        op = FerriteOperators.EAOperator(
-            SequentialCPUDevice(),
-            FerriteOperators.EAViewCache(),
-            FerriteOperators.GenericIndexedData(
-                repeat(Aₑflat, N),
-                mindices,
-            ),
-            vindices,
-            vindices,
-        )
-        y = zeros(N)
-        mul!(y, op, x)
-        @test y ≈ yref
-
-        op = FerriteOperators.EAOperator(
-            PolyesterDevice(1),
-            FerriteOperators.EAViewCache(),
-            FerriteOperators.GenericIndexedData(
-                repeat(Aₑflat, N),
-                mindices,
-            ),
-            vindices,
-            vindices,
-        )
-        y = zeros(N)
-        mul!(y, op, x)
-
-        @test y ≈ yref
-    end
-
     @testset "Actions" begin
         vin = ones(5)
         vout = ones(5)
@@ -119,35 +66,13 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
 
         @test get_matrix(nullop) ≈ zeros(5,5)
 
-
-        diagop = DiagonalOperator([1.0, 2.0, 3.0, 4.0, 5.0])
-        @test length(vin)  == size(diagop, 1)
-        mul!(vout, diagop, vin)
-        @test vout == [1.0, 2.0, 3.0, 4.0, 5.0]
-
-        # in and out must be distinguishable to catch out-aliasing mistakes
-        vres = zeros(5)
-        mul!(vres, diagop, [1.0, 1.0, 2.0, 2.0, 3.0])
-        @test vres == [1.0, 2.0, 6.0, 8.0, 15.0]
-
         # Bilinear operators with constant linearization support both update
         # forms, and the fused one fills the residual with the operator's
         # action `F(u) = A·u`.
-        update_linearization!(diagop, vin, nothing)
         update_linearization!(nullop, vin, nothing)
-        vres .= NaN
-        update_linearization!(diagop, vres, vin, nothing)
-        @test vres == [1.0, 2.0, 3.0, 4.0, 5.0]
+        vres = fill(NaN, 5)
         update_linearization!(nullop, vres, vin, nothing)
         @test vres == zeros(5)
-
-        mul!(vout, diagop, vin, 1.0, 1.0)
-        @test vout == 2.0 .* [1.0, 2.0, 3.0, 4.0, 5.0]
-
-        mul!(vout, diagop, vin, -2.0, 1.0)
-        @test vout == zeros(5)
-
-        @test get_matrix(diagop) ≈ spdiagm([1.0, 2.0, 3.0, 4.0, 5.0])
 
 
         vin = ones(4)
@@ -291,13 +216,13 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
 
         # Now just the residual
         residual .= NaN
-        nlop_base(residual, u, 0.0)
+        evaluate!(nlop_base, residual, u, 0.0)
         @test rnorm_baseline ≈ norm(residual)
 
         # Idempotency
         update_linearization!(nlop_base, u, 0.0)
         @test Jnorm_baseline ≈ norm(nlop_base.J)
-        nlop_base(residual, u, 0.0)
+        evaluate!(nlop_base, residual, u, 0.0)
         @test Jnorm_baseline ≈ norm(nlop_base.J)
         @test rnorm_baseline ≈ norm(residual)
         residual_baseline = copy(residual)
@@ -321,37 +246,44 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
             @test residual ≈ residual_baseline
 
             residual .= NaN
-            nlop(residual, u, 0.0)
+            evaluate!(nlop, residual, u, 0.0)
             @test residual ≈ residual_baseline
         end
 
-        @testset "Element Assembly Strategy $strategy" for strategy in (
+        # The `ElementAssembly` form accumulates per-element residuals and holds
+        # no matrix, so a matrix-target operator is rejected at setup rather
+        # than built with a matrix it can never fill.
+        @testset "Element Assembly Strategy rejects matrix targets $strategy" for strategy in (
             ElementAssemblyStrategy(SequentialCPUDevice()),
             ElementAssemblyStrategy(PolyesterDevice(1)),
-            ElementAssemblyStrategy(PolyesterDevice(2)),
         )
-            nlop = setup_operator(strategy, integrator, dh)
-            update_linearization!(nlop, u, 0.0)
-            y = zero(u)
-            mul!(y, nlop.J, u)
-            @test yref ≈ y
-            # The element-assembled action is idempotent: a second `mul!` on the
-            # same matrix-free operator gives the same result.
-            mul!(y, nlop.J, u)
-            @test yref ≈ y
-
-            residual .= NaN
-            update_linearization!(nlop, residual, u, 0.0)
-            mul!(y, nlop.J, u)
-            @test yref ≈ y
-            @test residual ≈ residual_baseline
-
-            residual .= NaN
-            nlop(residual, u, 0.0)
-            mul!(y, nlop.J, u)
-            @test yref ≈ y
-            @test residual ≈ residual_baseline
+            @test_throws ArgumentError setup_operator(strategy, integrator, dh)
         end
+    end
+
+    @testset "Element Assembly Strategy (vector target) $strategy" for strategy in (
+        ElementAssemblyStrategy(SequentialCPUDevice()),
+        ElementAssemblyStrategy(PolyesterDevice(1)),
+        ElementAssemblyStrategy(PolyesterDevice(2)),
+    )
+        # The per-element accumulation collapses into exactly the vector full
+        # assembly scatters directly.
+        grid = generate_grid(Quadrilateral, (5, 4))
+        dh   = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        close!(dh)
+
+        m   = SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u)
+        ref = setup_operator(SequentialAssemblyStrategy(SequentialCPUDevice()), m, dh)
+        update_operator!(ref, nothing)
+
+        op = setup_operator(strategy, m, dh)
+        @test size(op) == (ndofs(dh),)
+        update_operator!(op, nothing)
+        @test op.b ≈ ref.b
+        # Reassembly zeroes both the per-element buffer and the global vector.
+        update_operator!(op, nothing)
+        @test op.b ≈ ref.b
     end
 
     @testset "Condensed Elements" begin
@@ -520,10 +452,17 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         @test size(lin_op) == (n,)
     end
 
-    @testset "GPU device validation" begin
-        @test_throws ArgumentError FerriteOperators.setup_device_instances(FerriteOperators.CudaDevice(), FerriteOperators.EAIndexWorkspace(0), 1)
-        @test_throws ArgumentError FerriteOperators.n_workers(SequentialAssemblyStrategy(FerriteOperators.CudaDevice()), FerriteOperators.CudaDevice(), [1:5])
-        @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, FerriteOperators.CudaDevice(), nothing, [])
+    @testset "Device hooks a device type must implement" begin
+        # `AbstractGPUDevice` is the seam a downstream device subtypes; with no
+        # method of its own it must reach the loud generic hooks, and the forms
+        # whose setup builds storage must refuse it rather than fall through.
+        struct _TestGPUDevice{V, I} <: FerriteOperators.AbstractGPUDevice{V, I} end
+        device = _TestGPUDevice{Float32, Int32}()
+
+        @test_throws ArgumentError FerriteOperators.setup_device_instances(device, FerriteOperators.EAIndexWorkspace(0), 1)
+        @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, device, nothing, [])
+        @test_throws ArgumentError FerriteOperators.setup_operator_strategy_cache(
+            ElementAssemblyStrategy(device), nothing, nothing)
     end
 
     @testset "Generic setup_device_instances" begin

@@ -238,6 +238,22 @@ function evaluate! end
 
 get_matrix(op) = error("Operator matrix is not explicitly accessible for given operator")
 
+"""
+    operator_payload(op)
+
+The assembled array an operator's `Base.eltype` and `Base.size` read: the
+matrix a bilinear, nonlinear or transfer operator holds, the load vector of a
+linear operator, one stage block of a [`StageBlockOperator`](@ref).
+
+Operators whose shape lives in type parameters instead ([`NullOperator`](@ref),
+[`LinearNullOperator`](@ref)) carry no payload and keep their own methods.
+"""
+function operator_payload end
+
+Base.eltype(op::AbstractNonlinearOperator) = eltype(operator_payload(op))
+Base.size(op::AbstractNonlinearOperator) = size(operator_payload(op))
+Base.size(op::AbstractNonlinearOperator, axis) = size(operator_payload(op), axis)
+
 function *(op::AbstractNonlinearOperator, x::AbstractVector)
     y = similar(x)
     mul!(y, op, x)
@@ -264,24 +280,6 @@ function update_linearization!(op::AbstractBilinearOperator, residual::AbstractV
     return residual
 end
 
-
-"""
-    DiagonalOperator <: AbstractBilinearOperator
-
-Literally a "diagonal matrix".
-"""
-struct DiagonalOperator{TV <: AbstractVector} <: AbstractBilinearOperator
-    values::TV
-end
-
-mul!(out::AbstractVector, op::DiagonalOperator, in::AbstractVector) = out .= op.values .* in
-mul!(out::AbstractVector, op::DiagonalOperator, in::AbstractVector, α, β) = out .= α * op.values .* in + β * out
-Base.eltype(op::DiagonalOperator) = eltype(op.values)
-Base.size(op::DiagonalOperator, axis) = length(op.values)
-
-get_matrix(op::DiagonalOperator) = spdiagm(op.values)
-
-update_operator!(::DiagonalOperator, p, ctx = nothing) = nothing
 
 """
     NullOperator <: AbstractBilinearOperator
@@ -326,6 +324,7 @@ update_operator!(op::LinearNullOperator, p, ctx = nothing) = nothing
 
 Ferrite.add!(b::AbstractVector, op::AbstractLinearOperator) = __add_to_vector!(b, op.b)
 __add_to_vector!(b::AbstractVector, a::AbstractVector) = b .+= a
-Base.eltype(op::AbstractLinearOperator) = eltype(op.b)
-Base.size(op::AbstractLinearOperator) = size(op.b)
+operator_payload(op::AbstractLinearOperator) = op.b
+Base.eltype(op::AbstractLinearOperator) = eltype(operator_payload(op))
+Base.size(op::AbstractLinearOperator) = size(operator_payload(op))
 

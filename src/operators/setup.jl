@@ -198,7 +198,7 @@ function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, 
     device = strategy.device
     return [begin
         partition = compute_partition(strategy, sdh)
-        n = n_workers(strategy, device, partition)
+        n = n_workers(device, partition)
         ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots;
                                        needs_sensitivity, global_dofs = gdofs)
         dc = setup_device_instances(device, ws, n)
@@ -425,15 +425,24 @@ function _validate_transfer_strategy(strategy, label)
     return nothing
 end
 
-# One `SubdomainCache` per `(sdh_a, sdh_b)` pair; `tc_builder` is the one thing
-# a same-grid vs. nested-grid transfer operator disagrees on.
+# The whole construction a same-grid and a nested-grid transfer operator share:
+# `sp` is the pattern each builds its own way, `tc_builder` the cell cache that
+# walks a `(sdh_a, sdh_b)` pair, and the result is one `TransferFerriteOperator`.
+function _build_transfer_operator(strategy, integrator, dh_a, dh_b, sp, tc_builder)
+    P = allocate_matrix(SparseMatrixCSC{value_type(strategy.device), Int}, sp)
+    subdomain_caches = _build_transfer_subdomain_caches(
+        strategy, integrator, zip(dh_a.subdofhandlers, dh_b.subdofhandlers), tc_builder)
+    return TransferFerriteOperator(P, strategy, subdomain_caches, dh_a, dh_b, integrator)
+end
+
+# One `SubdomainCache` per `(sdh_a, sdh_b)` pair.
 function _build_transfer_subdomain_caches(strategy, integrator, pairs, tc_builder)
     device = strategy.device
     subdomain_caches = SubdomainCache[]
     for (sdh_a, sdh_b) in pairs
         element = setup_transfer_element_cache(integrator, sdh_a, sdh_b)
         partition = compute_partition(strategy, sdh_a)
-        n = n_workers(strategy, device, partition)
+        n = n_workers(device, partition)
         tc = tc_builder(sdh_a, sdh_b)
         ws = TransferWorkspace(element, allocate_transfer_element_matrix(element, sdh_a, sdh_b), tc)
         dc = setup_device_instances(device, ws, n)
@@ -467,14 +476,8 @@ function setup_transfer_operator(
     @assert get_grid(dh_row) === get_grid(dh_col) "Both DofHandlers must share the same grid"
     @assert length(dh_row.subdofhandlers) == length(dh_col.subdofhandlers) "Mismatch in number of subdomains"
 
-    Tv = value_type(strategy.device)
-    sp = init_transfer_sparsity_pattern(dh_row, dh_col)
-    P  = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
-
-    subdomain_caches = _build_transfer_subdomain_caches(
-        strategy, integrator, zip(dh_row.subdofhandlers, dh_col.subdofhandlers), SameGridCellCache)
-
-    return TransferFerriteOperator(P, strategy, subdomain_caches, dh_row, dh_col, integrator)
+    return _build_transfer_operator(strategy, integrator, dh_row, dh_col,
+                                    init_transfer_sparsity_pattern(dh_row, dh_col), SameGridCellCache)
 end
 
 """
@@ -511,7 +514,7 @@ end
 """
     setup_nested_transfer_operator(strategy, integrator, dh_fine, dh_coarse, fine2coarse, child_ref_coords)
 
-Set up a [`NestedTransferFerriteOperator`](@ref) assembling a rectangular sparse matrix
+Set up a [`TransferFerriteOperator`](@ref) assembling a rectangular sparse matrix
 of size `(ndofs(dh_fine) × ndofs(dh_coarse))`. `dh_fine` and `dh_coarse` must live on
 **different** grids where every fine cell is a child of exactly one coarse cell, as
 encoded by `fine2coarse` and `child_ref_coords`.
@@ -529,13 +532,9 @@ function setup_nested_transfer_operator(
         child_ref_coords::AbstractVector,
     )
     _validate_transfer_strategy(strategy, "Nested transfer operators")
-    Tv  = value_type(strategy.device)
-    sp  = init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse)
-    P   = allocate_matrix(SparseMatrixCSC{Tv, Int}, sp)
 
-    subdomain_caches = _build_transfer_subdomain_caches(
-        strategy, integrator, zip(dh_fine.subdofhandlers, dh_coarse.subdofhandlers),
+    return _build_transfer_operator(
+        strategy, integrator, dh_fine, dh_coarse,
+        init_nested_transfer_sparsity_pattern(dh_fine, dh_coarse, fine2coarse),
         (sdh_fine, sdh_coarse) -> NestedGridCellCache(sdh_fine, sdh_coarse, fine2coarse, child_ref_coords))
-
-    return NestedTransferFerriteOperator(P, strategy, subdomain_caches, dh_fine, dh_coarse, integrator)
 end

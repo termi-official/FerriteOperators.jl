@@ -160,7 +160,7 @@ one coarse cell. The caller supplies the mesh-hierarchy data:
 - `child_ref_coords :: Vector{Vector{Vec{dim,T}}}` – for each fine cell the reference
   coordinates of that cell's nodes *inside the parent (coarse) reference element*.
 
-Accessors: `cellid`/`coarse_cellid`, `get_fine_nodes`/`get_coarse_nodes`,
+Accessors: `cellid` (the fine cell),
 `get_fine_coordinates`/`get_coarse_coordinates`, `getrowdofs` (fine dofs, the
 rows of the resulting matrix), `getcolumndofs` (coarse dofs, the columns) and
 `get_child_ref_coords`.
@@ -246,10 +246,7 @@ function Ferrite.reinit!(tc::NestedGridCellCache, fine_id::Int)
     return tc
 end
 
-Ferrite.cellid(tc::NestedGridCellCache)              = tc.fine_cellid
-coarse_cellid(tc::NestedGridCellCache)       = tc.coarse_cellid
-get_fine_nodes(tc::NestedGridCellCache)      = tc.fine_nodes
-get_coarse_nodes(tc::NestedGridCellCache)    = tc.coarse_nodes
+Ferrite.cellid(tc::NestedGridCellCache) = tc.fine_cellid
 """
     get_fine_coordinates(tc) -> Vector{<:Vec}
     get_coarse_coordinates(tc) -> Vector{<:Vec}

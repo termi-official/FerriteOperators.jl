@@ -73,9 +73,10 @@ end
 FullAssembly() = FullAssembly(StandardOperatorSpecification())
 
 """
-ELEMENT level: store per-element matrices; the operator acts matrix-free.
-Single-field `DofHandler`s only — `EAVector`'s per-cell dof layout assumes one
-field per cell.
+ELEMENT level: accumulate per-element residual contributions and collapse them
+into the global vector at the end of the sweep. Vector-target (linear)
+operators only — the form holds no matrix. Single-field `DofHandler`s only,
+`EAVector`'s per-cell dof layout assuming one field per cell.
 """
 struct ElementAssembly <: AbstractAssemblyForm end
 
@@ -126,7 +127,7 @@ The composition of three orthogonal axes: the operator form
 ([`AbstractSchedulingPolicy`](@ref) — how parallel work is made safe), and the
 device. The named constructors below build the common compositions.
 """
-struct AssemblyStrategy{F <: AbstractAssemblyForm, S <: AbstractSchedulingPolicy, D} <: AbstractAssemblyStrategy
+struct AssemblyStrategy{F <: AbstractAssemblyForm, S <: AbstractSchedulingPolicy, D <: AbstractDevice} <: AbstractAssemblyStrategy
     form::F
     scheduling::S
     device::D
@@ -154,9 +155,10 @@ PerColorAssemblyStrategy(device, alg = ColoringAlgorithm.WorkStream) = AssemblyS
 """
     ElementAssemblyStrategy(device)
 
-[`ElementAssembly`](@ref) under [`SequentialScheduling`](@ref). Its per-element
-dof maps come from `celldofs`, so a subdomain declaring [`global_dofs`](@ref) or
-[`facet_item_global_dofs`](@ref) is rejected at setup.
+[`ElementAssembly`](@ref) under [`SequentialScheduling`](@ref), for a linear
+operator. Its per-element dof maps come from `celldofs`, so a subdomain
+declaring [`global_dofs`](@ref) or [`facet_item_global_dofs`](@ref) is rejected
+at setup, as is a bilinear or nonlinear operator (the form holds no matrix).
 """
 ElementAssemblyStrategy(device) = AssemblyStrategy(ElementAssembly(), SequentialScheduling(), device)
 
@@ -180,6 +182,16 @@ default_strategy() = Base.get_extension(FerriteOperators, :FerriteOperatorsPolye
 
 function setup_operator_strategy_cache(strategy::AssemblyStrategy{ElementAssembly, <:AbstractSchedulingPolicy, <:AbstractCPUDevice}, integrator, dh)
     return AssemblyStrategy(ElementAssemblyData(EAVector(dh)), strategy.scheduling, strategy.device)
+end
+
+# A form whose setup builds storage must be rejected on a device that has no
+# setup method: the identity fallback below would otherwise hand back a strategy
+# still in its pre-setup form, and the operator would assemble into an
+# `EAVector` that was never built.
+function setup_operator_strategy_cache(strategy::AssemblyStrategy{ElementAssembly}, integrator, dh)
+    throw(ArgumentError(
+        "The `ElementAssembly` form builds its per-element storage at setup, which is implemented " *
+        "for `AbstractCPUDevice` only (got $(typeof(strategy.device)))."))
 end
 
 setup_operator_strategy_cache(strategy, integrator, dh) = strategy
@@ -416,10 +428,10 @@ function compute_partition(scheduling::ColoredScheduling, provider::CellItems)
 end
 
 """
-    n_workers(strategy, device, partition) -> Int
+    n_workers(device, partition) -> Int
 
-Number of parallel workers for this strategy, device and partition — the size
-of the per-worker device cache [`setup_device_instances`](@ref) builds.
+Number of parallel workers for this device and partition — the size of the
+per-worker device cache [`setup_device_instances`](@ref) builds.
 
 A [`PolyesterDevice`](@ref) can occupy at most `Threads.nthreads()` of them at
 once, and `chunksize` is the granularity below which splitting is not worth it,
@@ -427,17 +439,10 @@ so the count is the smaller of the thread count and the number of chunks the
 largest barrier of `partition` holds. Workspaces are therefore per WORKER, not
 per chunk: a worker walks the chunks it was given with the one workspace it owns.
 """
-n_workers(strategy, ::SequentialCPUDevice, partition) = 1
-function n_workers(strategy, device::PolyesterDevice, partition)
+n_workers(::SequentialCPUDevice, partition) = 1
+function n_workers(device::PolyesterDevice, partition)
     ncellsmax = maximum(length, partition)
     return min(Threads.nthreads(), cld(ncellsmax, device.chunksize))
-end
-
-function n_workers(strategy, device::AbstractGPUDevice, partition)
-    throw(ArgumentError(
-        "GPU assembly is not yet implemented for $(typeof(device)). " *
-        "Implement n_workers for this device type."
-    ))
 end
 
 
@@ -452,7 +457,3 @@ matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMat
 matrix_type(::AbstractDevice, spec::BlockedOperatorSpecification) = spec.matrix_type
 vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
 vector_type(device::AbstractDevice) = Vector{value_type(device)}
-
-function Adapt.adapt_structure(::AbstractAssemblyStrategy, dh::DofHandler)
-    error("Device specific implementation for `adapt_structure(::AbstractAssemblyStrategy,dh::DofHandler)` is not implemented yet")
-end

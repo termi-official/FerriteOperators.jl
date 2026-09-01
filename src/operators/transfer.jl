@@ -31,11 +31,35 @@ the pre-allocated `(nrdofs_per_cell × ncdofs_per_cell)` element matrix.
 """
 abstract type AbstractTransferElementCache end
 
-## Allocation helper (may be specialised by concrete caches)
+"""
+    allocate_transfer_element_matrix(element_cache, sdh_row, sdh_col) -> AbstractMatrix
+
+The per-worker `Pₑ` buffer [`assemble_transfer_element!`](@ref) fills, defaulting
+to a dense `(ndofs_per_cell(sdh_row) × ndofs_per_cell(sdh_col))` matrix. A cache
+needing a different element type or layout specializes this.
+"""
 allocate_transfer_element_matrix(::AbstractTransferElementCache, sdh_row, sdh_col) =
     zeros(ndofs_per_cell(sdh_row), ndofs_per_cell(sdh_col))
 
+"""
+    setup_transfer_element_cache(integrator, sdh_row::SubDofHandler, sdh_col::SubDofHandler)
+
+Build the [`AbstractTransferElementCache`](@ref) serving one `(row, column)`
+subdomain pair — the transfer analogue of [`setup_element_cache`](@ref), run
+once per pair at setup.
+"""
 function setup_transfer_element_cache end
+
+"""
+    assemble_transfer_element!(Pₑ, tc, element_cache, pₑ)
+
+Fill the rectangular element matrix `Pₑ` with this cell pair's transfer
+contribution. `tc` is the transfer cell cache positioned on the pair
+([`SameGridCellCache`](@ref) or [`NestedGridCellCache`](@ref)), `pₑ` the
+element-local parameter view from [`query_cell_parameters`](@ref). `Pₑ` arrives
+zeroed and is scattered to `(getrowdofs(tc), getcolumndofs(tc))`.
+"""
+function assemble_transfer_element! end
 
 
 ####################################
@@ -92,8 +116,14 @@ end
     TransferFerriteOperator
 
 A transfer (prolongation / restriction) operator assembled as a rectangular sparse matrix
-`P` of size `(nrdofs × ncdofs)`. Construct via [`setup_transfer_operator`](@ref), update
-via [`update_operator!`](@ref), apply with `mul!(out, op, x[, α, β])`.
+`P` of size `(nrdofs × ncdofs)`. Update via [`update_operator!`](@ref), apply with
+`mul!(out, op, x[, α, β])`.
+
+Both transfer geometries build this one type: [`setup_transfer_operator`](@ref) for two
+DofHandlers on the SAME grid, [`setup_nested_transfer_operator`](@ref) for hierarchically
+nested grids (geometric multigrid). They differ in the cell cache that walks the pair —
+[`SameGridCellCache`](@ref) vs [`NestedGridCellCache`](@ref) — not in what is assembled,
+so `dh_row`/`dh_col` are the fine and coarse handlers in the nested case.
 
 !!! warning "Experimental surface"
     The transfer constructors and operator types may change in a minor release;
@@ -124,7 +154,6 @@ end
 
 """
     update_operator!(op::TransferFerriteOperator, p)
-    update_operator!(op::NestedTransferFerriteOperator, p)
 
 Reassemble the rectangular transfer matrix `op.P` from scratch.
 """
@@ -135,42 +164,7 @@ mul!(out::AbstractVector, op::TransferFerriteOperator, x::AbstractVector) =
 mul!(out::AbstractVector, op::TransferFerriteOperator, x::AbstractVector, α, β) =
     mul!(out, op.P, x, α, β)
 
-Base.eltype(op::TransferFerriteOperator) = eltype(op.P)
-Base.size(op::TransferFerriteOperator, axis) = size(op.P, axis)
-Base.size(op::TransferFerriteOperator) = size(op.P)
-
-
-####################################
-## Nested-grid transfer operator   ##
-####################################
-
-"""
-    NestedTransferFerriteOperator
-
-Transfer operator for hierarchically nested grids (geometric multigrid): the fine and
-coarse DofHandlers live on different grids, connected via `fine2coarse` mappings.
-Construct via [`setup_nested_transfer_operator`](@ref), update via [`update_operator!`](@ref).
-
-!!! warning "Experimental surface"
-    The transfer constructors and operator types may change in a minor release;
-    the assembled matrix and its sparsity are not affected.
-"""
-@concrete struct NestedTransferFerriteOperator
-    P
-    strategy
-    subdomain_caches
-    dh_fine
-    dh_coarse
-    integrator
-end
-
-update_operator!(op::NestedTransferFerriteOperator, p) = _reassemble_transfer!(op, p)
-
-mul!(out::AbstractVector, op::NestedTransferFerriteOperator, x::AbstractVector) =
-    mul!(out, op.P, x)
-mul!(out::AbstractVector, op::NestedTransferFerriteOperator, x::AbstractVector, α, β) =
-    mul!(out, op.P, x, α, β)
-
-Base.eltype(op::NestedTransferFerriteOperator) = eltype(op.P)
-Base.size(op::NestedTransferFerriteOperator, axis) = size(op.P, axis)
-Base.size(op::NestedTransferFerriteOperator) = size(op.P)
+operator_payload(op::TransferFerriteOperator) = op.P
+Base.eltype(op::TransferFerriteOperator) = eltype(operator_payload(op))
+Base.size(op::TransferFerriteOperator) = size(operator_payload(op))
+Base.size(op::TransferFerriteOperator, axis) = size(operator_payload(op), axis)

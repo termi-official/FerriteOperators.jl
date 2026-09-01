@@ -32,6 +32,15 @@ patterns marked ⚠ below.
 | `FerriteOperators.Simple*` example elements | `FerriteOperatorsExampleElements` — a separate package under `lib/`, exporting the integrators |
 | `*MultiDomainIntegrator(Dict(sdh => integrator))` | `*MultiDomainIntegrator(Dict("cellset_name" => integrator))` — volumetric cellset names, validated at setup |
 | `CondensationElection`, `Separate`, `FusedWithResidual`, `condensation_election`, `condensation_election_error` | removed — `condense_internal!` is unconditionally its own domain traversal |
+| `DiagonalOperator` | removed — build the matrix (`spdiagm`) and wrap it, or use `Diagonal` directly |
+| `NestedTransferFerriteOperator` | `TransferFerriteOperator` — both transfer geometries build the one type; `setup_nested_transfer_operator` is unchanged. `op.dh_fine`/`op.dh_coarse` are now `op.dh_row`/`op.dh_col` |
+| `CudaDevice` | removed — a GPU device subtypes `AbstractGPUDevice` and implements the device hooks |
+| `query_element_quadrature_data`, `store_quadrature_data!` | removed — `evaluate_quadrature!` writes the cell's `QVector` slice directly |
+| `QuadratureDataMultiQuery` | removed — call `process_query!` once per query |
+| `unwrap_parameters` | removed — override `query_cell_parameters`/`query_facet_parameters` on the cache instead |
+| `whole_patch_terms` | removed — filter a patch request's terms in the element |
+| `(op::LinearizedFerriteOperator)(residual, u, p)` (callable) | `evaluate!(op, residual, u, p)` |
+| bilinear/nonlinear operator under `ElementAssemblyStrategy` ⚠ | rejected at setup — the `ElementAssembly` form holds no matrix and serves vector-target (linear) operators only |
 
 Constructor *calls* like `SequentialAssemblyStrategy(device)` still work — the
 names are convenience constructors for the common strategy compositions. Only
@@ -242,6 +251,10 @@ f(s::ElementAssemblyStrategy)               f(s::AssemblyStrategy{ElementAssembl
                                             f(s::AssemblyStrategy{<:ElementAssemblyData}) # post-setup
 ```
 
+`ElementAssembly` now accumulates per-element *residual* contributions and
+holds no matrix, so it serves linear operators only; a bilinear or nonlinear
+one under it is rejected at setup.
+
 Or dispatch on a single axis: `s.form`, `s.scheduling`, `s.device`. Operators
 are payload + engine + integrator; anything that read `op.dh`/`op.strategy`/
 `op.subdomain_caches` reads `op.engine.*`. `getJ(op) = op.J` style accessors
@@ -347,8 +360,9 @@ local problems](elements.md)).
 4. Declare `has_internal_state` for condensed caches; add explicit
    `Ferrite.getnquadpoints` and `reinit_values!` methods for every cache,
    and delete `reinit!` calls from cell-kernel bodies.
-5. Replace parameter-wrapper unwrapping hacks with one `unwrap_parameters`
-   method; move facet-specific parameters into `query_facet_parameters`.
+5. Replace parameter-wrapper unwrapping hacks with a `query_cell_parameters`
+   method on the cache; move facet-specific parameters into
+   `query_facet_parameters`.
 6. Replace solver-state smuggling with an ordinary cache field, duplicated per
    worker by `duplicate_for_device`.
 7. Move every kernel that read time out of `p` onto `evaluation_time(args.ctx)`.

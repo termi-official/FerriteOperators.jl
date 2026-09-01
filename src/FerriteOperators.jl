@@ -3,7 +3,6 @@ module FerriteOperators
 using Reexport
 @reexport using Ferrite
 using TimerOutputs
-using Adapt
 using Unrolled
 using SparseArrays, StaticArrays
 import SparseArrays: AbstractSparseMatrixCSC, getcolptr
@@ -105,8 +104,8 @@ abstract type AbstractLinearIntegrator end
 include("elements/composite_elements.jl")     # High-level composition of operators
 include("elements/ad_element.jl")             # ADElementCache: AD as an element cache decorator
 
-include("operators/general.jl")         # Domain descriptors, NullOperator, DiagonalOperator
-include("operators/matrix_free.jl")     # Element-assembly storage and matrix-free products
+include("operators/general.jl")         # Domain descriptors, NullOperator
+include("operators/matrix_free.jl")     # Element-assembly storage: per-element residuals and their collapse
 include("operators/nonlinear.jl")       # Assembly and action tasks
 include("operators/bilinear.jl")
 include("operators/linear.jl")
@@ -139,9 +138,8 @@ export get_number_of_internal_dofs_per_element, setup_internal_variable_handler
 
 export QVector, setup_qvector, get_range_for_cell
 export evaluate_quadrature!
-export query_element_quadrature_data, store_quadrature_data!
 export VTKQuadratureGrid, VTKQuadratureFile, write_quadrature_data
-export QuadratureDataQuery, QuadratureDataMultiQuery, prepare_quadrature_query, process_query!
+export QuadratureDataQuery, prepare_quadrature_query, process_query!
 
 export setup_operator, update_operator!, update_linearization!, evaluate!
 export setup_evaluation_operator, EvaluationFerriteOperator
@@ -174,7 +172,7 @@ export FunctionalKind, evaluate_functional, evaluate_cell_functional, reduction_
 export PatchItems, npatches, patch_dofs, patch_ndofs, patch_cells, patch_cell_groups, assemble_patch_matrices!
 export patch_free_dofs, patch_prescribed_dofs, augment_prescribed_dofs!, patch_vertices, patch_vertex_dofs
 export WholePatch, CellGroup, PatchTerm, patch_term_active, any_patch_term_active
-export whole_patch_terms, assemble_patch_cell!
+export assemble_patch_cell!
 export PatchMatrixKind, PatchVectorKind, PatchCallbackKind, assemble_patches!, foreach_patch
 export PatchAssemblyWorkspace, patch_workspace, current_patch, patch_provider
 export assemble_patch_target!, patch_chunks
@@ -182,15 +180,16 @@ export AbstractPatchSink, patch_target, patch_scatter, patch_emit!
 export PatchLocalSink, PatchAssemblerSink, PatchGlobalVectorSink, PatchTripletSink, emit_patch_column!
 export ItemStates, item_state, set_item_state!, has_item_state, invalidate_item_state!, invalidate_item_states!
 export provides_analytic
-export query_cell_parameters, query_facet_parameters, unwrap_parameters, assemble_facet!, is_facet_in_cache
+export query_cell_parameters, query_facet_parameters, assemble_facet!, is_facet_in_cache
 export reinit_values!
 export ADElementCache, AbstractElementCacheDecorator, unwrap, ForwardDiffAD, FusedFromSplit, condensed_corrector
 export decorate_element_cache, needs_ad_decoration, fully_analytic
 
 export residual_size, unknown_size
 export get_dof_handler, get_strategy, get_subdomain_caches
+export get_first_cell, geometric_subdomain_interpolation
 
-export NullOperator, DiagonalOperator, LinearNullOperator
+export NullOperator, LinearNullOperator
 export AbstractNonlinearOperator
 
 export SequentialCPUDevice, PolyesterDevice
@@ -208,6 +207,7 @@ export NestedGridCellCache, NestedGridCellIterator
 export getrowdofs, getcolumndofs
 export get_fine_coordinates, get_coarse_coordinates, get_child_ref_coords
 export AbstractTransferIntegrator, AbstractTransferElementCache
+export setup_transfer_element_cache, assemble_transfer_element!, allocate_transfer_element_matrix
 export AbstractVolumetricElementCache, AbstractSurfaceElementCache
 export EmptyVolumetricElementCache, EmptySurfaceElementCache
 export MassProlongatorIntegrator
@@ -221,7 +221,7 @@ export evaluate_facet_functional
 export algebraic_items, setup_algebraic_cache, assemble_algebraic!, evaluate_algebraic_functional
 export AlgebraicItem, AlgebraicArgs
 export TransferFerriteOperator, setup_transfer_operator, init_transfer_sparsity_pattern
-export NestedTransferFerriteOperator, setup_nested_transfer_operator, init_nested_transfer_sparsity_pattern
+export setup_nested_transfer_operator, init_nested_transfer_sparsity_pattern
 
 export NonlinearMultiDomainIntegrator, BilinearMultiDomainIntegrator, LinearMultiDomainIntegrator
 export NonlinearCompositeIntegrator, BilinearCompositeIntegrator, LinearCompositeIntegrator

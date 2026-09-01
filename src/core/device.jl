@@ -32,10 +32,13 @@ index_type(::AbstractDevice{<:Any, IndexType}) where IndexType = IndexType
 
 `x`'s per-worker counterpart for `device`: an independent copy of mutable
 per-worker scratch, the same object shared read-only where sharing is safe, or
-(GPU) a device-resident layout. Every cache/workspace type reachable from a
-[`setup_operator`](@ref) call needs a method — there is no fallback, so a
-missing one surfaces as a `MethodError` at setup rather than an aliasing bug
-at assembly time.
+(GPU) a device-resident layout.
+
+The generic fallback shares an `isbits` `x` — there is nothing mutable to alias
+— and throws a `MethodError` for anything else. So a cache or workspace type
+reachable from a [`setup_operator`](@ref) call that owns mutable state needs a
+method, and a missing one surfaces at setup rather than as an aliasing bug at
+assembly time.
 """
 function duplicate_for_device end
 
@@ -212,19 +215,3 @@ struct PolyesterDevice{ValueType, IndexType} <: AbstractCPUDevice{ValueType, Ind
 end
 PolyesterDevice() = PolyesterDevice{Float64, Int}(32)
 PolyesterDevice(i::Int) = PolyesterDevice{Float64, Int}(i)
-
-
-
-"""
-    CudaDevice(threads, blocks)
-
-Placeholder for a future GPU device axis. Not implemented — no CUDA extension
-is declared and every entry point throws `ArgumentError`.
-"""
-struct CudaDevice{ValueType, IndexType} <: AbstractGPUDevice{ValueType, IndexType}
-    threads::Union{IndexType, Nothing}
-    blocks::Union{IndexType, Nothing}
-end
-
-CudaDevice() = CudaDevice{Float32, Int32}(nothing, nothing)
-CudaDevice(threads::IndexType, blocks::IndexType) where IndexType = CudaDevice{Float32, IndexType}(threads, blocks)

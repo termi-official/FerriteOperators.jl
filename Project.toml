@@ -4,7 +4,6 @@ version = "0.4.0"
 authors = ["Dennis Ogiermann <termi-official@users.noreply.github.com> and contributors"]
 
 [deps]
-Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
 ConcreteStructs = "2569d6c7-a4a2-43d3-a901-331e8e4be471"
 Ferrite = "c061ca5d-56c9-439f-9c0e-210fe06d3992"
@@ -29,7 +28,6 @@ FerriteOperatorsBlockArraysExt = "BlockArrays"
 FerriteOperatorsPolyesterExt = "Polyester"
 
 [compat]
-Adapt = "4.3.0"
 Aqua = "0.8"
 Atomix = "1.1.2"
 BlockArrays = "1"

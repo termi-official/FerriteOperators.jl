@@ -175,7 +175,7 @@ function parameter_vjp!(g::AbstractVector, op::LinearizedFerriteOperator, λ::Ab
     fill!(g, zero(eltype(g)))
     atomic = parameter_scatter_needs_atomic(op.engine.strategy)
     if atomic && op.engine.strategy.scheduling isa ColoredScheduling
-        @warn "PerColorAssemblyStrategy provides no isolation for parameter-space " *
+        @warn "ColoredScheduling provides no isolation for parameter-space " *
               "accumulation; the VJP scatter falls back to atomic adds." maxlog = 1
     end
     assembler = ParameterVJPAssembler{eltype(g), typeof(g), atomic}(g)
@@ -324,10 +324,7 @@ Apply the (scaled) action of the assembled linearization to the vector `in`.
 """
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector) = mul!(out, op.J, in)
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.J, in, α, β)
-(op::LinearizedFerriteOperator)(residual, u, p) = evaluate!(op, residual, u, p)
-Base.eltype(op::LinearizedFerriteOperator) = eltype(op.J)
-Base.size(op::LinearizedFerriteOperator) = size(op.J)
-Base.size(op::LinearizedFerriteOperator, axis) = size(op.J, axis)
+operator_payload(op::LinearizedFerriteOperator) = op.J
 
 """
     residual_size(op) -> Int

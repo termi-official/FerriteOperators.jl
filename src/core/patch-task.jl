@@ -78,20 +78,6 @@ gate that lets a patch sweep skip a cell no term touches.
 @inline any_patch_term_active(terms::Tuple, group::Int) =
     patch_term_active(first(terms).restriction, group) || any_patch_term_active(Base.tail(terms), group)
 
-"""
-    whole_patch_terms(terms::Tuple)
-
-The [`WholePatch`](@ref)-restricted subtuple of `terms`, order preserved.
-Restrictions are tuple *type* information, so this folds at compile time:
-elements fusing several terms per quadrature point use it to pick a
-monomorphic loop for non-group cells.
-"""
-@inline whole_patch_terms(::Tuple{}) = ()
-@inline function whole_patch_terms(terms::Tuple)
-    rest = whole_patch_terms(Base.tail(terms))
-    return first(terms).restriction isa WholePatch ? (first(terms), rest...) : rest
-end
-
 ####################################
 ## The item provider
 ####################################

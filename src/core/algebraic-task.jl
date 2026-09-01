@@ -404,6 +404,6 @@ function setup_algebraic_caches(strategy, algebraic_domain, protocol, ad_backend
     resolved  = needs_sensitivity ? decorate_algebraic_cache(cache, length(first(items)), ad_backend, T) : cache
     partition = compute_partition(strategy, AlgebraicItems(items))
     ws = create_algebraic_workspace(resolved, items, get_declared_slots(protocol), T, ivh; needs_sensitivity)
-    dc = setup_device_instances(device, ws, n_workers(strategy, device, partition))
+    dc = setup_device_instances(device, ws, n_workers(device, partition))
     return [SubdomainCache(AlgebraicDomain(resolved, items), dc, partition)]
 end

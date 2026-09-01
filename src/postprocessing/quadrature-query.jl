@@ -15,16 +15,6 @@ end
 QuadratureDataQuery(buffer::QVector) = QuadratureDataQuery(buffer, nothing)
 
 """
-    QuadratureDataMultiQuery{Q <: QuadratureDataQuery}
-
-A bundle of [`QuadratureDataQuery`](@ref) objects executed together, one pass
-per query, via [`process_query!`](@ref).
-"""
-struct QuadratureDataMultiQuery{Q <: QuadratureDataQuery}
-    queries::Vector{Q}
-end
-
-"""
     prepare_quadrature_query(::Type{T}, op; set = nothing)
     prepare_quadrature_query(::Type{T}, prototype::QuadratureDataQuery)
 
@@ -49,26 +39,15 @@ end
 
 """
     process_query!(query::QuadratureDataQuery, op, u, p, f; ctx = nothing)
-    process_query!(multi::QuadratureDataMultiQuery, op, u, p, fs; ctx = nothing)
 
 Evaluate `f(ue, qp, cell, element_cache, pe, ctx)` at every quadrature point into
 `query.buffer`. A non-`nothing` `query.set` restricts evaluation to those cells;
 all others retain their current (typically zero) values. `ctx` is the sweep's
 context, passed through to [`evaluate_quadrature!`](@ref).
-
-The multi-query form calls `process_query!` once per `(query, f)` pair.
 """
 function process_query!(query::QuadratureDataQuery, op, u, p, f; ctx = nothing)
     evaluate_quadrature!(query.buffer, op, u, p, f, query.set; ctx)
     return query
-end
-
-function process_query!(multi::QuadratureDataMultiQuery, op, u, p, fs; ctx = nothing)
-    # TODO fuse fs into a single f, so we do not need to iterate multiple times
-    for (query, f) in zip(multi.queries, fs)
-        process_query!(query, op, u, p, f; ctx)
-    end
-    return multi
 end
 
 """

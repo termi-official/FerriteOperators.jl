@@ -48,10 +48,6 @@ allocate_element_residual_vector(d::AbstractElementCacheDecorator, sdh) = alloca
 evaluate_cell_functional(kind, d::AbstractElementCacheDecorator, args) = evaluate_cell_functional(kind, d.inner, args)
 evaluate_algebraic_functional(kind, d::AbstractElementCacheDecorator, args) =
     evaluate_algebraic_functional(kind, d.inner, args)
-query_element_quadrature_data(d::AbstractElementCacheDecorator, cell, ivh, q::QVector) =
-    query_element_quadrature_data(d.inner, cell, ivh, q)
-store_quadrature_data!(q::QVector, qe, cell, ivh, d::AbstractElementCacheDecorator) =
-    store_quadrature_data!(q, qe, cell, ivh, d.inner)
 has_internal_state(::Type{<:AbstractElementCacheDecorator{Inner}}) where {Inner} = has_internal_state(Inner)
 internal_state_insensitive(::Type{<:AbstractElementCacheDecorator{Inner}}, kind) where {Inner} =
     internal_state_insensitive(Inner, kind)

@@ -181,6 +181,27 @@ else
             @test_throws ArgumentError FerriteOperators.validate_algebraic_cache(CondensedProbeCache())
         end
 
+        @testset "multi-domain routing forwards the algebraic declaration" begin
+            # Unforwarded, a wrapped sub-integrator's declaration would fall
+            # back to the framework default `()` and the family would silently
+            # vanish from the operator.
+            grid = Ferrite.get_grid(dh)
+            addcellset!(grid, "everything", Set(1:getncells(grid)))
+            sub     = DeclaredAlgebraicItems([[1, 2], [2, 3]])
+            wrapped = NonlinearMultiDomainIntegrator(Dict("everything" => sub))
+
+            @test algebraic_items(wrapped, dh) == algebraic_items(sub, dh)
+            @test setup_algebraic_cache(wrapped, dh) isa NoopAlgebraicCache
+
+            op = setup_operator(sequential_strategy(spec), wrapped, dh)
+            @test last(op.engine.subdomain_caches).domain isa FerriteOperators.AlgebraicDomain
+
+            # The declaration covers the whole DofHandler, so two declaring
+            # sub-integrators have no merge rule and are rejected.
+            @test_throws ArgumentError algebraic_items(
+                NonlinearMultiDomainIntegrator(Dict("everything" => sub, "other" => sub)), dh)
+        end
+
         @testset "AffineRate slots reconstruct over the item's dofs" begin
             # The 0D rows READ the rate slot here, so the reconstruction is
             # visible in the residual and not only in a workspace buffer.

@@ -66,9 +66,11 @@ end
 "Number of stages of the tableau."
 nstages(sbop::StageBlockOperator) = length(sbop.c)
 
-Base.eltype(sbop::StageBlockOperator) = eltype(sbop.Ju[1])
+operator_payload(sbop::StageBlockOperator) = sbop.Ju[1]
+Base.eltype(sbop::StageBlockOperator) = eltype(operator_payload(sbop))
+# Bespoke: the stage-block matrix is `nstages` times the size of its blocks.
 function Base.size(sbop::StageBlockOperator)
-    n = size(sbop.Ju[1], 1)
+    n = size(operator_payload(sbop), 1)
     return (nstages(sbop) * n, nstages(sbop) * n)
 end
 Base.size(sbop::StageBlockOperator, axis) = size(sbop)[axis]

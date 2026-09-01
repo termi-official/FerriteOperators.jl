@@ -225,9 +225,6 @@ end
         dw = [zeros(patch_ndofs(prov, 1))]
         assemble_patches!(PatchVectorKind(onlyw, PatchLocalSink(dw)), op, prov, (;), nothing)
         @test dest[1] ≈ dw[1] .+ d2[1] rtol = 1e-14
-
-        @test whole_patch_terms(terms) === (terms[1],)
-        @test whole_patch_terms(only2) === ()
     end
 
     @testset "sinks" begin

@@ -37,6 +37,4 @@ evaluate!(op::BilinearFerriteOperator, residual::AbstractVector, u::AbstractVect
 
 mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector) = mul!(out, op.A, in)
 mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.A, in, α, β)
-Base.eltype(op::BilinearFerriteOperator) = eltype(op.A)
-Base.size(op::BilinearFerriteOperator) = size(op.A)
-Base.size(op::BilinearFerriteOperator, axis) = size(op.A, axis)
+operator_payload(op::BilinearFerriteOperator) = op.A

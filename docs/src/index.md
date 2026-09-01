@@ -75,6 +75,12 @@ Polyester). `SequentialAssemblyStrategy(device)`,
 `PerColorAssemblyStrategy(device)` and `ElementAssemblyStrategy(device)` are
 convenience constructors for the common compositions.
 
+[`FullAssembly`](@ref) assembles the global matrix and vector and serves every
+operator family. [`ElementAssembly`](@ref) accumulates per-element vector
+contributions and collapses them into the global vector at the end of the
+sweep, so it serves linear operators only — it holds no matrix, and a bilinear
+or nonlinear operator under it is rejected at setup.
+
 All operator entry points funnel into one task body executed by a shared
 device loop:
 

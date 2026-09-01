@@ -136,8 +136,7 @@ end
 end
 
 @testset "QuadratureDataQuery" begin
-    import FerriteOperators: QuadratureDataQuery, QuadratureDataMultiQuery,
-                              prepare_quadrature_query, process_query!
+    import FerriteOperators: QuadratureDataQuery, prepare_quadrature_query, process_query!
 
     grid       = generate_grid(Hexahedron, (4, 1, 1))
     addcellset!(grid, "left",  x -> x[1] ≤ 0.0)
@@ -179,22 +178,5 @@ end
         query2 = prepare_quadrature_query(Vec{3, Float64}, proto)
         @test query2.buffer isa QVector{Vec{3, Float64}}
         @test length(query2.buffer) == length(proto.buffer)
-    end
-
-    # --- QuadratureDataMultiQuery runs both queries in two passes ---
-    @testset "QuadratureDataMultiQuery" begin
-        q1    = prepare_quadrature_query(Float64, qop)
-        q2    = prepare_quadrature_query(Int, q1)
-        q3    = prepare_quadrature_query(Vec{3, Float64}, q1)
-        multi = QuadratureDataMultiQuery([q1, q2, q3])
-        fs    = [
-            f_cellid,
-            (ue, qp, cell, element_cache, pe, ctx) -> 2.0,
-            (ue, qp, cell, element_cache, pe, ctx) -> Vec{3, Float64}((1.0,1.0,1.0)),
-        ]
-        process_query!(multi, qop, u, nothing, fs)
-        @test all(q -> q > 0.0, q1.buffer)
-        @test all(==(2.0), q2.buffer)
-        @test all(==(Vec{3, Float64}((1.0,1.0,1.0))), q3.buffer)
     end
 end

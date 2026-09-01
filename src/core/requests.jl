@@ -338,22 +338,13 @@ function assemble_cell! end
 ####################################
 
 """
-    unwrap_parameters(p) -> p′
-
-Solver-side wrapper trait: a solver that must wrap the user parameter bag
-defines one unwrapping rule here instead of every element handling the
-wrapper. Defaults to identity.
-"""
-unwrap_parameters(p) = p
-
-"""
     query_cell_parameters(cache, cell, p)
 
 Element-overridable query producing the element-local parameter view `pₑ`
 handed to volumetric kernels; parameter fields gather their per-element views
-through this seam. Defaults to [`unwrap_parameters`](@ref) on the bag.
+through this seam. Defaults to the parameter bag itself.
 """
-query_cell_parameters(cache, cell, p) = unwrap_parameters(p)
+query_cell_parameters(cache, cell, p) = p
 
 """
     query_facet_parameters(cache, cell, local_facet_index, p)
@@ -361,7 +352,7 @@ query_cell_parameters(cache, cell, p) = unwrap_parameters(p)
 Facet analogue of [`query_cell_parameters`](@ref) — boundary caches get their
 own parameter query per facet instead of reusing the volumetric object.
 """
-query_facet_parameters(cache, cell, local_facet_index, p) = unwrap_parameters(p)
+query_facet_parameters(cache, cell, local_facet_index, p) = p
 
 """
     provides_analytic(::Type{CacheType}, kind) -> Bool

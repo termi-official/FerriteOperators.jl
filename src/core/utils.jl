@@ -24,6 +24,14 @@ function debug_mode(; enable = true)
     return nothing
 end
 
+"""
+    geometric_subdomain_interpolation(sdh::SubDofHandler) -> VectorizedInterpolation
+
+The geometric interpolation of `sdh`'s cells, vectorized to the grid's spatial
+dimension — the `ip_geo` a `CellValues`/`FacetValues` constructor takes. Read
+off the subdomain's FIRST cell: a `SubDofHandler` is uniform in cell type by
+construction.
+"""
 function geometric_subdomain_interpolation(sdh::SubDofHandler)
     grid      = get_grid(sdh.dh)
     sdim      = getspatialdim(grid)
@@ -32,6 +40,12 @@ function geometric_subdomain_interpolation(sdh::SubDofHandler)
     return ip_geo
 end
 
+"""
+    get_first_cell(sdh::SubDofHandler) -> AbstractCell
+
+The first cell of `sdh`'s cellset. A `SubDofHandler` is uniform in cell type,
+so this is the cell a setup hook reads a subdomain's geometry from.
+"""
 function get_first_cell(sdh::SubDofHandler)
     grid = get_grid(sdh.dh)
     return getcells(grid, first(sdh.cellset))
