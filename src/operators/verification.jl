@@ -44,12 +44,11 @@ tell which route an operator takes, so the two must be interchangeable. Both
 skip without weights, with complex weights (the FD referee is real), or when a
 participating slot carries an [`AffineRate`](@ref) source.
 
-The FD referee evaluates the FULL residual, boundary terms included, while the
-sensitivity sweeps skip a boundary term riding the cell sweep
-([`facet_items`](@ref) terms are their own traversal and do enter them). A
-failing parameter, time, or state-product check on an operator with a
-fused-route boundary cache is therefore the diagnostic for a boundary term
-depending on the seeded quantity.
+The FD referee evaluates the FULL residual, boundary terms included. A
+[`facet_items`](@ref) term enters the sensitivity sweeps analytically or not at
+all, so a failing parameter, time, or state-product check on an operator
+carrying one is the diagnostic for a surface cache missing that kind's facet
+kernel.
 
 `checks` holds one `(passed, err, skipped)` entry per check, with the reason
 recorded on a skip; `passed` is the conjunction of the non-skipped ones. The

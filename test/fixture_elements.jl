@@ -113,18 +113,17 @@ end
 ####################################
 ## Constant Neumann surface element double
 ####################################
-# r(v) = w ∫_Γ v dΓ over `facetset`, so a linear operator's load vector sums to
-# w·|Γ|. `param_scaled` switches w from the cache's own `scale` to the parameter
-# the driver queried for this facet (`scale · p`) — the channel that makes
-# per-inner parameter views observable through a composite. The integrator
-# family differs by supertype, so the load carries two spellings and one cache.
+# r(v) = w ∫_Γ v dΓ over the declared `facetset`, so a linear operator's load
+# vector sums to w·|Γ|. `param_scaled` switches w from the cache's own `scale`
+# to the parameter the driver queried for this facet (`scale · p`) — the channel
+# that makes per-inner parameter views observable through a composite. The
+# integrator family differs by supertype, so the load carries two spellings and
+# one cache.
 struct NeumannProbeCache{param_scaled, FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
     scale::Float64
     fv::FV
-    facetset::Set{FacetIndex}
 end
-NeumannProbeCache{ps}(scale, fv, facetset) where {ps} =
-    NeumannProbeCache{ps, typeof(fv)}(scale, fv, facetset)
+NeumannProbeCache{ps}(scale, fv) where {ps} = NeumannProbeCache{ps, typeof(fv)}(scale, fv)
 
 struct LinearNeumannProbe{param_scaled, V} <: AbstractLinearIntegrator
     scale::Float64
@@ -153,20 +152,21 @@ _neumann_volumetric_cache(::Nothing, ::SubDofHandler) = FerriteOperators.EmptyVo
 _neumann_volumetric_cache(integrator, sdh::SubDofHandler) =
     FerriteOperators.setup_element_cache(integrator, sdh)
 
-FerriteOperators.setup_boundary_cache(m::LinearNeumannProbe{ps}, sdh::SubDofHandler) where {ps} =
-    _neumann_boundary_cache(m, sdh, ps)
-FerriteOperators.setup_boundary_cache(m::NonlinearNeumannProbe{ps}, sdh::SubDofHandler) where {ps} =
-    _neumann_boundary_cache(m, sdh, ps)
-function _neumann_boundary_cache(m, sdh::SubDofHandler, param_scaled::Bool)
+FerriteOperators.facet_items(m::NeumannProbe, sdh::SubDofHandler) = m.facetset
+
+FerriteOperators.setup_facet_item_cache(m::LinearNeumannProbe{ps}, sdh::SubDofHandler) where {ps} =
+    _neumann_facet_cache(m, sdh, ps)
+FerriteOperators.setup_facet_item_cache(m::NonlinearNeumannProbe{ps}, sdh::SubDofHandler) where {ps} =
+    _neumann_facet_cache(m, sdh, ps)
+function _neumann_facet_cache(m, sdh::SubDofHandler, param_scaled::Bool)
     ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
     ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
     fqr    = FacetQuadratureRule{Ferrite.getrefshape(ip)}(2)
-    return NeumannProbeCache{param_scaled}(m.scale, FacetValues(fqr, ip, ip_geo), m.facetset)
+    return NeumannProbeCache{param_scaled}(m.scale, FacetValues(fqr, ip, ip_geo))
 end
 
 FerriteOperators.duplicate_for_device(device, c::NeumannProbeCache{ps}) where {ps} =
-    NeumannProbeCache{ps}(c.scale, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
-FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::NeumannProbeCache) = idx ∈ c.facetset
+    NeumannProbeCache{ps}(c.scale, FerriteOperators.duplicate_for_device(device, c.fv))
 FerriteOperators.query_facet_parameters(c::NeumannProbeCache{true}, cell, lfi, p) = c.scale * p
 
 _neumann_load(c::NeumannProbeCache{false}, args) = c.scale
@@ -183,52 +183,20 @@ function FerriteOperators.assemble_facet!(req::ResidualRequest, c::NeumannProbeC
 end
 
 ####################################
-## Facet-item route switch for the Neumann probe
-####################################
-# The very same `NeumannProbeCache` a `NeumannProbe` hands the fused cell
-# sweep, declared as facet items instead: `setup_boundary_cache` stays at its
-# empty default and the facet set travels through `facet_items`. No cache and
-# no kernel changes, which is what makes the two routes comparable.
-#
-# `declared` defaults to the cache's own facet set, so the two routes see the
-# same facets. Passing a different set separates the ROUTE's declaration from
-# the cache's `is_facet_in_cache` gate, which this route does not consult.
-
-struct LinearFacetItemProbe{I} <: AbstractLinearIntegrator
-    inner::I
-    declared::Set{FacetIndex}
-end
-struct NonlinearFacetItemProbe{I} <: AbstractNonlinearIntegrator
-    inner::I
-    declared::Set{FacetIndex}
-end
-LinearFacetItemProbe(inner) = LinearFacetItemProbe(inner, inner.facetset)
-NonlinearFacetItemProbe(inner) = NonlinearFacetItemProbe(inner, inner.facetset)
-const FacetItemProbe = Union{LinearFacetItemProbe, NonlinearFacetItemProbe}
-
-FerriteOperators.setup_element_cache(m::FacetItemProbe, sdh::SubDofHandler) =
-    FerriteOperators.setup_element_cache(m.inner, sdh)
-FerriteOperators.facet_items(m::FacetItemProbe, sdh::SubDofHandler) = m.declared
-FerriteOperators.setup_facet_item_cache(m::FacetItemProbe, sdh::SubDofHandler) =
-    FerriteOperators.setup_boundary_cache(m.inner, sdh)
-
-####################################
 ## Robin facet element double — the pericardium shape
 ####################################
 # A boundary spring reading `:u` next to a boundary dashpot reading `:v`, each
-# with the single-slot facet Jacobian it has and no fused weighted kernel.
-# `slot` spells which state the term reads, so one cache type serves both;
-# `fused` additionally declares the weighted facet kernel — the only route the
-# facet-item family takes, and the one the fused boundary driver prefers over
-# composing the per-slot ones.
+# with the single-slot facet Jacobian it has. `slot` spells which state the term
+# reads, so one cache type serves both; `fused` additionally declares the
+# weighted facet kernel, which is the only route a weighted sweep takes on a
+# facet.
 
 struct RobinFacetCache{slot, fused, FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
     k::Float64
     fv::FV
-    facetset::Set{FacetIndex}
 end
-RobinFacetCache{slot, fused}(k, fv, facetset) where {slot, fused} =
-    RobinFacetCache{slot, fused, typeof(fv)}(k, fv, facetset)
+RobinFacetCache{slot, fused}(k, fv) where {slot, fused} =
+    RobinFacetCache{slot, fused, typeof(fv)}(k, fv)
 
 struct RobinFacetIntegrator{slot, fused} <: AbstractNonlinearIntegrator
     k::Float64
@@ -240,15 +208,15 @@ RobinFacetIntegrator(k, field_name, facetset; slot = :u, fused = false) =
 
 FerriteOperators.setup_element_cache(::RobinFacetIntegrator, ::SubDofHandler) =
     FerriteOperators.EmptyVolumetricElementCache()
-function FerriteOperators.setup_boundary_cache(m::RobinFacetIntegrator{slot, fused}, sdh::SubDofHandler) where {slot, fused}
+FerriteOperators.facet_items(m::RobinFacetIntegrator, ::SubDofHandler) = m.facetset
+function FerriteOperators.setup_facet_item_cache(m::RobinFacetIntegrator{slot, fused}, sdh::SubDofHandler) where {slot, fused}
     ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
     ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
     fqr    = FacetQuadratureRule{Ferrite.getrefshape(ip)}(2)
-    return RobinFacetCache{slot, fused}(m.k, FacetValues(fqr, ip, ip_geo), m.facetset)
+    return RobinFacetCache{slot, fused}(m.k, FacetValues(fqr, ip, ip_geo))
 end
 FerriteOperators.duplicate_for_device(device, c::RobinFacetCache{slot, fused}) where {slot, fused} =
-    RobinFacetCache{slot, fused}(c.k, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
-FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::RobinFacetCache) = idx ∈ c.facetset
+    RobinFacetCache{slot, fused}(c.k, FerriteOperators.duplicate_for_device(device, c.fv))
 
 # r(v) = k ∫_Γ s·v dΓ over the cache's own slot `s`: ∂r/∂s is k times the facet
 # mass matrix and ∂r/∂(every other slot) is zero.

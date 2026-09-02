@@ -188,9 +188,11 @@ local facet index is theirs.
 
 ## Facets
 
-The framework owns the facet loop: it walks each cell's facets, gates on
-[`is_facet_in_cache`](@ref), queries facet parameters per facet, and hands the
-sweep's request to the facet kernel.
+A boundary term declares the facets it is supported on
+([`facet_items`](@ref)) and gets its own traversal. The framework walks the
+declared facets, queries facet parameters per facet, and hands the sweep's
+request to the facet kernel. [Facet items](#Facet-items) covers the
+declaration; this section is the kernel contract.
 
 ```julia
 function FerriteOperators.assemble_facet!(req::ResidualRequest, cache::MyFacetCache, args::FacetArgs, lfi::Int)
@@ -200,10 +202,10 @@ end
 ```
 
 Facet contributions have no AD fallback in any sweep: a surface cache serves
-the sweep's request analytically or not at all. A cache serving a fused
-weighted sweep therefore implements `assemble_facet!` for
-[`WeightedJacobianRequest`](@ref); per-slot facet kernels are not composed
-behind the driver's back.
+the sweep's request analytically or not at all. A cache serving a weighted
+sweep therefore implements `assemble_facet!` for
+[`WeightedJacobianRequest`](@ref); per-slot facet kernels are never composed
+behind the kernel's back.
 
 ## Elements with global dofs
 
@@ -219,10 +221,9 @@ FerriteOperators.global_dofs(m::MyIntegrator, sdh::SubDofHandler) = algebraic_do
 
 The declaration lives on the **integrator**, one per subdomain, and is resolved
 once at setup — before any cache is built. It augments the **cell family**: the
-subdomain's volumetric kernel and the boundary kernel riding its sweep. A term
-supported on a facet *set* declares its own tail through
-[`facet_item_global_dofs`](@ref) instead (see [Facet items](#Facet-items)),
-which is what keeps this sweep in the field space. The local layout is then a
+subdomain's volumetric kernel. A term supported on a facet *set* declares its
+own tail through [`facet_item_global_dofs`](@ref) instead (see [Facet
+items](#Facet-items)), which is what keeps this sweep in the field space. The local layout is then a
 contract:
 
 ```
@@ -309,42 +310,24 @@ the declared tail would have no patch-local number and be dropped.
 
 ## Facet items
 
-The [facet loop](#Facets) is the **fused route**: the boundary term rides the
-cell sweep, and every cell's every facet is tested against
-[`is_facet_in_cache`](@ref). A term supported on a small fraction of the
-boundary — a tying constraint on an endocardial surface, a contact patch — pays
-that (cells × facets) rediscovery on every Newton iterate to find a set it
-already knows. Such a term declares its facets instead, and gets its own
-traversal:
+A boundary term declares the facets it lives on and gets its own traversal —
+the one route a surface term takes:
 
 ```julia
 FerriteOperators.facet_items(m::MyIntegrator, sdh::SubDofHandler) = getfacetset(get_grid(sdh.dh), "endocardium")
 FerriteOperators.setup_facet_item_cache(m::MyIntegrator, sdh::SubDofHandler) = MyFacetCache(...)
 ```
 
-**Same kernels, two routes.** [`setup_facet_item_cache`](@ref) returns the same
-kind of object [`setup_boundary_cache`](@ref) does, and the driver calls the
-same `assemble_facet!(req, cache, args::FacetArgs, lfi)` methods over the same
-[`FacetArgs`](@ref). There is no second kernel entry point and no second args
-record: moving a term between the two routes is a change of *declaration*, with
-zero element edits. The two coexist — one operator can carry a whole-boundary
-Neumann term on the fused route and a facet-set term as items.
+**THE DECLARED SET IS THE TRAVERSAL.** A term supported on a small fraction of
+the boundary — a tying constraint on an endocardial surface, a contact patch —
+costs a small fraction of the boundary: nothing rediscovers membership by
+walking every facet of every cell, so the cost is the declared facets and no
+more. A facet whose cell is not in `sdh.cellset`, a local facet index the cell
+does not have, and a facet declared twice are all setup errors.
 
-Which route to use:
-
-| | fused route ([`setup_boundary_cache`](@ref)) | facet items ([`facet_items`](@ref)) |
-|---|---|---|
-| term supported on most cells (whole-boundary Neumann) | fine | no gain |
-| term supported on few facets of many cells | pays the per-facet gate | the declared set is the traversal |
-| sensitivity coverage (∂F/∂θ, ∂F/∂t, state products) | **omitted** | **included** |
-| scheduling | the cell sweep's | its own partition |
-
-**The declared set IS the gate.** [`is_facet_in_cache`](@ref) is *not* consulted
-on this route. That gate exists so the fused sweep can rediscover membership
-while walking; here membership is the item list, so a cache whose gate and
-declaration disagree contributes on what was declared. A facet whose cell is
-not in `sdh.cellset`, a local facet index the cell does not have, and a facet
-declared twice are all setup errors.
+The family carries its own scheduling ([`FacetItems`](@ref) partitions the
+owning cells) and its own local-system tail
+([`facet_item_global_dofs`](@ref)), independent of the subdomain's cell sweep.
 
 **One item is one owning cell with all of its declared facets** — never one
 facet. Two facets of a cell therefore share one local system, are assembled
@@ -383,31 +366,28 @@ subdomain, and a condensed volumetric element may sit beside the tying term —
 the [`ADElementCache`](@ref) rejection of condensed elements applies to
 [`global_dofs`](@ref).
 
-**Sensitivities.** A facet-item term *does* enter the sensitivity sweeps — the
-fused route's omission (see [Sensitivities](operators.md#Sensitivities)) does
-not apply here. The no-AD-fallback rule of [Facets](#Facets) still holds, so
-the cache must implement `assemble_facet!` for the sensitivity request itself.
+**Sensitivities.** A facet-item term enters the sensitivity sweeps (see
+[Sensitivities](operators.md#Sensitivities)). The no-AD-fallback rule of
+[Facets](#Facets) holds there too, so the cache must implement
+`assemble_facet!` for the sensitivity request itself.
 Declaring the kind (`setup_operator(...; requests = (ParameterJacobianKind,))`)
 makes setup demand that kernel loudly, instead of letting a sweep reach a
 missing method.
 
 **Several terms on one subdomain.** Facet-item terms compose through
 [`NonlinearCompositeIntegrator`](@ref) and its siblings: the composite declares
-the union of the inners' facets and re-gates the fan-out per inner, so terms on
+the union of the inners' facets and gates the fan-out per inner, so terms on
 overlapping sets — a boundary spring and a dashpot on the same surface — share
 one item and one traversal (see [Composition](#Composition)).
 
 One thing a facet item deliberately does not do: it never calls
 [`reinit_values!`](@ref) — a facet kernel reinitializes its own `FacetValues`
-for the local facet index it was handed, on this route exactly as on the fused
-one.
+for the local facet index it was handed.
 
 **Functionals.** A surface integral over the declared set is a reduction of the
 facet-item family, served by [`evaluate_facet_functional`](@ref) — the
 [`evaluate_cell_functional`](@ref) counterpart, with the local facet index
-appended. The FUSED route takes no part in it: it rides the cell sweep, which is
-request-shaped, so a surface term joins a reduction by being declared as facet
-items.
+appended.
 
 ## Algebraic terms (items with no mesh support)
 
@@ -702,7 +682,7 @@ The request carries the buffers, so one generic fan-out serves every request
 type, and each inner receives its own [`query_cell_parameters`](@ref) view.
 Empty caches are dropped when the composition is built, so an all-empty
 composition collapses to the empty cache and a single surviving cache is
-returned unwrapped — the engine's empty-boundary fast path survives
+returned unwrapped — the engine's empty-cache fast path survives
 composition. Composed inners must agree on their quadrature rule; a
 `getnquadpoints` query on a disagreeing composite throws.
 
@@ -732,18 +712,16 @@ declaration leaks into the other family's local system.
 
 Facet-item terms compose too: a composite declares the **sorted union** of its
 inners' [`facet_items`](@ref), and the [`CompositeFacetItemCache`](@ref) it
-builds re-gates the fan-out on each inner's own set — an inner integrates
-exactly the facets it declared, as it does behind the fused route's per-inner
-[`is_facet_in_cache`](@ref) gate. Taking the union is what makes two terms
+builds gates the fan-out on each inner's own set — an inner integrates exactly
+the facets it declared. Taking the union is what makes two terms
 supported on the *same* facet legal: they are one item, declared once and
 assembled by both. Inners declaring nothing contribute to neither the
 declaration nor the cache, so an all-silent composite keeps the additive `()`
 default and a single declaring inner's cache is returned unwrapped.
 
-[`CompositeVolumetricElementCache`](@ref),
-[`CompositeSurfaceElementCache`](@ref) and [`CompositeFacetItemCache`](@ref)
-are the caches these integrators build, and remain available for hand-built
-compositions.
+[`CompositeVolumetricElementCache`](@ref) and
+[`CompositeFacetItemCache`](@ref) are the caches these integrators build, and
+remain available for hand-built compositions.
 
 Routing and composition compose in one order — a `*MultiDomainIntegrator`
 whose values are composite integrators. A composite of routers is not
@@ -752,8 +730,9 @@ supported.
 [`NonlinearMultiDomainIntegrator`](@ref) and its bilinear/linear siblings map
 **volumetric cellset names** to integrators, so one operator can carry
 different physics per subdomain. A name claims the subdomain whose cells lie
-in that cellset, and it resolves that subdomain's element cache *and* its
-boundary cache — facetset names take no part in routing. Resolution runs once
+in that cellset, and it resolves everything that subdomain declares — its
+element cache, its facet items and their surface cache, its global dofs;
+facetset names take no part in routing. Resolution runs once
 per operator setup; an unclaimed subdomain, an ambiguous claim, or a declared
 name claiming nothing is an `ArgumentError` there, never a silently empty
 contribution. It samples each subdomain's first cell, so the requirement that
@@ -779,11 +758,10 @@ Global reductions (energies for line searches, dissipation, chamber volumes,
 quantities of interest) are request kinds whose kernels *return* their item's
 contribution; the engine sums per worker and reduces in a fixed order, so
 results are deterministic for a fixed worker count. All three item families
-serve them: cell items through the hook above, DECLARED facet items through
+serve them: cell items through the hook above, facet items through
 [`evaluate_facet_functional`](@ref) — the facets of one item folding in
 declaration order — and algebraic items through
-[`evaluate_algebraic_functional`](@ref). The fused boundary route is the one
-exclusion, being request-shaped rather than value-returning.
+[`evaluate_algebraic_functional`](@ref).
 
 [`FerriteOperators.functional_value_type`](@ref) declares the type the
 reduction accumulates in. It is **required under a parallel device** — the

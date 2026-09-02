@@ -263,9 +263,7 @@ slot here (see [`evaluate_functional`](@ref)).
 Core fields:
 - `Ke`, `re`, `cell`, `ivh`: element matrix, element residual, `Ferrite.CellCache`, internal variable handler
 - `slot_buffers`: NamedTuple of element-local state buffers, one per declared slot
-- `element`, `boundary_element`: volumetric ([`AbstractVolumetricElementCache`](@ref)) and surface element caches
-- `facet_Ke`: `Ke`-shaped scratch the composed weighted facet route accumulates one slot's ∂F/∂s in
-  before folding it into `Ke` with that slot's weight; `nothing` where the subdomain carries no boundary terms
+- `element`: the volumetric element cache ([`AbstractVolumetricElementCache`](@ref))
 - `sensitivity`: [`SensitivityBuffers`](@ref), or `nothing` for a family that never issues a sensitivity kind (bilinear, linear)
 - `dofs`: augmented dof vector `[celldofs(cell); the declared global dofs]` ([`global_dofs`](@ref)), or `nothing`
   where the integrator declares none. The tail is written once at construction, the head refreshed by
@@ -279,8 +277,6 @@ Core fields:
     cell
     ivh
     element
-    boundary_element
-    facet_Ke
     sensitivity
     dofs
 end
@@ -302,7 +298,6 @@ _declared_global_dofs(dofs, sdh) = @view dofs[(ndofs_per_cell(sdh) + 1):end]
 function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
     return create_assembly_workspace(
         duplicate_for_device(device, ws.element),
-        duplicate_for_device(device, ws.boundary_element),
         ws.cell.dh,
         duplicate_for_device(device, ws.ivh),
         keys(ws.slot_buffers);
@@ -312,7 +307,7 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
 end
 
 """
-    create_assembly_workspace(element, boundary_element, sdh, ivh, slots;
+    create_assembly_workspace(element, sdh, ivh, slots;
                               needs_sensitivity = true, global_dofs = ())
 
 Create one [`AssemblyWorkspace`](@ref) with freshly allocated element-local
@@ -328,20 +323,17 @@ STRUCTURAL, decided by the integrator family ([`needs_ad_decoration`](@ref)).
 element-local buffer is padded by its length, and the workspace carries the
 augmented dof vector the sweep's gathers and scatters address.
 """
-function create_assembly_workspace(element, boundary_element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
+function create_assembly_workspace(element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
         needs_sensitivity::Bool = true, global_dofs = ()) where {N}
     n = length(global_dofs)
     slot_buffers = NamedTuple{slots}(ntuple(_ -> pad_element_vector(allocate_element_unknown_vector(element, sdh), n), N))
-    Ke = pad_element_matrix(allocate_element_matrix(element, sdh), n)
     return AssemblyWorkspace(
-        Ke,
+        pad_element_matrix(allocate_element_matrix(element, sdh), n),
         slot_buffers,
         pad_element_vector(allocate_element_residual_vector(element, sdh), n),
         CellCache(sdh),
         ivh,
         element,
-        boundary_element,
-        boundary_element isa EmptySurfaceElementCache ? nothing : similar(Ke),
         needs_sensitivity ? create_sensitivity_buffers(element, sdh, n) : nothing,
         _augmented_dof_vector(sdh, global_dofs),
     )

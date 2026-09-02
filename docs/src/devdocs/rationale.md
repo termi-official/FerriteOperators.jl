@@ -311,12 +311,12 @@ and that is the settled state rather than a deferral. A cache-level FD
 decorator would differentiate the volumetric kernel, exactly like the AD one,
 and would therefore lose the single property that makes operator-level
 [`FiniteDifferenceSensitivity`](@ref) worth keeping: it differences
-`evaluate!`, so **boundary terms enter**. Its remaining niche — kernels that
+`evaluate!`, so **every term enters**, including a facet term whose cache
+carries no analytic sensitivity kernel. Its remaining niche — kernels that
 cannot carry `Dual`s — has no consumer in the tree. The two mechanisms are
 final and their division of labour is documented where the routes are
-described: the operator-level method is the boundary-inclusive, Dual-free
-route, the decorator is the per-cache one where analytic kernels win cache by
-cache.
+described: the operator-level method is the Dual-free one, the decorator is the
+per-cache one where analytic kernels win cache by cache.
 
 *Implemented 2026-08-20 (W1). Record: `report4-architect-second-pass.md` §A2 for
 the design, and this page for the deviations.*

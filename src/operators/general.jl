@@ -2,7 +2,6 @@
     sdh
     ivh
     element
-    boundary_element
 end
 
 @concrete struct TransferDomain
@@ -61,9 +60,7 @@ _domain_family(::AlgebraicDomain) = :algebraic
 # `reduce_on_subdomains` skips on. Two independent reasons a subdomain cannot
 # contribute: its FAMILY is one the kind does not name ([`reduction_families`](@ref);
 # an undeclared kind restricts nothing), and — for the cell family — its element
-# cache returns no contribution by construction. The fused boundary route takes
-# no part in a reduction, so the volumetric cache is the whole cell-family story
-# here (unlike `contributes` below).
+# cache returns no contribution by construction.
 _may_contribute(domain, kind) = _family_named(domain, kind)
 _may_contribute(domain::AssemblyDomain, kind) =
     _family_named(domain, kind) && !(domain.element isa EmptyVolumetricElementCache)
@@ -92,15 +89,12 @@ end
 SubdomainCache(domain, device_cache, partition) =
     SubdomainCache(domain, device_cache, partition, _domain_assembles(domain))
 
-# A cell subdomain with neither a volumetric nor a boundary kernel has nothing
-# any assembly sweep could reach: the element cache returns without writing, the
-# fused facet gate never opens, and the scatter that follows adds zeros. An empty
-# ELEMENT cache alone is NOT enough — the fused boundary route rides the cell
-# sweep, so a subdomain carrying a surface cache must be traversed.
+# A cell subdomain whose element cache is empty has nothing any assembly sweep
+# could reach: the kernel returns without writing and the scatter that follows
+# adds zeros. Its boundary terms, if any, are a facet-item subdomain of their
+# own and are traversed there.
 _domain_assembles(domain) = true
-_domain_assembles(domain::AssemblyDomain) = !(
-    domain.element isa EmptyVolumetricElementCache &&
-    domain.boundary_element isa EmptySurfaceElementCache)
+_domain_assembles(domain::AssemblyDomain) = !(domain.element isa EmptyVolumetricElementCache)
 
 """
     AssemblyEngine

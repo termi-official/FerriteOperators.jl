@@ -154,98 +154,14 @@ function duplicate_for_device(device, cache::CompositeVolumetricElementCache)
     )
 end
 
-"""
-Combines multiple element caches over the same surface. The boundary driver
-gates on the composite (`is_facet_in_cache` = any inner covers the facet); the
-fan-out re-gates per inner, since inners may cover different facet sets. Each
-inner is handed its own per-facet parameter view.
-
-Same scope bound as [`CompositeVolumetricElementCache`](@ref): one domain, one
-context, one sink, no values objects shared by construction.
-"""
-struct CompositeSurfaceElementCache{CacheTupleType <: Tuple} <: AbstractSurfaceElementCache
-    inner_caches::CacheTupleType
-end
-
-query_facet_parameters(composite::CompositeSurfaceElementCache, cell, local_facet_index, p) =
-    CompositeParameters(map(inner -> query_facet_parameters(inner, cell, local_facet_index, p), composite.inner_caches))
-
-function duplicate_for_device(device, cache::CompositeSurfaceElementCache)
-    return CompositeSurfaceElementCache(
-        map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
-    )
-end
-
-assemble_facet!(req::AbstractAssemblyRequest, composite::CompositeSurfaceElementCache, args, local_facet_index::Int) =
-    _composite_assemble_facet!(req, composite.inner_caches, args, local_facet_index, args.p)
-
-_composite_assemble_facet!(req, inner_caches, args, local_facet_index, p::CompositeParameters) =
-    _fan_out_facet!(req, inner_caches, args, local_facet_index, p.views)
-@unroll function _composite_assemble_facet!(req, inner_caches, args, local_facet_index, p)
-    @unroll for inner in inner_caches
-        if is_facet_in_cache(FacetIndex(cellid(args.cell), local_facet_index), args.cell, inner)
-            assemble_facet!(req, inner, args, local_facet_index)
-        end
-    end
-end
-
-_fan_out_facet!(req, ::Tuple{}, args, local_facet_index, ::Tuple{}) = nothing
-function _fan_out_facet!(req, inner_caches::Tuple, args, local_facet_index, views::Tuple)
-    inner = first(inner_caches)
-    if is_facet_in_cache(FacetIndex(cellid(args.cell), local_facet_index), args.cell, inner)
-        assemble_facet!(req, inner, with_parameters(args, first(views)), local_facet_index)
-    end
-    return _fan_out_facet!(req, Base.tail(inner_caches), args, local_facet_index, Base.tail(views))
-end
-
-# A weighted sweep asks each inner for ITS OWN weighted contribution — fused
-# where the inner declares the weighted kernel, composed from that inner's
-# per-slot Jacobians otherwise — so a spring (∂F/∂u only) next to a dashpot
-# (∂F/∂v only) sums into one `W`. Same per-inner gate and parameter view as the
-# request fan-out above; routing per inner rather than for the composite as a
-# whole is what makes the pair legal, the composite claiming neither slot.
-facet_kernel!(kind::WeightedJacobianKind, composite::CompositeSurfaceElementCache, ws, args, lfi::Int) =
-    _composite_weighted_facet!(kind, composite.inner_caches, ws, args, lfi, args.p)
-
-_composite_weighted_facet!(kind, inner_caches, ws, args, lfi, p::CompositeParameters) =
-    _fan_out_weighted_facet!(kind, inner_caches, ws, args, lfi, p.views)
-@unroll function _composite_weighted_facet!(kind, inner_caches, ws, args, lfi, p)
-    @unroll for inner in inner_caches
-        if is_facet_in_cache(FacetIndex(cellid(args.cell), lfi), args.cell, inner)
-            facet_kernel!(kind, inner, ws, args, lfi)
-        end
-    end
-end
-
-_fan_out_weighted_facet!(kind, ::Tuple{}, ws, args, lfi, ::Tuple{}) = nothing
-function _fan_out_weighted_facet!(kind, inner_caches::Tuple, ws, args, lfi, views::Tuple)
-    inner = first(inner_caches)
-    if is_facet_in_cache(FacetIndex(cellid(args.cell), lfi), args.cell, inner)
-        facet_kernel!(kind, inner, ws, with_parameters(args, first(views)), lfi)
-    end
-    return _fan_out_weighted_facet!(kind, Base.tail(inner_caches), ws, args, lfi, Base.tail(views))
-end
-
-is_facet_in_cache(idx::FacetIndex, cell, composite::CompositeSurfaceElementCache) =
-    _any_facet_in_cache(idx, cell, composite.inner_caches)
-@unroll function _any_facet_in_cache(idx, cell, inner_caches)
-    @unroll for inner in inner_caches
-        is_facet_in_cache(idx, cell, inner) && return true
-    end
-    return false
-end
-
 # Interface composition (facet pairs) is not implemented.
 
 """
 Combines multiple facet-item caches over one subdomain. The subdomain declares
 ONE facet set — the union of the inners' [`facet_items`](@ref) — and the
-fan-out re-gates on the facets each inner declared, so an inner integrates
-exactly its own set as it does on the fused route. The per-inner sets are
-resolved once, at setup, and shared read-only during a sweep.
-
-[`is_facet_in_cache`](@ref) plays no part: the declaration is the gate on this
-route, for a composite as for any other facet-item cache.
+fan-out gates on the facets each inner declared, so an inner integrates exactly
+its own set. The per-inner sets are resolved once, at setup, and shared
+read-only during a sweep.
 
 Same scope bound as [`CompositeVolumetricElementCache`](@ref): one domain, one
 context, one sink, no values objects shared by construction. Each inner is
@@ -357,17 +273,14 @@ end
 
 """
     compose_element_caches(caches::Tuple)
-    compose_boundary_caches(caches::Tuple)
 
-Combine per-inner caches into the cache the engine sees. Empty caches carry no
-term and are dropped, so an all-empty composition collapses to the empty cache
-and a single survivor is returned unwrapped — the engine's empty-cache and
-single-cache fast paths survive composition.
+Combine per-inner volumetric caches into the cache the engine sees. Empty
+caches carry no term and are dropped, so an all-empty composition collapses to
+[`EmptyVolumetricElementCache`](@ref) and a single survivor is returned
+unwrapped — the engine's empty-cache and single-cache fast paths survive
+composition.
 """
 compose_element_caches(caches::Tuple) = _collapse(drop_empty_caches(caches), EmptyVolumetricElementCache(), CompositeVolumetricElementCache)
-
-@doc (@doc compose_element_caches)
-compose_boundary_caches(caches::Tuple) = _collapse(drop_empty_caches(caches), EmptySurfaceElementCache(), CompositeSurfaceElementCache)
 
 function _collapse(kept::Tuple, empty, Composite)
     length(kept) == 0 && return empty
@@ -380,7 +293,6 @@ end
 drop_empty_caches(::Tuple{}) = ()
 drop_empty_caches(caches::Tuple) = _drop_empty_head(first(caches), Base.tail(caches))
 _drop_empty_head(::EmptyVolumetricElementCache, rest::Tuple) = drop_empty_caches(rest)
-_drop_empty_head(::EmptySurfaceElementCache, rest::Tuple) = drop_empty_caches(rest)
 _drop_empty_head(cache, rest::Tuple) = (cache, drop_empty_caches(rest)...)
 
 ####################################
@@ -394,8 +306,7 @@ _drop_empty_head(cache, rest::Tuple) = (cache, drop_empty_caches(rest)...)
 
 Integrator stacking several sub-integrators over the SAME domain into one
 element: cache setup maps every sub-integrator over the subdomain and combines
-the results through [`compose_element_caches`](@ref) /
-[`compose_boundary_caches`](@ref).
+the results through [`compose_element_caches`](@ref).
 
 Scope bound: one domain, one evaluation context, one scatter target — as for
 [`CompositeVolumetricElementCache`](@ref). Hence the single field: terms needing
@@ -450,20 +361,8 @@ LinearCompositeIntegrator(subintegrators...) = LinearCompositeIntegrator(subinte
 
 const AnyCompositeIntegrator = Union{NonlinearCompositeIntegrator, BilinearCompositeIntegrator, LinearCompositeIntegrator}
 
-setup_element_cache(element_model::NonlinearCompositeIntegrator, sdh::SubDofHandler) =
+setup_element_cache(element_model::AnyCompositeIntegrator, sdh::SubDofHandler) =
     compose_element_caches(map(sub -> setup_element_cache(sub, sdh), element_model.subintegrators))
-setup_boundary_cache(element_model::NonlinearCompositeIntegrator, sdh::SubDofHandler) =
-    compose_boundary_caches(map(sub -> setup_boundary_cache(sub, sdh), element_model.subintegrators))
-
-setup_element_cache(element_model::BilinearCompositeIntegrator, sdh::SubDofHandler) =
-    compose_element_caches(map(sub -> setup_element_cache(sub, sdh), element_model.subintegrators))
-setup_boundary_cache(element_model::BilinearCompositeIntegrator, sdh::SubDofHandler) =
-    compose_boundary_caches(map(sub -> setup_boundary_cache(sub, sdh), element_model.subintegrators))
-
-setup_element_cache(element_model::LinearCompositeIntegrator, sdh::SubDofHandler) =
-    compose_element_caches(map(sub -> setup_element_cache(sub, sdh), element_model.subintegrators))
-setup_boundary_cache(element_model::LinearCompositeIntegrator, sdh::SubDofHandler) =
-    compose_boundary_caches(map(sub -> setup_boundary_cache(sub, sdh), element_model.subintegrators))
 
 # The inners share one local system, so they share its tail: a composite
 # declares what its inners declare, and silent inners (the default `()`) read
@@ -494,11 +393,11 @@ end
 
 The facet-item declaration of a composite: the sorted union of its
 sub-integrators' [`facet_items`](@ref), served by ONE
-[`CompositeFacetItemCache`](@ref) that re-gates the fan-out on each inner's own
+[`CompositeFacetItemCache`](@ref) that gates the fan-out on each inner's own
 set. Inners declaring nothing contribute nothing — to the declaration and to
 the cache — so an all-silent composite keeps the additive `()` default and a
 single declaring inner's cache is returned unwrapped, mirroring the
-[`compose_boundary_caches`](@ref) collapse rules.
+[`compose_element_caches`](@ref) collapse rules.
 
 The union is what makes overlap legal: two terms supported on the SAME facet
 are one item declared once and assembled by both inners, which the family's

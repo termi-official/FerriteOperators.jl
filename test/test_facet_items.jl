@@ -46,24 +46,17 @@ FerriteOperators.facet_items(m::CondensedFacetProbe, ::SubDofHandler) = m.facets
 FerriteOperators.setup_facet_item_cache(::CondensedFacetProbe, ::SubDofHandler) = CondensedFacetCache()
 
 @testset "Facet items" begin
-    @testset "the same cache on either route" begin
+    @testset "items are grouped by owning cell" begin
         (; grid, dh, facets) = corner_testbed()
         strategy = sequential_strategy()
         t̄ = 2.5
-        fused = setup_operator(strategy, LinearNeumannProbe(t̄, :u, facets), dh)
-        items = setup_operator(strategy, LinearFacetItemProbe(LinearNeumannProbe(t̄, :u, facets)), dh)
-        update_operator!(fused, nothing)
+        items = setup_operator(strategy, LinearNeumannProbe(t̄, :u, facets), dh)
         update_operator!(items, nothing)
-        # `≈`, never `==`: the routes visit the facets in different orders, so
-        # the summation into a shared dof differs in the last bits.
-        @test items.b ≈ fused.b
         @test sum(items.b) ≈ t̄ * 4.0            # |Γ| = 2 + 2 on the [-1, 1]² grid
         @test !all(iszero, items.b)
 
-        # The declaration is the only difference: one engine grows a facet-item
-        # subdomain, the other keeps the surface cache on the cell sweep.
+        # The declaration grows a facet-item subdomain beside the cell ones.
         @test length(items.engine.subdomain_caches) == length(dh.subdofhandlers) + 1
-        @test length(fused.engine.subdomain_caches) == length(dh.subdofhandlers)
         fd = last(items.engine.subdomain_caches).domain
 
         # One item per OWNING CELL, carrying all of that cell's declared facets
@@ -78,28 +71,29 @@ FerriteOperators.setup_facet_item_cache(::CondensedFacetProbe, ::SubDofHandler) 
         @test all(item -> issorted(item.local_facets), fd.items)
     end
 
-    @testset "the declared set is the gate" begin
+    @testset "the declared set is the traversal" begin
         (; grid, dh, facets) = corner_testbed()
         t̄ = 1.75
-        # The cache's own `is_facet_in_cache` gate is empty; the declaration is
-        # the full set.
-        gated = LinearNeumannProbe(t̄, :u, Set(FacetIndex[]))
-        op = setup_operator(sequential_strategy(), LinearFacetItemProbe(gated, facets), dh)
+        # A subset declaration integrates the subset, and nothing rediscovers
+        # the facets left out of it.
+        half = Set(getfacetset(grid, "right"))
+        op = setup_operator(sequential_strategy(), LinearNeumannProbe(t̄, :u, half), dh)
         update_operator!(op, nothing)
-        @test sum(op.b) ≈ t̄ * 4.0
+        @test sum(op.b) ≈ t̄ * 2.0
+        @test length(last(op.engine.subdomain_caches).domain.items) == length(half)
 
-        # The SAME cache on the fused route, where the gate is all there is,
-        # contributes nothing — which is what makes the line above a statement
-        # about the gate and not about the cache.
-        fused = setup_operator(sequential_strategy(), gated, dh)
-        update_operator!(fused, nothing)
-        @test all(iszero, fused.b)
+        # Declaring nothing grows no facet-item subdomain at all, and a
+        # boundary-only integrator then assembles nothing.
+        silent = setup_operator(sequential_strategy(), LinearNeumannProbe(t̄, :u, Set(FacetIndex[])), dh)
+        @test length(silent.engine.subdomain_caches) == length(dh.subdofhandlers)
+        update_operator!(silent, nothing)
+        @test all(iszero, silent.b)
     end
 
     @testset "scheduling" begin
         (; grid, dh, facets) = corner_testbed((4, 4))
         t̄ = 0.8
-        integrator() = LinearFacetItemProbe(LinearNeumannProbe(t̄, :u, facets))
+        integrator() = LinearNeumannProbe(t̄, :u, facets)
         ops = setup_operator(sequential_strategy(), integrator(), dh)
         update_operator!(ops, nothing)
         @test sum(ops.b) ≈ t̄ * 4.0
@@ -142,8 +136,8 @@ FerriteOperators.setup_facet_item_cache(::CondensedFacetProbe, ::SubDofHandler) 
         # r = θ ∫_Γ v dΓ, so ∂r/∂θ sums to |Γ|.
         @test sum(B[:, 1]) ≈ 4.0
 
-        # This operator carries no fused-route boundary cache, so nothing warns
-        # about an omission that does not apply to this route.
+        # Declaring a sensitivity kind over a cache that serves it is quiet:
+        # setup either finds the kernel or throws, and never warns.
         @test_logs setup_operator(sequential_strategy(), TractionFacetProbe(:u, facets), dh;
                                   requests = (ParameterJacobianKind,))
     end
@@ -190,7 +184,7 @@ FerriteOperators.setup_facet_item_cache(::CondensedFacetProbe, ::SubDofHandler) 
     @testset "loud errors" begin
         (; grid, dh, facets) = corner_testbed()
         strategy = sequential_strategy()
-        probe(set) = LinearFacetItemProbe(LinearNeumannProbe(1.0, :u, set), set)
+        probe(set) = LinearNeumannProbe(1.0, :u, set)
 
         # A facet whose cell this subdomain does not own.
         @test_throws ArgumentError setup_operator(
@@ -244,8 +238,7 @@ FerriteOperators.setup_facet_item_cache(::CondensedFacetProbe, ::SubDofHandler) 
         add!(sdh2, :u, Lagrange{RefQuadrilateral, 1}())
         close!(dh)
 
-        probe(scale, name) = LinearFacetItemProbe(
-            LinearNeumannProbe(scale, :u, Set(getfacetset(grid, name))))
+        probe(scale, name) = LinearNeumannProbe(scale, :u, Set(getfacetset(grid, name)))
         op = setup_operator(sequential_strategy(), LinearMultiDomainIntegrator(Dict(
             "right_cells" => probe(1.5, "right"),
             "left_cells"  => probe(-0.5, "left"))), dh)
@@ -549,9 +542,8 @@ end
 ## Composed facet-item terms
 ####################################
 # Several boundary terms over ONE subdomain, each supported on its own facet
-# set. The composite declares their union and the fan-out re-gates per inner —
-# the per-inner `is_facet_in_cache` gate of the fused route, restated as the
-# declaration this route reads it from.
+# set. The composite declares their union and the fan-out gates per inner on the
+# set that inner declared.
 
 # Declares a facet-item global-dof tail and nothing else: the composite's
 # derivation rule is integrator-level, so no cache is needed to exercise it.
@@ -560,10 +552,7 @@ struct GlobalDofProbe <: AbstractLinearIntegrator
 end
 FerriteOperators.facet_item_global_dofs(m::GlobalDofProbe, ::SubDofHandler) = m.dofs
 
-# The same physics on either route: raw probes ride the cell sweep, the same
-# probes wrapped in `LinearFacetItemProbe` get their own traversal.
-itemized(probes...) = LinearCompositeIntegrator(map(LinearFacetItemProbe, probes))
-fused_route(probes...) = LinearCompositeIntegrator(probes)
+itemized(probes...) = LinearCompositeIntegrator(probes)
 
 @testset "Composed facet items" begin
     (; grid, dh) = corner_testbed()
@@ -572,24 +561,16 @@ fused_route(probes...) = LinearCompositeIntegrator(probes)
     right = Set(getfacetset(grid, "right"))
     top   = Set(getfacetset(grid, "top"))
 
-    # Both routes exist in this release, so the fused assembly of the SAME
-    # physics is the referee. `≈`, never `==`: neither route promises the other's
-    # summation order into a dof several facets share, so the two may differ in
-    # the last bits. The tolerance is measured — the relative difference is 0 on
-    # these fixtures, which walk the facets in the same order.
-    function agrees_with_fused(probes...; p = nothing)
+    function assembled(probes...; p = nothing)
         items = setup_operator(strategy, itemized(probes...), dh)
-        fused = setup_operator(strategy, fused_route(probes...), dh)
         update_operator!(items, p)
-        update_operator!(fused, p)
-        return (; items, fused, agree = isapprox(items.b, fused.b; rtol = 1.0e-15))
+        return items
     end
 
     @testset "the declaration is the union, the gate is per inner" begin
         a = LinearNeumannProbe(2.0, :u, right)
         b = LinearNeumannProbe(-3.0, :u, top)
-        (; items, agree) = agrees_with_fused(a, b)
-        @test agree
+        items = assembled(a, b)
         # Each inner integrated ITS OWN half. Fanning out to every inner on
         # every declared facet would give (2.0 - 3.0)·|Γ| = -4.0 instead.
         @test sum(items.b) ≈ 2.0 * 2.0 + (-3.0) * 2.0
@@ -607,8 +588,7 @@ fused_route(probes...) = LinearCompositeIntegrator(probes)
     @testset "inners may share a facet" begin
         c = LinearNeumannProbe(2.0, :u, right)
         d = LinearNeumannProbe(0.5, :u, right)
-        (; items, agree) = agrees_with_fused(c, d)
-        @test agree
+        items = assembled(c, d)
         @test sum(items.b) ≈ (2.0 + 0.5) * 2.0
         # One declaration per facet: taking the union is what keeps the family's
         # declared-twice rejection off two terms supported on the same facet.
@@ -622,25 +602,24 @@ fused_route(probes...) = LinearCompositeIntegrator(probes)
         a = LinearNeumannProbe(2.0, :u, right; param_scaled = true)
         b = LinearNeumannProbe(-3.0, :u, top; param_scaled = true)
         p = 1.5
-        (; items, agree) = agrees_with_fused(a, b; p)
-        @test agree
+        items = assembled(a, b; p)
         @test sum(items.b) ≈ (2.0 - 3.0) * 2.0 * p
     end
 
     @testset "collapse rules" begin
         a = LinearNeumannProbe(2.0, :u, right)
-        quiet = LinearFacetItemProbe(LinearNeumannProbe(1.0, :u, right), Set(FacetIndex[]))
+        quiet = LinearNeumannProbe(1.0, :u, Set(FacetIndex[]))
         # An inner declaring nothing contributes to neither the declaration nor
         # the cache, and one survivor is returned unwrapped.
-        one_declarer = LinearCompositeIntegrator(LinearFacetItemProbe(a), quiet)
+        one_declarer = LinearCompositeIntegrator(a, quiet)
         @test Set(facet_items(one_declarer, sdh)) == right
         @test setup_facet_item_cache(one_declarer, sdh) isa NeumannProbeCache
         @test setup_facet_item_cache(itemized(a, LinearNeumannProbe(1.0, :u, top)), sdh) isa
             FerriteOperators.CompositeFacetItemCache
 
-        # All-silent keeps the additive `()` default, so a composite of ordinary
-        # boundary terms grows no facet-item subdomain.
-        @test facet_items(fused_route(a, LinearNeumannProbe(1.0, :u, top)), sdh) == ()
+        # All-silent keeps the additive `()` default, so a composite whose
+        # inners declare nothing grows no facet-item subdomain.
+        @test facet_items(LinearCompositeIntegrator(quiet, quiet), sdh) == ()
     end
 
     @testset "facet_item_global_dofs is the inners' one declaration" begin
@@ -672,7 +651,7 @@ fused_route(probes...) = LinearCompositeIntegrator(probes)
         # A facet item's local system is its owning cell's, so each subdomain
         # declares only the facets its own cells own.
         owned(name, cellset) = Set(f for f in getfacetset(rgrid, name) if f[1] in cellset)
-        item(scale, facets) = LinearFacetItemProbe(LinearNeumannProbe(scale, :u, facets))
+        item(scale, facets) = LinearNeumannProbe(scale, :u, facets)
         rc, lc = getcellset(rgrid, "right_cells"), getcellset(rgrid, "left_cells")
 
         op = setup_operator(sequential_strategy(), LinearMultiDomainIntegrator(Dict(
@@ -703,8 +682,8 @@ end
     states  = (u = sin.(0.3 .* (1:n)), v = cos.(0.2 .* (1:n)))
     weights = (u = 1.0, v = 1 / (0.5 * Δt))
 
-    spring  = NonlinearFacetItemProbe(RobinFacetIntegrator(2.5, :u, right; slot = :u, fused = true))
-    dashpot = NonlinearFacetItemProbe(RobinFacetIntegrator(0.75, :u, right; slot = :v, fused = true))
+    spring  = RobinFacetIntegrator(2.5, :u, right; slot = :u, fused = true)
+    dashpot = RobinFacetIntegrator(0.75, :u, right; slot = :v, fused = true)
 
     # ∂F/∂u of the spring and ∂F/∂v of the dashpot, each assembled on its own.
     sop = setup_operator(strategy, spring, dh; slots = (:u, :v))
@@ -726,10 +705,26 @@ end
         @test Matrix(Wp) ≈ weights.u .* Matrix(Kf) .+ weights.v .* Matrix(Df) rtol = 1.0e-12
     end
 
+    @testset "a single cache serves the weighted sweep from its fused kernel" begin
+        FUSED_FACET_W_CALLS[] = 0
+        Ws = share_pattern(sop.J)
+        assemble_weighted_jacobian!(Ws, sop, weights, states, nothing, ctx)
+        @test FUSED_FACET_W_CALLS[] == length(right)
+        # A spring has no ∂F/∂v, so the `:v` weight contributes nothing.
+        @test Matrix(Ws) ≈ weights.u .* Matrix(Kf) rtol = 1.0e-12
+
+        # Measured: 3376 B of assembler setup for the operator's two traversals
+        # (its cell subdomain and its facet-item one), constant in the facet
+        # count — the walk itself allocates nothing per facet.
+        for _ in 1:2   # warmup: compilation + lazy buffer sizing
+            assemble_weighted_jacobian!(Ws, sop, weights, states, nothing, ctx)
+        end
+        @test @allocated(assemble_weighted_jacobian!(Ws, sop, weights, states, nothing, ctx)) < 4096
+    end
+
     @testset "the fused kernel is the only route, and its absence is loud" begin
-        # Per-slot facet Jacobians alone: enough for the fused boundary route's
-        # fold, not for this one.
-        unfused = NonlinearFacetItemProbe(RobinFacetIntegrator(2.5, :u, right; slot = :u))
+        # Per-slot facet Jacobians alone are no route to a weighted sweep here.
+        unfused = RobinFacetIntegrator(2.5, :u, right; slot = :u)
         pinned = "only route a weighted Jacobian sweep takes on the facet-item route"
 
         err = @test_throws ArgumentError setup_operator(strategy, unfused, dh;

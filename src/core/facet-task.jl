@@ -2,13 +2,10 @@
 ## Facet items — boundary terms as their own traversal
 ####################################
 #
-# A term restricted to a facet SET gets its own item family instead of riding
-# the cell sweep: one work item is one owning cell with all of that cell's
-# declared facets, and the declared set IS the traversal. It coexists with the
-# fused route (`boundary_kernel!`); choosing between them is a declaration, not
-# an element rewrite, since both run the same
-# `assemble_facet!(req, cache, args::FacetArgs, lfi)` methods off one surface
-# cache.
+# A boundary term is its own item family: one work item is one owning cell with
+# all of that cell's declared facets, and the declared set IS the traversal.
+# This is the ONE route a surface term takes — the cell sweep runs the
+# volumetric kernel and nothing else.
 #
 # The element-facing half of the family (`facet_items`,
 # `setup_facet_item_cache`) lives with the other element contracts, in
@@ -151,17 +148,12 @@ execute_single_task!(task::AssemblyTask, ws::FacetItemWorkspace) = execute_kind!
     facet_item_walk!(req, task, ws, statesₑ)
 
 The facet walk of one item: `req` over the item's declared facets, in
-declaration order, with the facet parameters queried SEPARATELY per facet —
-the same per-facet contract `boundary_kernel!` implements for the fused route.
+declaration order, with the facet parameters queried SEPARATELY per facet. The
+DECLARED set is the membership statement — a cache states its facets by
+declaring them, never by re-deriving them per kernel call.
 
-[`is_facet_in_cache`](@ref) is NOT consulted here: that gate exists so the
-fused sweep can rediscover membership, while on this route the declared set IS
-the membership statement. A cache whose gate and declaration disagree
-contributes on what it DECLARED.
-
-No [`reinit_values!`](@ref) call either, on this route as on the fused one: a
-facet kernel reinitializes its own `FacetValues` for the local facet index it
-was handed.
+No [`reinit_values!`](@ref) call: a facet kernel reinitializes its own
+`FacetValues` for the local facet index it was handed.
 """
 function facet_item_walk!(req, task, ws, statesₑ)
     for lfi in current_facets(ws)
@@ -361,10 +353,9 @@ Assert that `cache` can serve `kind` on the facet-item route. The generic
 method passes: every other kind reaches its own [`assemble_facet!`](@ref)
 method, or a `MethodError` naming it.
 
-[`WeightedJacobianKind`](@ref) is the one kind with a route to choose, and on
-this route there is exactly one — the FUSED
-`assemble_facet!(::WeightedJacobianRequest, …)` kernel. The per-slot fold
-`facet_kernel!` composes on the fused boundary route has no counterpart here,
+[`WeightedJacobianKind`](@ref) is the one kind that could take more than one,
+and takes exactly one — the FUSED `assemble_facet!(::WeightedJacobianRequest,
+…)` kernel. Nothing composes per-slot facet Jacobians behind the kernel's back,
 so a cache without the fused kernel is rejected naming that kernel.
 
 Checked at setup for every DECLARED kind ([`validate_facet_item_cache`](@ref))

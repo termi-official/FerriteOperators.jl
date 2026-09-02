@@ -785,15 +785,19 @@ end
     @test A_skipped == A_reference
     @test !iszero(A_skipped)
 
-    # An empty ELEMENT cache alone is not the verdict: the fused boundary route
-    # rides the cell sweep, so a subdomain carrying a surface cache is traversed.
+    # An empty ELEMENT cache is the whole verdict for a cell subdomain: a
+    # boundary-only subdomain skips its cell traversal, and its term is carried
+    # by the facet-item subdomain the declaration grew instead.
     t̄  = 3.25
     nop = setup_operator(strategy, LinearMultiDomainIntegrator(Dict(
         "right_cells" => LinearNeumannProbe(t̄, :u, Set(getfacetset(grid, "right"))),
         "left_cells"  => SimpleLinearIntegrator(0.0, qrc, :u),
     )), dh)
-    @test first(nop.engine.subdomain_caches).domain.element isa FerriteOperators.EmptyVolumetricElementCache
-    @test all(sc -> sc.contributes, nop.engine.subdomain_caches)
+    cells  = [sc for sc in nop.engine.subdomain_caches if sc.domain isa FerriteOperators.AssemblyDomain]
+    facets = [sc for sc in nop.engine.subdomain_caches if sc.domain isa FerriteOperators.FacetItemDomain]
+    boundary_only = only(sc for sc in cells if sc.domain.element isa FerriteOperators.EmptyVolumetricElementCache)
+    @test !boundary_only.contributes
+    @test length(facets) == 1 && only(facets).contributes
     update_operator!(nop, nothing)
     @test sum(nop.b) ≈ t̄ * 2.0 rtol = 1e-12       # |Γ_right| = 2 on the [-1, 1]² grid
 end

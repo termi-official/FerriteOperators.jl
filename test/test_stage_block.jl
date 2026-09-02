@@ -275,63 +275,6 @@ end
         end
     end
 
-    @testset "weighted Jacobians on the boundary" begin
-        # Boundary-only operators: the volumetric cache is empty, so `W` is the
-        # facet contribution alone and the hand-composed reference is exact.
-        right   = Set(getfacetset(grid, "right"))
-        weights = (u = 1.0, v = 1 / (0.5 * Δt))
-        states  = (u = u, v = cos.(0.2 .* (1:n)))
-        spring  = RobinFacetIntegrator(2.5, :u, right; slot = :u)
-        dashpot = RobinFacetIntegrator(0.75, :u, right; slot = :v)
-
-        pericardium = setup_operator(strategy, NonlinearCompositeIntegrator(spring, dashpot), dh; slots = (:u, :v))
-        sop = setup_operator(strategy, spring,  dh; slots = (:u, :v))
-        dop = setup_operator(strategy, dashpot, dh; slots = (:u, :v))
-
-        # ∂F/∂u of the spring and ∂F/∂v of the dashpot, each on its own.
-        Kf = FerriteOperators.create_system_matrix(sop.engine.strategy, dh)
-        Df = share_pattern(Kf)
-        assemble_slot_jacobian!(Kf, sop, JacobianKind{:u}(), states, nothing, ctx)
-        assemble_slot_jacobian!(Df, dop, JacobianKind{:v}(), states, nothing, ctx)
-        @test nnz(Kf) > 0 && nnz(Df) > 0
-
-        Wp = share_pattern(pericardium.J)
-        assemble_weighted_jacobian!(Wp, pericardium, weights, states, nothing, ctx)
-        @test Matrix(Wp) ≈ weights.u .* Matrix(Kf) .+ weights.v .* Matrix(Df) rtol = 1e-12
-
-        # A single per-slot-only cache composes the slots it claims and nothing
-        # for the ones it does not — a spring has no ∂F/∂v.
-        Ws = share_pattern(sop.J)
-        assemble_weighted_jacobian!(Ws, sop, weights, states, nothing, ctx)
-        @test Matrix(Ws) ≈ weights.u .* Matrix(Kf) rtol = 1e-12
-
-        @testset "a declared fused facet kernel wins over composition" begin
-            fop = setup_operator(strategy, RobinFacetIntegrator(2.5, :u, right; slot = :u, fused = true),
-                                 dh; slots = (:u, :v))
-            FUSED_FACET_W_CALLS[] = 0
-            Wf = share_pattern(fop.J)
-            assemble_weighted_jacobian!(Wf, fop, weights, states, nothing, ctx)
-            @test FUSED_FACET_W_CALLS[] == length(right)
-            # composing the per-slot kernel it ALSO has would double this
-            @test Matrix(Wf) ≈ weights.u .* Matrix(Kf) rtol = 1e-12
-        end
-
-        @testset "a cache with neither route is loud" begin
-            nop = setup_operator(strategy, NonlinearNeumannProbe(1.0, :u, right), dh; slots = (:u, :v))
-            err = @test_throws ArgumentError assemble_weighted_jacobian!(
-                share_pattern(nop.J), nop, weights, states, nothing, ctx)
-            @test occursin("WeightedJacobianRequest", err.value.msg)
-            @test occursin("JacobianRequest{slot}", err.value.msg)
-        end
-
-        @testset "the composed facet route does not allocate per facet" begin
-            for _ in 1:2
-                assemble_weighted_jacobian!(Wp, pericardium, weights, states, nothing, ctx)
-            end
-            @test @allocated(assemble_weighted_jacobian!(Wp, pericardium, weights, states, nothing, ctx)) < 1024
-        end
-    end
-
     @testset "transformed Radau stage matrix" begin
         # The diagonalized scheme needs ONE stage-independent component pair
         # and a complex combine! per eigenvalue — no stage-block machinery.

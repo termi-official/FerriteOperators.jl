@@ -7,10 +7,9 @@ Integrator carrying one sub-integrator per named subdomain, so a single
 operator hosts different physics per subdomain. The keys are names of
 **volumetric cellsets** in the grid's cellset registry.
 
-A name resolves *both* the element cache and the boundary cache of the
-subdomain it claims; facetset names play no part. Which facets actually carry a
-term is decided per facet by [`is_facet_in_cache`](@ref), as for any other
-surface cache.
+A name resolves everything the subdomain it claims declares — its element
+cache, its [`facet_items`](@ref) and their surface cache, its global dofs;
+facetset names play no part in the claim.
 
 Each subdomain must lie entirely within one declared cellset. **Production mode
 assumes this holds and does not verify it** — a subdomain's first cell alone
@@ -55,9 +54,9 @@ end
 
 const AnyMultiDomainIntegrator = Union{NonlinearMultiDomainIntegrator, BilinearMultiDomainIntegrator, LinearMultiDomainIntegrator}
 
-# Resolution is hoisted to the plural hooks: twice per operator setup (elements,
-# boundaries) instead of once per subdomain and hook. Decoration stays
-# per-subdomain, since neighbouring sub-integrators may differ in needing it.
+# Resolution is hoisted to the plural hook: once per operator setup instead of
+# once per subdomain. Decoration stays per-subdomain, since neighbouring
+# sub-integrators may differ in needing it.
 function setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler, ad_backend, n_global_dofs)
     resolved = zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers, n_global_dofs)
     needs_ad_decoration(integrator) || return [setup_element_cache(sub, sdh) for (sub, sdh, _) in resolved]
@@ -70,9 +69,6 @@ global_dofs(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     global_dofs(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
 facet_item_global_dofs(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     facet_item_global_dofs(subintegrator_for_subdomain(integrator.subintegrators, sdh), sdh)
-
-setup_boundaries(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler) =
-    [setup_boundary_cache(sub, sdh) for (sub, sdh) in zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers)]
 
 # Each subdomain routes its own facet set through its own surface cache.
 facet_items(integrator::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
@@ -120,12 +116,10 @@ function _algebraic_subintegrator(integrator::AnyMultiDomainIntegrator, dh)
     return integrator.subintegrators[only(declaring)]
 end
 
-# Available for direct use, but each pays a full resolution — the engine calls
-# the plural hooks above.
+# Available for direct use, but pays a full resolution — the engine calls the
+# plural hook above.
 setup_element_cache(element_model::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     setup_element_cache(subintegrator_for_subdomain(element_model.subintegrators, sdh), sdh)
-setup_boundary_cache(element_model::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
-    setup_boundary_cache(subintegrator_for_subdomain(element_model.subintegrators, sdh), sdh)
 
 """
     subintegrators_per_subdomain(integrator, dh) -> Vector

@@ -43,6 +43,7 @@ patterns marked ⚠ below.
 | `QuadratureDataMultiQuery` | removed — call `process_query!` once per query |
 | `unwrap_parameters` | removed — override `query_cell_parameters`/`query_facet_parameters` on the cache instead |
 | `whole_patch_terms` | removed — filter a patch request's terms in the element |
+| `setup_boundary_cache`, `is_facet_in_cache`, `compose_boundary_caches`, `CompositeSurfaceElementCache` | removed — a boundary term declares its facets through `facet_items` and builds its cache in `setup_facet_item_cache`. The `assemble_facet!` kernels, `query_facet_parameters` and the surface cache TYPE are unchanged: port the two setup hooks and delete the gate. Composed surface terms use `CompositeFacetItemCache`, built by the composite integrators' `setup_facet_item_cache` |
 | `(op::LinearizedFerriteOperator)(residual, u, p)` (callable) | `evaluate!(op, residual, u, p)` |
 
 `SequentialAssemblyStrategy`, `PerColorAssemblyStrategy` and
@@ -70,7 +71,7 @@ to the environment that needs them (typically `test/`) and replaces
 the bare name — the subpackage exports all of them.
 
 The composition machinery is *not* affected: `CompositeVolumetricElementCache`,
-`CompositeSurfaceElementCache`, the `*MultiDomainIntegrator` family and the
+`CompositeFacetItemCache`, the `*MultiDomainIntegrator` family and the
 transfer integrators `MassProlongatorIntegrator` /
 `NestedMassProlongatorIntegrator` remain in FerriteOperators.
 
@@ -100,7 +101,8 @@ BilinearMultiDomainIntegrator(Dict("right_cells" => a, "left_cells" => b))
 ```
 
 A name claims the subdomain whose cells lie inside its cellset, and resolves
-both the element cache and the boundary cache of that subdomain. Setup throws
+everything that subdomain declares — its element cache, its facet items and
+their surface cache, its global dofs. Setup throws
 an `ArgumentError` for a subdomain claimed by no name, a subdomain claimed by
 several names, and a declared name claiming no subdomain — so a mistyped name
 fails at `setup_operator` rather than assembling nothing. The claim is read
@@ -222,8 +224,10 @@ sensitivities on a cache with no analytic kernel for them.
 
 ## Facets ⚠
 
-The framework owns the facet loop. `is_facet_in_cache` is unchanged; kernels
-become request-typed and facet parameters are queried per facet:
+Kernels become request-typed and facet parameters are queried per facet. The
+0.3 per-cell facet loop is gone: a boundary term now DECLARES its facets
+(`facet_items`) and builds its cache in `setup_facet_item_cache`, and the
+declared set is the traversal.
 
 ```julia
 # 0.3.x
@@ -236,14 +240,24 @@ function FerriteOperators.assemble_facet!(req::ResidualRequest, cache::MyFacetCa
 end
 ```
 
-**⚠ An old-signature `assemble_facet!`, or a missing `is_facet_in_cache`, now
-raises a loud `ArgumentError` at setup** (`validate_boundary_cache` on the
-fused route, `validate_facet_item_cache` on the facet-item route) instead of
-silently vanishing — except where the drift sits in `setup_boundary_cache`'s
-own signature: Julia then falls back to its empty default, indistinguishable
-from "no boundary terms". Grep every downstream `assemble_facet!`/
-`assemble_element!` method definition and port it regardless; put at least one
-boundary integral under a test with an analytic reference (see
+The 0.3 setup pair ports as:
+
+```julia
+# 0.3.x
+FerriteOperators.setup_boundary_cache(m::MyIntegrator, sdh) = MyFacetCache(...)
+FerriteOperators.is_facet_in_cache(idx, cell, c::MyFacetCache) = idx ∈ c.facetset
+
+# 0.4 — the set moves from the cache's gate to the integrator's declaration
+FerriteOperators.facet_items(m::MyIntegrator, sdh) = m.facetset
+FerriteOperators.setup_facet_item_cache(m::MyIntegrator, sdh) = MyFacetCache(...)
+```
+
+**⚠ An old-signature `assemble_facet!` raises a loud `ArgumentError` at setup**
+(`validate_facet_item_cache`) instead of silently vanishing. A term that
+declares no `facet_items` assembles nothing at all — there is no per-cell loop
+left to rediscover it — so grep every downstream `setup_boundary_cache` and
+`is_facet_in_cache` method and port the pair; put at least one boundary
+integral under a test with an analytic reference (see
 `test/test_element_api.jl`, "Facet driver with a real Neumann kernel").
 
 ## Strategies and operators
@@ -288,7 +302,7 @@ local problems](elements.md)).
   `parameter_vjp!(g, op, λ, states, p, ctx)`,
   `time_sensitivity!(g, op, states, p, ctx)` (AD by default, analytic kernels
   win per cache, `local_conditions!` admits the generic route on a condensed
-  cache, `FiniteDifferenceSensitivity` as the boundary-inclusive override).
+  cache, `FiniteDifferenceSensitivity` as the Dual-free override).
   ∂F/∂t seeds through the context — the AD sweep hands the
   kernel a Dual-timed context and the FD method perturbs the context time — so
   `time_sensitivity!` takes the same `(states, p, ctx)` triple as every other
@@ -328,11 +342,10 @@ local problems](elements.md)).
   sweep un-augmented. Everything a family sizes follows its own declaration, AD
   seeds included; the coupling's sparsity is declared on the operator
   specification (see [Elements with global dofs](elements.md#Elements-with-global-dofs)).
-- **Facet items**: `facet_items` + `setup_facet_item_cache` give a term
-  supported on a facet *set* its own traversal instead of the per-cell
-  `is_facet_in_cache` gate, over the same `assemble_facet!` kernels — a change
-  of declaration, not an element rewrite — and unlike the fused route those
-  contributions enter the sensitivity sweeps.
+- **Facet items**: `facet_items` + `setup_facet_item_cache` give a boundary
+  term its own traversal instead of the 0.3 per-cell facet loop, over the same
+  `assemble_facet!` kernels — a change of declaration, not an element rewrite.
+  Those contributions enter the sensitivity sweeps, analytically.
 - **Algebraic items**: `algebraic_items` + `setup_algebraic_cache` +
   `assemble_algebraic!` carry terms with no mesh support at all (0D circulation
   rows, lumped balances) as first-class items of the same operator.
@@ -356,8 +369,9 @@ local problems](elements.md)).
 ## Porting checklist
 
 1. Grep for `assemble_element!`, `assemble_facet!`, `assemble_element_gto1!`
-   method *definitions* — port each to request kernels (⚠ facet methods fail
-   silently, everything else errors loudly).
+   method *definitions* — port each to request kernels. Grep for
+   `setup_boundary_cache`/`is_facet_in_cache` too: a boundary term that does
+   not declare `facet_items` assembles nothing, silently.
 2. Grep for strategy **type** dispatch and `op.dh`/`op.strategy`/`op.subdomain_caches`.
 3. Replace `GenericFirstOrderTimeParameters` call sites with slots + ctx;
    declare `slots` at `setup_operator`.

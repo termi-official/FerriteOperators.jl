@@ -65,30 +65,6 @@ _kind_type(r) = Base.typename(r isa Type ? r : typeof(r)).wrapper
 get_declared_slots(::DefaultProtocol{slots}) where {slots} = slots
 get_declared_kinds(protocol::DefaultProtocol) = protocol.kinds
 
-# The omission the message names belongs to the FUSED route alone, and it is a
-# warning rather than an error because the common case (parameter- and
-# time-independent tractions) is correct. Keyed once per (declared kind set ×
-# boundary cache type): the operator carries that combination, not the sweep.
-function _warn_boundary_sensitivity(requests::Tuple, boundary_caches)
-    any(K -> K <: SensitivityKind, requests) || return nothing
-    surface = findfirst(c -> !(c isa EmptySurfaceElementCache), boundary_caches)
-    surface === nothing && return nothing
-    B = typeof(boundary_caches[surface])
-    kinds = join(map(nameof, filter(K -> K <: SensitivityKind, collect(requests))), ", ")
-    @warn "Sensitivity sweeps run the volumetric kernel only where a boundary term rides the " *
-          "cell sweep: fused-route boundary contributions are NOT included in ∂F/∂θ, ∂F/∂t, or " *
-          "the matrix-free state products — a term declared through `facet_items` is its own " *
-          "traversal and DOES enter them. This operator declares " *
-          "$(kinds) and carries a `$(nameof(B))` boundary cache, so its sensitivities are " *
-          "correct only if the boundary terms are independent of the seeded quantity — θ for " *
-          "the parameter kinds, t for the time sensitivity, u for the state products. " *
-          "`check_derivatives` detects the dependent case: its finite-difference referee " *
-          "evaluates the FULL residual including boundary terms, so a failing parameter, time, " *
-          "or state-product check on this operator is the signature of this omission." _id =
-          Symbol(:boundary_sensitivity_, B, :_, hash(requests)) maxlog = 1
-    return nothing
-end
-
 """
     create_system_matrix(strategy, dh)
 
@@ -126,10 +102,6 @@ function setup_elements(integrator, dh, ad_backend, n_global_dofs)
     needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
     return [decorate_element_cache(setup_element_cache(integrator, sdh), sdh, ad_backend, n)
             for (sdh, n) in zip(dh.subdofhandlers, n_global_dofs)]
-end
-
-function setup_boundaries(integrator, dh)
-    return [setup_boundary_cache(integrator, sdh) for sdh in dh.subdofhandlers]
 end
 
 function _cell_internal_offsets(integrator, element_caches, dh)
@@ -193,18 +165,18 @@ function _build_internal_variable_handler(integrator, element_caches, algebraic_
     return InternalVariableHandler(cell_offsets, item_offsets, ndofs(dh), cell_len + item_len)
 end
 
-function setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh;
+function setup_subdomain_caches(strategy, element_caches, ivh, dh;
         slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, global_dof_sets)
     device = strategy.device
     return [begin
         partition = compute_partition(strategy, sdh)
         n = n_workers(device, partition)
-        ws = create_assembly_workspace(element_cache, boundary_cache, sdh, ivh, slots;
+        ws = create_assembly_workspace(element_cache, sdh, ivh, slots;
                                        needs_sensitivity, global_dofs = gdofs)
         dc = setup_device_instances(device, ws, n)
-        SubdomainCache(AssemblyDomain(sdh, ivh, element_cache, boundary_cache), dc, partition)
-    end for (sdh, element_cache, boundary_cache, gdofs) in
-        zip(dh.subdofhandlers, element_caches, boundary_caches, global_dof_sets)]
+        SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
+    end for (sdh, element_cache, gdofs) in
+        zip(dh.subdofhandlers, element_caches, global_dof_sets)]
 end
 
 # Each family's global-dof declaration is resolved once per subdomain, before
@@ -285,13 +257,10 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     facet_item_sets   = resolve_facet_item_global_dof_sets(strategy, integrator, dh)
     element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
     foreach(cache -> validate_element_cache(cache, requests), element_caches)
-    boundary_caches   = setup_boundaries(integrator, dh)
-    foreach(cache -> validate_boundary_cache(cache, requests), boundary_caches)
     algebraic_domain  = resolve_algebraic_domain(integrator, dh, protocol)
     ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
-    _warn_boundary_sensitivity(requests, boundary_caches)
     needs_sensitivity = needs_ad_decoration(integrator)
-    cell_caches       = setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh;
+    cell_caches       = setup_subdomain_caches(strategy, element_caches, ivh, dh;
                                                slots = get_declared_slots(protocol),
                                                needs_sensitivity,
                                                global_dof_sets)

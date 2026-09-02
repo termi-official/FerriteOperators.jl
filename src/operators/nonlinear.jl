@@ -77,10 +77,10 @@ choice:
   per-slot sweeps carry their own guards, so the weighted kind is servable
   exactly when every participating [`JacobianKind`](@ref) is.
 
-A boundary term riding the cell sweep routes per surface cache and
-independently of the above: its fused weighted facet kernel where declared,
-else the same fold over the per-slot facet Jacobians it declares (see
-[Boundary terms in a weighted sweep](@ref)).
+A [`facet_items`](@ref) term is its own traversal and takes neither route: it
+serves the weighted kind through its own fused
+`assemble_facet!(::WeightedJacobianRequest, …)` kernel or not at all
+([`assert_facet_item_route`](@ref)).
 """
 function assemble_weighted_jacobian!(W::AbstractMatrix, op::LinearizedFerriteOperator, weights::NamedTuple, states::NamedTuple, p, ctx)
     kind = WeightedJacobianKind(weights)

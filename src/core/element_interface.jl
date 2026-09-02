@@ -152,10 +152,9 @@ Facet kernels are request-typed,
 
     assemble_facet!(req, cache, args, local_facet_index::Int)
 
-gated by `is_facet_in_cache(::FacetIndex, cell, cache)`. The framework's
-boundary driver walks the facets of each cell; facet parameters are queried
-separately per facet via [`query_facet_parameters`](@ref). Setup happens
-through `setup_boundary_cache(integrator, sdh)`.
+and run over the facets [`facet_items`](@ref) declares; facet parameters are
+queried separately per facet via [`query_facet_parameters`](@ref). Setup happens
+through [`setup_facet_item_cache`](@ref).
 """
 abstract type AbstractSurfaceElementCache end
 
@@ -171,16 +170,6 @@ request analytically or not at all.
 function assemble_facet! end
 
 """
-    is_facet_in_cache(facet::FacetIndex, cell, cache) -> Bool
-
-Gate of the framework's facet driver: `true` iff `cache` contributes on
-`facet`. The driver walks every facet of every cell and calls
-[`assemble_facet!`](@ref) only where this returns `true`, so a surface cache
-states its facet set here instead of re-deriving it per kernel call.
-"""
-function is_facet_in_cache end
-
-"""
     evaluate_facet_functional(kind::FunctionalKind, cache, args, local_facet_index) -> value
 
 The [`evaluate_cell_functional`](@ref) counterpart of the facet-item family:
@@ -189,32 +178,20 @@ returns this facet's contribution to the functional named by `kind` — a
 contribution. `args` is a [`FacetArgs`](@ref), and the kernel reinitializes its
 own `FacetValues` for `local_facet_index`, exactly as [`assemble_facet!`](@ref)
 does.
-
-Only the facets [`facet_items`](@ref) declares reach this hook: the FUSED
-boundary route rides the cell sweep, which is request-shaped, so a surface term
-joins a reduction by being declared as facet items.
 """
 function evaluate_facet_functional end
 
 "Utility to execute noop assembly."
 struct EmptySurfaceElementCache <: AbstractSurfaceElementCache end
 assemble_facet!(req::AbstractAssemblyRequest, ::EmptySurfaceElementCache, args, local_facet_index::Int) = nothing
-@inline is_facet_in_cache(::FacetIndex, cell, ::EmptySurfaceElementCache) = false
 evaluate_facet_functional(kind, ::EmptySurfaceElementCache, args, local_facet_index::Int) = nothing
-
-"""
-    setup_boundary_cache(integrator, sdh)
-
-Setup the boundary element cache on a given subdofhandler. Defaults to the
-empty cache — "no boundary terms" is the legitimate common case.
-"""
-setup_boundary_cache(integrator, sdh) = EmptySurfaceElementCache()
 
 """
     facet_items(integrator, sdh) -> iterable of FacetIndex
 
-The facets of `sdh` that assemble as their own work items instead of riding
-the cell sweep. Defaults to `()`; a non-empty declaration additionally needs
+The facets of `sdh` a boundary term is supported on. They assemble as their own
+work items — one item per owning cell — which is the ONE route a surface term
+takes. Defaults to `()`; a non-empty declaration additionally needs
 [`setup_facet_item_cache`](@ref).
 
 Every declared facet's cell must lie in `sdh.cellset` — a facet item's local
@@ -222,25 +199,18 @@ system is its owning cell's — and no facet may be declared twice; both are
 setup errors. Facets of ONE cell form a single item, assembled and scattered
 as one local system.
 
-The DECLARED SET IS THE GATE on this route: [`is_facet_in_cache`](@ref) is not
-consulted. That gate exists so the fused route can rediscover membership while
-walking every facet of every cell — exactly the cost this family avoids for a
-term supported on a small fraction of the boundary.
-
-Both routes share one kernel set: the same
-`assemble_facet!(req, cache, args::FacetArgs, lfi)` methods over the same
-[`FacetArgs`](@ref), so moving a term between routes is a change of
-declaration with no element edits.
+THE DECLARED SET IS THE TRAVERSAL: a cell whose facets are undeclared is never
+visited by this family, which is what makes a term supported on a small
+fraction of the boundary cost a small fraction of the boundary.
 """
 facet_items(integrator, sdh) = ()
 
 """
     setup_facet_item_cache(integrator, sdh) -> AbstractSurfaceElementCache
 
-The surface cache serving the facets [`facet_items`](@ref) declares for `sdh`
-— one per subdomain, exactly like [`setup_boundary_cache`](@ref) and returning
-the same kind of object, so a cache built here may equally be handed to the
-fused route and vice versa.
+The [`AbstractSurfaceElementCache`](@ref) serving the facets
+[`facet_items`](@ref) declares for `sdh` — one per subdomain, the surface
+counterpart of [`setup_element_cache`](@ref).
 
 There is deliberately no silent fallback: declaring facet items without this
 method is a loud setup error, not a boundary term that quietly assembles
@@ -250,8 +220,7 @@ function setup_facet_item_cache(integrator, sdh)
     throw(ArgumentError(
         "$(typeof(integrator)) declares `facet_items` but implements no " *
         "`setup_facet_item_cache(integrator, sdh)` method. One surface cache serves every " *
-        "declared facet of the subdomain, and it is the same kind of cache " *
-        "`setup_boundary_cache` returns."))
+        "declared facet of the subdomain."))
 end
 
 """

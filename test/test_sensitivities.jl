@@ -435,26 +435,6 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
     end
 end
 
-# --- The boundary limitation of sensitivity sweeps ---
-
-@testset "Boundary terms are not differentiated" begin
-    (; grid, dh, qrc, strategy) = scalar_quad_testbed((2, 2))
-    right = Set(getfacetset(grid, "right"))
-    # The volumetric element of `SourceDiffusionIntegrator` plus a real constant
-    # Neumann term, so an operator can carry a non-empty boundary cache.
-    bnd() = NonlinearNeumannProbe(-1.0, :u, right;
-                                  volumetric = SourceDiffusionIntegrator(qrc, :u))
-
-    # The combination is what warns: a declared sensitivity kind whose sweep
-    # runs the volumetric kernel only, over an operator that has boundary terms.
-    @test_logs (:warn, r"boundary contributions are NOT included") match_mode = :any setup_operator(
-        strategy, bnd(), dh; requests = (ParameterVJPKind,))
-    # Neither half warns on its own.
-    @test_logs setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh;
-                              requests = (ParameterVJPKind,))
-    @test_logs setup_operator(strategy, bnd(), dh)
-end
-
 # `@allocated` has to be measured from inside a function. At testset scope the
 # operators and buffers are captured variables, and on Julia 1.10 the boxing of
 # those captures is charged to the call being measured — a fixed cost of the

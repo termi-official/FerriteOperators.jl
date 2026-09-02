@@ -9,9 +9,8 @@ using TimerOutputs
 
 include(joinpath(@__DIR__, "fixture_elements.jl"))
 
-# A real facet kernel exercising the framework-owned boundary driver: a
-# constant Neumann load t̄ on a facet set, with the analytic reference
-# sum(b) = t̄ · |Γ|.
+# A real facet kernel exercising the facet-item traversal: a constant Neumann
+# load t̄ on a facet set, with the analytic reference sum(b) = t̄ · |Γ|.
 @testset "Facet driver with a real Neumann kernel" begin
     grid = generate_grid(Hexahedron, (2, 2, 2))   # unit cube [-1,1]³ → right face area 4.0
     dh = DofHandler(grid)
@@ -36,7 +35,7 @@ end
 
 @testset "Element API" begin
     import FerriteOperators: assemble_cell!, assemble_facet!
-    import FerriteOperators: setup_element_cache, setup_boundary_cache
+    import FerriteOperators: setup_element_cache
     import FerriteOperators
 
     setup_test_cache(kwargs...) =
@@ -70,13 +69,8 @@ end
         args  = CellArgs((u = uₑs,), cell_cache_s, 0.0, nothing)
         fargs = FacetArgs((u = uₑs,), cell_cache_s, 0.0, nothing)
 
-        # The empty cache never claims a facet …
-        for local_facet_index = 1:nfacets(cell_cache_s)
-            @test !FerriteOperators.is_facet_in_cache(FacetIndex(1, local_facet_index), cell_cache_s, FerriteOperators.EmptySurfaceElementCache())
-        end
-
-        # … and both empty caches are null objects: whichever request they are
-        # handed, the buffers it names come back as they went in.
+        # Both empty caches are null objects: whichever request they are handed,
+        # the buffers it names come back as they went in.
         @testset "$route" for (route, run!) in (
             ("volumetric", req -> assemble_cell!(req, FerriteOperators.EmptyVolumetricElementCache(), args)),
             ("surface",    req -> assemble_facet!(req, FerriteOperators.EmptySurfaceElementCache(), fargs, 1)),
@@ -240,7 +234,6 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
 
     @testset "collapse rules" begin
         empty_v = FerriteOperators.EmptyVolumetricElementCache()
-        empty_s = FerriteOperators.EmptySurfaceElementCache()
         c1 = FerriteOperators.setup_element_cache(SimpleLinearIntegrator(1.0, qrc, :u), sdh)
         c2 = FerriteOperators.setup_element_cache(SimpleBilinearMassIntegrator(1.0, qrc, :u), sdh)
 
@@ -248,15 +241,6 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
         @test FerriteOperators.compose_element_caches((empty_v, c1)) === c1
         @test FerriteOperators.compose_element_caches((c1, c2)) isa FerriteOperators.CompositeVolumetricElementCache
         @test length(FerriteOperators.compose_element_caches((c1, empty_v, c2)).inner_caches) == 2
-        @test FerriteOperators.compose_boundary_caches((empty_s, empty_s)) === empty_s
-
-        # The empty-boundary fast path survives composition: an integrator with
-        # no boundary term still yields the empty surface cache.
-        model = LinearCompositeIntegrator(
-            SimpleLinearIntegrator(1.0, qrc, :u),
-            SimpleLinearIntegrator(2.0, qrc, :u),
-        )
-        @test FerriteOperators.setup_boundary_cache(model, sdh) isa FerriteOperators.EmptySurfaceElementCache
     end
 
     @testset "quadrature agreement" begin
@@ -396,76 +380,3 @@ FerriteOperators.get_number_of_internal_dofs_per_element(
     @test unknown_size(op) == ndofs(dh) + 2 * getncells(grid)
 end
 
-####################################
-## Boundary cache setup validation (fused route)
-####################################
-# `validate_boundary_cache` is `validate_facet_item_cache`'s counterpart for
-# `setup_boundary_cache` — the 0.3→0.4 migration gap: a surface cache written
-# against the old positional `assemble_facet!` signature builds fine and then
-# either MethodErrors mid-sweep or, if `is_facet_in_cache` never matches,
-# contributes nothing.
-
-# The old 0.3 signature — no method matches the mandatory 0.4 one.
-struct OldSignatureBoundaryCache <: FerriteOperators.AbstractSurfaceElementCache end
-FerriteOperators.assemble_facet!(rₑ, uₑ, cell, lfi::Int, ::OldSignatureBoundaryCache, p) = nothing
-FerriteOperators.is_facet_in_cache(::FacetIndex, cell, ::OldSignatureBoundaryCache) = false
-
-struct OldSignatureBoundaryProbe <: AbstractLinearIntegrator end
-FerriteOperators.setup_element_cache(::OldSignatureBoundaryProbe, ::SubDofHandler) =
-    FerriteOperators.EmptyVolumetricElementCache()
-FerriteOperators.setup_boundary_cache(::OldSignatureBoundaryProbe, ::SubDofHandler) = OldSignatureBoundaryCache()
-
-# The 0.4 residual kernel ported; `is_facet_in_cache` did not.
-struct NoGateBoundaryCache <: FerriteOperators.AbstractSurfaceElementCache end
-FerriteOperators.assemble_facet!(::ResidualRequest, ::NoGateBoundaryCache, args, lfi::Int) = nothing
-
-struct NoGateBoundaryProbe <: AbstractLinearIntegrator end
-FerriteOperators.setup_element_cache(::NoGateBoundaryProbe, ::SubDofHandler) =
-    FerriteOperators.EmptyVolumetricElementCache()
-FerriteOperators.setup_boundary_cache(::NoGateBoundaryProbe, ::SubDofHandler) = NoGateBoundaryCache()
-
-# A `provides_analytic` claim with no facet kernel behind it — the trait ↔
-# kernel check shared with `validate_facet_item_cache`.
-struct OverclaimingBoundaryCache <: FerriteOperators.AbstractSurfaceElementCache end
-FerriteOperators.assemble_facet!(::ResidualRequest, ::OverclaimingBoundaryCache, args, lfi::Int) = nothing
-FerriteOperators.is_facet_in_cache(::FacetIndex, cell, ::OverclaimingBoundaryCache) = false
-FerriteOperators.provides_analytic(::Type{OverclaimingBoundaryCache}, ::JacobianKind{:u}) = true
-
-struct OverclaimingBoundaryProbe <: AbstractLinearIntegrator end
-FerriteOperators.setup_element_cache(::OverclaimingBoundaryProbe, ::SubDofHandler) =
-    FerriteOperators.EmptyVolumetricElementCache()
-FerriteOperators.setup_boundary_cache(::OverclaimingBoundaryProbe, ::SubDofHandler) = OverclaimingBoundaryCache()
-
-@testset "Boundary cache setup validation" begin
-    grid = generate_grid(Quadrilateral, (2, 2))
-    dh = DofHandler(grid)
-    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-    close!(dh)
-    strategy = AssemblyStrategy(SequentialCPUDevice())
-
-    # The legitimate default validates trivially.
-    @test FerriteOperators.validate_boundary_cache(FerriteOperators.EmptySurfaceElementCache()) === nothing
-
-    # A 0.3-signature cache: no method matches the mandatory 0.4 residual kernel.
-    err = @test_throws ArgumentError setup_operator(strategy, OldSignatureBoundaryProbe(), dh)
-    @test occursin("assemble_facet!", err.value.msg)
-    @test occursin("ResidualRequest", err.value.msg)
-    @test occursin("FacetArgs", err.value.msg)
-
-    # The residual kernel ported; the gate did not.
-    err = @test_throws ArgumentError setup_operator(strategy, NoGateBoundaryProbe(), dh)
-    @test occursin("is_facet_in_cache", err.value.msg)
-    @test occursin("FacetIndex", err.value.msg)
-
-    # A trait claim without the facet kernel behind it.
-    err = @test_throws ArgumentError setup_operator(strategy, OverclaimingBoundaryProbe(), dh)
-    @test occursin("provides_analytic", err.value.msg)
-    @test occursin("::Int", err.value.msg)
-
-    # Existing boundary fixtures — the fused Neumann route — pass unchanged.
-    t̄ = 1.5
-    right = Set(getfacetset(grid, "right"))
-    op = setup_operator(strategy, LinearNeumannProbe(t̄, :u, right), dh)
-    update_operator!(op, nothing)
-    @test sum(op.b) ≈ t̄ * 2.0
-end

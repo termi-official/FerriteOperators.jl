@@ -178,7 +178,7 @@ export AbstractPatchSink, patch_emit!
 export PatchGlobalVectorSink, PatchTripletSink, emit_patch_column!
 export ItemStates, item_state, set_item_state!, has_item_state, invalidate_item_state!, invalidate_item_states!
 export provides_analytic
-export query_cell_parameters, query_facet_parameters, assemble_facet!, is_facet_in_cache
+export query_cell_parameters, query_facet_parameters, assemble_facet!
 export reinit_values!
 export ADElementCache, AbstractElementCacheDecorator, unwrap, ForwardDiffAD, FusedFromSplit, condensed_corrector
 export decorate_element_cache, needs_ad_decoration, fully_analytic
@@ -209,8 +209,8 @@ export AbstractVolumetricElementCache, AbstractSurfaceElementCache
 export EmptyVolumetricElementCache, EmptySurfaceElementCache
 export MassProlongatorIntegrator
 export NestedMassProlongatorIntegrator
-export setup_element_cache, setup_boundary_cache
-export compose_element_caches, compose_boundary_caches
+export setup_element_cache
+export compose_element_caches
 export global_dofs, global_dof_range
 export facet_items, setup_facet_item_cache, facet_item_global_dofs, facet_item_global_dof_range
 export FacetItemDomain

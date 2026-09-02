@@ -510,9 +510,12 @@ execute_kind!(kind::PrimalKind, task, ws) = primal_cell_sweep!(kind, task, ws)
 The built-in primal driver body, reusable by a downstream kind's own
 `execute_kind!`. Zeroes the buffers [`assembles_matrix`](@ref) /
 [`assembles_vector`](@ref) name, reinitializes the element's values, queries
-the cell parameters, runs the cell and facet kernels — gathering the state
-slots iff [`depends_on_unknowns`](@ref) — and scatters through
+the cell parameters, runs the cell kernel — gathering the state slots iff
+[`depends_on_unknowns`](@ref) — and scatters through
 [`scatter_local!`](@ref).
+
+Boundary terms are their own item family ([`facet_items`](@ref)) and take no
+part here: a cell sweep runs the volumetric kernel and nothing else.
 
 The kernel it calls is `cell_kernel!(kind, …)`, whose generic method issues the
 kind's request analytically; the built-in kinds with an AD fallback specialize
@@ -527,10 +530,8 @@ function primal_cell_sweep!(kind, task, ws)
     if depends_on_unknowns(kind)
         statesₑ = load_slots!(ws, task.states)
         @timeit_debug "assemble element" cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx)
-        @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, statesₑ, task)
     else
         @timeit_debug "assemble element" cell_kernel!(kind, ws.element, ws, (;), pₑ, task.ctx)
-        @timeit_debug "assemble boundary" boundary_kernel!(kind, ws.boundary_element, ws, (;), task)
     end
     scatter_local!(kind, task.inner_assembler, ws)
 end
@@ -538,78 +539,6 @@ end
 # The single CellArgs/FacetArgs construction seams.
 _cell_args(ws, statesₑ, pₑ, ctx) = CellArgs(statesₑ, ws.cell, pₑ, ctx)
 _facet_args(ws, statesₑ, pₑ, ctx) = FacetArgs(statesₑ, ws.cell, pₑ, ctx)
-
-# The framework-owned facet driver: walk the cell's facets, gate on
-# is_facet_in_cache, query facet parameters SEPARATELY per facet, and hand the
-# kind's request over the shared local buffers to the facet kernel.
-boundary_kernel!(kind, ::EmptySurfaceElementCache, ws, statesₑ, task) = nothing
-function boundary_kernel!(kind, cache::AbstractSurfaceElementCache, ws, statesₑ, task)
-    for lfi in 1:nfacets(ws.cell)
-        if is_facet_in_cache(FacetIndex(cellid(ws.cell), lfi), ws.cell, cache)
-            pᵦ = query_facet_parameters(cache, ws.cell, lfi, task.p)
-            facet_kernel!(kind, cache, ws, _facet_args(ws, statesₑ, pᵦ, task.ctx), lfi)
-        end
-    end
-end
-
-"""
-    facet_kernel!(kind, cache, ws, args, lfi)
-
-One facet's contribution to a sweep of `kind`, over the workspace buffers.
-Facet contributions have no AD fallback in any sweep — a surface cache serves
-the sweep's request analytically or not at all — so the generic method simply
-issues the kind's request.
-"""
-facet_kernel!(kind, cache, ws, args, lfi::Int) =
-    assemble_facet!(materialize_request(kind, ws), cache, args, lfi)
-
-# A weighted sweep takes the cache's FUSED weighted kernel where it declares
-# one, and otherwise composes `Σₛ wₛ·(∂F/∂s facet kernel)` from the per-slot
-# Jacobians the cache DOES declare. A slot it does not claim contributes
-# nothing — the statement a spring makes about ∂F/∂v under `(u, v)` weights.
-# Analytic wins: a cache claiming the weighted kind keeps its fused kernel,
-# which is the only route that can carry a combination no single-slot Jacobian
-# computes.
-function facet_kernel!(kind::WeightedJacobianKind{slots, C}, cache, ws, args, lfi::Int) where {slots, C}
-    T = typeof(cache)
-    provides_analytic(T, kind) &&
-        return assemble_facet!(materialize_request(kind, ws), cache, args, lfi)
-    any(_claimed_facet_slots(T, kind)) || _throw_no_weighted_facet_route(T, kind)
-    return _fold_weighted_facet!(C, slots, values(kind.weights), cache, ws, args, lfi)
-end
-
-_claimed_facet_slots(::Type{T}, ::WeightedJacobianKind{slots, C}) where {T, slots, C} =
-    ntuple(i -> provides_analytic(T, JacobianKind{slots[i], C}()), Val(length(slots)))
-
-# Unrolled by tuple recursion: an `ntuple`/`map` closure over the workspace and
-# the args record is materialized once per facet, which the alloc gate forbids.
-@inline _fold_weighted_facet!(::Type{C}, ::Tuple{}, ::Tuple{}, cache, ws, args, lfi) where {C} = nothing
-@inline function _fold_weighted_facet!(::Type{C}, slots::Tuple, weights::Tuple, cache, ws, args, lfi) where {C}
-    _add_weighted_facet_slot!(ws, JacobianKind{first(slots), C}(), first(weights), cache, args, lfi)
-    return _fold_weighted_facet!(C, Base.tail(slots), Base.tail(weights), cache, ws, args, lfi)
-end
-
-# The slot lands in the per-worker scratch first: a facet kernel ACCUMULATES
-# into the request's matrix, so its contribution has to be separable before the
-# weight can be applied to it.
-@inline function _add_weighted_facet_slot!(ws, ::JacobianKind{slot, C}, w, cache, args, lfi) where {slot, C}
-    provides_analytic(typeof(cache), JacobianKind{slot, C}()) || return nothing
-    scratch = ws.facet_Ke
-    fill!(scratch, zero(eltype(scratch)))
-    assemble_facet!(JacobianRequest{slot, C}(scratch), cache, args, lfi)
-    ws.Ke .+= w .* scratch
-    return nothing
-end
-
-@noinline _throw_no_weighted_facet_route(T::Type, kind::WeightedJacobianKind{slots, C}) where {slots, C} =
-    throw(ArgumentError(
-        "$(T) declares neither route a weighted Jacobian sweep can take on a facet: no fused " *
-        "`assemble_facet!(::WeightedJacobianRequest, …)` kernel (declared through " *
-        "`provides_analytic(::Type{<:$(nameof(T))}, ::WeightedJacobianKind)`), and no per-slot " *
-        "`assemble_facet!(::JacobianRequest{slot}, …)` kernel for any of $(slots) either. Facet " *
-        "kernels have no automatic-differentiation fallback, so declare one of the two — the " *
-        "fused kernel for a hand-derived combination, per-slot kernels for terms the sweep's " *
-        "weights fold."))
 
 # ONE generic method for every primal kind: `cache` (`ws.element`) is EITHER
 # genuinely analytic for `kind` or a decorator ([`ADElementCache`](@ref)) that
@@ -878,11 +807,9 @@ the per-worker partials reduce in a fixed order — results are deterministic fo
 a fixed worker count. Nothing is written into the operator, so an operator
 declaring no functional kind serves one just as well.
 
-Cell items contribute through [`evaluate_cell_functional`](@ref), DECLARED facet
-items through [`evaluate_facet_functional`](@ref) and algebraic items through
-[`evaluate_algebraic_functional`](@ref). The fused boundary route takes no part:
-it rides the cell sweep, which is request-shaped, so a surface term joins a
-reduction by being declared as [`facet_items`](@ref).
+Cell items contribute through [`evaluate_cell_functional`](@ref), facet items
+through [`evaluate_facet_functional`](@ref) and algebraic items through
+[`evaluate_algebraic_functional`](@ref).
 
 Two failure modes are kept apart. STRUCTURAL emptiness — no items in the
 operator's partitions, or no subdomain whose element cache can contribute — is

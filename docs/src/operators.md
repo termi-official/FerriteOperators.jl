@@ -170,13 +170,11 @@ The differentiated slot must carry a plain vector source. An
 so `JacobianKind{:du}()` against it is rejected — assemble the components
 against plain sources and let the reconstruction slope enter as a weight.
 
-A boundary term riding the cell sweep must serve every slot the components are
+A [`facet_items`](@ref) term must serve every slot the components are
 assembled for. The facet driver hands the sweep's `JacobianRequest{:du}` to the
 surface cache with no AD fallback, so a cache implementing only
 `ResidualRequest` and `JacobianRequest{:u}` raises a `MethodError` on the first
-facet of a `:du` component sweep. A *weighted* sweep is the one place this is
-softened: it composes the slots the cache declares and takes the ones it does
-not as zero (see below).
+item of a `:du` component sweep.
 
 Fully implicit Runge-Kutta assembles `s` stage pairs and applies the s×s
 Newton block `δᵢⱼ Jdu⁽ⁱ⁾ + Δt aᵢⱼ Ju⁽ⁱ⁾` without ever building it:
@@ -232,32 +230,18 @@ participating slot Jacobian is.
 
 ### Boundary terms in a weighted sweep
 
-A boundary term riding the cell sweep takes its own route per surface cache,
-facet kernels having no AD fallback:
+Facet kernels have no AD fallback, so a boundary term
+([`facet_items`](@ref)) serves a weighted sweep through ONE route: its own
+`assemble_facet!(::WeightedJacobianRequest, …)` kernel, declared through
+[`provides_analytic`](@ref). Nothing composes per-slot facet Jacobians behind
+the kernel's back. A cache without it is an `ArgumentError` naming that kernel
+— at `setup_operator` where the kind is declared, and on the first item swept
+otherwise.
 
-- the cache declares [`WeightedJacobianKind`](@ref) and its
-  `assemble_facet!(::WeightedJacobianRequest, …)` kernel — the fused facet
-  route, and the one that always wins where it exists;
-- otherwise the driver composes `Σₛ wₛ·(∂F/∂s facet kernel)` from the per-slot
-  `JacobianRequest{slot}` kernels the cache declares through
-  [`provides_analytic`](@ref). **A slot it does not declare contributes
-  nothing** — a boundary spring states `∂F/∂v = 0` by not declaring `:v`;
-- a cache declaring neither is an `ArgumentError` naming both routes, on the
-  first facet of the sweep.
-
-That is what puts a spring (`∂F/∂u` only) next to a dashpot (`∂F/∂v` only) in
-one `W`: a composite surface cache routes per inner, so the pair is legal even
-though neither inner serves both slots. The composition runs over a per-worker
-scratch element matrix, so it allocates nothing per facet.
-
-On the **facet-item route** ([`facet_items`](@ref)) the fused kernel is the
-*only* route: there is no per-slot fold, so a cache serving a weighted sweep
-there implements `assemble_facet!(::WeightedJacobianRequest, …)` and declares
-it through [`provides_analytic`](@ref). A cache without it is an
-`ArgumentError` naming that kernel — at `setup_operator` where the kind is
-declared, and on the first item swept otherwise. A
-[`CompositeFacetItemCache`](@ref) still routes **per inner**, so the
-spring/dashpot pair stays legal once each inner carries its own fused kernel.
+A [`CompositeFacetItemCache`](@ref) routes **per inner**, which is what puts a
+boundary spring (`∂F/∂u` only) next to a dashpot (`∂F/∂v` only) in one `W`:
+each inner accumulates its own fused contribution, the composite claiming
+neither slot.
 
 An [`AffineRate`](@ref) slot may participate only through an analytic weighted
 kernel: reconstructed slots are frozen under AD, while a kernel forming the
@@ -286,27 +270,12 @@ residual kernel. The engine itself never forks between the two: it always
 calls `assemble_cell!` on the resolved cache, analytic-or-decorated.
 Sensitivity sweeps **never** write back into the caller's state.
 
-!!! warning "Fused-route boundary terms are not differentiated"
-    A sensitivity sweep runs the **volumetric** kernel only where a boundary
-    term rides the cell sweep ([`setup_boundary_cache`](@ref)): those
-    contributions are omitted from `∂F/∂θ`, `∂F/∂t` and the matrix-free state
-    products, so the result is correct exactly when the fused boundary terms
-    are independent of the seeded quantity — θ for the parameter kinds, `t` for
-    the time sensitivity, `u` for the state products. A θ-dependent traction or
-    a time-dependent flux on that route therefore yields a silently incomplete
-    sensitivity.
-
-    A term declared through [`facet_items`](@ref) is its own traversal and
-    **does** enter the sensitivity sweeps — analytically only, since facet
-    kernels have no AD fallback (see
-    [Facet items](elements.md#Facet-items)).
-
-    An operator declaring a sensitivity kind while carrying a non-empty
-    fused-route boundary cache warns once at `setup_operator`, and
-    [`check_derivatives`](@ref) detects the dependent case: its
-    finite-difference referee evaluates the full residual *including* boundary
-    terms, so a failing parameter, time, or state-product check on such an
-    operator is the signature of this omission.
+Boundary terms ([`facet_items`](@ref)) are their own traversal and enter
+`∂F/∂θ`, `∂F/∂t` and the matrix-free state products like any other item family
+— **analytically only**, since facet kernels have no AD fallback (see [Facet
+items](elements.md#Facet-items)). Declaring the sensitivity kind makes setup
+demand that kernel loudly; a surface cache missing it is an `ArgumentError` at
+`setup_operator`, never a silently incomplete sensitivity.
 
 ∂F/∂t seeds through the context channel: the AD sweep hands the kernel a
 context whose evaluation time is Dual-valued, and the finite-difference method
@@ -334,9 +303,10 @@ time sensitivities, the caller selects [`FiniteDifferenceSensitivity`](@ref)
 it bypasses analytic sensitivity kernels).
 
 Two derivative mechanisms exist and the split is final. Operator-level
-[`FiniteDifferenceSensitivity`](@ref) is the BOUNDARY-INCLUSIVE, Dual-free
-route: it differences `evaluate!`, so facet terms enter, and no kernel ever
-sees a `Dual`. The [`ADElementCache`](@ref) decorator is the PER-CACHE route:
+[`FiniteDifferenceSensitivity`](@ref) is the Dual-free route: it differences
+`evaluate!`, so every term enters — including a facet term whose cache carries
+no analytic sensitivity kernel — and no kernel ever sees a `Dual`. The
+[`ADElementCache`](@ref) decorator is the PER-CACHE route:
 analytic kernels win cache by cache, it is allocation-free per cell for the
 state and time sweeps, and it is volumetric only. There is deliberately no
 cache-level finite-difference decorator — it would be volumetric like the AD
@@ -376,9 +346,9 @@ differentiable/static split: only the entries exposed by
 [`parameter_vector`](@ref) are probed.
 
 The FD referee evaluates the operator's **full** residual, boundary terms
-included, which is what makes a failing parameter, time, or state-product check
-the diagnostic for the fused-route omission described under
-[Sensitivities](#Sensitivities).
+included, which is what makes it a referee for the analytic facet kernels a
+[`facet_items`](@ref) term's sensitivities rest on (see
+[Sensitivities](#Sensitivities)).
 
 The time check runs only with a context and is recorded as a skip without one.
 Passing `weights = (u = …, du = …)` adds the two weighted-Jacobian checks: the
