@@ -290,17 +290,16 @@ Setup raises the restrictions this layout implies. [`ColoredScheduling`](@ref)
 is rejected — coloring works by giving no two items of a color a shared dof,
 and a declared global dof is shared by *every* item of its subdomain, so no
 coloring isolates it; the parallel route is the atomic scatter of
-[`SequentialScheduling`](@ref) under a parallel device. The
-[`ElementAssembly`](@ref) form is rejected too, its per-element dof maps being
-built from `celldofs`, and so is patch assembly, whose patch-local dof map is
-built the same way: the declared tail would have no patch-local number and be
-dropped. A condensed element cache without an analytic `Consistent` Jacobian
+[`SequentialScheduling`](@ref) under a parallel device. A condensed element
+cache without an analytic `Consistent` Jacobian
 kernel is rejected as well — the generic combination
 `∂F/∂ū|_q + ∂F/∂q · dq/dū` reads a corrector block spanning the field space
 while the AD partials span the augmented system. The declaration itself is
 validated too: in bounds, without duplicates, and — sampled on the subdomain's
 first cell — disjoint from `celldofs`, since a dof appearing in both head and
-tail would receive every contribution twice.
+tail would receive every contribution twice. [`foreach_patch`](@ref) raises its
+own rejection at the call: a patch's dof map is built from `celldofs` too, so
+the declared tail would have no patch-local number and be dropped.
 
 !!! note "Requires Ferrite's mesh-free algebraic variables"
     See the canonical capability note under [Algebraic

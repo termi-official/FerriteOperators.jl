@@ -29,7 +29,7 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
     @test count(!iszero, op.b) == 9
 
     # parallel path through the same driver
-    opp = setup_operator(AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()), integrator, dh)
+    opp = setup_operator(AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling()), integrator, dh)
     update_operator!(opp, nothing)
     @test opp.b ≈ op.b rtol = 1e-13
 end
@@ -182,7 +182,7 @@ FerriteOperators.provides_analytic(::Type{AnalyticProbeCache}, ::ParameterJacobi
         # parallel strategy is the composite through `duplicate_for_device`.
         @testset "$composite_strategy" for composite_strategy in (
             AssemblyStrategy(SequentialCPUDevice()),
-            AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()),
+            AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling()),
         )
             op = setup_operator(composite_strategy, LinearCompositeIntegrator(
                 ParamProbeIntegrator(2.0, qrc, :u),

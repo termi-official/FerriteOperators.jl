@@ -106,14 +106,14 @@ FerriteOperators.setup_facet_item_cache(::CondensedFacetProbe, ::SubDofHandler) 
 
         # Atomic scatter: neighbouring cells' facets share dofs, and chunk size
         # 1 puts every item on its own worker.
-        opp = setup_operator(AssemblyStrategy(FullAssembly(), SequentialScheduling(), PolyesterDevice(1)),
+        opp = setup_operator(AssemblyStrategy(FullAssembly(), SequentialScheduling(), PolyesterDevice(min_items_per_worker = 1)),
                              integrator(), dh)
         update_operator!(opp, nothing)
         @test opp.b ≈ ops.b
 
         # Coloring of the OWNING CELLS: the partition covers every declared item
         # exactly once, and needs more than one barrier to do it.
-        opc = setup_operator(AssemblyStrategy(FullAssembly(), ColoredScheduling(), PolyesterDevice(1)),
+        opc = setup_operator(AssemblyStrategy(FullAssembly(), ColoredScheduling(), PolyesterDevice(min_items_per_worker = 1)),
                              integrator(), dh)
         update_operator!(opc, nothing)
         @test opc.b ≈ ops.b
@@ -379,7 +379,7 @@ else
         # A declared global dof rules out coloring, so the parallel route is the
         # atomic scatter — and every worker's duplicated workspace has to
         # rebuild the same augmented dof vector.
-        opp = setup_operator(AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), PolyesterDevice(1)),
+        opp = setup_operator(AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), PolyesterDevice(min_items_per_worker = 1)),
                              integrator, dh)
         rp = zeros(n)
         update_linearization!(opp, rp, u, nothing)
@@ -513,7 +513,7 @@ end
     @testset "parallel workers reduce to the same value" begin
         # Chunk size 1 over the coloring, so the barriers are handed to genuine
         # per-worker folds rather than to one worker walking everything.
-        pop = setup_operator(AssemblyStrategy(FullAssembly(), ColoredScheduling(), PolyesterDevice(1)),
+        pop = setup_operator(AssemblyStrategy(FullAssembly(), ColoredScheduling(), PolyesterDevice(min_items_per_worker = 1)),
                              FacetFunctionalProbe(:u, facets), dh)
         psc = last(pop.engine.subdomain_caches)
         @test length(psc.device_cache) == min(Threads.nthreads(), maximum(length, psc.partition))

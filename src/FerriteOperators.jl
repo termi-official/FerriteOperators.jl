@@ -43,7 +43,6 @@ include("core/qvector.jl")           # Flat per-cell quadrature data storage
 # Conveniences for working with Ferrite, plus dispatches missing from
 # Ferrite.jl and pirated here.
 include("core/ferrite-addons/collections.jl")
-include("core/ferrite-addons/mappings.jl")
 include("core/ferrite-addons/assembly.jl")
 include("core/ferrite-addons/parallel_duplication_api.jl")
 include("core/ferrite-addons/internal_variable_handler.jl")
@@ -105,7 +104,6 @@ include("elements/composite_elements.jl")     # High-level composition of operat
 include("elements/ad_element.jl")             # ADElementCache: AD as an element cache decorator
 
 include("operators/general.jl")         # Domain descriptors, NullOperator
-include("operators/matrix_free.jl")     # Element-assembly storage: per-element residuals and their collapse
 include("operators/nonlinear.jl")       # Assembly and action tasks
 include("operators/bilinear.jl")
 include("operators/linear.jl")
@@ -196,7 +194,7 @@ export SequentialCPUDevice, PolyesterDevice
 export AbstractCPUDevice, AbstractGPUDevice
 export value_type, duplicate_for_device
 export default_strategy
-export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAssembly, ElementAssembly, ElementAssemblyData
+export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAssembly
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling
 export StandardOperatorSpecification, BlockedOperatorSpecification
 

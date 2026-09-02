@@ -232,10 +232,6 @@ function _reject_unsupported_global_dof_strategy(strategy::AssemblyStrategy, dec
         "coloring makes a scatter race-free by giving no two items of a color a shared dof, " *
         "and a declared global dof is shared by every item that carries it, so no coloring " *
         "isolates it. Use `SequentialScheduling`, whose parallel route is the atomic scatter."))
-    strategy.form isa Union{ElementAssembly, ElementAssemblyData} && throw(ArgumentError(
-        "A subdomain declaring `$declaration` cannot be assembled in the `ElementAssembly` " *
-        "form: its per-element storage and dof maps are built from `celldofs`, which by " *
-        "construction never contains a global dof. Use `FullAssembly`."))
     return nothing
 end
 
@@ -287,7 +283,6 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     requests          = get_declared_kinds(protocol)
     global_dof_sets   = resolve_global_dof_sets(strategy, integrator, dh)
     facet_item_sets   = resolve_facet_item_global_dof_sets(strategy, integrator, dh)
-    operator_strategy = setup_operator_strategy_cache(strategy, integrator, dh)
     element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
     foreach(cache -> validate_element_cache(cache, requests), element_caches)
     boundary_caches   = setup_boundaries(integrator, dh)
@@ -296,21 +291,21 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
     _warn_boundary_sensitivity(requests, boundary_caches)
     needs_sensitivity = needs_ad_decoration(integrator)
-    cell_caches       = setup_subdomain_caches(operator_strategy, element_caches, boundary_caches, ivh, dh;
+    cell_caches       = setup_subdomain_caches(strategy, element_caches, boundary_caches, ivh, dh;
                                                slots = get_declared_slots(protocol),
                                                needs_sensitivity,
                                                global_dof_sets)
-    facet_caches      = setup_facet_item_caches(operator_strategy, integrator, dh, protocol, ivh;
+    facet_caches      = setup_facet_item_caches(strategy, integrator, dh, protocol, ivh;
                                                 slots = get_declared_slots(protocol),
                                                 needs_sensitivity,
                                                 facet_item_global_dof_sets = facet_item_sets)
-    algebraic_caches  = setup_algebraic_caches(operator_strategy, algebraic_domain, protocol, ad_backend,
+    algebraic_caches  = setup_algebraic_caches(strategy, algebraic_domain, protocol, ad_backend,
                                                needs_sensitivity, ivh)
     # The families carry different domain types; widening only where something
     # is declared keeps a cells-only operator's element type concrete.
     subdomain_caches  = (isempty(facet_caches) && isempty(algebraic_caches)) ? cell_caches :
         vcat(Vector{SubdomainCache}(cell_caches), facet_caches, algebraic_caches)
-    return AssemblyEngine(operator_strategy, subdomain_caches, dh, ivh, protocol)
+    return AssemblyEngine(strategy, subdomain_caches, dh, ivh, protocol)
 end
 
 """

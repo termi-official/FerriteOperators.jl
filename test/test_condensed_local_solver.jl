@@ -292,10 +292,10 @@ FerriteOperators.setup_element_cache(m::ForwardingIntegrator{h}, sdh::SubDofHand
         @test report.worst_qp ∈ 1:nqp
         @test report.converged
 
-        # Per-worker partials fold to the same totals under PolyesterDevice(2)
+        # Per-worker partials fold to the same totals on a threaded device
         # — CondensationReport is a monoid (& / + / max-with-argmax / max /
         # min componentwise), so this is a report merge, not a stats reset.
-        par = relaxation_case(AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()), qrc; spread...)
+        par = relaxation_case(AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling()), qrc; spread...)
         preport = condense_internal!(par.op, par.states, nothing, par.ctx)
         @test preport.solves == report.solves
         @test preport.iterations == report.iterations

@@ -202,16 +202,16 @@ end
 
 
 """
-    PolyesterDevice(chunksize)
+    PolyesterDevice(; min_items_per_worker = 32)
 
 Threaded algorithms via Polyester.jl. Load Polyester.jl to activate this device.
 
-`chunksize` is the granularity a barrier's items are split at: a worker never
-takes a fraction of a chunk, so a barrier holding fewer than `chunksize` items
-per thread runs on fewer workers than there are threads.
+`min_items_per_worker` is the smallest share of a barrier's items a worker is
+given: a barrier of `n` items runs on `min(Threads.nthreads(), cld(n,
+min_items_per_worker))` workers, so a LOWER value means MORE parallelism on a
+small barrier. Keyword-only — the number is a threshold, not a worker count.
 """
 struct PolyesterDevice{ValueType, IndexType} <: AbstractCPUDevice{ValueType, IndexType}
-    chunksize::IndexType
+    min_items_per_worker::Int
 end
-PolyesterDevice() = PolyesterDevice{Float64, Int}(32)
-PolyesterDevice(i::Int) = PolyesterDevice{Float64, Int}(i)
+PolyesterDevice(; min_items_per_worker::Int = 32) = PolyesterDevice{Float64, Int}(min_items_per_worker)

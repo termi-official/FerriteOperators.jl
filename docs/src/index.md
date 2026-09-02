@@ -67,20 +67,18 @@ end
 ## The assembly strategy
 
 Which machinery an operator is built on is one composite choice, and the three
-axes are orthogonal: the *operator form* ([`FullAssembly`](@ref) /
-[`ElementAssembly`](@ref) — the MFEM assembly level), the *scheduling policy*
-([`SequentialScheduling`](@ref) / [`ColoredScheduling`](@ref) — how parallel
-work is made race-safe), and the *device* (sequential CPU, threaded via
-Polyester). [`AssemblyStrategy`](@ref)`(device; form, scheduling)` is the
-keyword convenience constructor for the common compositions: `AssemblyStrategy(device)`,
-`AssemblyStrategy(device; scheduling = ColoredScheduling())`, and
-`AssemblyStrategy(device; form = ElementAssembly())`.
+axes are orthogonal: the *operator form* ([`AbstractAssemblyForm`](@ref) — the
+MFEM assembly level), the *scheduling policy* ([`SequentialScheduling`](@ref) /
+[`ColoredScheduling`](@ref) — how parallel work is made race-safe), and the
+*device* (sequential CPU, threaded via Polyester).
+[`AssemblyStrategy`](@ref)`(device; form, scheduling)` is the keyword
+convenience constructor for the common compositions: `AssemblyStrategy(device)`
+and `AssemblyStrategy(device; scheduling = ColoredScheduling())`.
 
 [`FullAssembly`](@ref) assembles the global matrix and vector and serves every
-operator family. [`ElementAssembly`](@ref) accumulates per-element vector
-contributions and collapses them into the global vector at the end of the
-sweep, so it serves linear operators only — it holds no matrix, and a bilinear
-or nonlinear operator under it is rejected at setup.
+operator family. It is the form axis' sole member; the axis and the `form`
+keyword are the extension point a further assembly level (element assembly,
+matrix-free) is added at.
 
 All operator entry points funnel into one task body executed by a shared
 device loop:

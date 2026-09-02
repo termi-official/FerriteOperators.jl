@@ -135,8 +135,8 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
 
             @testset "Strategy $strategy" for strategy in (
                     AssemblyStrategy(SequentialCPUDevice(); scheduling = ColoredScheduling()),
-                    AssemblyStrategy(PolyesterDevice(1); scheduling = ColoredScheduling()),
-                    AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()),
+                    AssemblyStrategy(PolyesterDevice(min_items_per_worker = 1); scheduling = ColoredScheduling()),
+                    AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling()),
             )
                 bilinop = setup_operator(strategy, integrator, dh)
                 # Consistency
@@ -230,8 +230,8 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         @testset "Full Assembly Strategy $strategy" for strategy in (
             AssemblyStrategy(SequentialCPUDevice()),
             AssemblyStrategy(SequentialCPUDevice(); scheduling = ColoredScheduling()),
-            AssemblyStrategy(PolyesterDevice(1); scheduling = ColoredScheduling()),
-            AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()),
+            AssemblyStrategy(PolyesterDevice(min_items_per_worker = 1); scheduling = ColoredScheduling()),
+            AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling()),
         )
             nlop = setup_operator(strategy, integrator, dh)
             # Consistency: each of the three entry points against the baseline.
@@ -249,41 +249,6 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
             evaluate!(nlop, residual, u, 0.0)
             @test residual ≈ residual_baseline
         end
-
-        # The `ElementAssembly` form accumulates per-element residuals and holds
-        # no matrix, so a matrix-target operator is rejected at setup rather
-        # than built with a matrix it can never fill.
-        @testset "Element Assembly Strategy rejects matrix targets $strategy" for strategy in (
-            AssemblyStrategy(SequentialCPUDevice(); form = ElementAssembly()),
-            AssemblyStrategy(PolyesterDevice(1); form = ElementAssembly()),
-        )
-            @test_throws ArgumentError setup_operator(strategy, integrator, dh)
-        end
-    end
-
-    @testset "Element Assembly Strategy (vector target) $strategy" for strategy in (
-        AssemblyStrategy(SequentialCPUDevice(); form = ElementAssembly()),
-        AssemblyStrategy(PolyesterDevice(1); form = ElementAssembly()),
-        AssemblyStrategy(PolyesterDevice(2); form = ElementAssembly()),
-    )
-        # The per-element accumulation collapses into exactly the vector full
-        # assembly scatters directly.
-        grid = generate_grid(Quadrilateral, (5, 4))
-        dh   = DofHandler(grid)
-        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
-        close!(dh)
-
-        m   = SimpleLinearIntegrator(1.0, QuadratureRuleCollection(2), :u)
-        ref = setup_operator(AssemblyStrategy(SequentialCPUDevice()), m, dh)
-        update_operator!(ref, nothing)
-
-        op = setup_operator(strategy, m, dh)
-        @test size(op) == (ndofs(dh),)
-        update_operator!(op, nothing)
-        @test op.b ≈ ref.b
-        # Reassembly zeroes both the per-element buffer and the global vector.
-        update_operator!(op, nothing)
-        @test op.b ≈ ref.b
     end
 
     @testset "Condensed Elements" begin
@@ -454,15 +419,12 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
 
     @testset "Device hooks a device type must implement" begin
         # `AbstractGPUDevice` is the seam a downstream device subtypes; with no
-        # method of its own it must reach the loud generic hooks, and the forms
-        # whose setup builds storage must refuse it rather than fall through.
+        # method of its own it must reach the loud generic hooks.
         struct _TestGPUDevice{V, I} <: FerriteOperators.AbstractGPUDevice{V, I} end
         device = _TestGPUDevice{Float32, Int32}()
 
-        @test_throws ArgumentError FerriteOperators.setup_device_instances(device, FerriteOperators.EAIndexWorkspace(0), 1)
+        @test_throws ArgumentError FerriteOperators.setup_device_instances(device, nothing, 1)
         @test_throws ArgumentError FerriteOperators.execute_on_device!(nothing, device, nothing, [])
-        @test_throws ArgumentError FerriteOperators.setup_operator_strategy_cache(
-            AssemblyStrategy(device; form = ElementAssembly()), nothing, nothing)
     end
 
     @testset "Generic setup_device_instances" begin
@@ -699,7 +661,7 @@ function polyester_sweep_allocations(dims)
     dh   = DofHandler(grid)
     add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
     close!(dh)
-    op = setup_operator(AssemblyStrategy(PolyesterDevice(1)),
+    op = setup_operator(AssemblyStrategy(PolyesterDevice(min_items_per_worker = 1)),
                         SimpleBilinearDiffusionIntegrator(1.0, QuadratureRuleCollection(2), :u), dh)
     for _ in 1:3   # warmup: compilation, and Polyester's own first-batch setup
         update_operator!(op, nothing)
@@ -712,7 +674,7 @@ end
     # target is duplicated once per worker, so what one sweep allocates is fixed
     # by the worker count — a 32× larger mesh must not move it. Both meshes
     # carry more cells than there are threads, so both run the same number of
-    # workers at `chunksize = 1`.
+    # workers at `min_items_per_worker = 1`.
     nt = Threads.nthreads()
     @test polyester_sweep_allocations((nt, 8)) == polyester_sweep_allocations((nt, 256))
 end
@@ -779,7 +741,6 @@ function unskipped_assembly!(A, op, kind)
         FerriteOperators.execute_on_device!(
             task, op.engine.strategy.device, sc.device_cache, sc.partition)
     end
-    FerriteOperators.finalize_assembly!(assembler)
     return A
 end
 

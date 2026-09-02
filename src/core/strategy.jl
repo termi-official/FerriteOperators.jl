@@ -63,6 +63,9 @@ abstract type AbstractAssemblyStrategy end
 """
 Which representation of the operator is produced — the MFEM assembly level.
 Orthogonal to how the work is scheduled and to the device it runs on.
+[`FullAssembly`](@ref) is the sole member; the axis and the `form` keyword of
+[`AssemblyStrategy`](@ref) are the extension point a further assembly level
+(element assembly, matrix-free) is added at.
 """
 abstract type AbstractAssemblyForm end
 
@@ -71,19 +74,6 @@ struct FullAssembly{Spec} <: AbstractAssemblyForm
     operator_specification::Spec
 end
 FullAssembly() = FullAssembly(StandardOperatorSpecification())
-
-"""
-ELEMENT level: accumulate per-element residual contributions and collapse them
-into the global vector at the end of the sweep. Vector-target (linear)
-operators only — the form holds no matrix. Single-field `DofHandler`s only,
-`EAVector`'s per-cell dof layout assuming one field per cell.
-"""
-struct ElementAssembly <: AbstractAssemblyForm end
-
-"ELEMENT level after setup: carries the per-element storage layout."
-@concrete struct ElementAssemblyData <: AbstractAssemblyForm
-    eadata
-end
 
 ####################################
 ## Scheduling policy
@@ -142,8 +132,7 @@ axes are the model, and the defaults here cover the common composition
 the only composition that admits the global-dof declarations
 ([`global_dofs`](@ref), [`facet_item_global_dofs`](@ref)) and the algebraic
 item family). Pass `scheduling = ColoredScheduling()` for a parallel device
-without atomic support, or `form = ElementAssembly()` for the per-element
-linear-operator path.
+without atomic support.
 """
 AssemblyStrategy(device::AbstractDevice; form = FullAssembly(), scheduling = SequentialScheduling()) =
     AssemblyStrategy(form, scheduling, device)
@@ -165,22 +154,6 @@ construct one explicitly instead.
 default_strategy() = Base.get_extension(FerriteOperators, :FerriteOperatorsPolyesterExt) === nothing ?
     AssemblyStrategy(SequentialCPUDevice()) :
     AssemblyStrategy(PolyesterDevice())
-
-function setup_operator_strategy_cache(strategy::AssemblyStrategy{ElementAssembly, <:AbstractSchedulingPolicy, <:AbstractCPUDevice}, integrator, dh)
-    return AssemblyStrategy(ElementAssemblyData(EAVector(dh)), strategy.scheduling, strategy.device)
-end
-
-# A form whose setup builds storage must be rejected on a device that has no
-# setup method: the identity fallback below would otherwise hand back a strategy
-# still in its pre-setup form, and the operator would assemble into an
-# `EAVector` that was never built.
-function setup_operator_strategy_cache(strategy::AssemblyStrategy{ElementAssembly}, integrator, dh)
-    throw(ArgumentError(
-        "The `ElementAssembly` form builds its per-element storage at setup, which is implemented " *
-        "for `AbstractCPUDevice` only (got $(typeof(strategy.device)))."))
-end
-
-setup_operator_strategy_cache(strategy, integrator, dh) = strategy
 
 
 ####################################
@@ -420,15 +393,15 @@ Number of parallel workers for this device and partition — the size of the
 per-worker device cache [`setup_device_instances`](@ref) builds.
 
 A [`PolyesterDevice`](@ref) can occupy at most `Threads.nthreads()` of them at
-once, and `chunksize` is the granularity below which splitting is not worth it,
-so the count is the smaller of the thread count and the number of chunks the
+once, and `min_items_per_worker` is the smallest share a worker is given, so
+the count is the smaller of the thread count and the number of such shares the
 largest barrier of `partition` holds. Workspaces are therefore per WORKER, not
-per chunk: a worker walks the chunks it was given with the one workspace it owns.
+per share: a worker walks the items it was given with the one workspace it owns.
 """
 n_workers(::SequentialCPUDevice, partition) = 1
 function n_workers(device::PolyesterDevice, partition)
     ncellsmax = maximum(length, partition)
-    return min(Threads.nthreads(), cld(ncellsmax, device.chunksize))
+    return min(Threads.nthreads(), cld(ncellsmax, device.min_items_per_worker))
 end
 
 

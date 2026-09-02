@@ -4,23 +4,23 @@ using FerriteOperators, Polyester
 
 # One iteration of the `@batch` loop per WORKER, and `workspaces` is the setup-time
 # per-worker device cache, so `length(workspaces)` is the worker count both loops run
-# with. A barrier's items are split into that many contiguous, chunk-aligned blocks:
-# privacy is per worker index, never per thread, so the split is correct whatever
-# Polyester schedules the iterations onto.
-@inline function worker_items(w, num_workers, num_items, chunksize)
-    num_chunks  = cld(num_items, chunksize)
-    first_chunk = ((w - 1) * num_chunks) ÷ num_workers + 1
-    last_chunk  = (w * num_chunks) ÷ num_workers
-    return ((first_chunk - 1) * chunksize + 1):min(num_items, last_chunk * chunksize)
+# with. A barrier's items are grouped into blocks of `min_items` and split into that
+# many contiguous, block-aligned ranges: privacy is per worker index, never per thread,
+# so the split is correct whatever Polyester schedules the iterations onto.
+@inline function worker_items(w, num_workers, num_items, min_items)
+    num_blocks  = cld(num_items, min_items)
+    first_block = ((w - 1) * num_blocks) ÷ num_workers + 1
+    last_block  = (w * num_blocks) ÷ num_workers
+    return ((first_block - 1) * min_items + 1):min(num_items, last_block * min_items)
 end
 
 # Workers for one barrier: never more than the device cache holds, and never more than
-# there are chunks to hand out.
-@inline active_workers(workspaces, num_items, chunksize) =
-    min(length(workspaces), cld(num_items, chunksize))
+# there are blocks to hand out.
+@inline active_workers(workspaces, num_items, min_items) =
+    min(length(workspaces), cld(num_items, min_items))
 
 function FerriteOperators.execute_on_device!(task, device::FerriteOperators.PolyesterDevice, workspaces, items)
-    (; chunksize) = device
+    (; min_items_per_worker) = device
     # The per-worker copy of the task's scatter target — the only part of a task that is
     # not shared read-only — is one duplicate per worker, so a sweep's cost here is the
     # worker count and not the item count.
@@ -28,13 +28,13 @@ function FerriteOperators.execute_on_device!(task, device::FerriteOperators.Poly
 
     for chunk in items
         num_items   = length(chunk)
-        num_workers = active_workers(workspaces, num_items, chunksize)
+        num_workers = active_workers(workspaces, num_items, min_items_per_worker)
         num_workers == 0 && continue
         @batch for w in 1:num_workers
             local_task = tasks[w]
             local_ws   = workspaces[w]
 
-            for itemid in worker_items(w, num_workers, num_items, chunksize)
+            for itemid in worker_items(w, num_workers, num_items, min_items_per_worker)
                 cellid = chunk[itemid]
                 FerriteOperators.reinit!(local_ws, cellid)
                 FerriteOperators.execute_single_task!(local_task, local_ws)
@@ -44,7 +44,7 @@ function FerriteOperators.execute_on_device!(task, device::FerriteOperators.Poly
 end
 
 function FerriteOperators.reduce_on_device(task, device::FerriteOperators.PolyesterDevice, workspaces, items)
-    (; chunksize) = device
+    (; min_items_per_worker) = device
     T = FerriteOperators.functional_value_type(task.kind)
     T === Nothing && throw(ArgumentError(
         "$(nameof(typeof(task.kind))) does not declare `functional_value_type`, which the " *
@@ -63,14 +63,14 @@ function FerriteOperators.reduce_on_device(task, device::FerriteOperators.Polyes
 
     for chunk in items
         num_items   = length(chunk)
-        num_workers = active_workers(workspaces, num_items, chunksize)
+        num_workers = active_workers(workspaces, num_items, min_items_per_worker)
         num_workers == 0 && continue
         @batch for w in 1:num_workers
             local_task = tasks[w]
             local_ws   = workspaces[w]
 
             partials[w] = FerriteOperators.fold_items(
-                local_task, local_ws, view(chunk, worker_items(w, num_workers, num_items, chunksize)),
+                local_task, local_ws, view(chunk, worker_items(w, num_workers, num_items, min_items_per_worker)),
                 partials[w])
         end
     end

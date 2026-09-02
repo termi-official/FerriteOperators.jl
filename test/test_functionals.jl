@@ -171,7 +171,7 @@ end
     end
 
     @testset "parallel workers reduce to the same value" begin
-        pop = setup_operator(AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()), FunctionalTestIntegrator(qrc, :u), dh)
+        pop = setup_operator(AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling()), FunctionalTestIntegrator(qrc, :u), dh)
         Φs = evaluate_functional(op, FunctionalKind(:energy), u, nothing)
         Φp = evaluate_functional(pop, FunctionalKind(:energy), u, nothing)
         @test Φs ≈ Φp rtol = 1e-12
@@ -214,7 +214,7 @@ end
         @test_throws ArgumentError evaluate_functional(op, FunctionalKind(:mistyped), u, nothing)
         # An undeclared kind cannot run in parallel: the partials are allocated
         # before the batch, so the type must be known up front.
-        pop = setup_operator(AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()), FunctionalTestIntegrator(qrc, :u), dh)
+        pop = setup_operator(AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling()), FunctionalTestIntegrator(qrc, :u), dh)
         @test_throws ArgumentError evaluate_functional(pop, FunctionalKind(:energy_undeclared), u, nothing)
         # …while the declared one does.
         @test evaluate_functional(pop, FunctionalKind(:energy), u, nothing) isa Float64

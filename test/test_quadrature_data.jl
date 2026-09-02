@@ -61,7 +61,7 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
     # --- Polyester (threaded) device produces the same result ---
     @testset "PolyesterDevice consistency" begin
         strategy_seq = AssemblyStrategy(SequentialCPUDevice())
-        strategy_par = AssemblyStrategy(PolyesterDevice(4); scheduling = ColoredScheduling())
+        strategy_par = AssemblyStrategy(PolyesterDevice(min_items_per_worker = 4); scheduling = ColoredScheduling())
         qop_seq = setup_operator(strategy_seq, integrator, dh)
         qop_par = setup_operator(strategy_par, integrator, dh)
         q_seq   = setup_qvector(Float64, dh, qrc)

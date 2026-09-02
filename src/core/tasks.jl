@@ -459,12 +459,10 @@ the item's own dof vector, that family having no cell dofs to start from.
 
 What a scatter of the current item addresses. Without a global-dof declaration
 for the item's family it is the geometry cache, which every assembler in the
-package takes — the element-indexed [`ElementAssembly`](@ref) one reads
-`cellid` from it, the dof-scattered ones read `celldofs`. With them the local
-system spans dofs no cell owns, so the augmented dof vector is the only address
-that describes it, and `ElementAssembly` is rejected at setup for that reason.
-An algebraic item is addressed by its dof vector, there being no cell to name
-it by.
+package takes and reads `celldofs` from. With them the local system spans dofs
+no cell owns, so the augmented dof vector is the only address that describes
+it. An algebraic item is addressed by its dof vector, there being no cell to
+name it by.
 """
 @inline scatter_address(ws) = _scatter_address(ws.dofs, ws.cell)
 @inline _scatter_address(::Nothing, cell) = cell
@@ -799,7 +797,6 @@ function run_sweep!(kind, assembler, op, states::NamedTuple, p, ctx)
     _check_differentiated_slot(kind, op.engine, states)
     task = AssemblyTask(kind, assembler, states, p, ctx)
     execute_on_subdomains!(task, op.engine)
-    finalize_assembly!(assembler)
 end
 assemble_into!(kind, out::Tuple, op, states::NamedTuple, p, ctx) =
     run_sweep!(kind, start_assemble(op.engine.strategy, out...), op, states, p, ctx)

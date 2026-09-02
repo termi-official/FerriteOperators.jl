@@ -22,8 +22,9 @@ patterns marked ⚠ below.
 | `SequentialAssemblyStrategy{Dev}` as a **type** ⚠ | `AssemblyStrategy{<:FullAssembly, SequentialScheduling, Dev}` |
 | `SequentialAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device)` |
 | `PerColorAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device; scheduling = ColoredScheduling())` |
-| `ElementAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device; form = ElementAssembly())` |
-| `ElementAssemblyOperatorStrategy` | `AssemblyStrategy{<:ElementAssemblyData}` |
+| `ElementAssemblyStrategy(device)` (constructor call), `ElementAssemblyOperatorStrategy` | removed without replacement — see the `ElementAssembly` row below |
+| `ElementAssembly`, `ElementAssemblyData`, `EAVector` ⚠ | removed without replacement in 0.4 — the element-assembly form is gone entirely, pending a clean element-assembly route. Every operator assembles under `FullAssembly` |
+| `PolyesterDevice(n)` (positional) | `PolyesterDevice(min_items_per_worker = n)` — keyword-only, and the field is `min_items_per_worker` (was `chunksize`). Semantics unchanged: it is the smallest share of a barrier's items a worker is given, so a LOWER value means MORE workers |
 | `op.dh`, `op.strategy`, `op.subdomain_caches` | `op.engine.dh`, `op.engine.strategy`, `op.engine.subdomain_caches` |
 | `op.J` / `op.A` / `op.b`, `residual_size`, `unknown_size` | unchanged |
 | `residual!(op, r, u, p)` | `evaluate!(op, r, u, p)` |
@@ -43,14 +44,12 @@ patterns marked ⚠ below.
 | `unwrap_parameters` | removed — override `query_cell_parameters`/`query_facet_parameters` on the cache instead |
 | `whole_patch_terms` | removed — filter a patch request's terms in the element |
 | `(op::LinearizedFerriteOperator)(residual, u, p)` (callable) | `evaluate!(op, residual, u, p)` |
-| bilinear/nonlinear operator under `ElementAssemblyStrategy` ⚠ | rejected at setup — the `ElementAssembly` form holds no matrix and serves vector-target (linear) operators only |
 
 `SequentialAssemblyStrategy`, `PerColorAssemblyStrategy` and
 `ElementAssemblyStrategy` are removed outright — 0.4.0 is unreleased, so there
 is no deprecation shim for the constructor *calls* either. Use the keyword
-convenience constructor instead: `AssemblyStrategy(device)`,
-`AssemblyStrategy(device; scheduling = ColoredScheduling())`,
-`AssemblyStrategy(device; form = ElementAssembly())`.
+convenience constructor instead: `AssemblyStrategy(device)` and
+`AssemblyStrategy(device; scheduling = ColoredScheduling())`.
 
 ## Example elements
 
@@ -253,13 +252,12 @@ boundary integral under a test with an analytic reference (see
 # 0.3.x type dispatch                       # 0.4
 f(s::SequentialAssemblyStrategy)            f(s::AssemblyStrategy{<:FullAssembly, SequentialScheduling})
 f(s::PerColorAssemblyStrategy)              f(s::AssemblyStrategy{<:FullAssembly, <:ColoredScheduling})
-f(s::ElementAssemblyStrategy)               f(s::AssemblyStrategy{ElementAssembly})   # pre-setup
-                                            f(s::AssemblyStrategy{<:ElementAssemblyData}) # post-setup
+f(s::ElementAssemblyStrategy)               removed — no element-assembly form in 0.4
 ```
 
-`ElementAssembly` now accumulates per-element *residual* contributions and
-holds no matrix, so it serves linear operators only; a bilinear or nonlinear
-one under it is rejected at setup.
+The form axis keeps `FullAssembly` as its sole member, and it plus the `form`
+keyword of `AssemblyStrategy` are the extension point a further assembly level
+is added at.
 
 Or dispatch on a single axis: `s.form`, `s.scheduling`, `s.device`. Operators
 are payload + engine + integrator; anything that read `op.dh`/`op.strategy`/

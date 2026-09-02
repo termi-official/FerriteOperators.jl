@@ -67,12 +67,11 @@ engine sizes `Ke`/`re`/the slot buffers to the augmented length and scatters
 through the augmented dof vector; the AD fallback differentiates the full
 augmented system.
 
-Two restrictions, both raised at setup and shared with
+One restriction, raised at setup and shared with
 [`facet_item_global_dofs`](@ref): a declaration excludes
-[`ColoredScheduling`](@ref) (a dof shared by every item cannot be isolated by
-coloring — the parallel route is atomic scatter under
-[`SequentialScheduling`](@ref)) and the [`ElementAssembly`](@ref) form (its dof
-maps are celldofs-based).
+[`ColoredScheduling`](@ref) — a dof shared by every item cannot be isolated by
+coloring, so the parallel route is atomic scatter under
+[`SequentialScheduling`](@ref).
 
 The sparsity entries for the resulting coupling are NOT inferred: which items
 couple to the dofs is the user's Ferrite coupling descriptor, passed through
@@ -274,8 +273,8 @@ the subdomain, and a condensed volumetric element may sit beside the tying term
 — the rejection in [`ADElementCache`](@ref) applies to the cell declaration.
 
 The restrictions of [`global_dofs`](@ref) hold here too: the declaration
-excludes [`ColoredScheduling`](@ref) and the [`ElementAssembly`](@ref) form, and
-the sparsity entries are the caller's coupling descriptor, never inferred.
+excludes [`ColoredScheduling`](@ref), and the sparsity entries are the caller's
+coupling descriptor, never inferred.
 """
 facet_item_global_dofs(integrator, sdh) = ()
 

@@ -1,10 +1,7 @@
 # Atomicity is a property of the SCATTER TARGET, not of the strategy alone:
 # - dof-scattered shared targets (global sparse matrices, global vectors,
 #   dense parameter-Jacobian rows) follow `dof_scatter_needs_atomic` —
-#   coloring isolates them, otherwise a parallel device needs atomics,
-#   REGARDLESS of the operator form (an EA operator's residual sweep into a
-#   plain global vector still races);
-# - element-private targets (EA per-element storage) never need atomics;
+#   coloring isolates them, otherwise a parallel device needs atomics;
 # - parameter-space accumulators (VJP columns) are never color-isolated —
 #   every parallel device needs atomics there.
 # Value-returning sweeps have no scatter target at all: they fold per worker
@@ -44,10 +41,6 @@ function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic}, dof
     end
     return
 end
-finalize_assembly!(assembler::Ferrite.AbstractAssembler) = nothing
-finalize_assembly!(assembler::AbstractVector) = nothing
-finalize_assembly!(::Nothing) = nothing   # sweeps whose sink is request-owned (quadrature storage)
-
 # Sensitivity scatter targets. Deliberately not Ferrite.AbstractAssembler:
 # their column/entry layout is the parameter space, not the dof space, so the
 # celldofs-scatter methods above must never match them.
@@ -79,8 +72,6 @@ end
 
 duplicate_for_device(device, a::ParameterJacobianAssembler) = a
 duplicate_for_device(device, a::ParameterVJPAssembler) = a
-finalize_assembly!(::ParameterJacobianAssembler) = nothing
-finalize_assembly!(::ParameterVJPAssembler) = nothing
 
 allocate_vector(::Vector{T}, dh) where T = zeros(T, ndofs(dh))
 allocate_vector(::Type{Vector{T}}, dh) where T = zeros(T, ndofs(dh))

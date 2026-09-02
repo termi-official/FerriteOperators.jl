@@ -177,7 +177,7 @@ stationary_ctx(t) = TimeIntegrationContext(t, 1.0, 1.0)
     end
 
     @testset "parallel strategy consistency" begin
-        pstrategy = AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling())
+        pstrategy = AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling())
         pop = setup_operator(pstrategy, SourceDiffusionIntegrator(qrc, :u), dh)
         Bs = zeros(n, 1); update_parameter_jacobian!(Bs, op, u, p)
         Bp = zeros(n, 1); update_parameter_jacobian!(Bp, pop, u, p)
@@ -336,7 +336,7 @@ end
         @test Jv ≈ hop.J * hv rtol = 1e-10
         @test hu == hu_before
 
-        pop = setup_operator(AssemblyStrategy(PolyesterDevice(2); scheduling = ColoredScheduling()), hint, hdh)
+        pop = setup_operator(AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling()), hint, hdh)
         Jvp = zeros(hn)
         state_jvp!(Jvp, pop, hv, hu, 0.0)
         @test Jvp ≈ Jv rtol = 1e-13

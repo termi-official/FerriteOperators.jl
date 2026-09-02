@@ -111,7 +111,7 @@ else
             # Chunk size 1 puts each of the two colliding items on its own
             # worker, which is exactly what the atomic scatter has to resolve.
             opseq = setup_operator(sequential_strategy(spec), m, dh)
-            oppar = setup_operator(AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), PolyesterDevice(1)), m, dh)
+            oppar = setup_operator(AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), PolyesterDevice(min_items_per_worker = 1)), m, dh)
             rs = zeros(n); update_linearization!(opseq, rs, u, θ)
             rp = zeros(n); update_linearization!(oppar, rp, u, θ)
             @test oppar.J ≈ opseq.J
@@ -124,7 +124,7 @@ else
             mu = ReservoirIntegrator(; coupled = false)
             @test isempty(global_dofs(mu, dh.subdofhandlers[1]))
             ops = setup_operator(sequential_strategy(spec), mu, dh)
-            opc = setup_operator(AssemblyStrategy(FullAssembly(spec), ColoredScheduling(), PolyesterDevice(1)), mu, dh)
+            opc = setup_operator(AssemblyStrategy(FullAssembly(spec), ColoredScheduling(), PolyesterDevice(min_items_per_worker = 1)), mu, dh)
             rs = zeros(n); update_linearization!(ops, rs, u, θ)
             rc = zeros(n); update_linearization!(opc, rc, u, θ)
             @test opc.J ≈ ops.J

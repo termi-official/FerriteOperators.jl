@@ -71,7 +71,7 @@ else
 
         @testset "parallel device with atomic scatter" begin
             opseq = setup_operator(sequential_strategy(spec), StressDrivenIntegrator(var, E, σ̄), dh)
-            oppar = setup_operator(AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), PolyesterDevice(2)),
+            oppar = setup_operator(AssemblyStrategy(FullAssembly(spec), SequentialScheduling(), PolyesterDevice(min_items_per_worker = 2)),
                                    StressDrivenIntegrator(var, E, σ̄), dh)
             rs = zeros(n); update_linearization!(opseq, rs, u, nothing)
             rp = zeros(n); update_linearization!(oppar, rp, u, nothing)
@@ -83,8 +83,6 @@ else
             m = StressDrivenIntegrator(var, E, σ̄)
             @test_throws ArgumentError setup_operator(
                 AssemblyStrategy(FullAssembly(spec), ColoredScheduling(), SequentialCPUDevice()), m, dh)
-            @test_throws ArgumentError setup_operator(
-                AssemblyStrategy(ElementAssembly(), SequentialScheduling(), SequentialCPUDevice()), m, dh)
         end
 
         @testset "declaration validation" begin
