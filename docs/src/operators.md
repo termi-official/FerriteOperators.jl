@@ -309,7 +309,7 @@ time sensitivities, the caller selects [`FiniteDifferenceSensitivity`](@ref)
 (primal evaluations on a protected copy, condensing at each — the total, but
 it bypasses analytic sensitivity kernels).
 
-Two derivative mechanisms exist and the split is final. Operator-level
+Two derivative mechanisms exist. Operator-level
 [`FiniteDifferenceSensitivity`](@ref) is the Dual-free route: it differences
 `evaluate!`, so every term enters — including a facet term whose cache carries
 no analytic sensitivity kernel — and no kernel ever sees a `Dual`. The

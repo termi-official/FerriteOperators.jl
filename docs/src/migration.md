@@ -22,8 +22,8 @@ patterns marked ⚠ below.
 | `SequentialAssemblyStrategy{Dev}` as a **type** ⚠ | `AssemblyStrategy{<:FullAssembly, SequentialScheduling, Dev}` |
 | `SequentialAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device)` |
 | `PerColorAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device; scheduling = ColoredScheduling())` |
-| `ElementAssemblyStrategy(device)` (constructor call), `ElementAssemblyOperatorStrategy` | removed without replacement — see the `ElementAssembly` row below |
-| `ElementAssembly`, `ElementAssemblyData`, `EAVector` ⚠ | removed without replacement in 0.4 — the element-assembly form is gone entirely, pending a clean element-assembly route. Every operator assembles under `FullAssembly` |
+| `ElementAssemblyStrategy(device)` (constructor call), `ElementAssemblyOperatorStrategy` | removed without replacement — see the `EAVector` row below |
+| `EAVector`, `GenericEAMatrixIndex`, `GenericEAVectorIndex` ⚠ | removed without replacement in 0.4 — the element-assembly form is gone entirely, pending a clean element-assembly route. Every operator assembles under `FullAssembly` |
 | `PolyesterDevice(n)` (positional) | `PolyesterDevice(min_items_per_worker = n)` — keyword-only, and the field is `min_items_per_worker` (was `chunksize`). Semantics unchanged: it is the smallest share of a barrier's items a worker is given, so a LOWER value means MORE workers |
 | `op.dh`, `op.strategy`, `op.subdomain_caches` | `op.engine.dh`, `op.engine.strategy`, `op.engine.subdomain_caches` |
 | `op.J` / `op.A` / `op.b`, `residual_size`, `unknown_size` | unchanged |
@@ -35,15 +35,12 @@ patterns marked ⚠ below.
 | `Ferrite.getnquadpoints`/`reinit!` via `.cv`/`.fv` field fallback | define `Ferrite.getnquadpoints` and `reinit_values!` explicitly on your cache |
 | `FerriteOperators.Simple*` example elements | `FerriteOperatorsExampleElements` — a separate package under `lib/`, exporting the integrators |
 | `*MultiDomainIntegrator(Dict(sdh => integrator))` | `*MultiDomainIntegrator(Dict("cellset_name" => integrator))` — volumetric cellset names, validated at setup |
-| `CondensationElection`, `Separate`, `FusedWithResidual`, `condensation_election`, `condensation_election_error` | removed — `condense_internal!` is unconditionally its own domain traversal |
 | `DiagonalOperator` | removed — build the matrix (`spdiagm`) and wrap it, or use `Diagonal` directly |
 | `NestedTransferFerriteOperator` | `TransferFerriteOperator` — both transfer geometries build the one type; `setup_nested_transfer_operator` is unchanged. `op.dh_fine`/`op.dh_coarse` are now `op.dh_row`/`op.dh_col` |
 | `CudaDevice` | removed — a GPU device subtypes `AbstractGPUDevice` and implements the device hooks |
 | `query_element_quadrature_data`, `store_quadrature_data!` | removed — `evaluate_quadrature!` writes the cell's `QVector` slice directly |
 | `QuadratureDataMultiQuery` | removed — call `process_query!` once per query |
-| `unwrap_parameters` | removed — override `query_cell_parameters`/`query_facet_parameters` on the cache instead |
-| `whole_patch_terms` | removed — filter a patch request's terms in the element |
-| `setup_boundary_cache`, `is_facet_in_cache`, `compose_boundary_caches`, `CompositeSurfaceElementCache` | removed — a boundary term declares its facets through `facet_items` and builds its cache in `setup_facet_item_cache`. The `assemble_facet!` kernels, `query_facet_parameters` and the surface cache TYPE are unchanged: port the two setup hooks and delete the gate. Composed surface terms use `CompositeFacetItemCache`, built by the composite integrators' `setup_facet_item_cache` |
+| `setup_boundary_cache`, `is_facet_in_cache`, `CompositeSurfaceElementCache` | removed — a boundary term declares its facets through `facet_items` and builds its cache in `setup_facet_item_cache`. The `assemble_facet!` kernels, `query_facet_parameters` and the surface cache TYPE are unchanged: port the two setup hooks and delete the gate. Composed surface terms use `CompositeFacetItemCache`, built by the composite integrators' `setup_facet_item_cache` |
 | `(op::LinearizedFerriteOperator)(residual, u, p)` (callable) | `evaluate!(op, residual, u, p)` |
 
 `SequentialAssemblyStrategy`, `PerColorAssemblyStrategy` and
@@ -157,10 +154,10 @@ parameter (`args::CellArgs`) is permitted; leaving it unannotated works the
 same. Derivative sweeps rebuild `args` with one field replaced through
 `with_states`, `with_parameters` and `with_context`.
 
-## Time protocols (GTO1, Newmark)
+## Time parameter wrappers (GTO1, Newmark)
 
-The parameter-wrapper protocols are gone. Solvers pass named slot vectors and
-a context; elements read values.
+The parameter wrappers are gone. Solvers pass named slot vectors and a context;
+elements read values.
 
 ```julia
 # 0.3.x
@@ -186,7 +183,7 @@ updates). For a backward-Euler local state under any one-step global scheme,
 `γ̃ = Δt`. **`γ̃` is not a rate slope** — see the `TimeIntegrationContext`
 docstring for the trap.
 
-Slot names are free: a Newmark-style protocol passes whatever it needs, e.g.
+Slot names are free: a Newmark-style scheme passes whatever it needs, e.g.
 `slots = (:u, :v, :a)`. Rate-like slots do not have to be materialized by the
 solver — an [`AffineRate`](@ref) source reconstructs them from the primary
 unknown at gather time:

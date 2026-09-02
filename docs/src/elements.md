@@ -610,22 +610,26 @@ correction unless the cache serves the kind analytically or declares it
 A condensed cache still gets wrapped in [`ADElementCache`](@ref) when it lacks
 some kind's analytic coverage, and the decorator's `Consistent` state
 Jacobian/JacobianResidual then has a GENERIC path: it AD-differentiates the
-pure residual seeding `ū` and `q` separately and combines them with the
-`dq/dū` block, read through [`condensed_corrector`](@ref) — `Jₑ =
-∂F/∂ū|_q + ∂F/∂q · dq/dū`. This is the getting-started path (bigger than the
-compact Tier-1 corrector most analytic kernels read, since the framework needs
-the completed `nq × ndofs` block). `condensed_corrector` receives the
-item's [`CellArgs`](@ref), so it serves either election — read the store, or
-re-derive the block from `args.states`.
+pure residual seeding `ū` and `q` separately and combines them with the `dq/dū`
+block — `Jₑ = ∂F/∂ū|_q + ∂F/∂q · dq/dū`.
 
-Two patterns transport a corrector, and they answer different questions. An
-element that goes through `ADElementCache`'s generic combination implements
-[`condensed_corrector`](@ref) — the seam that path reads. An element serving
-`Consistent` kinds analytically never implements it: it reads and writes the
-same per-item corrector directly, through
-[`item_state`](@ref)/[`set_item_state!`](@ref) on its own [`ItemStates`](@ref)
-field, from inside its own analytic kernel — the same storage an
-[`ItemStates`](@ref) field always is, with no generic combination in between.
+**The corrector has one storage and one access seam.** The storage is the
+element's own [`ItemStates`](@ref) cache field, written in
+[`condense_cell!`](@ref) and read back through
+[`item_state`](@ref)/[`set_item_state!`](@ref) — or, under [`Recompute`](@ref),
+the closed form that stands in for it. What differs is who reads it:
+
+- an element whose analytic `Consistent` kernel forms the combination itself
+  reads its own store from inside that kernel, and implements nothing further;
+- an element relying on the decorator's generic combination exposes the block
+  through [`condensed_corrector`](@ref), which is the seam that path calls. It
+  receives the item's [`CellArgs`](@ref), so one implementation serves either
+  election — read the store, or re-derive the block from `args.states`.
+
+The generic route is the getting-started path, and the block it asks for is
+bigger than the compact corrector most analytic kernels keep: the framework
+needs the completed `nq × ndofs` block, where a hand-written kernel contracts
+its own slope on the fly.
 
 The parameter and time sensitivities have the same shape of generic path, out
 of the element's LOCAL CONDITIONS rather than a stored block:

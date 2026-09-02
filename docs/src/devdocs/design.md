@@ -32,8 +32,8 @@ A *hand-fused* integrator — one that derives its own discretization from
 scheme-layer object living in an element cache. That is a legitimate authoring
 choice (it is how a deliberately manual first-order discretization, or a
 multilevel-Newton element with a rate-coupled local problem, is written), and
-the framework serves it through the same request protocol. The distinction is
-one of authorship, not of mechanism.
+the framework serves it through the same request-typed kernels. The distinction
+is one of authorship, not of mechanism.
 
 ## The operator layer
 
@@ -153,7 +153,7 @@ declares the item families it integrates over instead, which routes it to the
 the sweep folds the returned values, so there is no request type, no
 assembler, and no workspace state at either end.
 
-That one declaration replaces the per-family spelling above.
+That one declaration stands in for the per-family spelling above.
 [`reduction_families`](@ref) answers `execute_kind!` for every family (the
 named ones run that family's reduction driver body, the rest contribute
 nothing), `sweep_family` (a declaring kind is value-returning) and the
