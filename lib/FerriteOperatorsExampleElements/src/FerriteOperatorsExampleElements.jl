@@ -7,9 +7,11 @@ exposes: a bilinear form ([`SimpleBilinearDiffusionIntegrator`](@ref),
 ([`SimpleLinearIntegrator`](@ref)), a nonlinear element with analytic tangent
 ([`SimpleHyperelasticityIntegrator`](@ref)), a condensed element with
 per-quadrature-point internal state
-([`SimpleCondensedLinearViscoelasticity`](@ref)) and one whose local problem is
+([`SimpleCondensedLinearViscoelasticity`](@ref)), one whose local problem is
 nonlinear and communicates with the outer solver
-([`SimpleCondensedPowerLawRelaxation`](@ref)).
+([`SimpleCondensedPowerLawRelaxation`](@ref)), and a NESTED pair whose local
+problem is itself a condensed finite element problem
+([`SimpleRelaxingBar`](@ref) inside [`SimpleNestedHomogenization`](@ref)).
 
 Meant to be read, copied and used as test fixtures: not tuned for production
 use, and carrying no stability guarantee beyond the contract they demonstrate.
@@ -20,6 +22,8 @@ using FerriteOperators
 using Ferrite
 using Tensors
 using StaticArrays
+
+using LinearAlgebra: dot, lu, norm
 
 import Ferrite: getnquadpoints
 
@@ -43,6 +47,7 @@ include("simple_mass.jl")                  # Linear form and mass bilinear form
 include("simple_hyperelasticity.jl")       # Nonlinear element with analytic tangent
 include("simple_linear_viscoelasticity.jl") # Condensed element with internal state
 include("simple_power_law_relaxation.jl")   # Condensed element with a nonlinear local solve
+include("nested_homogenization.jl")         # Condensed element whose local problem is a condensed FE problem
 
 # The integrators are the public handle; the caches they set up are internal,
 # reachable as `FerriteOperatorsExampleElements.Simple…ElementCache`.
@@ -55,5 +60,7 @@ export MaxwellParameters
 export SimpleCondensedPowerLawRelaxation
 export NortonRelaxationParameters, LocalNewtonSettings
 export InexactLocalSolveContext, local_solve_tolerance
+export SimpleRelaxingBar, RelaxingBarParameters
+export SimpleNestedHomogenization
 
 end

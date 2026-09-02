@@ -26,10 +26,12 @@ FerriteOperators.rebuild_parameters(p::NortonRelaxationParameters, θ) =
 """
     LocalNewtonSettings(; max_iterations = 25, tolerance = 1.0e-12)
 
-Static configuration of the element-local Newton solver of
-[`SimpleCondensedPowerLawRelaxation`](@ref): the per-quadrature-point iteration
-budget, and the tightest absolute local residual tolerance the element ever
-solves to — a solver may only LOOSEN it, per [`local_solve_tolerance`](@ref).
+Static configuration of an element-local Newton solver: the iteration budget and
+the tightest absolute local residual tolerance the element ever solves to — a
+solver may only LOOSEN it, per [`local_solve_tolerance`](@ref). Read
+per quadrature point by [`SimpleCondensedPowerLawRelaxation`](@ref) and
+[`SimpleRelaxingBar`](@ref), and per micro Newton by
+[`SimpleNestedHomogenization`](@ref).
 Exceeding the budget is reported through [`CondensationReport`](@ref)`.converged`,
 not thrown.
 """
