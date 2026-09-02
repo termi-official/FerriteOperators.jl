@@ -1,0 +1,383 @@
+# Migrating from 0.3.x to 0.4
+
+This guide maps every removed or changed 0.3.x API to its 0.4 replacement.
+Breaking changes are clustered into this one transition — there are no
+deprecation shims; old signatures are gone, and (important!) some old element
+methods are **silently never called** rather than erroring, so grep for the
+patterns marked ⚠ below.
+
+## Quick map
+
+| 0.3.x | 0.4 |
+|---|---|
+| `assemble_element!(Kₑ, [rₑ,] [uₑ,] cell, cache, t)` (5 arities) | `assemble_cell!(req, cache, args)` — request-typed |
+| `assemble_facet!(Kₑ, …, cell, lfi, cache, t)` ⚠ | `assemble_facet!(req, cache, args, lfi)` |
+| `assemble_element_gto1!(…, uₑprev, …, p, t, Δt)` | kernel reads `args.states.uprev`, `args.ctx` |
+| `GenericFirstOrderTimeParameters(p, t, Δt, uprev)` | `slots = (:u, :uprev)` at setup + `TimeIntegrationContext(t, Δt, γ̃)` |
+| `AbstractGenericFirstOrderTime*ElementCache` | plain `AbstractVolumetricElementCache`/`AbstractSurfaceElementCache` |
+| bare `t` as the parameter object (`evaluate!(op, r, u, t)`) | `p` is user parameters; time rides in `ctx` and is read as `evaluation_time(args.ctx)` |
+| `query_element_parameters(cache, cell, ivh, p)` | `query_cell_parameters(cache, cell, p)` (no `ivh`) |
+| — (volumetric `pₑ` reused on facets) | `query_facet_parameters(cache, cell, lfi, p)` per facet |
+| `query_element_unknown_buffer(cache, ue)` | removed — slot buffers are workspace-owned |
+| `SequentialAssemblyStrategy{Dev}` as a **type** ⚠ | `AssemblyStrategy{<:FullAssembly, SequentialScheduling, Dev}` |
+| `SequentialAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device)` |
+| `PerColorAssemblyStrategy(device)` (constructor call) | `AssemblyStrategy(device; scheduling = ColoredScheduling())` |
+| `ElementAssemblyStrategy(device)` (constructor call), `ElementAssemblyOperatorStrategy` | removed without replacement — see the `EAVector` row below |
+| `EAVector`, `GenericEAMatrixIndex`, `GenericEAVectorIndex` ⚠ | removed without replacement in 0.4 — the element-assembly form is gone entirely, pending a clean element-assembly route. Every operator assembles under `FullAssembly` |
+| `PolyesterDevice(n)` (positional) | `PolyesterDevice(min_items_per_worker = n)` — keyword-only, and the field is `min_items_per_worker` (was `chunksize`). Semantics unchanged: it is the smallest share of a barrier's items a worker is given, so a LOWER value means MORE workers |
+| `op.dh`, `op.strategy`, `op.subdomain_caches` | `op.engine.dh`, `op.engine.strategy`, `op.engine.subdomain_caches` |
+| `op.J` / `op.A` / `op.b`, `residual_size`, `unknown_size` | unchanged |
+| `residual!(op, r, u, p)` | `evaluate!(op, r, u, p)` |
+| `setup_quadrature_operator` / `FerriteQuadratureOperator` | any operator works: `evaluate_quadrature!(q, op, u, p, f)`, or `setup_evaluation_operator` for a term that is only ever evaluated |
+| quadrature kernel `f(uₑ, qp, cell, cache, pₑ)` ⚠ | `f(uₑ, qp, cell, cache, pₑ, ctx)` — the sweep's context in the last slot, passed as `evaluate_quadrature!(…; ctx = …)` |
+| silent `setup_element_cache` fallback | missing method **throws at setup** |
+| `reinit!` inside every cell-kernel body | engine calls `reinit_values!(cache, cell, kind)` once per cell and sweep |
+| `Ferrite.getnquadpoints`/`reinit!` via `.cv`/`.fv` field fallback | define `Ferrite.getnquadpoints` and `reinit_values!` explicitly on your cache |
+| `FerriteOperators.Simple*` example elements | `FerriteOperatorsExampleElements` — a separate package under `lib/`, exporting the integrators |
+| `*MultiDomainIntegrator(Dict(sdh => integrator))` | `*MultiDomainIntegrator(Dict("cellset_name" => integrator))` — volumetric cellset names, validated at setup |
+| `DiagonalOperator` | removed — build the matrix (`spdiagm`) and wrap it, or use `Diagonal` directly |
+| `NestedTransferFerriteOperator` | `TransferFerriteOperator` — both transfer geometries build the one type; `setup_nested_transfer_operator` is unchanged. `op.dh_fine`/`op.dh_coarse` are now `op.dh_row`/`op.dh_col` |
+| `CudaDevice` | removed — a GPU device subtypes `AbstractGPUDevice` and implements the device hooks |
+| `query_element_quadrature_data`, `store_quadrature_data!` | removed — `evaluate_quadrature!` writes the cell's `QVector` slice directly |
+| `QuadratureDataMultiQuery` | removed — call `process_query!` once per query |
+| `setup_boundary_cache`, `is_facet_in_cache`, `CompositeSurfaceElementCache` | removed — a boundary term declares its facets through `facet_items` and builds its cache in `setup_facet_item_cache`. The `assemble_facet!` kernels, `query_facet_parameters` and the surface cache TYPE are unchanged: port the two setup hooks and delete the gate. Composed surface terms use `CompositeFacetItemCache`, built by the composite integrators' `setup_facet_item_cache` |
+| `(op::LinearizedFerriteOperator)(residual, u, p)` (callable) | `evaluate!(op, residual, u, p)` |
+
+`SequentialAssemblyStrategy`, `PerColorAssemblyStrategy` and
+`ElementAssemblyStrategy` are removed outright — 0.4.0 is unreleased, so there
+is no deprecation shim for the constructor *calls* either. Use the keyword
+convenience constructor instead: `AssemblyStrategy(device)` and
+`AssemblyStrategy(device; scheduling = ColoredScheduling())`.
+
+## Example elements
+
+`SimpleBilinearDiffusionIntegrator`, `SimpleLinearIntegrator`,
+`SimpleBilinearMassIntegrator`, `SimpleHyperelasticityIntegrator`,
+`SimpleCondensedLinearViscoelasticity`, their caches and `MaxwellParameters`
+are no longer part of FerriteOperators. They live in
+`FerriteOperatorsExampleElements`, which is a test-time and example-time
+dependency, not a runtime one. Code using them adds
+
+```julia
+Pkg.add(url = "https://github.com/termi-official/FerriteOperators.jl",
+        subdir = "lib/FerriteOperatorsExampleElements")
+```
+
+to the environment that needs them (typically `test/`) and replaces
+`FerriteOperators.Simple…` with `using FerriteOperatorsExampleElements` plus
+the bare name — the subpackage exports all of them.
+
+The composition machinery is *not* affected: `CompositeVolumetricElementCache`,
+`CompositeFacetItemCache`, the `*MultiDomainIntegrator` family and the
+transfer integrators `MassProlongatorIntegrator` /
+`NestedMassProlongatorIntegrator` remain in FerriteOperators.
+
+The `*ElementCache` types are internal to the example package. Code dispatching
+on one reaches it as `FerriteOperatorsExampleElements.Simple…ElementCache`.
+
+## Composition
+
+`NonlinearCompositeIntegrator`, `BilinearCompositeIntegrator` and
+`LinearCompositeIntegrator` build the composite caches, which previously had to
+be assembled by hand. One behavioural change reaches existing hand-built
+composites: an inner cache's query override is honoured; each inner receives
+its own parameter view. An inner that relied on seeing the outer view must
+take that view from its own query.
+
+## Multi-domain routing
+
+`NonlinearMultiDomainIntegrator`, `BilinearMultiDomainIntegrator` and
+`LinearMultiDomainIntegrator` are keyed by the **name of a volumetric cellset**
+instead of by `SubDofHandler`:
+
+```julia
+# before
+BilinearMultiDomainIntegrator(Dict(sdh_right => a, sdh_left => b))
+# now
+BilinearMultiDomainIntegrator(Dict("right_cells" => a, "left_cells" => b))
+```
+
+A name claims the subdomain whose cells lie inside its cellset, and resolves
+everything that subdomain declares — its element cache, its facet items and
+their surface cache, its global dofs. Setup throws
+an `ArgumentError` for a subdomain claimed by no name, a subdomain claimed by
+several names, and a declared name claiming no subdomain — so a mistyped name
+fails at `setup_operator` rather than assembling nothing. The claim is read
+from each subdomain's first cell; `FerriteOperators.debug_mode` upgrades that
+sample to an exhaustive per-cell check.
+
+## Element kernels
+
+One request-typed entry point replaces the arity family. The residual kernel
+is mandatory (validated at `setup_operator`); Jacobians and every sensitivity
+are derived from it by ForwardDiff unless you declare analytic kernels.
+
+```julia
+# 0.3.x — three near-identical bodies
+function assemble_element!(Kₑ, rₑ, uₑ, cell, cache::MyCache, p) ... end
+function assemble_element!(Kₑ, uₑ, cell, cache::MyCache, p) ... end
+function assemble_element!(rₑ, uₑ, cell, cache::MyCache, p) ... end
+
+# 0.4 — reinit lives in the per-cache hook …
+FerriteOperators.reinit_values!(c::MyCache, cell) = reinit!(c.cv, cell)
+
+# … one mandatory residual kernel (pure evaluation, no reinit) …
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args::CellArgs)
+    uₑ = args.states.u
+    pₑ = args.p
+    # accumulate into req.r
+end
+
+# … and optional analytic kernels, declared via a trait. Declare per KIND
+# INSTANCE (`::JacobianKind{:u}`): a bare `::JacobianKind` claims every slot
+# and both correction modes — including `:q` — and setup validation holds the
+# claim against the kernels you actually implement.
+FerriteOperators.provides_analytic(::Type{<:MyCache}, ::FerriteOperators.JacobianKind{:u}) = true
+function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::MyCache, args::CellArgs)
+    # accumulate into req.K
+end
+# fused Newton path: JacobianResidualRequest (req.K and req.r), kind JacobianResidualKind
+```
+
+Requirements on the residual kernel: eltype-generic in `eltype(args.states.*)`,
+`eltype(args.p)` and the context time (the AD contract); never write global
+state; treat `args.cell` as read-only; no reinit inside cell kernels — the
+engine calls `reinit_values!` once per cell and sweep (elements carrying
+several values objects specialize the kind-dispatched form to reinitialize
+only what a request needs). Facet kernels reinitialize their `FacetValues` per
+facet themselves.
+
+**`args` is a [`CellArgs`](@ref)** (a [`FacetArgs`](@ref) for facet kernels) —
+four fields, `states`/`cell`/`p`/`ctx`, no supertype between the two. Kernels
+select on the `(request, cache)` pair, never on `args`, so annotating the
+parameter (`args::CellArgs`) is permitted; leaving it unannotated works the
+same. Derivative sweeps rebuild `args` with one field replaced through
+`with_states`, `with_parameters` and `with_context`.
+
+## Time parameter wrappers (GTO1, Newmark)
+
+The parameter wrappers are gone. Solvers pass named slot vectors and a context;
+elements read values.
+
+```julia
+# 0.3.x
+update_linearization!(op, r, u, GenericFirstOrderTimeParameters(p, t, Δt, uprev))
+# element: assemble_element_gto1!(Kₑ, rₑ, uₑ, uₑprev, cell, cache, p, t, Δt)
+
+# 0.4
+op = setup_operator(strategy, integrator, dh; slots = (:u, :uprev))
+update_linearization!(op, r, (u = u, uprev = uprev), p, TimeIntegrationContext(t, Δt, γ̃))
+# element: uₑprev = args.states.uprev;  t = evaluation_time(args.ctx);  γ̃ = stage_scaling(args.ctx)
+```
+
+**Time reaches elements through `ctx`, and only through `ctx`.** `p` is the
+user parameter bag: passing a bare `t` as the parameter object, or hiding `t`
+inside `p`, is not a supported convention — every wrapper would then need an
+unwrapping rule, and the framework itself must see `t` to seed ∂F/∂t. A kernel
+that reads its time from `args.p` gets no time sensitivity at all.
+
+`γ̃` is the *normalized local stage interval* of the element-local
+internal-variable problem (`q = q_ref + γ̃·g` is the normalization; the element
+may integrate with any consistent rule over it, including exponential
+updates). For a backward-Euler local state under any one-step global scheme,
+`γ̃ = Δt`. **`γ̃` is not a rate slope** — see the `TimeIntegrationContext`
+docstring for the trap.
+
+Slot names are free: a Newmark-style scheme passes whatever it needs, e.g.
+`slots = (:u, :v, :a)`. Rate-like slots do not have to be materialized by the
+solver — an [`AffineRate`](@ref) source reconstructs them from the primary
+unknown at gather time:
+
+```julia
+op = setup_operator(strategy, integrator, dh; slots = (:u, :v, :a))
+update_linearization!(op, r,
+    (u = u, v = AffineRate(γ/(β*Δt), uᵥ), a = AffineRate(1/(β*Δt^2), ũ)),
+    p, TimeIntegrationContext(t, Δt, Δt))
+# element: vₑ = args.states.v
+```
+
+A kernel reads slot *values* and nothing else — the reconstruction is a
+solver-side statement about where those values came from. Do not carry
+reconstruction slopes in `p`, and do not put them into `ctx`; a scheme scalar
+that must reach a kernel rides as request payload (see weighted Jacobians
+below).
+
+The `:u` slot must be declared and must precede any reconstructed slot in the
+states NamedTuple — the sweep throws otherwise. The assembled Jacobian is
+∂F/∂u at frozen slot values (AD seeds the `:u` buffer only), so the
+chain-rule contribution `slope · ∂F/∂v` remains the solver's, applied through
+its per-slot weights.
+
+Condensed elements: declare `FerriteOperators.has_internal_state(::Type{<:MyCache}) = true`
+and implement `condense_cell!(cache, args, weights) -> CondensationReport` —
+the local solve, run once per item by `condense_internal!` rather than inside
+every kernel. `q` is an ordinary slot sourced by `InternalSource`; every
+evaluation sweep afterwards is a pure function at frozen `q`, and
+`condense_internal!` is the only writer of it. Where the corrector comes from
+is a construction-time election (`Stored()`/`Recompute()`), so read it through
+one access point instead of touching the store in the kernel, and
+`local_conditions!` is what admits the generic parameter and time
+sensitivities on a cache with no analytic kernel for them.
+
+## Facets ⚠
+
+Kernels become request-typed and facet parameters are queried per facet. The
+0.3 per-cell facet loop is gone: a boundary term now DECLARES its facets
+(`facet_items`) and builds its cache in `setup_facet_item_cache`, and the
+declared set is the traversal.
+
+```julia
+# 0.3.x
+function assemble_facet!(rₑ, uₑ, cell, lfi, cache::MyFacetCache, p) ... end
+
+# 0.4
+function FerriteOperators.assemble_facet!(req::ResidualRequest, cache::MyFacetCache, args, lfi::Int)
+    reinit!(cache.fv, args.cell, lfi)
+    # accumulate into req.r; args.p came from query_facet_parameters(cache, cell, lfi, p)
+end
+```
+
+The 0.3 setup pair ports as:
+
+```julia
+# 0.3.x
+FerriteOperators.setup_boundary_cache(m::MyIntegrator, sdh) = MyFacetCache(...)
+FerriteOperators.is_facet_in_cache(idx, cell, c::MyFacetCache) = idx ∈ c.facetset
+
+# 0.4 — the set moves from the cache's gate to the integrator's declaration
+FerriteOperators.facet_items(m::MyIntegrator, sdh) = m.facetset
+FerriteOperators.setup_facet_item_cache(m::MyIntegrator, sdh) = MyFacetCache(...)
+```
+
+**⚠ An old-signature `assemble_facet!` raises a loud `ArgumentError` at setup**
+(`validate_facet_item_cache`) instead of silently vanishing. A term that
+declares no `facet_items` assembles nothing at all — there is no per-cell loop
+left to rediscover it — so grep every downstream `setup_boundary_cache` and
+`is_facet_in_cache` method and port the pair; put at least one boundary
+integral under a test with an analytic reference (see
+`test/test_element_api.jl`, "Facet driver with a real Neumann kernel").
+
+## Strategies and operators
+
+```julia
+# 0.3.x type dispatch                       # 0.4
+f(s::SequentialAssemblyStrategy)            f(s::AssemblyStrategy{<:FullAssembly, SequentialScheduling})
+f(s::PerColorAssemblyStrategy)              f(s::AssemblyStrategy{<:FullAssembly, <:ColoredScheduling})
+f(s::ElementAssemblyStrategy)               removed — no element-assembly form in 0.4
+```
+
+The form axis keeps `FullAssembly` as its sole member, and it plus the `form`
+keyword of `AssemblyStrategy` are the extension point a further assembly level
+is added at.
+
+Or dispatch on a single axis: `s.form`, `s.scheduling`, `s.device`. Operators
+are payload + engine + integrator; anything that read `op.dh`/`op.strategy`/
+`op.subdomain_caches` reads `op.engine.*`. `getJ(op) = op.J` style accessors
+keep working.
+
+## Per-worker mutable state
+
+The pattern of smuggling solver state into element caches (model-tree
+rewrites, parameter-bag payloads) has no args-channel replacement: per-worker
+mutable working memory is an ordinary cache field, duplicated — not aliased —
+per worker by `duplicate_for_device` (see [storage classes for elements with
+local problems](elements.md)).
+
+## New capabilities worth adopting during the port
+
+- **Setup-time declarations**: `setup_operator(strategy, integrator, dh; slots,
+  requests)` is where a scheme says what it asks of an operator. `slots` sizes
+  the per-worker slot buffers; `requests` moves admissibility failures from
+  first use to `setup_operator` and selects which per-worker sweep-state
+  families exist. Which caches carry AD machinery is structural and separate —
+  a bilinear or linear operator carries none.
+- **Sensitivities**: `update_parameter_jacobian!(B, op, states, p, ctx)`,
+  `parameter_vjp!(g, op, λ, states, p, ctx)`,
+  `time_sensitivity!(g, op, states, p, ctx)` (AD by default, analytic kernels
+  win per cache, `local_conditions!` admits the generic route on a condensed
+  cache, `FiniteDifferenceSensitivity` as the Dual-free override).
+  ∂F/∂t seeds through the context — the AD sweep hands the
+  kernel a Dual-timed context and the FD method perturbs the context time — so
+  `time_sensitivity!` takes the same `(states, p, ctx)` triple as every other
+  entry point, reads `t` from `evaluation_time(ctx)`, and throws when `ctx` is
+  `nothing`.
+- **Matrix-free state actions**: `state_jvp!` (`J·v` without a matrix),
+  `state_vjp!` (`Jᵀλ` — the adjoint action).
+- **Components and stage operators**: `allocate_components` +
+  `assemble_slot_jacobian!(J, op, JacobianKind{:du}(), …)` + `combine!` replace
+  hand-matched `M`/`K` pairs and the `op.A`/`op.J` reach-through — one shared
+  sparsity pattern, weights applied by the solver, complex targets supported
+  (transformed Radau). `StageBlockOperator`/`assemble_stages!` carry the same
+  components into fully implicit Runge-Kutta.
+- **Weighted Jacobians**: `assemble_weighted_jacobian!(W, op, weights, states, p, ctx)`
+  is the scheme matrix `Σₛ wₛ ∂F/∂s` in one call. A hand-fused `W` kernel
+  (`M/(γΔt) + K`) ports as an analytic provider of `WeightedJacobianKind`
+  reading `req.weights` — NOT as a `JacobianRequest{:u}` kernel, which the
+  Jacobian checks legitimately reject against the AD referee.
+- **Derivative verification**: `check_derivatives(op, states, p, ctx)`
+  cross-checks every analytic kernel and AD path against finite differences
+  of the operator's own residual — run it once per ported element. Its time
+  check runs only with a context, its weighted-Jacobian checks only with
+  `weights = (…)`; the rest are skipped with the reason recorded.
+- **Functionals**: `evaluate_functional(op, FunctionalKind(:energy), states, p, ctx)`
+  reduces per-item contributions returned by `evaluate_cell_functional`,
+  `evaluate_facet_functional` (over declared facet items) and
+  `evaluate_algebraic_functional` kernels — global scalars/tensors without
+  hand-rolled loops.
+- Admissibility with internal state is per cache and per kind: analytic
+  kernel, `internal_state_insensitive` declaration, or FD — never a silent
+  wrong adjoint, never a blanket rejection.
+- **Elements with global dofs**: `global_dofs(integrator, sdh)` appends dofs
+  that belong to no cell — an RVE's macroscopic strain, a lumped pressure — to
+  the CELL family's local system as `[celldofs(cell); global dofs]`, resolved
+  through `global_dof_range`; a facet-set term declares its own tail through
+  `facet_item_global_dofs`/`facet_item_global_dof_range` and leaves the cell
+  sweep un-augmented. Everything a family sizes follows its own declaration, AD
+  seeds included; the coupling's sparsity is declared on the operator
+  specification (see [Elements with global dofs](elements.md#Elements-with-global-dofs)).
+- **Facet items**: `facet_items` + `setup_facet_item_cache` give a boundary
+  term its own traversal instead of the 0.3 per-cell facet loop, over the same
+  `assemble_facet!` kernels — a change of declaration, not an element rewrite.
+  Those contributions enter the sensitivity sweeps, analytically.
+- **Algebraic items**: `algebraic_items` + `setup_algebraic_cache` +
+  `assemble_algebraic!` carry terms with no mesh support at all (0D circulation
+  rows, lumped balances) as first-class items of the same operator.
+- **Operator specifications**: `FullAssembly(spec)` decides what the global
+  matrix *is* — `StandardOperatorSpecification` for the monolithic
+  `SparseMatrixCSC`, `BlockedOperatorSpecification` for a `BlockMatrix` whose
+  block type the caller names (CSR blocks, fieldwise preconditioners). Both
+  take the `algebraic_couplings` and `constraint_handler` pattern declarations.
+- **∂F/∂q as a target**: `allocate_internal_jacobian(op)` +
+  `update_internal_jacobian!(Kq, op, states, p, ctx)` hand a Schur-complement
+  consumer the rectangular residual × internal-dof block, which is neither a
+  slot Jacobian nor part of the square system matrix.
+- **Condensation on algebraic items**: `condense_algebraic!` eliminates an
+  algebraic item's own internal state through the same `condense_internal!`
+  sweep and the same `[ū | q_cells | q_items]` tail as a condensed cell.
+- **Transfer operators are an experimental surface**: `setup_transfer_operator`,
+  `setup_nested_transfer_operator` and their operator types may change in a
+  minor release. Port against them if you need them today — the assembled
+  matrix and its sparsity are contract — but expect the constructors to move.
+
+## Porting checklist
+
+1. Grep for `assemble_element!`, `assemble_facet!`, `assemble_element_gto1!`
+   method *definitions* — port each to request kernels. Grep for
+   `setup_boundary_cache`/`is_facet_in_cache` too: a boundary term that does
+   not declare `facet_items` assembles nothing, silently.
+2. Grep for strategy **type** dispatch and `op.dh`/`op.strategy`/`op.subdomain_caches`.
+3. Replace `GenericFirstOrderTimeParameters` call sites with slots + ctx;
+   declare `slots` at `setup_operator`.
+4. Declare `has_internal_state` for condensed caches; add explicit
+   `Ferrite.getnquadpoints` and `reinit_values!` methods for every cache,
+   and delete `reinit!` calls from cell-kernel bodies.
+5. Replace parameter-wrapper unwrapping hacks with a `query_cell_parameters`
+   method on the cache; move facet-specific parameters into
+   `query_facet_parameters`.
+6. Replace solver-state smuggling with an ordinary cache field, duplicated per
+   worker by `duplicate_for_device`.
+7. Move every kernel that read time out of `p` onto `evaluation_time(args.ctx)`.
+   Annotating `args::CellArgs`/`args::FacetArgs` is optional either way.
+8. Rename `residual!` call sites to `evaluate!`.
+9. Run your suite; every port failure except facets is a loud
+   `MethodError`/`ArgumentError` at setup or first assembly.

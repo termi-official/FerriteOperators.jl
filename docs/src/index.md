@@ -12,8 +12,8 @@ CurrentModule = FerriteOperators
 !!! warning
     This package is under heavy development. Expect regular breaking changes
     for now. If you are interested in joining development, then either comment
-    an issue or reach out via julialang.zulipchat.com, via mail or via 
-    julialang.slack.com. Alternatively open a discussion if you have something 
+    an issue or reach out via julialang.zulipchat.com, via mail or via
+    julialang.slack.com. Alternatively open a discussion if you have something
     specific in mind.
 
 !!! note
@@ -22,187 +22,111 @@ CurrentModule = FerriteOperators
     in the current design. This can be done via julialang.slack.com,
     julialang.zulipchat.com or via mail.
 
-## Architecture Overview
+## What this package is
 
-FerriteOperators sits between Ferrite modeling code and solver code. It provides
-a flexible job system to define generic finite element operators. These typically
-assemble sparse matrices, residual vectors, or apply matrix-free actions with
-user-defined element formulations. The task system allows to execute these
-actions either sequentially or in parallel and on
-different devices (CPU threads, GPUs, ...).
+FerriteOperators sits between Ferrite modeling code and solver code. Its
+design follows the fundamental finite-element operator decomposition
+popularized by MFEM and libCEED: element restriction, basis evaluation,
+pointwise physics, and global scatter are separate concerns, and how much of
+the operator is materialized (full sparse matrix, stored element matrices,
+matrix-free action) is a *strategy axis*, not a property of the physics.
 
-The assembly pipeline is built around four layers:
+Elements express scheme-agnostic integrands. Operators evaluate a set of them
+at a given state, parameter bag, and per-sweep context. Solvers own the time
+discretization and compose operator evaluations into a scheme. [The layer
+contract](devdocs/design.md) states that division of labour precisely.
 
-1. **Strategies** decide *how* to partition work into items (sequential, per-color, element-assembly / matrix-free).
-2. **Devices** decide *where* to execute (e.g. sequential on the CPU, threaded via Polyester, or GPU via KernelAbstractions).
-3. **Tasks** encode *what* to execute on a device.
-4. **Workspaces** hold the pre-allocated per-worker scratch data (e.g. element cache, cell cache, local matrices/vectors, ...) allowing them to execute their assigned tasks independently.
+## Quickstart
 
-These layers compose into a single generic device loop shared by all operator types, implemented as `FerriteOperators.execute_on_device!`:
+```julia
+using FerriteOperators
+
+strategy = AssemblyStrategy(SequentialCPUDevice())
+op = setup_operator(strategy, MyIntegrator(qrc, :u), dh; slots = (:u, :uprev))
+
+r = zeros(ndofs(dh))
+update_linearization!(op, r, (u = u, uprev = uprev), p, TimeIntegrationContext(t, Δt, γ̃))
+Δu = op.J \ r
+```
+
+An element supplies one mandatory residual kernel; the assembled Jacobian, the
+fused Newton path, and every sensitivity follow from it by ForwardDiff unless
+analytic kernels are declared.
+
+```julia
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::MyCache, args)
+    (; cv) = cache
+    uₑ = args.states.u
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        # ... accumulate into req.r ...
+    end
+end
+```
+
+## The assembly strategy
+
+Which machinery an operator is built on is one composite choice, and the three
+axes are orthogonal: the *operator form* ([`AbstractAssemblyForm`](@ref) — the
+MFEM assembly level), the *scheduling policy* ([`SequentialScheduling`](@ref) /
+[`ColoredScheduling`](@ref) — how parallel work is made race-safe), and the
+*device* (sequential CPU, threaded via Polyester).
+[`AssemblyStrategy`](@ref)`(device; form, scheduling)` is the keyword
+convenience constructor for the common compositions: `AssemblyStrategy(device)`
+and `AssemblyStrategy(device; scheduling = ColoredScheduling())`.
+
+[`FullAssembly`](@ref) assembles the global matrix and vector and serves every
+operator family. It is the form axis' sole member; the axis and the `form`
+keyword are the extension point a further assembly level (element assembly,
+matrix-free) is added at.
+
+All operator entry points funnel into one task body executed by a shared
+device loop:
 
 ```
-for chunk in partitions
-    parfor taskid in chunk
-        reinit!(workspace, taskid)
+for chunk in partition
+    parfor item in chunk
+        reinit!(workspace, item)                # geometry cache
+        reinit_values!(cache, cell, kind)       # element values, once per sweep
         execute_single_task!(task, workspace)
     end
 end
 ```
 
-where the partition is computed at setup time by `compute_partition(strategy, sdh)` and
-encodes the work distribution (single batch for sequential, color groups for per-color,
-etc.). The device cache contains the workspace(s) for each parallel worker, constructed
-by `setup_device_instances(device, obj, n_workers)`, which creates independent copies of
-`obj` via `duplicate_for_device(device, obj)` for parallel execution. The function
-works on any duplicable object, not only workspaces.
+[The layer contract](devdocs/design.md) has the layer table that names who owns
+what along that path — requests, engines and workspaces included.
 
-Square operators (bilinear, nonlinear, linear) use an [`AssemblyWorkspace`](@ref)
-that holds the local element matrix `Ke`, unknown vector `ue`, residual vector
-`re`, geometry cache, internal variable handler, and element cache.
+## Where to read on
 
-Transfer operators (prolongation/restriction) use a [`TransferWorkspace`](@ref)
-with the rectangular element matrix `Pe`, a transfer cell cache, and the
-transfer element cache.
+- [Writing elements](elements.md) — request-typed kernels, the cell/facet
+  argument bundle, values reinitialization, parameter queries, analytic
+  opt-ins, condensed elements, functionals.
+- [Operators and entry points](operators.md) — setup and its declarations,
+  the assembly entry points, slots and rate reconstruction, sensitivities,
+  weighted Jacobians, component bags and stage operators, derivative
+  verification, quadrature data, transfer operators.
+- [Patch items](patches.md) — multi-cell work items with patch-local scatter
+  (experimental).
+- [Migrating from 0.3.x](migration.md) — the map from the old element and
+  operator API to the current one.
 
-Adding a new operator type typically only requires defining a new task type and
-implementing `execute_single_task!` for the appropriate workspace - the device loop,
-strategy infrastructure, and parallel duplication remain unchanged.
+API reference:
 
-## The Element Interface
+- [Element API reference](element-api.md) — the contracts an element cache
+  implements, and the request types its kernels take.
+- [Provided integrators and caches](provided-elements.md) — composition,
+  multi-domain routing, the AD decorator, the transfer prolongators.
+- [Example elements](example-elements.md) — the worked implementations in
+  `FerriteOperatorsExampleElements`.
+- [Operator API reference](operator-api.md) — the operator types and every
+  assembly, sensitivity and condensation entry point.
+- [Assembly engine API reference](engine-api.md) — kinds, drivers, strategies,
+  devices, workspaces and the quadrature layer.
 
-For users the most important piece is the element interface.
-Users need to provide some structs and corresponding dispatches to work with FerriteOperators.jl.
+Developer documentation:
 
-Essentially there are three super-types for elements
-
-```@docs
-FerriteOperators.AbstractVolumetricElementCache
-FerriteOperators.AbstractSurfaceElementCache
-FerriteOperators.AbstractInterfaceElementCache
-assemble_element!
-assemble_facet!
-assemble_interface!
-FerriteOperators.setup_element_cache
-FerriteOperators.setup_boundary_cache
-FerriteOperators.setup_interface_cache
-FerriteOperators.load_element_unknowns!
-
-```
-
-Only `FerriteOperators.AbstractVolumetricElementCache` is implemented for now and it covers already all typical use-cases.
-
-Furthermore, each element formulation is derived from an integrator. Integrators are the bridge between elements and materials.
-Right now, these types of integrators are provided
-
-```@docs
-FerriteOperators.AbstractBilinearIntegrator
-FerriteOperators.AbstractNonlinearIntegrator
-FerriteOperators.AbstractLinearIntegrator
-```
-
-## Transfer Operators
-
-Transfer operators assemble rectangular sparse matrices for prolongation and
-restriction between two `DofHandler`s.
-
-```@docs
-setup_transfer_operator
-setup_nested_transfer_operator
-FerriteOperators.AbstractTransferIntegrator
-FerriteOperators.AbstractTransferElementCache
-```
-
-## The Setup Interface
-
-The main entry point for users is the function
-
-```@docs
-setup_operator
-```
-
-which takes a strategy, the integrator and a matching dof handler.
-Here the strategy controls the type of parallelism, the used device (e.g. threaded CPU or GPU) and the integrator is the hub controlling what exactly will be assembled.
-
-## Devices
-
-```@docs
-SequentialCPUDevice
-PolyesterDevice
-```
-
-## Strategies
-
-```@docs
-SequentialAssemblyStrategy
-PerColorAssemblyStrategy
-ElementAssemblyStrategy
-```
-
-## Quadrature Data
-
-FerriteOperators provides a unified system for working with data at quadrature
-points (QPs). The same infrastructure serves three purposes:
-
-1. **Precomputed coefficients** – pass per-QP material data into element formulations.
-2. **Matrix-free precomputation** – store evaluated quantities (e.g. stresses) at
-   QPs during a separate pass for use in later matrix-free actions.
-3. **Post-processing / visualization** – query QP data for export to VTK or other
-   downstream processing.
-
-### Storage: `QVector`
-
-[`QVector`](@ref) is the flat, cell-indexed storage type.  Each cell owns a
-contiguous slice of the underlying `data` vector; slices can have different
-lengths, enabling p-adaptivity and mixed meshes.
-
-```@docs
-QVector
-setup_qvector
-get_range_for_cell
-```
-
-### Evaluation: `FerriteQuadratureOperator`
-
-[`FerriteQuadratureOperator`](@ref) is a lightweight operator that drives a
-user-supplied function over all quadrature points and writes the results into a
-[`QVector`](@ref).
-
-```@docs
-FerriteQuadratureOperator
-setup_quadrature_operator
-evaluate_quadrature!
-query_element_quadrature_data
-store_quadrature_data!
-```
-
-### Post-processing: `QuadratureDataQuery`
-
-[`QuadratureDataQuery`](@ref) bundles a [`QVector`](@ref) output buffer with an
-optional cell-ID filter.  Build one with [`prepare_quadrature_query`](@ref), run
-it with [`process_query!`](@ref), then inspect `query.buffer` or write to VTK.
-
-```@docs
-QuadratureDataQuery
-QuadratureDataMultiQuery
-prepare_quadrature_query
-process_query!
-```
-
-### VTK export: `VTKQuadratureFile`
-
-QP data can be exported to VTK for visualization in e.g. ParaView.
-The workflow mirrors `Ferrite.VTKGridFile`:
-
-```julia
-qgrid = VTKQuadratureGrid(dh, qrc)
-VTKQuadratureFile("stress_output", qgrid) do vtk
-    write_quadrature_data(vtk, σ, "stress")
-    write_quadrature_data(vtk, query, "plastic_strain")  # QuadratureDataQuery
-end
-```
-
-```@docs
-VTKQuadratureGrid
-VTKQuadratureFile
-write_quadrature_data
-```
+- [The layer contract](devdocs/design.md) — term / operator / scheme layers and
+  their ownership boundaries, the channel decision table, and the framework's
+  extension points.
+- [Design rationale](devdocs/rationale.md) — why the design is the way it is:
+  the decisions, the alternatives that were rejected, and what they cost.

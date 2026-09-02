@@ -1,7 +1,7 @@
 @doc raw"""
-    SimpleBilinearDiffusionIntegrator{CoefficientType}
+    SimpleBilinearDiffusionIntegrator
 
-Represents the integrand of the bilinear form ``a(u,v) = -\int \nabla v(x) \cdot D \nabla u(x) dx`` for a given diffusion value ``D`` and ``u,v`` from the same function space.
+Represents the integrand of the bilinear form ``a(u,v) = \int \nabla v(x) \cdot D \nabla u(x) dx`` for a given diffusion value ``D`` and ``u,v`` from the same function space.
 """
 struct SimpleBilinearDiffusionIntegrator <: AbstractBilinearIntegrator
     # This is specific to our model
@@ -12,7 +12,7 @@ struct SimpleBilinearDiffusionIntegrator <: AbstractBilinearIntegrator
 end
 
 """
-The cache associated with [`BilinearDiffusionIntegrator`](@ref) to assemble element diffusion matrices.
+The cache associated with [`SimpleBilinearDiffusionIntegrator`](@ref) to assemble element diffusion matrices.
 """
 struct SimpleBilinearDiffusionElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
     D::Float64
@@ -20,7 +20,7 @@ struct SimpleBilinearDiffusionElementCache{CV <: CellValues} <: AbstractVolumetr
 end
 
 Ferrite.getnquadpoints(e::SimpleBilinearDiffusionElementCache) = getnquadpoints(e.cellvalues)
-Ferrite.reinit!(e::SimpleBilinearDiffusionElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
+reinit_values!(e::SimpleBilinearDiffusionElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
 
 function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache)
     return SimpleBilinearDiffusionElementCache(
@@ -29,11 +29,11 @@ function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache
     )
 end
 
-function assemble_element!(Kₑ::AbstractMatrix, cell, element_cache::SimpleBilinearDiffusionElementCache, time)
+function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleBilinearDiffusionElementCache, args::CellArgs)
+    Kₑ = req.K
+    cell = args.cell
     (; cellvalues, D) = element_cache
     n_basefuncs = getnbasefunctions(cellvalues)
-
-    reinit!(cellvalues, cell)
 
     for qp in 1:getnquadpoints(cellvalues)
         dΩ = getdetJdV(cellvalues, qp)
@@ -53,4 +53,20 @@ function setup_element_cache(element_model::SimpleBilinearDiffusionIntegrator, s
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleBilinearDiffusionElementCache(element_model.D, CellValues(qr, ip, ip_geo))
+end
+
+provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind{:u}) = true
+# The bilinear form induces a linear operator, so its residual is the element
+# matrix acting on the element vector — mandatory so the element composes
+# into nonlinear operators and AD-based sensitivities.
+function assemble_cell!(req::ResidualRequest, cache::SimpleBilinearDiffusionElementCache, args::CellArgs)
+    (; cellvalues, D) = cache
+    uₑ = args.states.u
+    for qp in 1:getnquadpoints(cellvalues)
+        dΩ = getdetJdV(cellvalues, qp)
+        ∇u = function_gradient(cellvalues, qp, uₑ)
+        for i in 1:getnbasefunctions(cellvalues)
+            req.r[i] += D * (∇u ⋅ shape_gradient(cellvalues, qp, i)) * dΩ
+        end
+    end
 end

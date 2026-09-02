@@ -1,8 +1,6 @@
-## Cell iterators for assembly of rectangular (transfer/prolongation) operators.
-##
-## Two cases are covered:
-##   1. SameGridCellIterator  – two DofHandlers on the *same* grid (p-multigrid).
-##   2. NestedGridCellIterator – a fine grid nested inside a coarse grid (geometric multigrid).
+## Cell iterators for assembling rectangular (transfer/prolongation) operators:
+## SameGridCellIterator for two DofHandlers on the *same* grid (p-multigrid),
+## NestedGridCellIterator for a fine grid nested inside a coarse one (geometric multigrid).
 
 ####################################
 ## SameGridCellCache      ##
@@ -11,18 +9,14 @@
 """
     SameGridCellCache
 
-Cache for iterating over cells of a shared grid when assembling e.g. a transfer (prolongation /
-restriction) operator between two DofHandlers that are defined on the **same** grid and the
-**same** set of cells (e.g. polynomial p-multigrid).
+Cache for iterating the cells of a shared grid, e.g. to assemble a transfer
+(prolongation / restriction) operator between two DofHandlers on the **same**
+grid and the **same** set of cells (polynomial p-multigrid). The geometry is
+shared; each DofHandler provides its own dof ids.
 
-The geometry (nodes, coordinates) is shared; each DofHandler provides its own dof-ids.
-
-**Accessor functions**
-- `cellid(tc)` – current cell id
-- `getnodes(tc)` – global node ids
-- `getcoordinates(tc)` – cell coordinates
-- `getrowdofs(tc)` – global row dofs (from `dh_row`, typically the fine/test space)
-- `getcolumndofs(tc)` – global column dofs (from `dh_col`, typically the coarse/trial space)
+Accessors: `cellid`, `getnodes`, `getcoordinates`, plus `getrowdofs` (from
+`dh_row`, typically the fine/test space) and `getcolumndofs` (from `dh_col`,
+the coarse/trial space).
 """
 mutable struct SameGridCellCache{X, G <: AbstractGrid,
                                           DH_row <: AbstractDofHandler,
@@ -73,12 +67,22 @@ end
 Ferrite.cellid(tc::SameGridCellCache)      = tc.cellid
 Ferrite.getnodes(tc::SameGridCellCache)    = tc.nodes
 Ferrite.getcoordinates(tc::SameGridCellCache) = tc.coords
+"""
+    getrowdofs(tc) -> Vector{Int}
+    getcolumndofs(tc) -> Vector{Int}
+
+The dof vectors indexing the rectangular element matrix: rows from the
+test-space DofHandler, columns from the trial-space one. For a nested cache
+that is the fine cell's dofs and its parent coarse cell's.
+"""
 getrowdofs(tc::SameGridCellCache)  = tc.rdofs
+
+@doc (@doc getrowdofs)
 getcolumndofs(tc::SameGridCellCache) = tc.cdofs
 
 duplicate_for_device(device::AbstractCPUDevice, tc::SameGridCellCache) = SameGridCellCache(tc.dh_row, tc.dh_col)
 
-# Allow reinit!(cv, tc) for CellValues so the loop pattern `reinit!(cv, tc)` works.
+# So that the usual `reinit!(cv, tc)` loop pattern works with this cache.
 function Ferrite.reinit!(cv::Ferrite.AbstractCellValues, tc::SameGridCellCache)
     cell = Ferrite.reinit_needs_cell(cv) ? getcells(tc.grid, tc.cellid) : nothing
     return Ferrite.reinit!(cv, cell, tc.coords)
@@ -93,13 +97,11 @@ end
     SameGridCellIterator(dh_row, dh_col [, cellset])
     SameGridCellIterator(sdh_row::SubDofHandler, sdh_col::SubDofHandler)
 
-Iterator over cells of a shared grid for assembling e.g. a transfer operator between `dh_row`
-(row / test / fine space) and `dh_col` (column / trial / coarse space).
-
-Both DofHandlers must live on the **same** grid object.  When constructed from a pair of
-`SubDofHandler`s the iterator is restricted to their common `cellset`.
-
-Each iteration step reinitialises a [`SameGridCellCache`](@ref) and returns it.
+Iterates the cells of a shared grid, reinitialising and returning a
+[`SameGridCellCache`](@ref) per step. `dh_row` (row / test / fine space) and
+`dh_col` (column / trial / coarse space) must live on the **same** grid object;
+from a pair of `SubDofHandler`s the iteration is restricted to their common
+`cellset`.
 
 !!! warning
     Stateful – do not collect or broadcast over this iterator.
@@ -151,24 +153,17 @@ Base.length(it::SameGridCellIterator) = length(_getset(it))
 """
     NestedGridCellCache
 
-Cache for iterating over fine cells when assembling e.g. a transfer operator between a **fine**
-and a **coarse** grid where every fine cell is a child of exactly one coarse cell.
-
-The user must supply:
+Cache for iterating **fine** cells, e.g. to assemble a transfer operator
+between a fine and a coarse grid where every fine cell is a child of exactly
+one coarse cell. The caller supplies the mesh-hierarchy data:
 - `fine2coarse :: Vector{Int}` – maps `fine_cell_id → coarse_cell_id`.
 - `child_ref_coords :: Vector{Vector{Vec{dim,T}}}` – for each fine cell the reference
   coordinates of that cell's nodes *inside the parent (coarse) reference element*.
 
-These two pieces of information are grid-level data that come from the mesh hierarchy and
-are typically known at construction time.
-
-**Accessor functions**
-- `cellid(tc)` / `coarse_cellid(tc)` – current fine / coarse cell id
-- `get_fine_nodes(tc)` / `get_coarse_nodes(tc)`
-- `get_fine_coordinates(tc)` / `get_coarse_coordinates(tc)`
-- `getrowdofs(tc)` – dofs from the fine DofHandler (rows of the resulting matrix)
-- `getcolumndofs(tc)` – dofs from the coarse DofHandler (columns of the resulting matrix)
-- `get_child_ref_coords(tc)` – reference coordinates of the fine cell's nodes in the coarse element
+Accessors: `cellid` (the fine cell),
+`get_fine_coordinates`/`get_coarse_coordinates`, `getrowdofs` (fine dofs, the
+rows of the resulting matrix), `getcolumndofs` (coarse dofs, the columns) and
+`get_child_ref_coords`.
 """
 mutable struct NestedGridCellCache{
         X_f, X_c,
@@ -191,7 +186,6 @@ mutable struct NestedGridCellCache{
     const coarse_dofs::Vector{Int}
     # Mapping data
     const fine2coarse::Vector{Int}
-    # Reference coordinates of the fine cell's nodes inside the coarse reference element.
     # Indexed as child_ref_coords[fine_cell_id], each entry a Vector{Vec{dim,T}}.
     const child_ref_coords::Vector{Vector{X_c}}
 end
@@ -252,11 +246,18 @@ function Ferrite.reinit!(tc::NestedGridCellCache, fine_id::Int)
     return tc
 end
 
-Ferrite.cellid(tc::NestedGridCellCache)              = tc.fine_cellid
-coarse_cellid(tc::NestedGridCellCache)       = tc.coarse_cellid
-get_fine_nodes(tc::NestedGridCellCache)      = tc.fine_nodes
-get_coarse_nodes(tc::NestedGridCellCache)    = tc.coarse_nodes
+Ferrite.cellid(tc::NestedGridCellCache) = tc.fine_cellid
+"""
+    get_fine_coordinates(tc) -> Vector{<:Vec}
+    get_coarse_coordinates(tc) -> Vector{<:Vec}
+
+The node coordinates of the current fine cell and of its parent coarse cell —
+the two geometries a nested transfer kernel maps between — both refreshed by
+`Ferrite.reinit!` on the [`NestedGridCellCache`](@ref).
+"""
 get_fine_coordinates(tc::NestedGridCellCache)   = tc.fine_coords
+
+@doc (@doc get_fine_coordinates)
 get_coarse_coordinates(tc::NestedGridCellCache) = tc.coarse_coords
 getrowdofs(tc::NestedGridCellCache)          = tc.fine_dofs
 getcolumndofs(tc::NestedGridCellCache)       = tc.coarse_dofs
@@ -266,13 +267,13 @@ duplicate_for_device(device::AbstractCPUDevice, tc::NestedGridCellCache) = Neste
 """
     get_child_ref_coords(tc::NestedGridCellCache)
 
-Return the reference coordinates of the current fine cell's nodes expressed in the
-reference frame of its parent coarse cell.  These can be used to evaluate coarse-grid
-shape functions at fine-grid quadrature points.
+The current fine cell's nodes in the reference frame of its parent coarse
+cell, where coarse-grid shape functions are evaluated at fine-grid quadrature
+points.
 """
 get_child_ref_coords(tc::NestedGridCellCache) = tc.child_ref_coords[tc.fine_cellid]
 
-# Allow reinit!(cv, tc) for CellValues so the loop pattern `reinit!(cv, tc)` works with nested grids.
+# So that the usual `reinit!(cv, tc)` loop pattern works with nested grids.
 function Ferrite.reinit!(cv::Ferrite.AbstractCellValues, tc::NestedGridCellCache)
     cell = Ferrite.reinit_needs_cell(cv) ? getcells(tc.fine_grid, tc.fine_cellid) : nothing
     return Ferrite.reinit!(cv, cell, tc.fine_coords)
@@ -286,15 +287,11 @@ end
 """
     NestedGridCellIterator(dh_fine, dh_coarse, fine2coarse, child_ref_coords [, cellset])
 
-Iterator over **fine** cells for assembling a transfer operator between a fine and a coarse
-grid that are hierarchically nested.
-
-Arguments:
-- `dh_fine` / `dh_coarse` – DofHandlers on the fine and coarse grid respectively.
-- `fine2coarse :: Vector{Int}` – maps each fine cell id to the id of its parent coarse cell.
-- `child_ref_coords` – for each fine cell, the reference coordinates of that cell's nodes
-  within the parent coarse reference element.
-- `cellset` – optional subset of fine cells to iterate over (default: all fine cells).
+Iterator over the **fine** cells of two hierarchically nested grids, e.g. for
+assembling a transfer operator between them. `dh_fine`/`dh_coarse` are the
+DofHandlers of the two grids, `fine2coarse` and `child_ref_coords` are as in
+[`NestedGridCellCache`](@ref), and `cellset` restricts the iteration (default:
+all fine cells).
 
 !!! warning
     Stateful – do not collect or broadcast over this iterator.
