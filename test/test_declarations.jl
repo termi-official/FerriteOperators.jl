@@ -165,6 +165,93 @@ end
 end
 
 ####################################
+## Declaration-hook signature drift
+####################################
+# `global_dofs`, `facet_items`, `facet_item_global_dofs` and `algebraic_items`
+# all default to an EMPTY declaration, so a method written against a signature
+# the engine does not call is never reached and the operator assembles a silent
+# subset. `DriftProbe{hook}` wears one drifted method for `hook`; `:none` wears
+# none, `:correct` wears all four at the engine's own signature.
+
+struct DriftProbe{hook} <: AbstractNonlinearIntegrator
+    qrc::QuadratureRuleCollection
+end
+FerriteOperators.setup_element_cache(m::DriftProbe, sdh::SubDofHandler) =
+    FerriteOperators.setup_element_cache(CVIntegrator{:declared}(m.qrc, :u), sdh)
+
+# The right name on the right integrator, the argument the engine does not pass.
+# `SubDofHandler <: AbstractDofHandler`, so a drifted second argument has to name
+# the concrete `DofHandler` to actually miss the per-subdomain call.
+FerriteOperators.global_dofs(::DriftProbe{:global_dofs}, ::DofHandler) = (1,)
+FerriteOperators.facet_items(::DriftProbe{:facet_items}, ::DofHandler) = (FacetIndex(1, 1),)
+FerriteOperators.facet_item_global_dofs(::DriftProbe{:facet_item_global_dofs}, ::DofHandler) = (1,)
+FerriteOperators.algebraic_items(::DriftProbe{:algebraic_items}, ::SubDofHandler) = ([1],)
+# A drifted ARITY misses the call the same way a drifted argument type does.
+FerriteOperators.global_dofs(::DriftProbe{:arity}, ::SubDofHandler, ::Int) = (1,)
+
+# A specialized method the engine's call resolves to passes, whatever it returns.
+FerriteOperators.global_dofs(::DriftProbe{:correct}, ::SubDofHandler) = ()
+FerriteOperators.facet_items(::DriftProbe{:correct}, ::SubDofHandler) = ()
+FerriteOperators.facet_item_global_dofs(::DriftProbe{:correct}, ::SubDofHandler) = ()
+FerriteOperators.algebraic_items(::DriftProbe{:correct}, ::DofHandler) = ()
+
+@testset "Declaration-hook signature drift" begin
+    (; dh, qrc, strategy) = scalar_quad_testbed((3, 2))
+    probe(hook) = DriftProbe{hook}(qrc)
+    check(integrator) = FerriteOperators.assert_declaration_signatures(integrator, dh)
+
+    @testset "a drifted signature is rejected, naming hook and both signatures" begin
+        for (hook, expected, drifted) in ((:global_dofs, "SubDofHandler", "DofHandler"),
+                                          (:facet_items, "SubDofHandler", "DofHandler"),
+                                          (:facet_item_global_dofs, "SubDofHandler", "DofHandler"),
+                                          (:algebraic_items, "DofHandler", "SubDofHandler"))
+            err = @test_throws ArgumentError check(probe(hook))
+            @test occursin("expected: $hook(::DriftProbe, ::$expected)", err.value.msg)
+            @test occursin("DriftProbe{:$hook}, ::Ferrite.$drifted)", err.value.msg)
+        end
+        err = @test_throws ArgumentError check(probe(:arity))
+        @test occursin("expected: global_dofs(::DriftProbe, ::SubDofHandler)", err.value.msg)
+        @test occursin("DriftProbe{:arity}, ::Ferrite.SubDofHandler, ::Int64)", err.value.msg)
+    end
+
+    @testset "the rejection is a setup error, not a call-time one" begin
+        err = @test_throws ArgumentError setup_operator(
+            strategy, probe(:facet_items), dh; slots = (:u, :du))
+        @test occursin("facet_items", err.value.msg)
+        # The same element without the drifted method builds.
+        op = setup_operator(strategy, probe(:none), dh; slots = (:u, :du))
+        @test op isa FerriteOperators.LinearizedFerriteOperator
+    end
+
+    @testset "correct declarers and non-declarers pass" begin
+        @test check(probe(:correct)) === nothing
+        @test check(probe(:none)) === nothing
+        @test check(DeclaredDiffusionIntegrator(qrc, :u)) === nothing
+    end
+
+    @testset "wrappers are probed through, not around" begin
+        plain, drifted, correct = probe(:none), probe(:facet_items), probe(:correct)
+
+        # Both wrappers forward `facet_items` at the engine's own signature, so
+        # the wrapper's own method resolves and only the recursion into the
+        # inners can see the drift standing behind it.
+        routed(subs...) = NonlinearMultiDomainIntegrator(
+            Dict{String, AbstractNonlinearIntegrator}(string(i) => sub for (i, sub) in enumerate(subs)))
+        for wrapped in (NonlinearCompositeIntegrator(plain, drifted),
+                        routed(plain, drifted),
+                        routed(NonlinearCompositeIntegrator(plain, drifted)))
+            err = @test_throws ArgumentError check(wrapped)
+            @test occursin("DriftProbe{:facet_items} has a method", err.value.msg)
+        end
+
+        # …and the wrappers' own forwarding methods are not themselves drift.
+        @test check(NonlinearCompositeIntegrator(plain, correct)) === nothing
+        @test check(routed(plain, correct)) === nothing
+        @test check(routed(NonlinearCompositeIntegrator(plain, correct))) === nothing
+    end
+end
+
+####################################
 ## Downstream-style custom kinds
 ####################################
 # Everything below is what a downstream package writes: kind + request +

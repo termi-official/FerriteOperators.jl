@@ -344,3 +344,19 @@ which keeps [`evaluate_functional`](@ref) working on an operator that has
 algebraic items.
 """
 evaluate_algebraic_functional(kind, cache, args) = nothing
+
+####################################
+## Declaration subjects
+####################################
+
+# Every integrator that answers a declaration hook ([`global_dofs`](@ref),
+# [`facet_items`](@ref), [`facet_item_global_dofs`](@ref),
+# [`algebraic_items`](@ref)) for one operator: the integrator itself and, through
+# the wrappers that forward the hooks with the engine's own arguments, their
+# sub-integrators. `assert_declaration_signatures` is the consumer, and a
+# wrapper's forwarding method is the reason it needs the list: that method is
+# itself correctly specialized on the wrapper type, so the wrapper alone would
+# answer the signature probe for every inner standing behind it — the same
+# reason `validate_element_cache` recurses into a composite's inners rather than
+# trusting the blanket fan-out method.
+_declaration_subjects!(subjects, integrator) = push!(subjects, integrator)

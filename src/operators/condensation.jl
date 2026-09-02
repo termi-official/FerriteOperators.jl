@@ -339,24 +339,6 @@ end
 condense_internal!(op, states::NamedTuple, p, ctx) = condense_internal!(op, (u = 1.0,), states, p, ctx)
 
 """
-    condensed_update_linearization!(op, residual, weights, states, p, ctx) -> CondensationReport
-
-The fused convenience entry point a Newton loop calls once per trial point:
-condenses via [`condense_internal!`](@ref) and, only if every local problem
-converged, calls [`update_linearization!`](@ref) to fill `op.J`/`residual`.
-Returns the report EARLY on `!report.converged`, without evaluating — the same
-"one call, route decided inside" move [`assemble_weighted_jacobian!`](@ref)
-already makes. Forgetting to condense requires deliberately dropping to the
-lower-level pair, which makes the correct sequence the convenient one.
-"""
-function condensed_update_linearization!(op, residual, weights::NamedTuple, states::NamedTuple, p, ctx)
-    report = condense_internal!(op, weights, states, p, ctx)
-    report.converged || return report
-    update_linearization!(op, residual, states, p, ctx)
-    return report
-end
-
-"""
     rollback_state!(op, u, committed)
 
 Discard a rejected trial: copy the committed solution back into `u` and

@@ -116,6 +116,17 @@ function _algebraic_subintegrator(integrator::AnyMultiDomainIntegrator, dh)
     return integrator.subintegrators[only(declaring)]
 end
 
+# A router answers every declaration hook out of the claiming sub-integrator's,
+# so each of them is a declaration subject in its own right. Names are visited
+# in sorted order, so a signature rejection names the same offender on every run.
+function _declaration_subjects!(subjects, integrator::AnyMultiDomainIntegrator)
+    push!(subjects, integrator)
+    for name in sort!(collect(keys(integrator.subintegrators)))
+        _declaration_subjects!(subjects, integrator.subintegrators[name])
+    end
+    return subjects
+end
+
 # Available for direct use, but pays a full resolution — the engine calls the
 # plural hook above.
 setup_element_cache(element_model::AnyMultiDomainIntegrator, sdh::SubDofHandler) =

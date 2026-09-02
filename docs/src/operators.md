@@ -94,9 +94,11 @@ same two pattern declarations:
   [Elements with global dofs](elements.md#Elements-with-global-dofs) — and for
   those an [`algebraic_items`](@ref) declaration needs, see
   [Algebraic terms](elements.md#Algebraic-terms-(items-with-no-mesh-support));
-- `constraint_handler`, which adds the constraint entries so condensation has
-  room to write. Sparsity **only**: applying the constraints to the assembled
-  system stays with the caller, through Ferrite's `apply!`/`apply_assemble!`.
+- `constraint_handler`, which adds the entries Ferrite's CONSTRAINT
+  condensation needs room to write (unrelated to the internal-variable
+  condensation of [Condensed elements](elements.md#Condensed-elements-(internal-variables))).
+  Sparsity **only**: applying the constraints to the assembled system stays with
+  the caller, through Ferrite's `apply!`/`apply_assemble!`.
 
 !!! note "`algebraic_couplings` requires Ferrite's mesh-free algebraic variables"
     See the canonical capability note under [Algebraic
@@ -290,14 +292,15 @@ evaluates the primal residual at contexts with perturbed times. An element
 therefore reads time as `evaluation_time(args.ctx)`, and `time_sensitivity!`
 requires a context — passing `nothing` is an `ArgumentError`.
 
-Admissibility with internal state: a condensed element's residual kernel is
-PURE (it reads the frozen `q` a prior [`condense_internal!`](@ref) wrote), so
-a plain AD fallback computes a genuine `∂F/∂·|_q` partial rather than
-differentiating through an iteration — but the sensitivity kinds carry no
-[`CorrectionMode`](@ref) (they are always the total), so that partial is
-missing the `∂F/∂q · dq/d·` correction. A cache with [`has_internal_state`](@ref)
-is therefore admissible for a sensitivity kind only if it (a) provides the
-analytic kernel (the correction, folded in — the payoff a corrector store
+Admissibility with internal state: a sensitivity sweep is phase two of the
+[two-stage protocol](elements.md#The-two-stage-protocol), so a condensed
+element's residual kernel is PURE (it reads the frozen `q` a prior
+[`condense_internal!`](@ref) wrote) and a plain AD fallback computes a genuine
+`∂F/∂·|_q` partial rather than differentiating through an iteration — but the
+sensitivity kinds carry no [`CorrectionMode`](@ref) (they are always the total),
+so that partial is missing the `∂F/∂q · dq/d·` correction. A cache with
+[`has_internal_state`](@ref) is therefore admissible for a sensitivity kind only
+if it (a) provides the analytic kernel (the correction, folded in — the payoff a corrector store
 unlocks: exact parameter/state sensitivities on a condensed element,
 generically, once the store exists), (b) declares
 [`internal_state_insensitive`](@ref) (asserting the local equations do not

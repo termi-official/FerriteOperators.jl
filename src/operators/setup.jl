@@ -164,6 +164,63 @@ function _validate_global_dofs(index, sdh, gdofs, ndofs_total, declaration)
     return nothing
 end
 
+"""
+    assert_declaration_signatures(integrator, dh)
+
+Reject a declaration hook whose method was written against a signature the
+engine does not call. [`global_dofs`](@ref), [`facet_items`](@ref),
+[`facet_item_global_dofs`](@ref) and [`algebraic_items`](@ref) all default to an
+EMPTY declaration, so a drifted signature never surfaces as a `MethodError`: the
+default answers instead, and the operator assembles a subset — a missing
+local-system tail, an unvisited boundary, absent algebraic rows — without a word.
+
+The check is type-level and runs once per [`setup_engine`](@ref). For every
+integrator that answers these hooks — the outer one and, through the wrappers
+that forward them, their sub-integrators — a hook with ANY method specialized on
+that integrator's type must have one the engine's own call resolves to. An
+integrator declaring nothing has no specialized method and passes; a correct
+declarer's method is what the call resolves to and passes.
+"""
+function assert_declaration_signatures(integrator, dh::AbstractDofHandler)
+    subjects = _declaration_subjects!(Any[], integrator)
+    for subject in subjects
+        _assert_hook_signature(algebraic_items, subject, typeof(dh))
+    end
+    isempty(dh.subdofhandlers) && return nothing
+    # Type-level, and every subdomain of one DofHandler shares `typeof(sdh)`, so
+    # one representative answers for all of them.
+    SDH = typeof(first(dh.subdofhandlers))
+    for subject in subjects
+        _assert_hook_signature(global_dofs, subject, SDH)
+        _assert_hook_signature(facet_items, subject, SDH)
+        _assert_hook_signature(facet_item_global_dofs, subject, SDH)
+    end
+    return nothing
+end
+
+function _assert_hook_signature(hook, subject, argtype::Type)
+    IT = typeof(subject)
+    _is_empty_declaration_default(which(hook, Tuple{IT, argtype})) || return nothing
+    drifted = [m for m in methods(hook, Tuple{IT, Vararg{Any}})
+               if !_is_empty_declaration_default(m)]
+    isempty(drifted) && return nothing
+    expected = "$(nameof(hook))(::$(nameof(IT)), ::$(nameof(argtype)))"
+    throw(ArgumentError(
+        "$(IT) has a method for the declaration hook `$(nameof(hook))`, but the engine's call " *
+        "`$expected` resolves to the empty default, so this integrator declares nothing at " *
+        "all. The declaration hooks default to an empty declaration rather than erroring, so " *
+        "a drifted signature assembles a silent subset instead of failing.\n" *
+        "found:    " * join(drifted, "\n          ") * "\n" *
+        "expected: " * expected))
+end
+
+# The empty default of a declaration hook is its one method left open in the
+# integrator slot; every other method is some integrator type's declaration.
+function _is_empty_declaration_default(m::Method)
+    params = Base.unwrap_unionall(m.sig).parameters
+    return length(params) ≥ 2 && params[2] === Any
+end
+
 # Kind types or instances normalize to their UnionAll base, so a declaration
 # carrying a payload type parameter (`ParameterVJPKind{Vector{Float64}}`) never
 # silently misses its validation entry or its sweep-state family.
@@ -185,6 +242,10 @@ in [`ADElementCache`](@ref) at construction, for every kind the integrator
 might issue and not only the declared ones, decided STRUCTURALLY by
 [`needs_ad_decoration`](@ref). `ad_backend = nothing` opts out of wrapping.
 
+The declaration hooks are signature-checked first
+([`assert_declaration_signatures`](@ref)), since each defaults to an empty
+declaration and a drifted method would otherwise assemble a silent subset.
+
 Facet item ([`facet_items`](@ref)) and then algebraic item
 ([`algebraic_items`](@ref)) caches are appended after the cell subdomains, so
 traversal order follows the declarations rather than which families are
@@ -195,6 +256,7 @@ afterwards alongside the cell caches.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler;
         slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD())
+    assert_declaration_signatures(integrator, dh)
     declared_slots    = Tuple(slots)
     declared_kinds    = map(_kind_type, requests)
     global_dof_sets   = resolve_global_dof_sets(strategy, integrator, dh)

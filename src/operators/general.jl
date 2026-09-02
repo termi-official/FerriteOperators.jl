@@ -234,6 +234,21 @@ Evaluate the residual `F(u)` into `residual` without updating the Jacobian.
 function evaluate! end
 
 
+"""
+    get_matrix(op)
+
+Optional accessor hook: the matrix an operator type chooses to expose to a
+consumer that needs the array itself rather than the operator's action. There is
+no default — the fallback errors — so an operator has this accessor only where
+its own type implements it, and an operator backed by no explicit matrix
+legitimately has none.
+
+FerriteOperators ships one method, for [`NullOperator`](@ref), which
+materializes its all-zero matrix on demand. The assembled operators hold their
+array in a field and expose it through [`operator_payload`](@ref), which is what
+`Base.eltype`/`Base.size` read; an operator type defined downstream implements
+`get_matrix` as its own accessor.
+"""
 get_matrix(op) = error("Operator matrix is not explicitly accessible for given operator")
 
 """

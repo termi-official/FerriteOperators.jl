@@ -74,7 +74,8 @@ treats each one differently:
   partition assigns each item to exactly one worker at a time, so the aliased
   slots a worker touches are disjoint from every other worker's.
 
-`assemble_cell!` kernels are pure evaluations at fixed internal state. A local
+`assemble_cell!` kernels are pure evaluations at fixed internal state — they are
+phase two of the [two-stage protocol](#The-two-stage-protocol). A local
 nonlinear solve that EVOLVES state — anything whose result must survive to the
 next sweep or the next step — belongs in [`condense_cell!`](@ref) only, never
 inline inside a kernel.
@@ -526,17 +527,46 @@ this family's standing limitation.
 ## Condensed elements (internal variables)
 
 Elements with per-quadrature-point internal state append their unknowns after
-the FE dofs (`u = [ū; q]`, managed by the [`InternalVariableHandler`](@ref)),
-own their local stage problem, and are solved in two phases:
+the FE dofs (`u = [ū; q]`, managed by the [`InternalVariableHandler`](@ref)) and
+own their local stage problem. `q` is gathered through an
+[`InternalSource`](@ref) slot like any other state — declared at setup
+(`slots = (:u, :q, …)`) and sourced per call
+(`states = (u = u, q = InternalSource(u), …)`).
+
+### The two-stage protocol
+
+Every operator carrying condensed internal state is driven in two phases, and
+the split is the CONTRACT rather than one way of arranging the work:
 
 ```julia
-report = condense_internal!(op, weights, states, p, ctx)   # solves every q, stores correctors, writes the tail
-update_linearization!(op, r, states, p, ctx)                # pure evaluation at frozen q
+report = condense_internal!(op, weights, states, p, ctx)   # phase one: solve every local problem
+update_linearization!(op, r, states, p, ctx)                # phase two: evaluate at fixed local state
 ```
 
+**Phase one solves every local problem, at every trial point.**
+[`condense_internal!`](@ref) makes its own traversal of the domain and calls
+[`condense_cell!`](@ref) (cell items) or [`condense_algebraic!`](@ref)
+(algebraic items) once per item. Those hooks solve that item's local problem,
+write the trial `q` into the `[ū; q]` tail and — under the default
+[`Stored`](@ref) election — store the item's corrector in an element-allocated
+[`ItemStates`](@ref) cache field. They are the only hooks allowed to EVOLVE
+internal state, and [`condense_internal!`](@ref) is the only writer of `q`.
+"Every trial point" is literal: `q` is a function of the trial `ū`, not of the
+time step, so a Newton iterate, a line-search probe and a finite-difference
+perturbation each need their own phase one.
+
+**Phase two is a pure evaluation at the local state phase one left behind.**
+Every sweep afterwards — [`update_linearization!`](@ref), [`evaluate!`](@ref),
+[`assemble_weighted_jacobian!`](@ref), the sensitivity sweeps,
+[`evaluate_functional`](@ref) — is a pure function of `(ū, q, p, t)` at whatever
+`q` the tail currently holds. `assemble_cell!` kernels receive `q` as an
+already-gathered slot and never write back, which is what makes a sweep
+repeatable: split Jacobian-then-residual passes, AD chunk passes and parallel
+devices all evaluate the same thing.
+
 A sweep that only evaluates the residual reads `q` and no corrector, so passing
-`weights = nothing` elects a residual-only condensation: the same local solves,
-the same `q` down to the bit, no corrector formed. It invalidates the corrector
+`weights = nothing` elects a residual-only phase one: the same local solves, the
+same `q` down to the bit, no corrector formed. It invalidates the corrector
 stores as it goes, so a `Consistent` sweep at that state throws instead of
 combining an earlier trial point's corrections; condensing again with weights
 restores them.
@@ -546,17 +576,46 @@ condense_internal!(op, nothing, states, p, ctx)            # solves every q, for
 evaluate!(op, r, states, p, ctx)                           # the only sweep this state admits
 ```
 
-[`condense_internal!`](@ref) is the ONLY writer of `q`: it runs once over the
-whole domain, solves each quadrature point's local problem in
-[`condense_cell!`](@ref) — the one element hook allowed to evolve internal
-state — writes the trial `q` into the
-`[ū; q]` tail, and stores a corrector (an element-allocated
-[`ItemStates`](@ref) cache field) that the `Consistent` correction mode reads.
-Every evaluation sweep afterwards is a PURE function of `(ū, q, p, t)` at
-frozen `q`; no sweep writes back. `q` is gathered through an
-[`InternalSource`](@ref) slot like any other state — declared at setup
-(`slots = (:u, :q, …)`) and sourced per call (`states = (u = u, q =
-InternalSource(u), …)`).
+#### Freshness: condense before assembling
+
+The two phases are ordered, and keeping them in order is the caller's job:
+
+- mutating the solution vector moves the trial point, so phase one must run
+  again before the next sweep. The solver's own `ū .+= Δu` happens outside this
+  package and is invisible to it;
+- [`rollback_state!`](@ref) restores the committed solution and INVALIDATES
+  every corrector the operator carries — they were formed for the discarded
+  trial's `q`. [`commit_state!`](@ref) invalidates nothing: the committed point
+  is the last condensed point;
+- a residual-only phase one invalidates the correctors up front, so a residual
+  sweep is the only one that state admits.
+
+Under [`Stored`](@ref) a `Consistent` sweep reading a never-condensed or
+invalidated corrector throws, naming the item ([`item_state`](@ref)); under
+[`Recompute`](@ref) there is no store to stamp, so nothing detects it. Neither
+guard covers the same vector mutated in place between a phase one and a sweep,
+which is the one hazard the framework cannot close structurally. **Forgetting to
+re-condense is therefore silently wrong, not an error.** In a solve it is benign
+in kind — the residual stays exact, so Newton stalls visibly rather than
+converging to the wrong answer — while a sensitivity taken at a stale `q` is
+simply a different derivative than the caller believes.
+
+#### This is not operator splitting
+
+"Local, then global" here is EXACT ELIMINATION inside one implicit solve: phase
+one solves the local conditions `L(ū, q, θ, t) = 0` at the current trial `ū`,
+phase two evaluates the same coupled system at that `q`, and the pair is the
+monolithic system reorganized — no term of the residual is deferred and no error
+is introduced beyond the local solves' own tolerance. A reaction–diffusion-style
+operator split is a different object: a TIME-DISCRETIZATION scheme that advances
+different terms of one equation over the same interval in sequence, carrying a
+splitting error that is a property of the step and does not vanish as the local
+solves converge. Both are described as "local then global", and conflating them
+turns an exact reorganization into an approximation or an approximation into an
+exactness claim. Splitting is a solver design that lives above this package; the
+two-stage protocol lives inside a single implicit solve.
+
+### The corrector election
 
 Whether the corrector is stored at all is a construction-time election
 ([`CorrectorElection`](@ref)), because per-quadrature-point corrector storage
@@ -576,28 +635,21 @@ application would otherwise re-derive the same corrector. Write the element so
 the election is invisible to its kernels: read the corrector through ONE
 access point that either reads the store or recomputes.
 
-What the election costs beyond memory is the freshness guard and, possibly,
-the kernel's input requirements. Under `Recompute()` there is no stamp, so
-nothing detects a missing [`condense_internal!`](@ref) — the q-ordering
-contract is unchanged, only its enforcement is gone. And a recomputing access
-point reads whatever the closed form needs: a corrector re-derived from
-`(u, q)` and the stage scaling makes `stage_scaling(args.ctx)` a requirement
-of every Jacobian sweep, where the stored election reads the retained block and
-needs no context at all — which is exactly what the shipped
-`SimpleCondensedLinearViscoelasticity` does (see the
+What the election costs beyond memory is the freshness guard — with no store
+there is nothing to stamp, so the detection above is gone while the ordering
+contract is unchanged — and, possibly, the kernel's input requirements.
+A recomputing access point reads whatever the closed form needs:
+a corrector re-derived from `(u, q)` and the stage scaling makes
+`stage_scaling(args.ctx)` a requirement of every Jacobian sweep, where the
+stored election reads the retained block and needs no context at all — which is
+exactly what the shipped `SimpleCondensedLinearViscoelasticity` does (see the
 [example element reference](example-elements.md)).
 
 A Jacobian-shaped kind's [`CorrectionMode`](@ref) (`Consistent`, the default,
 or `FrozenQ`) selects the total `∂F/∂·|_q + ∂F/∂q · dq/d·` or the partial
 `∂F/∂·|_q` alone; `FrozenQ` must always be spelled and is refused at
 construction for the sensitivity kinds (a wrong gradient, unlike a wrong
-iteration matrix, is never a legitimate election). Reading an uncondensed or
-stale corrector throws, naming the cell; [`rollback_state!`](@ref) invalidates
-every corrector the operator carries (a rejected trial's `q` is stale),
-[`commit_state!`](@ref) does not (the committed point is the last condensed
-point). [`condensed_update_linearization!`](@ref) is the fused convenience
-entry point — condense, bail out on `!report.converged`, evaluate — that a
-Newton loop calls once per trial point.
+iteration matrix, is never a legitimate election).
 
 Declare [`has_internal_state`](@ref) for such caches — it governs the
 sensitivity admissibility rules in

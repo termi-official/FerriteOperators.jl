@@ -362,16 +362,15 @@ Recorded so they are not rediscovered as surprises.
 
 **Freshness is not structurally closable, and the residual hazard is named.**
 The solver writes `u .+= Δu` outside the package entirely, so no hook sees it.
-Four independent guards narrow the window — corrector stamping,
-[`condensed_update_linearization!`](@ref) making the correct sequence the
-convenient one, [`rollback_state!`](@ref) invalidating where
-[`commit_state!`](@ref) does not, and [`check_derivatives`](@ref) re-condensing
-at every trial point — but **what remains uncovered is the same vector mutated
-in place between condensation and a sensitivity sweep.** For a *solve* that is
-benign in kind: the residual is still exact, so Newton stalls visibly rather
-than converging to a wrong answer. For a *sensitivity* it is silently wrong, and
-an optimizer will consume the gradient happily. The documentation names that
-case rather than implying the guards are complete.
+Three independent guards narrow the window — corrector stamping,
+[`rollback_state!`](@ref) invalidating where [`commit_state!`](@ref) does not,
+and [`check_derivatives`](@ref) re-condensing at every trial point — but **what
+remains uncovered is the same vector mutated in place between condensation and a
+sensitivity sweep.** For a *solve* that is benign in kind: the residual is still
+exact, so Newton stalls visibly rather than converging to a wrong answer. For a
+*sensitivity* it is silently wrong, and an optimizer will consume the gradient
+happily. The documentation names that case rather than implying the guards are
+complete.
 
 **Per-quadrature-point corrector storage is the binding constraint at scale**, and
 it is why [`Recompute`](@ref) is a first-class election rather than a fallback:

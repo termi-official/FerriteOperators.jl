@@ -387,6 +387,14 @@ function _composite_declared_dofs(integrator, declarations::Tuple, hook)
     return reference
 end
 
+# A composite answers every declaration hook out of its sub-integrators', so
+# each of them is a declaration subject in its own right.
+function _declaration_subjects!(subjects, integrator::AnyCompositeIntegrator)
+    push!(subjects, integrator)
+    foreach(sub -> _declaration_subjects!(subjects, sub), integrator.subintegrators)
+    return subjects
+end
+
 """
     facet_items(integrator::AnyCompositeIntegrator, sdh)
     setup_facet_item_cache(integrator::AnyCompositeIntegrator, sdh)
