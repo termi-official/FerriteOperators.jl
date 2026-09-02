@@ -196,6 +196,26 @@ stationary_ctx(t) = TimeIntegrationContext(t, 1.0, 1.0)
         @test vs ≈ vp rtol = 1e-12
     end
 
+    @testset "AD work buffers are per worker" begin
+        # Race class: Dual work buffers shared between duplicated workers, whose
+        # concurrent seeding drops whole element contributions from a sweep.
+        pstrategy = AssemblyStrategy(PolyesterDevice(min_items_per_worker = 2); scheduling = ColoredScheduling())
+        topp = setup_operator(pstrategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
+        workers = first(topp.engine.subdomain_caches).device_cache
+        @test length(workers) ≥ min(Threads.nthreads(), 2)   # the assertion below needs real duplicates
+        ad_duals(ws) = (bufs = ws.element.buffers;
+                        (bufs.jac_cfg.duals..., bufs.grad_cfg.duals, bufs.deriv_cfg.duals))
+        @test allunique(objectid(d) for ws in workers for d in ad_duals(ws))
+
+        tops = setup_operator(strategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
+        gs = zeros(n); time_sensitivity!(gs, tops, (u = u,), nothing, stationary_ctx(0.9))
+        @test all(1:20) do _
+            fresh = setup_operator(pstrategy, TimeSourceDiffusionIntegrator(qrc, :u), dh)
+            gp = zeros(n); time_sensitivity!(gp, fresh, (u = u,), nothing, stationary_ctx(0.9))
+            isapprox(gp, gs; rtol = 1.0e-13)
+        end
+    end
+
     @testset "bilinear element inside a nonlinear operator" begin
         # A bilinear element must carry a residual kernel so it composes into
         # nonlinear operators.

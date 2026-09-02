@@ -119,15 +119,21 @@ end
 function create_ad_element_buffers(inner, sdh, n_global_dofs::Int = 0)
     vₑ = pad_element_vector(allocate_element_unknown_vector(inner, sdh), n_global_dofs)
     re = pad_element_vector(allocate_element_residual_vector(inner, sdh), n_global_dofs)
-    return _create_ad_element_buffers(inner, vₑ, re, true)
+    return _ad_element_buffers(vₑ, re, has_internal_state(typeof(inner)) ? getnquadpoints(inner) : 0)
 end
 
+# The `:q` configs are sized from `getnquadpoints`, a cell-cache contract, so an
+# item family described by a dof count alone (an algebraic item) keeps them at
+# `nothing`.
 create_ad_element_buffers(inner, ndofs::Int, ::Type{T}) where {T} =
-    _create_ad_element_buffers(inner, zeros(T, ndofs), zeros(T, ndofs), false)
+    _ad_element_buffers(zeros(T, ndofs), zeros(T, ndofs), 0)
 
-# `supports_q_bootstrap`: the `:q` configs are sized from `getnquadpoints`, a
-# cell-cache contract, so an algebraic inner keeps them at `nothing`.
-function _create_ad_element_buffers(inner, vₑ, re, supports_q_bootstrap::Bool)
+# Every mutable member — the ForwardDiff configs included, which own the Dual
+# work buffers a sweep writes into — is allocated here, from the unknown- and
+# residual-sized prototypes and the item's `nqp` (0 where there is no `:q`
+# slot). A worker's buffers are therefore CONSTRUCTED, never assembled field by
+# field out of another worker's.
+function _ad_element_buffers(vₑ, re, nqp::Int)
     T   = eltype(re)
     tag       = ForwardDiff.Tag{FerriteOperatorsADTag, T}()
     chunk     = ForwardDiff.Chunk(vₑ)
@@ -144,8 +150,7 @@ function _create_ad_element_buffers(inner, vₑ, re, supports_q_bootstrap::Bool)
     L_cfg     = nothing
     Lₑ        = nothing
     Lq        = nothing
-    if supports_q_bootstrap && has_internal_state(typeof(inner))
-        nqp       = getnquadpoints(inner)
+    if nqp > 0
         qseed     = zeros(T, nqp)
         chunk_q   = ForwardDiff.Chunk(qseed)
         jac_cfg_q = ForwardDiff.JacobianConfig(nothing, re, qseed, chunk_q, tag)
@@ -155,22 +160,19 @@ function _create_ad_element_buffers(inner, vₑ, re, supports_q_bootstrap::Bool)
         L_cfg     = ForwardDiff.JacobianConfig(nothing, Lₑ, qseed, chunk_q, tag)
         Lq        = zeros(T, nqp, nqp)
     end
-    nq = Lₑ === nothing ? 0 : length(Lₑ)
     return ADElementBuffers(re, jac_cfg, deriv_cfg, grad_cfg, u_dual, re_dual, wseed, wdual, Vector{T}(),
-                            jac_cfg_q, Kq, L_cfg, Lₑ, Lq, Matrix{T}(undef, nq, 0), _copy_or_nothing(Lₑ))
+                            jac_cfg_q, Kq, L_cfg, Lₑ, Lq, Matrix{T}(undef, nqp, 0), _copy_or_nothing(Lₑ))
 end
 
 _copy_or_nothing(::Nothing) = nothing
 _copy_or_nothing(x) = copy(x)
 
-function duplicate_for_device(device, b::ADElementBuffers)
-    return ADElementBuffers(
-        copy(b.re), b.jac_cfg, b.deriv_cfg, b.grad_cfg,
-        copy(b.u_dual), copy(b.re_dual), copy(b.wseed), copy.(b.wdual), copy(b.θ),
-        b.jac_cfg_q, _copy_or_nothing(b.Kq),
-        b.L_cfg, _copy_or_nothing(b.Lₑ), _copy_or_nothing(b.Lq), copy(b.Lθ), _copy_or_nothing(b.qsc),
-    )
-end
+# A worker's own buffers, built from this one's shapes — the ForwardDiff configs
+# cannot be shared, their Dual work buffers being written on every seeded call.
+# The lazily grown members (`θ`, `Lθ`, `wdual`) come back at their initial size
+# and regrow on first use.
+duplicate_for_device(device, b::ADElementBuffers) =
+    _ad_element_buffers(zero(b.wseed), zero(b.re), b.Lₑ === nothing ? 0 : length(b.Lₑ))
 
 """
     weighted_seed_buffers!(buf::ADElementBuffers, nslots) -> Vector of Dual buffers
