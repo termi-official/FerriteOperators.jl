@@ -94,14 +94,14 @@ end
 ```
 
 [The layer contract](devdocs/design.md) has the layer table that names who owns
-what along that path — requests, protocols, engines and workspaces included.
+what along that path — requests, engines and workspaces included.
 
 ## Where to read on
 
 - [Writing elements](elements.md) — request-typed kernels, the cell/facet
   argument bundle, values reinitialization, parameter queries, analytic
   opt-ins, condensed elements, functionals.
-- [Operators and entry points](operators.md) — setup and scheme protocols,
+- [Operators and entry points](operators.md) — setup and its declarations,
   the assembly entry points, slots and rate reconstruction, sensitivities,
   weighted Jacobians, component bags and stage operators, derivative
   verification, quadrature data, transfer operators.

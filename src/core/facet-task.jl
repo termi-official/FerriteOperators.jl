@@ -391,7 +391,7 @@ function _assert_facet_analytic(D::Type, kind)
 end
 
 """
-    setup_facet_item_caches(strategy, integrator, dh, protocol, ivh; slots, needs_sensitivity, facet_item_global_dof_sets)
+    setup_facet_item_caches(strategy, integrator, dh, declared_kinds, ivh; slots, needs_sensitivity, facet_item_global_dof_sets)
 
 The `SubdomainCache`s of the facet item family, one per subdomain that
 declares [`facet_items`](@ref): resolve and validate the declaration, build the
@@ -403,7 +403,7 @@ Unlike the algebraic family, nothing has to be resolved before the
 (its owning cell's `q` belongs to the cell family's item for that cell), so the
 declaration cannot change the `[ū | q_cells | q_items]` layout.
 """
-function setup_facet_item_caches(strategy, integrator, dh, protocol, ivh;
+function setup_facet_item_caches(strategy, integrator, dh, declared_kinds, ivh;
         slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, facet_item_global_dof_sets)
     device = strategy.device
     caches = SubdomainCache[]
@@ -412,7 +412,7 @@ function setup_facet_item_caches(strategy, integrator, dh, protocol, ivh;
         isempty(declared) && continue
         items = resolve_facet_items(index, sdh, declared)
         cache = setup_facet_item_cache(integrator, sdh)
-        validate_facet_item_cache(cache, get_declared_kinds(protocol))
+        validate_facet_item_cache(cache, declared_kinds)
         partition = compute_partition(strategy, FacetItems(sdh, items))
         ws = create_facet_item_workspace(cache, items, sdh, ivh, slots; needs_sensitivity, global_dofs = gdofs)
         dc = setup_device_instances(device, ws, n_workers(device, partition))

@@ -197,9 +197,8 @@ has.
 Elements then serve it like any built-in kind — `provides_analytic(::Type{<:MyCache}, ::MyKind) = true`
 plus an `assemble_cell!(req::MyRequest, cache::MyCache, args)` method — and the
 operator issues it through `assemble_into!(MyKind(), (A,), op, states, p, ctx)`.
-Declaring it (`setup_operator(...; requests = (MyKind,))`, or a protocol whose
-`get_declared_kinds` names it) selects its sweep-state family and runs its
-setup-time trait ↔ kernel validation.
+Declaring it (`setup_operator(...; requests = (MyKind,))`) selects its
+sweep-state family and runs its setup-time trait ↔ kernel validation.
 
 Thirteen provided bodies exist, across the four workspace types:
 
@@ -229,7 +228,7 @@ kernel" and forwards through the decorators unchanged.
 **New per-worker state** — a workspace is a fixed core (geometry cache, slot
 buffers, `Ke`/`re`) plus [`SensitivityBuffers`](@ref), present exactly when
 [`needs_ad_decoration`](@ref) says so — structural, by integrator family, not
-by protocol declaration. The workspace itself is immutable, so a sweep fills
+by declaration. The workspace itself is immutable, so a sweep fills
 buffers and never rebinds a field. There is no third, downstream-openable
 family: an element cache wanting its own per-worker scratch carries it as an
 ordinary cache field, duplicated per worker by its own `duplicate_for_device`

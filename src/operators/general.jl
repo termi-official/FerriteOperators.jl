@@ -101,17 +101,21 @@ _domain_assembles(domain::AssemblyDomain) = !(domain.element isa EmptyVolumetric
 
 The assembly machinery shared by all operators: the execution strategy, the
 per-subdomain caches (workspaces + partitions), the dof handler the operator
-assembles against, the engine-scoped internal-variable handler, and the scheme
-protocol carrying the setup-time declarations ([`AbstractSchemeProtocol`](@ref)).
+assembles against, the engine-scoped internal-variable handler, and the
+setup-time declarations [`setup_engine`](@ref) was given.
 Operators are payload (matrices/vectors) plus an engine plus their integrator.
 """
 @concrete struct AssemblyEngine
     strategy
     subdomain_caches
     dh
-    ivh         # shared by all subdomains
-    protocol    # the setup-time declarations
+    ivh               # shared by all subdomains
+    declared_slots    # the slot names the per-worker buffers are sized for
+    declared_kinds    # the declared request kinds, as their UnionAll bases
 end
+
+_declared_slots(engine::AssemblyEngine) = engine.declared_slots
+_declared_kinds(engine::AssemblyEngine) = engine.declared_kinds
 
 """
     execute_on_subdomains!(task, engine)

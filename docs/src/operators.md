@@ -23,53 +23,60 @@ sensitivity is the request kind, not a separate driver.
 integrator encodes — a nonlinear residual, the action of the linear operator a
 bilinear form induces, a hand-fused scheme residual.
 
-## Scheme protocols
+## Setup-time declarations
 
-What a scheme asks of an operator is setup-time knowledge, and a *protocol* is
-where it is declared:
+What a scheme asks of an operator is setup-time knowledge, and the `slots` and
+`requests` keywords of [`setup_operator`](@ref) are where it is declared — slot
+names and request kinds, nothing else:
 
 ```julia
-struct SDIRKWProtocol <: AbstractSchemeProtocol end
-FerriteOperators.get_declared_slots(::SDIRKWProtocol) = (:u, :du)
-FerriteOperators.get_declared_kinds(::SDIRKWProtocol) = (WeightedJacobianKind, ResidualKind)
-
-op = setup_operator(strategy, integrator, dh, SDIRKWProtocol())
+# the SDIRK-W scheme: two slots, the weighted Jacobian it solves with, and the
+# residual it drives with
+op = setup_operator(strategy, integrator, dh;
+                    slots = (:u, :du),
+                    requests = (WeightedJacobianKind, ResidualKind))
 ```
 
-Protocols are **declarations only**: slot names and request kinds. They carry
-no coefficients — γ, tableaus and weights are per-evaluation solver data —
-and nothing term-shaped; a term needing its own context or sink is its own
-sweep.
+Declarations carry no coefficients — γ, tableaus and weights are
+per-evaluation solver data — and nothing term-shaped; a term needing its own
+context or sink is its own sweep.
 
-The keyword form is sugar whose keywords are the [`DefaultProtocol`](@ref)
-constructor arguments, so both forms build the same operator:
+`slots` sizes the buffers: the engine allocates one per-worker slot buffer per
+name, and a sweep whose `states` name a slot the operator never declared fails
+loudly instead of erroring per cell. Slot type tags are reserved vocabulary —
+names are the whole declaration.
+
+`requests` moves checks forward: declaring a kind runs its trait ↔ kernel and
+internal-state admissibility checks eagerly at `setup_operator` instead of on
+first use — an inadmissible adjoint fails when the operator is built, not
+mid-solve — and builds its per-worker sweep-state family there too. Kinds are
+normalized to their UnionAll base, so an instance or a payload-parameterized
+type (`ParameterVJPKind(zeros(n))`) declares the same kind as its bare name:
 
 ```julia
 op = setup_operator(strategy, integrator, dh;
                     requests = (ParameterVJPKind, TimeSensitivityKind))
 ```
 
-Declaring a kind runs its trait ↔ kernel and internal-state admissibility
-checks eagerly at `setup_operator` instead of on first use — an inadmissible
-adjoint fails when the operator is built, not mid-solve. Which element caches
-carry [`ADElementCache`](@ref) decoration, and whether the workspace carries
-[`SensitivityBuffers`](@ref) at all, is decided separately and structurally by
-the integrator family ([`needs_ad_decoration`](@ref)) — a bilinear or linear
-operator carries no AD/sensitivity machinery whatever an element cache does or
-does not implement analytically, whatever the protocol declares. The
-workspace is immutable — every field is bound at `setup_operator`, and a sweep
-works by filling the buffers those fields point at.
+Which element caches carry [`ADElementCache`](@ref) decoration, and whether the
+workspace carries [`SensitivityBuffers`](@ref) at all, is decided separately and
+structurally by the integrator family ([`needs_ad_decoration`](@ref)) — a
+bilinear or linear operator carries no AD/sensitivity machinery whatever an
+element cache does or does not implement analytically, and whatever is
+declared. The workspace is immutable — every field is bound at
+`setup_operator`, and a sweep works by filling the buffers those fields point
+at.
 
 Declaring a [`FunctionalKind`](@ref) builds **nothing**, which is the feature
 rather than an omission: a functional sweep's kernel returns the cell's
 contribution and the sweep folds the returned values, so it has no per-worker
 state to allocate and nothing to reset between evaluations. What such a kind
-does declare is its reduction's value type, on the kind rather than on the
-protocol — [`FerriteOperators.functional_value_type`](@ref), required under a
-parallel device and described with the kernel hook in
+does declare is its reduction's value type, on the kind rather than at setup —
+[`FerriteOperators.functional_value_type`](@ref), required under a parallel
+device and described with the kernel hook in
 [Writing elements](@ref Functionals).
 
-Declaring stays a hint, never a capability restriction: undeclared kinds
+Declaring a kind stays a hint, never a capability restriction: undeclared kinds
 remain usable and simply run their checks at the call-time entry points
 instead of at setup.
 

@@ -367,7 +367,7 @@ function _algebraic_item_offsets(integrator, cache, items)
 end
 
 """
-    resolve_algebraic_domain(integrator, dh, protocol) -> (cache, items) or `nothing`
+    resolve_algebraic_domain(integrator, dh, declared_kinds) -> (cache, items) or `nothing`
 
 The [`algebraic_items`](@ref) declaration resolved and validated once, before
 [`setup_internal_variable_handler`](@ref) or any decoration: `nothing` where
@@ -377,17 +377,17 @@ the integrator declares no items, otherwise the raw cache
 cache's item block, and what [`setup_algebraic_caches`](@ref) needs to finish
 the domain.
 """
-function resolve_algebraic_domain(integrator, dh, protocol)
+function resolve_algebraic_domain(integrator, dh, declared_kinds)
     declared = algebraic_items(integrator, dh)
     isempty(declared) && return nothing
     items = resolve_algebraic_items(declared, ndofs(dh))
     cache = setup_algebraic_cache(integrator, dh)
-    validate_algebraic_cache(cache, get_declared_kinds(protocol))
+    validate_algebraic_cache(cache, declared_kinds)
     return (cache, items)
 end
 
 """
-    setup_algebraic_caches(strategy, algebraic_domain, protocol, ad_backend, needs_sensitivity, ivh)
+    setup_algebraic_caches(strategy, algebraic_domain, slots, ad_backend, needs_sensitivity, ivh)
 
 The `SubdomainCache`s of the algebraic family, finishing what
 [`resolve_algebraic_domain`](@ref) resolved: decorate the cache, derive the
@@ -396,14 +396,14 @@ partition, and build the shared [`AlgebraicWorkspace`](@ref) against `ivh`.
 [`setup_engine`](@ref) appends the result after the cell subdomains, so a
 sweep's traversal order stays deterministic.
 """
-function setup_algebraic_caches(strategy, algebraic_domain, protocol, ad_backend, needs_sensitivity::Bool, ivh)
+function setup_algebraic_caches(strategy, algebraic_domain, slots::NTuple{<:Any, Symbol}, ad_backend, needs_sensitivity::Bool, ivh)
     algebraic_domain === nothing && return SubdomainCache[]
     cache, items = algebraic_domain
     device = strategy.device
     T      = value_type(device)
     resolved  = needs_sensitivity ? decorate_algebraic_cache(cache, length(first(items)), ad_backend, T) : cache
     partition = compute_partition(strategy, AlgebraicItems(items))
-    ws = create_algebraic_workspace(resolved, items, get_declared_slots(protocol), T, ivh; needs_sensitivity)
+    ws = create_algebraic_workspace(resolved, items, slots, T, ivh; needs_sensitivity)
     dc = setup_device_instances(device, ws, n_workers(device, partition))
     return [SubdomainCache(AlgebraicDomain(resolved, items), dc, partition)]
 end

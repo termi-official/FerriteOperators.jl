@@ -278,9 +278,6 @@ are payload + engine + integrator; anything that read `op.dh`/`op.strategy`/
 `op.subdomain_caches` reads `op.engine.*`. `getJ(op) = op.J` style accessors
 keep working.
 
-The engine's setup-time declarations live on its scheme protocol:
-`get_declared_slots` and `get_declared_kinds` of `op.engine.protocol`.
-
 ## Per-worker mutable state
 
 The pattern of smuggling solver state into element caches (model-tree
@@ -291,13 +288,12 @@ local problems](elements.md)).
 
 ## New capabilities worth adopting during the port
 
-- **Scheme protocols**: `setup_operator(strategy, integrator, dh, protocol)` is
-  the positional form for scheme operators; the keyword form is sugar whose
-  keywords are `DefaultProtocol`'s constructor arguments, so
-  `setup_operator(strategy, integrator, dh; slots, requests)` keeps working
-  verbatim. Declarations move admissibility failures from first use to
-  `setup_operator`, and select which per-worker sweep-state families exist —
-  a bilinear or linear operator carries no AD machinery.
+- **Setup-time declarations**: `setup_operator(strategy, integrator, dh; slots,
+  requests)` is where a scheme says what it asks of an operator. `slots` sizes
+  the per-worker slot buffers; `requests` moves admissibility failures from
+  first use to `setup_operator` and selects which per-worker sweep-state
+  families exist. Which caches carry AD machinery is structural and separate —
+  a bilinear or linear operator carries none.
 - **Sensitivities**: `update_parameter_jacobian!(B, op, states, p, ctx)`,
   `parameter_vjp!(g, op, λ, states, p, ctx)`,
   `time_sensitivity!(g, op, states, p, ctx)` (AD by default, analytic kernels

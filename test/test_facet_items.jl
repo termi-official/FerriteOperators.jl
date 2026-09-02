@@ -528,7 +528,7 @@ end
         empty_partition = (engine = FerriteOperators.AssemblyEngine(
             op.engine.strategy,
             [FerriteOperators.SubdomainCache(sc.domain, sc.device_cache, (Int[],))],
-            op.engine.dh, op.engine.ivh, op.engine.protocol),)
+            op.engine.dh, op.engine.ivh, op.engine.declared_slots, op.engine.declared_kinds),)
         @test_throws ArgumentError evaluate_functional(empty_partition, FunctionalKind(:facet_area), u, nothing)
         @test_throws ArgumentError evaluate_functional(empty_partition, FunctionalKind(:facet_area_undeclared), u, nothing)
     end

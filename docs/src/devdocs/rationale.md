@@ -614,6 +614,40 @@ shape needs, and that requires a name for the shape.
 *Ruled 2026-08-19; the demotion did not happen. Record:
 `report2-adversarial-review.md` Angles 1 and 3.*
 
+### Why the scheme-protocol layer was deleted
+
+**Decision.** There is no protocol type. A scheme declares what it asks of an
+operator through the `slots` and `requests` keywords of
+[`setup_operator`](@ref), and the engine stores those two tuples. The
+`AbstractSchemeProtocol` abstract type, its `DefaultProtocol` implementation,
+the `get_declared_slots`/`get_declared_kinds` generics and the positional
+`setup_operator(strategy, problem, dh, protocol)` form are gone, unreleased.
+
+**Why.** The typed layer was worth a type only for the payloads it was going to
+carry beyond the two declarations — element scratch, a scheme-owned context
+type, gated workspace families — and every one of them eroded before the layer
+met its first consumer: scratch became a cache field, the context stayed an
+argument, and the property the workspace gating existed to engineer became
+structural by integrator family, so the gating mechanism was deleted rather
+than satisfied. Downstream the pressure never arrived either: Thunderbolt's
+solver types already carry scheme identity, and the solver-owned-time design
+drains what is left of scheme knowledge out of setup. What remained was one
+tuple of slot names and one tuple of kinds, reachable through an abstract type,
+two generics and a parameterized struct — a carrier heavier than its cargo, and
+one that made the keyword form documentation-visible sugar for something a user
+never had a reason to write.
+
+The keyword declarations are the surviving carrier and their behaviour is
+unchanged: declared slots still size the per-worker buffers, declared kinds
+still normalize to their UnionAll bases, still pull the trait ↔ kernel and
+admissibility checks to setup, and still build sweep state eagerly. If the
+reserved operator algebra below ever lands, it designs its own declaration
+surface rather than inheriting this one.
+
+*Ruled 2026-09-02. Record: `report4-architect-second-pass.md` Part C (R10, R12)
+and `report3-control-arm-minimal-path.md` §5.2, which put the layer on the
+block; the ruling itself is recorded here.*
+
 ### Eager by default, lazy only with a consumer
 
 **Decision.** Materialization is a **constructor choice**, stated in the type,

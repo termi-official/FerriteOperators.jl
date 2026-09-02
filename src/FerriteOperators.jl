@@ -142,8 +142,6 @@ export QuadratureDataQuery, prepare_quadrature_query, process_query!
 export setup_operator, update_operator!, update_linearization!, evaluate!
 export setup_evaluation_operator, EvaluationFerriteOperator
 export BilinearFerriteOperator, LinearFerriteOperator
-export AbstractSchemeProtocol, DefaultProtocol
-export get_declared_slots, get_declared_kinds
 export assemble_slot_jacobian!, assemble_weighted_jacobian!
 export allocate_components, share_pattern, combine!
 export StageBlockOperator, assemble_stages!

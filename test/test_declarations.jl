@@ -10,11 +10,11 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
 # and ∂F/∂du the mass matrix, so every weighted combination is known in closed
 # form. `fused` selects the flavour whose cache serves the weighted Jacobian
 # analytically; both flavours share the residual.
-const ProtocolDiffusionCache = CVCache{:protocol}
-const FusedDiffusionCache    = CVCache{:protocol_fused}
-const AnyDiffusionCache      = Union{ProtocolDiffusionCache, FusedDiffusionCache}
-ProtocolDiffusionIntegrator(qrc, field_name, fused = false) =
-    fused ? CVIntegrator{:protocol_fused}(qrc, field_name) : CVIntegrator{:protocol}(qrc, field_name)
+const DeclaredDiffusionCache = CVCache{:declared}
+const FusedDiffusionCache    = CVCache{:declared_fused}
+const AnyDiffusionCache      = Union{DeclaredDiffusionCache, FusedDiffusionCache}
+DeclaredDiffusionIntegrator(qrc, field_name, fused = false) =
+    fused ? CVIntegrator{:declared_fused}(qrc, field_name) : CVIntegrator{:declared}(qrc, field_name)
 
 function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::AnyDiffusionCache, args)
     transient_diffusion_residual!(req.r, cache, args)
@@ -29,16 +29,13 @@ end
 FerriteOperators.evaluate_cell_functional(::FunctionalKind{:mass}, cache::AnyDiffusionCache, args) =
     sum(qp -> getdetJdV(cache.cv, qp), 1:getnquadpoints(cache.cv))
 
-# The worked SDIRK-W scheme protocol: two slots, the weighted Jacobian it
+# The worked SDIRK-W declaration: two slots, the weighted Jacobian the scheme
 # solves with, and the residual. No coefficients — γ and Δt ride with the
 # evaluation, not with the declaration.
-struct SDIRKWProtocol <: AbstractSchemeProtocol end
-FerriteOperators.get_declared_slots(::SDIRKWProtocol) = (:u, :du)
-FerriteOperators.get_declared_kinds(::SDIRKWProtocol) = (WeightedJacobianKind, ResidualKind)
-
-function protocol_testbed(; fused = false, protocol = SDIRKWProtocol())
+function declared_testbed(; fused = false, slots = (:u, :du),
+        requests = (WeightedJacobianKind, ResidualKind))
     (; grid, dh, qrc, strategy) = scalar_quad_testbed((3, 2))
-    op  = setup_operator(strategy, ProtocolDiffusionIntegrator(qrc, :u, fused), dh, protocol)
+    op  = setup_operator(strategy, DeclaredDiffusionIntegrator(qrc, :u, fused), dh; slots, requests)
     Mop = setup_operator(strategy, SimpleBilinearMassIntegrator(1.0, qrc, :u), dh)
     Kop = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
     update_operator!(Mop, nothing)
@@ -46,23 +43,18 @@ function protocol_testbed(; fused = false, protocol = SDIRKWProtocol())
     return (; op, Mop, Kop, dh, grid, qrc, strategy, n = ndofs(dh))
 end
 
-@testset "Scheme protocols" begin
+@testset "Setup-time declarations" begin
     Δt  = 0.25
     γ   = 0.5
     ctx = TimeIntegrationContext(1.0, Δt, Δt)
     weights = (u = 1.0, du = 1 / (γ * Δt))
 
-    @testset "declarations-only surface" begin
-        p = SDIRKWProtocol()
-        @test get_declared_slots(p) == (:u, :du)
-        @test get_declared_kinds(p) == (WeightedJacobianKind, ResidualKind)
-    end
-
-    # A protocol only declares; the weighted-Jacobian VALUES on both routes are
+    # Declaring only declares; the weighted-Jacobian VALUES on both routes are
     # pinned against the bundled bilinear integrators in test_stage_block.jl.
     @testset "SDIRK-W witness: the declarations reach the engine" begin
-        tb = protocol_testbed(; fused = true)
-        @test get_declared_kinds(tb.op.engine.protocol) == (WeightedJacobianKind, ResidualKind)
+        tb = declared_testbed(; fused = true)
+        @test FerriteOperators._declared_slots(tb.op.engine) == (:u, :du)
+        @test FerriteOperators._declared_kinds(tb.op.engine) == (WeightedJacobianKind, ResidualKind)
 
         u  = sin.(0.3 .* (1:tb.n)); du = cos.(0.2 .* (1:tb.n))
         states = (u = u, du = du)
@@ -72,14 +64,14 @@ end
         assemble_weighted_jacobian!(W, tb.op, weights, states, nothing, ctx)
         @test FUSED_W_SWEEPS[] == getncells(tb.grid)     # one kernel call per cell, one sweep
 
-        # the residual the same protocol declares still runs
+        # the residual the same operator declares still runs
         r = zeros(tb.n)
         evaluate!(tb.op, r, states, nothing, ctx)
         @test r ≈ tb.Mop.A * du .+ tb.Kop.A * u rtol = 1e-12
     end
 
-    @testset "the same protocol over a non-analytic cache agrees" begin
-        tb = protocol_testbed(; fused = false)
+    @testset "the same declarations over a non-analytic cache agree" begin
+        tb = declared_testbed(; fused = false)
         u  = sin.(0.3 .* (1:tb.n)); du = cos.(0.2 .* (1:tb.n))
         states = (u = u, du = du)
 
@@ -94,27 +86,8 @@ end
         @test Wc.nzval ≈ W.nzval rtol = 1e-12
     end
 
-    @testset "the keyword form is sugar for DefaultProtocol" begin
-        (; dh, n, qrc, strategy) = scalar_quad_testbed((3, 2))
-        integrator = ProtocolDiffusionIntegrator(qrc, :u)
-
-        kw  = setup_operator(strategy, integrator, dh; slots = (:u, :du), requests = (StateJVPKind,))
-        pos = setup_operator(strategy, integrator, dh,
-                             DefaultProtocol(; slots = (:u, :du), requests = (StateJVPKind,)))
-        @test typeof(kw.engine.protocol) === typeof(pos.engine.protocol)
-        @test get_declared_slots(kw.engine.protocol) == get_declared_slots(pos.engine.protocol)
-        @test get_declared_kinds(kw.engine.protocol) == get_declared_kinds(pos.engine.protocol)
-
-        u = sin.(0.3 .* (1:n)); du = cos.(0.2 .* (1:n))
-        states = (u = u, du = du)
-        rkw = zeros(n); update_linearization!(kw, rkw, states, nothing, ctx)
-        rpos = zeros(n); update_linearization!(pos, rpos, states, nothing, ctx)
-        @test rkw == rpos
-        @test kw.J == pos.J
-    end
-
     @testset "sensitivity buffers are built structurally, by integrator family" begin
-        tb = protocol_testbed()
+        tb = declared_testbed()
         qrc = QuadratureRuleCollection(2)
 
         # bilinear and linear operators never carry sensitivity machinery —
@@ -130,44 +103,44 @@ end
     end
 
     @testset "workspaces are immutable" begin
-        tb = protocol_testbed()
+        tb = declared_testbed()
         @test !ismutable(first_workspace(tb.op))
         @test !ismutable(first_workspace(tb.Mop))
     end
 
     @testset "undeclared kinds stay usable" begin
-        tb = protocol_testbed()
+        tb = declared_testbed()
         u = sin.(0.3 .* (1:tb.n)); du = cos.(0.2 .* (1:tb.n))
         states = (u = u, du = du)
 
-        # SDIRKWProtocol declares neither the state JVP nor a functional
-        @test !(StateJVPKind in get_declared_kinds(tb.op.engine.protocol))
+        # the testbed declares neither the state JVP nor a functional
+        @test !(StateJVPKind in FerriteOperators._declared_kinds(tb.op.engine))
         Jv = zeros(tb.n); v = cos.(0.11 .* (1:tb.n))
         state_jvp!(Jv, tb.op, v, states, nothing, ctx)
         @test Jv ≈ tb.Kop.A * v rtol = 1e-10
 
         # a functional sweep reads no state, so an undeclared one just runs
-        @test !(FunctionalKind in get_declared_kinds(tb.op.engine.protocol))
+        @test !(FunctionalKind in FerriteOperators._declared_kinds(tb.op.engine))
         area = evaluate_functional(tb.op, FunctionalKind(:mass), states, nothing, ctx)
         @test area ≈ 4.0 rtol = 1e-12          # the [-1,1]² reference grid
 
         # …and declaring it builds nothing: the declaring operator answers the
         # same, and a bilinear one still carries no sensitivity buffers at all.
-        fop = setup_operator(tb.strategy, ProtocolDiffusionIntegrator(tb.qrc, :u), tb.dh,
-                             DefaultProtocol(; slots = (:u, :du), requests = (FunctionalKind,)))
+        fop = setup_operator(tb.strategy, DeclaredDiffusionIntegrator(tb.qrc, :u), tb.dh;
+                             slots = (:u, :du), requests = (FunctionalKind,))
         @test evaluate_functional(fop, FunctionalKind(:mass), states, nothing, ctx) == area
-        bfop = setup_operator(tb.strategy, SimpleBilinearMassIntegrator(1.0, tb.qrc, :u), tb.dh,
-                              DefaultProtocol(; requests = (FunctionalKind,)))
+        bfop = setup_operator(tb.strategy, SimpleBilinearMassIntegrator(1.0, tb.qrc, :u), tb.dh;
+                              requests = (FunctionalKind,))
         @test !carries_sensitivity_buffers(bfop)
     end
 
-    @testset "two operators from one protocol evaluate concurrently" begin
+    @testset "two operators from one declaration evaluate concurrently" begin
         (; dh, n, qrc, strategy) = scalar_quad_testbed((6, 5))
-        integrator = ProtocolDiffusionIntegrator(qrc, :u)
-        protocol = SDIRKWProtocol()
+        integrator = DeclaredDiffusionIntegrator(qrc, :u)
+        declarations = (slots = (:u, :du), requests = (WeightedJacobianKind, ResidualKind))
 
-        op1 = setup_operator(strategy, integrator, dh, protocol)
-        op2 = setup_operator(strategy, integrator, dh, protocol)
+        op1 = setup_operator(strategy, integrator, dh; declarations...)
+        op2 = setup_operator(strategy, integrator, dh; declarations...)
 
         # no mutable state is shared between the two caches
         @test op1.J !== op2.J
@@ -247,12 +220,6 @@ FerriteOperators.materialize_request(::OrphanKind, ws) = OrphanRequest(ws.Ke)
 FerriteOperators.assembles_matrix(::OrphanKind) = true
 FerriteOperators.provides_analytic(::Type{<:AnyDiffusionCache}, ::OrphanKind) = true
 
-struct CustomKindProtocol{K <: Tuple} <: AbstractSchemeProtocol
-    kinds::K
-end
-FerriteOperators.get_declared_slots(::CustomKindProtocol)  = (:u, :du)
-FerriteOperators.get_declared_kinds(p::CustomKindProtocol) = p.kinds
-
 # Measured inside a function: at testset scope `A` and the operator are
 # captured variables, and on Julia 1.10 the boxing of those captures is charged
 # to the call being measured rather than to the sweep.
@@ -264,7 +231,7 @@ end
 
 @testset "Custom request kinds" begin
     @testset "matrix kind on the primal driver body" begin
-        tb = protocol_testbed(protocol = CustomKindProtocol((ScaledStiffnessKind,)))
+        tb = declared_testbed(; requests = (ScaledStiffnessKind,))
         A = allocate_matrix(tb.dh)
         FerriteOperators.assemble_into!(ScaledStiffnessKind(), (A,), tb.op, (;), nothing, nothing)
         @test A ≈ 2.5 * tb.Kop.A rtol = 1e-13
@@ -278,16 +245,16 @@ end
     @testset "trait claimed without a kernel errors at setup" begin
         (; dh, qrc, strategy) = scalar_quad_testbed((3, 2))
         @test_throws ArgumentError setup_operator(
-            strategy, ProtocolDiffusionIntegrator(qrc, :u), dh, CustomKindProtocol((OrphanKind,)))
+            strategy, DeclaredDiffusionIntegrator(qrc, :u), dh; requests = (OrphanKind,))
     end
 
     @testset "sensitivity-shaped downstream kind reads ws.sensitivity directly" begin
-        plain = protocol_testbed(protocol = CustomKindProtocol((ResidualProbeKind,)))
+        plain = declared_testbed(; requests = (ResidualProbeKind,))
 
         # A bilinear operator carries no sensitivity buffers whatever it
         # declares — structural, by integrator family, not by declaration.
         declared = setup_operator(plain.strategy, SimpleBilinearMassIntegrator(1.0, plain.qrc, :u),
-                                  plain.dh, DefaultProtocol(; requests = (ResidualProbeKind,)))
+                                  plain.dh; requests = (ResidualProbeKind,))
         @test !carries_sensitivity_buffers(declared)
 
         n = plain.n
