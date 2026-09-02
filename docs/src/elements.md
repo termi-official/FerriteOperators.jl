@@ -391,6 +391,12 @@ Declaring the kind (`setup_operator(...; requests = (ParameterJacobianKind,))`)
 makes setup demand that kernel loudly, instead of letting a sweep reach a
 missing method.
 
+**Several terms on one subdomain.** Facet-item terms compose through
+[`NonlinearCompositeIntegrator`](@ref) and its siblings: the composite declares
+the union of the inners' facets and re-gates the fan-out per inner, so terms on
+overlapping sets — a boundary spring and a dashpot on the same surface — share
+one item and one traversal (see [Composition](#Composition)).
+
 One thing a facet item deliberately does not do: it never calls
 [`reinit_values!`](@ref) — a facet kernel reinitializes its own `FacetValues`
 for the local facet index it was handed, on this route exactly as on the fused
@@ -719,11 +725,25 @@ The inners share one local system, so they share its tail: a composite's
 [`global_dofs`](@ref) are what its inners declare. Silent inners (the default
 `()`) read the tail a declaring inner puts there; two inners declaring
 *different* dofs is an `ArgumentError` at setup, there being no unambiguous
-tail for the composed local system to have.
+tail for the composed local system to have. Each family answers from its own
+hook, by the same rule: a composite's [`facet_item_global_dofs`](@ref) is
+derived from the inners exactly as its [`global_dofs`](@ref) is, and neither
+declaration leaks into the other family's local system.
 
-[`CompositeVolumetricElementCache`](@ref) and
-[`CompositeSurfaceElementCache`](@ref) are the caches these integrators build,
-and remain available for hand-built compositions.
+Facet-item terms compose too: a composite declares the **sorted union** of its
+inners' [`facet_items`](@ref), and the [`CompositeFacetItemCache`](@ref) it
+builds re-gates the fan-out on each inner's own set — an inner integrates
+exactly the facets it declared, as it does behind the fused route's per-inner
+[`is_facet_in_cache`](@ref) gate. Taking the union is what makes two terms
+supported on the *same* facet legal: they are one item, declared once and
+assembled by both. Inners declaring nothing contribute to neither the
+declaration nor the cache, so an all-silent composite keeps the additive `()`
+default and a single declaring inner's cache is returned unwrapped.
+
+[`CompositeVolumetricElementCache`](@ref),
+[`CompositeSurfaceElementCache`](@ref) and [`CompositeFacetItemCache`](@ref)
+are the caches these integrators build, and remain available for hand-built
+compositions.
 
 Routing and composition compose in one order — a `*MultiDomainIntegrator`
 whose values are composite integrators. A composite of routers is not

@@ -250,6 +250,15 @@ one `W`: a composite surface cache routes per inner, so the pair is legal even
 though neither inner serves both slots. The composition runs over a per-worker
 scratch element matrix, so it allocates nothing per facet.
 
+On the **facet-item route** ([`facet_items`](@ref)) the fused kernel is the
+*only* route: there is no per-slot fold, so a cache serving a weighted sweep
+there implements `assemble_facet!(::WeightedJacobianRequest, …)` and declares
+it through [`provides_analytic`](@ref). A cache without it is an
+`ArgumentError` naming that kernel — at `setup_operator` where the kind is
+declared, and on the first item swept otherwise. A
+[`CompositeFacetItemCache`](@ref) still routes **per inner**, so the
+spring/dashpot pair stays legal once each inner carries its own fused kernel.
+
 An [`AffineRate`](@ref) slot may participate only through an analytic weighted
 kernel: reconstructed slots are frozen under AD, while a kernel forming the
 combination itself sees the slope through its weights. That exemption is what

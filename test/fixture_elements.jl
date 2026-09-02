@@ -213,6 +213,79 @@ FerriteOperators.setup_facet_item_cache(m::FacetItemProbe, sdh::SubDofHandler) =
     FerriteOperators.setup_boundary_cache(m.inner, sdh)
 
 ####################################
+## Robin facet element double — the pericardium shape
+####################################
+# A boundary spring reading `:u` next to a boundary dashpot reading `:v`, each
+# with the single-slot facet Jacobian it has and no fused weighted kernel.
+# `slot` spells which state the term reads, so one cache type serves both;
+# `fused` additionally declares the weighted facet kernel — the only route the
+# facet-item family takes, and the one the fused boundary driver prefers over
+# composing the per-slot ones.
+
+struct RobinFacetCache{slot, fused, FV <: FacetValues} <: FerriteOperators.AbstractSurfaceElementCache
+    k::Float64
+    fv::FV
+    facetset::Set{FacetIndex}
+end
+RobinFacetCache{slot, fused}(k, fv, facetset) where {slot, fused} =
+    RobinFacetCache{slot, fused, typeof(fv)}(k, fv, facetset)
+
+struct RobinFacetIntegrator{slot, fused} <: AbstractNonlinearIntegrator
+    k::Float64
+    field_name::Symbol
+    facetset::Set{FacetIndex}
+end
+RobinFacetIntegrator(k, field_name, facetset; slot = :u, fused = false) =
+    RobinFacetIntegrator{slot, fused}(k, field_name, facetset)
+
+FerriteOperators.setup_element_cache(::RobinFacetIntegrator, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+function FerriteOperators.setup_boundary_cache(m::RobinFacetIntegrator{slot, fused}, sdh::SubDofHandler) where {slot, fused}
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    fqr    = FacetQuadratureRule{Ferrite.getrefshape(ip)}(2)
+    return RobinFacetCache{slot, fused}(m.k, FacetValues(fqr, ip, ip_geo), m.facetset)
+end
+FerriteOperators.duplicate_for_device(device, c::RobinFacetCache{slot, fused}) where {slot, fused} =
+    RobinFacetCache{slot, fused}(c.k, FerriteOperators.duplicate_for_device(device, c.fv), c.facetset)
+FerriteOperators.is_facet_in_cache(idx::FacetIndex, cell, c::RobinFacetCache) = idx ∈ c.facetset
+
+# r(v) = k ∫_Γ s·v dΓ over the cache's own slot `s`: ∂r/∂s is k times the facet
+# mass matrix and ∂r/∂(every other slot) is zero.
+function _robin_facet!(req, c::RobinFacetCache{slot}, args, lfi, scale = 1.0) where {slot}
+    reinit!(c.fv, args.cell, lfi)
+    sₑ = args.states[slot]
+    for qp in 1:getnquadpoints(c.fv)
+        dΓ = getdetJdV(c.fv, qp)
+        for i in 1:getnbasefunctions(c.fv)
+            Nᵢ = shape_value(c.fv, qp, i) * dΓ
+            req isa ResidualRequest && (req.r[i] += scale * c.k * function_value(c.fv, qp, sₑ) * Nᵢ)
+            req isa JacobianRequest && for j in 1:getnbasefunctions(c.fv)
+                req.K[i, j] += scale * c.k * Nᵢ * shape_value(c.fv, qp, j)
+            end
+        end
+    end
+end
+FerriteOperators.assemble_facet!(req::ResidualRequest, c::RobinFacetCache, args::FacetArgs, lfi::Int) =
+    _robin_facet!(req, c, args, lfi)
+FerriteOperators.assemble_facet!(req::JacobianRequest{:u}, c::RobinFacetCache{:u}, args::FacetArgs, lfi::Int) =
+    _robin_facet!(req, c, args, lfi)
+FerriteOperators.assemble_facet!(req::JacobianRequest{:v}, c::RobinFacetCache{:v}, args::FacetArgs, lfi::Int) =
+    _robin_facet!(req, c, args, lfi)
+FerriteOperators.provides_analytic(::Type{<:RobinFacetCache{:u}}, ::JacobianKind{:u}) = true
+FerriteOperators.provides_analytic(::Type{<:RobinFacetCache{:v}}, ::JacobianKind{:v}) = true
+
+# The fused facet kernel — same matrix, one call — and the counter that pins
+# which route the driver took.
+const FUSED_FACET_W_CALLS = Ref(0)
+FerriteOperators.provides_analytic(::Type{<:RobinFacetCache{<:Any, true}}, ::WeightedJacobianKind) = true
+function FerriteOperators.assemble_facet!(req::WeightedJacobianRequest, c::RobinFacetCache{slot, true},
+                                          args::FacetArgs, lfi::Int) where {slot}
+    FUSED_FACET_W_CALLS[] += 1
+    _robin_facet!(JacobianRequest{slot}(req.K), c, args, lfi, req.weights[slot])
+end
+
+####################################
 ## Parameter-scaled facet traction — the facet-item sensitivity double
 ####################################
 # r(v) = θ·a(t) ∫_Γ v dΓ over the declared facets, with a(t) = 1 + t through the

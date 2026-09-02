@@ -237,6 +237,120 @@ end
 
 # Interface composition (facet pairs) is not implemented.
 
+"""
+Combines multiple facet-item caches over one subdomain. The subdomain declares
+ONE facet set — the union of the inners' [`facet_items`](@ref) — and the
+fan-out re-gates on the facets each inner declared, so an inner integrates
+exactly its own set as it does on the fused route. The per-inner sets are
+resolved once, at setup, and shared read-only during a sweep.
+
+[`is_facet_in_cache`](@ref) plays no part: the declaration is the gate on this
+route, for a composite as for any other facet-item cache.
+
+Same scope bound as [`CompositeVolumetricElementCache`](@ref): one domain, one
+context, one sink, no values objects shared by construction. Each inner is
+handed its own per-facet parameter view, produced by that inner's
+[`query_facet_parameters`](@ref).
+
+A weighted sweep routes PER INNER — every covering inner is handed the same
+[`WeightedJacobianRequest`](@ref) and accumulates its own fused contribution,
+which is what puts a boundary spring (∂F/∂u only) next to a dashpot (∂F/∂v
+only) in one `W`. This route composes no per-slot Jacobians, so an inner
+without the fused weighted facet kernel is rejected by
+[`assert_facet_item_route`](@ref) rather than folded around.
+"""
+struct CompositeFacetItemCache{CacheTupleType <: Tuple, SetTupleType <: Tuple} <: AbstractSurfaceElementCache
+    inner_caches::CacheTupleType
+    facet_sets::SetTupleType
+end
+
+query_facet_parameters(composite::CompositeFacetItemCache, cell, local_facet_index, p) =
+    CompositeParameters(map(inner -> query_facet_parameters(inner, cell, local_facet_index, p), composite.inner_caches))
+
+duplicate_for_device(device, cache::CompositeFacetItemCache) = CompositeFacetItemCache(
+    map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
+    cache.facet_sets,                                # shared: read-only during a sweep
+)
+
+function assemble_facet!(req::AbstractAssemblyRequest, composite::CompositeFacetItemCache, args, local_facet_index::Int)
+    idx = FacetIndex(cellid(args.cell), local_facet_index)
+    return _composite_facet_item!(req, composite.inner_caches, composite.facet_sets, idx, args, local_facet_index, args.p)
+end
+
+_composite_facet_item!(req, caches, sets, idx, args, lfi, p::CompositeParameters) =
+    _fan_out_facet_item!(req, caches, sets, idx, args, lfi, p.views)
+_composite_facet_item!(req, caches, sets, idx, args, lfi, p) =
+    _fan_out_facet_item!(req, caches, sets, idx, args, lfi)
+
+_fan_out_facet_item!(req, ::Tuple{}, ::Tuple{}, idx, args, lfi, ::Tuple{}) = nothing
+function _fan_out_facet_item!(req, caches::Tuple, sets::Tuple, idx, args, lfi, views::Tuple)
+    idx in first(sets) && assemble_facet!(req, first(caches), with_parameters(args, first(views)), lfi)
+    return _fan_out_facet_item!(req, Base.tail(caches), Base.tail(sets), idx, args, lfi, Base.tail(views))
+end
+
+_fan_out_facet_item!(req, ::Tuple{}, ::Tuple{}, idx, args, lfi) = nothing
+function _fan_out_facet_item!(req, caches::Tuple, sets::Tuple, idx, args, lfi)
+    idx in first(sets) && assemble_facet!(req, first(caches), args, lfi)
+    return _fan_out_facet_item!(req, Base.tail(caches), Base.tail(sets), idx, args, lfi)
+end
+
+function evaluate_facet_functional(kind, composite::CompositeFacetItemCache, args, local_facet_index::Int)
+    idx = FacetIndex(cellid(args.cell), local_facet_index)
+    return _composite_facet_functional(kind, composite.inner_caches, composite.facet_sets, idx, args, local_facet_index, args.p)
+end
+
+_composite_facet_functional(kind, caches, sets, idx, args, lfi, p::CompositeParameters) =
+    _fan_out_facet_functional(kind, caches, sets, idx, args, lfi, p.views)
+_composite_facet_functional(kind, caches, sets, idx, args, lfi, p) =
+    _fan_out_facet_functional(kind, caches, sets, idx, args, lfi)
+
+_fan_out_facet_functional(kind, ::Tuple{}, ::Tuple{}, idx, args, lfi, ::Tuple{}) = nothing
+function _fan_out_facet_functional(kind, caches::Tuple, sets::Tuple, idx, args, lfi, views::Tuple)
+    head = idx in first(sets) ?
+        evaluate_facet_functional(kind, first(caches), with_parameters(args, first(views)), lfi) : nothing
+    return _add_facet_partials(head,
+        _fan_out_facet_functional(kind, Base.tail(caches), Base.tail(sets), idx, args, lfi, Base.tail(views)))
+end
+
+_fan_out_facet_functional(kind, ::Tuple{}, ::Tuple{}, idx, args, lfi) = nothing
+function _fan_out_facet_functional(kind, caches::Tuple, sets::Tuple, idx, args, lfi)
+    head = idx in first(sets) ? evaluate_facet_functional(kind, first(caches), args, lfi) : nothing
+    return _add_facet_partials(head,
+        _fan_out_facet_functional(kind, Base.tail(caches), Base.tail(sets), idx, args, lfi))
+end
+
+# A facet's contribution is the sum over the inners covering it, and `nothing`
+# — "no contribution" — is the fold's identity, exactly as it is for the
+# family's own sweep.
+_add_facet_partials(::Nothing, ::Nothing) = nothing
+_add_facet_partials(a, ::Nothing) = a
+_add_facet_partials(::Nothing, b) = b
+_add_facet_partials(a, b) = a + b
+
+# Facet kernels have no AD fallback, so the fan-out is all-or-nothing per kind
+# just as the volumetric composite's is: the composite serves a kind iff every
+# inner does.
+provides_analytic(::Type{CompositeFacetItemCache{CT, ST}}, kind) where {CT <: Tuple, ST} = _all_provide(CT, kind)
+serves_kind(::Type{CompositeFacetItemCache{CT, ST}}, kind) where {CT <: Tuple, ST} = _all_serve(CT, kind)
+has_internal_state(::Type{CompositeFacetItemCache{CT, ST}}) where {CT <: Tuple, ST} = _any_internal(CT)
+internal_state_insensitive(::Type{CompositeFacetItemCache{CT, ST}}, kind) where {CT <: Tuple, ST} =
+    _all_stateful_insensitive(CT, kind)
+
+# The blanket fan-out satisfies any `hasmethod` probe, so validation recurses:
+# each inner is its own validation subject, kernels and route election alike.
+_validate_facet_item_kernels(composite::CompositeFacetItemCache, declared_requests::Tuple) =
+    foreach(cache -> validate_facet_item_cache(cache, declared_requests), composite.inner_caches)
+
+# ... and so does the per-item route election, which is a statement about the
+# cache that actually runs the kernel.
+assert_facet_item_route(kind::WeightedJacobianKind, composite::CompositeFacetItemCache) =
+    _assert_inner_facet_item_routes(kind, composite.inner_caches)
+@unroll function _assert_inner_facet_item_routes(kind, inner_caches)
+    @unroll for inner in inner_caches
+        assert_facet_item_route(kind, inner)
+    end
+end
+
 ####################################
 ## Composition of element caches
 ####################################
@@ -353,18 +467,64 @@ setup_boundary_cache(element_model::LinearCompositeIntegrator, sdh::SubDofHandle
 
 # The inners share one local system, so they share its tail: a composite
 # declares what its inners declare, and silent inners (the default `()`) read
-# the tail a declaring inner puts there.
-function global_dofs(integrator::AnyCompositeIntegrator, sdh::SubDofHandler)
-    declared = filter(!isempty, map(sub -> global_dofs(sub, sdh), integrator.subintegrators))
+# the tail a declaring inner puts there. Each family answers from its OWN hook,
+# since each sizes its own local system.
+global_dofs(integrator::AnyCompositeIntegrator, sdh::SubDofHandler) = _composite_declared_dofs(
+    integrator, map(sub -> global_dofs(sub, sdh), integrator.subintegrators), "global_dofs")
+
+facet_item_global_dofs(integrator::AnyCompositeIntegrator, sdh::SubDofHandler) = _composite_declared_dofs(
+    integrator, map(sub -> facet_item_global_dofs(sub, sdh), integrator.subintegrators), "facet_item_global_dofs")
+
+function _composite_declared_dofs(integrator, declarations::Tuple, hook)
+    declared = filter(!isempty, declarations)
     isempty(declared) && return ()
     reference = first(declared)
     all(d -> length(d) == length(reference) && all(d .== reference), declared) || throw(ArgumentError(
-        "The sub-integrators of $(nameof(typeof(integrator))) declare different `global_dofs` " *
+        "The sub-integrators of $(nameof(typeof(integrator))) declare different `$hook` " *
         "for this subdomain ($(map(collect, declared))). Composed terms fill ONE local system, " *
         "whose tail is `[celldofs(cell); global dofs]` — with two different declarations there " *
         "is no unambiguous tail. Declare the same dofs in the same order, or assemble the " *
         "terms as separate operators."))
     return reference
+end
+
+"""
+    facet_items(integrator::AnyCompositeIntegrator, sdh)
+    setup_facet_item_cache(integrator::AnyCompositeIntegrator, sdh)
+
+The facet-item declaration of a composite: the sorted union of its
+sub-integrators' [`facet_items`](@ref), served by ONE
+[`CompositeFacetItemCache`](@ref) that re-gates the fan-out on each inner's own
+set. Inners declaring nothing contribute nothing — to the declaration and to
+the cache — so an all-silent composite keeps the additive `()` default and a
+single declaring inner's cache is returned unwrapped, mirroring the
+[`compose_boundary_caches`](@ref) collapse rules.
+
+The union is what makes overlap legal: two terms supported on the SAME facet
+are one item declared once and assembled by both inners, which the family's
+declared-twice rejection would otherwise refuse.
+"""
+function facet_items(integrator::AnyCompositeIntegrator, sdh::SubDofHandler)
+    declared = map(sub -> facet_items(sub, sdh), integrator.subintegrators)
+    all(isempty, declared) && return ()
+    merged = Set{FacetIndex}()
+    for set in declared, facet in set
+        push!(merged, facet)
+    end
+    # Sorted for the same reason `resolve_facet_items` sorts: neither a `Set`'s
+    # iteration order nor the order the inners happen to sit in may decide the
+    # item order.
+    return sort!(collect(merged); by = facet -> (facet[1], facet[2]))
+end
+
+function setup_facet_item_cache(integrator::AnyCompositeIntegrator, sdh::SubDofHandler)
+    declaring = filter(sub -> !isempty(facet_items(sub, sdh)), integrator.subintegrators)
+    isempty(declaring) && throw(ArgumentError(
+        "No sub-integrator of $(nameof(typeof(integrator))) declares `facet_items` for this " *
+        "subdomain, so there is no facet-item cache to build."))
+    caches = map(sub -> setup_facet_item_cache(sub, sdh), declaring)
+    length(caches) == 1 && return only(caches)
+    return CompositeFacetItemCache(caches, map(sub -> Set{FacetIndex}(facet_items(sub, sdh)), declaring))
 end
 
 flatten_subintegrators(::Tuple{}) = ()

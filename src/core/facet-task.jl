@@ -181,8 +181,13 @@ with the volumetric kernel taken out and the facet walk restricted to the
 item's own facets. Scatters ONCE per item through [`scatter_local!`](@ref) —
 one scatter for all of a cell's declared facets, which is what the item shape
 buys.
+
+[`assert_facet_item_route`](@ref) runs first, so a kind this cache cannot serve
+on this route fails naming the kernel to write instead of as a `MethodError`
+inside the walk.
 """
 function primal_facet_item_sweep!(kind, task, ws)
+    assert_facet_item_route(kind, ws.element)
     assembles_matrix(kind) && fill!(ws.Ke, zero(eltype(ws.Ke)))
     assembles_vector(kind) && fill!(ws.re, zero(eltype(ws.re)))
     if depends_on_unknowns(kind)
@@ -314,13 +319,22 @@ Setup-time consistency check for facet item caches, the
 A DECLARED sensitivity kind is checked harder — the kernel must exist, not
 merely be trait-consistent — because facet contributions have no
 automatic-differentiation fallback, unlike a volumetric cache whose
-[`ADElementCache`](@ref) decoration would serve it from the residual.
+[`ADElementCache`](@ref) decoration would serve it from the residual. Every
+declared kind additionally passes [`assert_facet_item_route`](@ref), the
+route-level check the sweep repeats per item.
 
 The probes run against [`unwrap`](@ref), the type an author would have written
 the kernel on: a decorator's forwarding methods answer `hasmethod` for everyone
-and would make every probe pass vacuously.
+and would make every probe pass vacuously. A composite cache recurses into its
+inners from there, for the same reason: its blanket fan-out method answers
+every probe.
 """
 function validate_facet_item_cache(cache, declared_requests::Tuple = ())
+    _validate_facet_item_kernels(cache, declared_requests)
+    return nothing
+end
+
+function _validate_facet_item_kernels(cache, declared_requests::Tuple)
     T = typeof(cache)
     D = unwrap(T)
     hasmethod(assemble_facet!, Tuple{ResidualRequest, D, FacetArgs, Int}) || throw(ArgumentError(
@@ -334,10 +348,45 @@ function validate_facet_item_cache(cache, declared_requests::Tuple = ())
         has_cell_request(K) || continue
         kind = validation_instance(K)
         _assert_trait_backed(T, kind, assemble_facet!, FacetArgs, (Int,))
+        assert_facet_item_route(kind, cache)
         K <: SensitivityKind && _assert_facet_analytic(D, kind)
     end
     return nothing
 end
+
+"""
+    assert_facet_item_route(kind, cache)
+
+Assert that `cache` can serve `kind` on the facet-item route. The generic
+method passes: every other kind reaches its own [`assemble_facet!`](@ref)
+method, or a `MethodError` naming it.
+
+[`WeightedJacobianKind`](@ref) is the one kind with a route to choose, and on
+this route there is exactly one — the FUSED
+`assemble_facet!(::WeightedJacobianRequest, …)` kernel. The per-slot fold
+`facet_kernel!` composes on the fused boundary route has no counterpart here,
+so a cache without the fused kernel is rejected naming that kernel.
+
+Checked at setup for every DECLARED kind ([`validate_facet_item_cache`](@ref))
+and once per item in [`primal_facet_item_sweep!`](@ref) for the kind actually
+swept, which is the declare-to-check model the kernel probes follow.
+"""
+assert_facet_item_route(kind, cache) = nothing
+
+function assert_facet_item_route(kind::WeightedJacobianKind, cache)
+    provides_analytic(typeof(cache), kind) || _throw_no_weighted_facet_item_route(typeof(cache), kind)
+    return nothing
+end
+
+@noinline _throw_no_weighted_facet_item_route(T::Type, ::WeightedJacobianKind{slots}) where {slots} =
+    throw(ArgumentError(
+        "$(T) declares no fused weighted facet kernel, which is the only route a weighted " *
+        "Jacobian sweep takes on the facet-item route. Implement " *
+        "`assemble_facet!(::WeightedJacobianRequest, ::$(nameof(T)), ::FacetArgs, ::Int)` and " *
+        "declare it through `provides_analytic(::Type{<:$(nameof(T))}, ::WeightedJacobianKind)`; " *
+        "the kernel reads the weights of $(slots) from `req.weights` and forms the combination " *
+        "itself. Facet kernels have no automatic-differentiation fallback, and this route " *
+        "composes no per-slot `JacobianRequest{slot}` kernels behind the kernel's back."))
 
 function _assert_facet_analytic(D::Type, kind)
     hasmethod(assemble_facet!, Tuple{request_type(kind), D, FacetArgs, Int}) && return nothing
