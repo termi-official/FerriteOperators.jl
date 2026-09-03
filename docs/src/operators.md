@@ -23,35 +23,44 @@ sensitivity is the request kind, not a separate driver.
 integrator encodes — a nonlinear residual, the action of the linear operator a
 bilinear form induces, a hand-fused scheme residual.
 
+Which assembly entry point an operator takes follows its integrator family. A
+nonlinear operator assembles through [`update_linearization!`](@ref) — `op.J`
+alone, or `op.J` and the residual in one fused sweep — and evaluates through
+[`evaluate!`](@ref). A bilinear or linear operator assembles its payload —
+`op.A`, `op.b` — through [`update_operator!`](@ref)`(op, p, ctx)`, which
+carries no `states` because the form has none to depend on; a bilinear
+operator also answers [`evaluate!`](@ref), the action `A·u` computed from the
+residual kernels without touching `op.A`.
+
 ## Setup-time declarations
 
-What a scheme asks of an operator is setup-time knowledge, and the `slots` and
-`requests` keywords of [`setup_operator`](@ref) are where it is declared — slot
-names and request kinds, nothing else:
+`slots` and `requests` are the setup-time declarations
+[`setup_operator`](@ref) takes: slot names and request kinds, nothing else.
 
 ```julia
-# the SDIRK-W scheme: two slots, the weighted Jacobian it solves with, and the
-# residual it drives with
+# an operator for a solver that assembles weighted Jacobians and drives with
+# the residual, over two slots
 op = setup_operator(strategy, integrator, dh;
                     slots = (:u, :du),
                     requests = (WeightedJacobianKind, ResidualKind))
 ```
 
-Declarations carry no coefficients — γ, tableaus and weights are
-per-evaluation solver data — and nothing term-shaped; a term needing its own
-context or sink is its own sweep.
+Neither carries coefficients — γ, tableaus and weights are per-evaluation
+solver data — and neither is term-shaped; a term needing its own context or
+sink is its own sweep.
 
 `slots` sizes the buffers: the engine allocates one per-worker slot buffer per
 name, and a sweep whose `states` name a slot the operator never declared fails
-loudly instead of erroring per cell. Slot type tags are reserved vocabulary —
-names are the whole declaration.
+loudly instead of erroring per cell. Names are the whole declaration — a slot
+carries no declared type, and its *source* is chosen per call (see [Slots and
+rate reconstruction](#Slots-and-rate-reconstruction)).
 
 `requests` moves checks forward: declaring a kind runs its trait ↔ kernel and
-internal-state admissibility checks eagerly at `setup_operator` instead of on
-first use — an inadmissible adjoint fails when the operator is built, not
-mid-solve — and builds its per-worker sweep-state family there too. Kinds are
-normalized to their UnionAll base, so an instance or a payload-parameterized
-type (`ParameterVJPKind(zeros(n))`) declares the same kind as its bare name:
+internal-state admissibility checks at `setup_operator` instead of on first
+use — an inadmissible adjoint fails when the operator is built, not mid-solve.
+Kinds are normalized to their UnionAll base, so an instance or a
+payload-parameterized type (`ParameterVJPKind(zeros(n))`) declares the same
+kind as its bare name:
 
 ```julia
 op = setup_operator(strategy, integrator, dh;
@@ -62,16 +71,17 @@ Which element caches carry [`ADElementCache`](@ref) decoration, and whether the
 workspace carries [`SensitivityBuffers`](@ref) at all, is decided separately and
 structurally by the integrator family ([`needs_ad_decoration`](@ref)) — a
 bilinear or linear operator carries no AD/sensitivity machinery whatever an
-element cache does or does not implement analytically, and whatever is
-declared. The workspace is immutable — every field is bound at
-`setup_operator`, and a sweep works by filling the buffers those fields point
-at.
+element cache does or does not implement analytically, and whatever `requests`
+names. Declaring a kind builds no per-worker state of its own. The workspace is
+immutable — every field is bound at `setup_operator`, and a sweep works by
+filling the buffers those fields point at.
 
-Declaring a [`FunctionalKind`](@ref) builds **nothing**, which is the feature
-rather than an omission: a functional sweep's kernel returns the cell's
-contribution and the sweep folds the returned values, so it has no per-worker
-state to allocate and nothing to reset between evaluations. What such a kind
-does declare is its reduction's value type, on the kind rather than at setup —
+Declaring a [`FunctionalKind`](@ref) checks **nothing**, which follows from the
+shape of the kind rather than being an omission: a functional sweep's kernel
+*returns* the cell's contribution instead of filling a request
+([`has_cell_request`](@ref) is `false` for it), so there is no trait ↔ kernel
+pairing to hold it against. What such a kind does declare is its reduction's
+value type, on the kind rather than at setup —
 [`FerriteOperators.functional_value_type`](@ref), required under a parallel
 device and described with the kernel hook in
 [Writing elements](@ref Functionals).
@@ -318,10 +328,10 @@ Two derivative mechanisms exist. Operator-level
 no analytic sensitivity kernel — and no kernel ever sees a `Dual`. The
 [`ADElementCache`](@ref) decorator is the PER-CACHE route:
 analytic kernels win cache by cache, it is allocation-free per cell for the
-state and time sweeps, and it is volumetric only. There is deliberately no
-cache-level finite-difference decorator — it would be volumetric like the AD
-one and would therefore lose the single property that makes the operator-level
-method worth keeping.
+state and time sweeps, and it is volumetric only. There is no cache-level
+finite-difference decorator; [the
+rationale](devdocs/rationale.md#Why-finite-differences-are-operator-level-and-AD-is-per-cache)
+records why.
 
 ∂F/∂q, the block coupling the residual to a condensed element's internal
 state, is its own rectangular target rather than a slot Jacobian:

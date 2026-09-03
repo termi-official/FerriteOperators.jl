@@ -77,7 +77,7 @@ is made by the *shape* of the information, not by which layer produced it.
 | point-shaped, one value per quadrature point | quadrature storage and the **query seams** | [`QVector`](@ref) for stored per-QP data; [`query_cell_parameters`](@ref) / [`query_facet_parameters`](@ref) for element-owned gathers, including parameter fields. |
 | a scalar of *this* sweep | **`args.ctx`** | `t`, `Δt`, `γ̃` in [`TimeIntegrationContext`](@ref). A scheme with richer per-sweep scalars passes its own context type; framework code touches contexts only through [`evaluation_time`](@ref), [`with_time`](@ref) and [`stage_scaling`](@ref). |
 | configuration, constant across the sweep | **`args.p`** | material parameters and the user's bag. Never time, never history. `p` stays opaque: a solver-side wrapper is unwrapped by the cache's own [`query_cell_parameters`](@ref). |
-| per-worker mutable working memory | **element cache fields** | duplicated — not aliased — per worker by `duplicate_for_device`, see [storage classes for elements with local problems](../elements.md). |
+| per-worker mutable working memory | **element cache fields** | duplicated — not aliased — per worker by `duplicate_for_device`, see [storage classes for elements with local problems](../elements.md#Storage-classes-for-elements-with-local-problems). |
 | a scheme scalar attached to a slot | request payload | rides on the request instead of the args bundle — that is what [`WeightedJacobianKind`](@ref) does with its weights. |
 
 Two consequences worth stating explicitly.
@@ -197,8 +197,8 @@ has.
 Elements then serve it like any built-in kind — `provides_analytic(::Type{<:MyCache}, ::MyKind) = true`
 plus an `assemble_cell!(req::MyRequest, cache::MyCache, args)` method — and the
 operator issues it through `assemble_into!(MyKind(), (A,), op, states, p, ctx)`.
-Declaring it (`setup_operator(...; requests = (MyKind,))`) selects its
-sweep-state family and runs its setup-time trait ↔ kernel validation.
+Declaring it (`setup_operator(...; requests = (MyKind,))`) runs its setup-time
+trait ↔ kernel validation.
 
 Thirteen provided bodies exist, across the four workspace types:
 
@@ -232,7 +232,8 @@ by declaration. The workspace itself is immutable, so a sweep fills
 buffers and never rebinds a field. There is no third, downstream-openable
 family: an element cache wanting its own per-worker scratch carries it as an
 ordinary cache field, duplicated per worker by its own `duplicate_for_device`
-(see [storage classes for elements with local problems](../elements.md)).
+(see [storage classes for elements with local
+problems](../elements.md#Storage-classes-for-elements-with-local-problems)).
 
 **New AD backends** — [`ADElementCache`](@ref)'s `backend` field is the seam:
 [`ForwardDiffAD`](@ref) is the default, and a downstream extension implements

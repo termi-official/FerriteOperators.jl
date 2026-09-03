@@ -75,6 +75,11 @@ MFEM assembly level), the *scheduling policy* ([`SequentialScheduling`](@ref) /
 convenience constructor for the common compositions: `AssemblyStrategy(device)`
 and `AssemblyStrategy(device; scheduling = ColoredScheduling())`.
 
+[`PolyesterDevice`](@ref) lives behind a package extension: `using Polyester`
+activates it, and without that load the type exists with no execution route.
+[`default_strategy`](@ref) resolves that at call time — the Polyester device
+where the extension is loaded, [`SequentialCPUDevice`](@ref) otherwise.
+
 [`FullAssembly`](@ref) assembles the global matrix and vector and serves every
 operator family. It is the form axis' sole member; the axis and the `form`
 keyword are the extension point a further assembly level (element assembly,

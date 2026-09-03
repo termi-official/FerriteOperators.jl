@@ -281,16 +281,16 @@ The pattern of smuggling solver state into element caches (model-tree
 rewrites, parameter-bag payloads) has no args-channel replacement: per-worker
 mutable working memory is an ordinary cache field, duplicated — not aliased —
 per worker by `duplicate_for_device` (see [storage classes for elements with
-local problems](elements.md)).
+local problems](elements.md#Storage-classes-for-elements-with-local-problems)).
 
 ## New capabilities worth adopting during the port
 
 - **Setup-time declarations**: `setup_operator(strategy, integrator, dh; slots,
-  requests)` is where a scheme says what it asks of an operator. `slots` sizes
-  the per-worker slot buffers; `requests` moves admissibility failures from
-  first use to `setup_operator` and selects which per-worker sweep-state
-  families exist. Which caches carry AD machinery is structural and separate —
-  a bilinear or linear operator carries none.
+  requests)` takes slot names and request kinds. `slots` sizes the per-worker
+  slot buffers; `requests` moves the trait ↔ kernel and admissibility failures
+  from first use to `setup_operator`, and builds no per-worker state. Which
+  caches carry AD machinery is structural and separate — a bilinear or linear
+  operator carries none.
 - **Sensitivities**: `update_parameter_jacobian!(B, op, states, p, ctx)`,
   `parameter_vjp!(g, op, λ, states, p, ctx)`,
   `time_sensitivity!(g, op, states, p, ctx)` (AD by default, analytic kernels

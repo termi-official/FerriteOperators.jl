@@ -223,7 +223,7 @@ end
 
 # Kind types or instances normalize to their UnionAll base, so a declaration
 # carrying a payload type parameter (`ParameterVJPKind{Vector{Float64}}`) never
-# silently misses its validation entry or its sweep-state family.
+# silently misses its validation entry.
 _kind_type(r) = Base.typename(r isa Type ? r : typeof(r)).wrapper
 
 """
@@ -232,10 +232,11 @@ _kind_type(r) = Base.typename(r isa Type ? r : typeof(r)).wrapper
 Build the [`AssemblyEngine`](@ref) shared by all operator kinds from the
 setup-time declarations: `slots` names the state slots a sweep may carry, one
 per-worker buffer each, and `requests` the request kinds whose trait ↔ kernel
-and internal-state admissibility checks run here instead of at first use, and
-whose per-worker sweep-state families are built eagerly. Kinds are normalized
-to their UnionAll bases, so an instance or a payload-parameterized type
-declares the same kind as its bare name. Both are stored on the engine.
+and internal-state admissibility checks run here instead of at first use.
+Declaring a kind builds no per-worker state; it moves that kind's checks
+forward. Kinds are normalized to their UnionAll bases, so an instance or a
+payload-parameterized type declares the same kind as its bare name. Both are
+stored on the engine.
 
 Element caches lacking analytic coverage of some AD-decorator kind are wrapped
 in [`ADElementCache`](@ref) at construction, for every kind the integrator
@@ -288,8 +289,8 @@ end
 
 Build the operator for `problem` (an integrator) over `dh` from what the caller
 declares: `slots` the state slot names sweeps may carry — the engine sizes one
-per-worker buffer per name — and `requests` the request kinds validated and
-given sweep state at setup ([`setup_engine`](@ref)). `ad_backend` selects the
+per-worker buffer per name — and `requests` the request kinds whose setup-time
+validation runs here ([`setup_engine`](@ref)). `ad_backend` selects the
 [`ADElementCache`](@ref) backend wrapping caches that lack analytic coverage
 (`nothing` opts out).
 
