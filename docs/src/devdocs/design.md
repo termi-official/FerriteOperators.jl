@@ -4,14 +4,16 @@ CurrentModule = FerriteOperators
 
 # The layer contract
 
-Three layers share the assembly pipeline, and every design question about
-"where does this belong" is answered by which layer owns the information.
+This package owns two layers of the assembly pipeline — the **term** and the
+**operator**. Every design question about "where does this belong" is answered
+by which of the two owns the information, or by the finding that neither does
+and it belongs to the caller.
 
-| layer | owns | in this package |
+| owner | owns | in this package |
 |---|---|---|
-| **term** | scheme-agnostic integrands over one work item | element caches and their request-typed kernels |
-| **operator** | evaluating a set of terms at `(states, p, ctx)` | the engine, its workspaces, and the entry points |
-| **scheme** | composing evaluations into a discretization | solver code: history vectors, slot sources, weights, contexts |
+| **term** layer | scheme-agnostic integrands over one work item | element caches and their request-typed kernels |
+| **operator** layer | evaluating a set of terms at `(states, p, ctx)` | the engine, its workspaces, and the entry points |
+| *the caller* — solver code | composing evaluations into a discretization | nothing: there is no scheme-facing API here. The solver holds the history vectors and tableau coefficients, fills the slots, supplies the weights, and constructs the context |
 
 ## The term layer
 
@@ -28,12 +30,12 @@ stage row without a line of change, because each of those merely supplies
 different slot values.
 
 A *hand-fused* integrator — one that derives its own discretization from
-`uprev` and `ctx`, or that computes a scheme's combined matrix directly — is a
-scheme-layer object living in an element cache. That is a legitimate authoring
-choice (it is how a deliberately manual first-order discretization, or a
-multilevel-Newton element with a rate-coupled local problem, is written), and
-the framework serves it through the same request-typed kernels. The distinction
-is one of authorship, not of mechanism.
+`uprev` and `ctx`, or that computes a scheme's combined matrix directly — puts
+solver-owned discretization inside an element cache by deliberate authorship.
+That is a legitimate choice (it is how a deliberately manual first-order
+discretization, or a multilevel-Newton element with a rate-coupled local
+problem, is written), and the framework serves it through the same
+request-typed kernels. The distinction is one of authorship, not of mechanism.
 
 ## The operator layer
 
@@ -51,16 +53,17 @@ integrator encodes — a nonlinear residual, the action of the linear operator a
 bilinear form induces (its element matrix acting on the element vector), or a
 hand-fused scheme residual — and the name says exactly that much and no more.
 
-## The scheme layer
+## The caller's side of the contract
 
-The solver owns the discretization. It holds history vectors and tableau
-coefficients, decides what each slot contains for this evaluation, supplies
-the chain-rule weights that fold per-slot Jacobians into the matrix it solves
-with, and constructs the context.
+The solver owns the discretization, and it owns it *outside* this package:
+nothing here declares, registers or hosts a scheme. The solver holds the
+history vectors and tableau coefficients, decides what each slot contains for
+this evaluation, supplies the chain-rule weights that fold per-slot Jacobians
+into the matrix it solves with, and constructs the context.
 
 Where a scheme needs several *evaluation times* — generalized-α evaluating
-stiffness at `tₙ₊₁₋αf` and inertia at `tₙ₊₁₋αm` — it splits the problem into
-term-subset operators and runs one sweep per term at its own context,
+stiffness at `tₙ₊₁₋αf` and inertia at `tₙ₊₁₋αm` — the solver splits the problem
+into term-subset operators and runs one sweep per term at its own context,
 combining the results as components. One monolithic kernel cannot host two
 evaluation times, and the context is not the place to smuggle a second one:
 this is a modeling requirement on the operator split, not a gap in the context
@@ -69,7 +72,7 @@ channel.
 ## The channel decision table
 
 Every piece of information a kernel might want has one channel. The decision
-is made by the *shape* of the information, not by which layer produced it.
+is made by the *shape* of the information, not by who produced it.
 
 | shape | channel | notes |
 |---|---|---|

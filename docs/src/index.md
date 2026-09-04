@@ -112,8 +112,6 @@ what along that path — requests, engines and workspaces included.
   verification, quadrature data, transfer operators.
 - [Patch items](patches.md) — multi-cell work items with patch-local scatter
   (experimental).
-- [Migrating from 0.3.x](migration.md) — the map from the old element and
-  operator API to the current one.
 
 API reference:
 
@@ -130,8 +128,8 @@ API reference:
 
 Developer documentation:
 
-- [The layer contract](devdocs/design.md) — term / operator / scheme layers and
-  their ownership boundaries, the channel decision table, and the framework's
-  extension points.
+- [The layer contract](devdocs/design.md) — the term and operator layers, their
+  ownership boundaries and what the calling solver owns instead, the channel
+  decision table, and the framework's extension points.
 - [Design rationale](devdocs/rationale.md) — why the design is the way it is:
   the decisions, the alternatives that were rejected, and what they cost.

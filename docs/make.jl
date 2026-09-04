@@ -30,7 +30,6 @@ makedocs(;
         "Operator API reference" => "operator-api.md",
         "Assembly engine API reference" => "engine-api.md",
         "Patch items" => "patches.md",
-        "Migration to 0.4" => "migration.md",
         "Developer documentation" => [
             "The layer contract" => "devdocs/design.md",
             "Design rationale" => "devdocs/rationale.md",

@@ -10,7 +10,8 @@ decision, and the alternatives that are rejected and on what grounds. Entries
 are organized by **design question**.
 
 Everything else states the contract. [The layer contract](design.md) says which
-layer owns which piece of information and what the extension points are;
+layer owns which piece of information — and which pieces the calling solver
+owns instead — and what the extension points are;
 [Writing elements](../elements.md) and [Operators and entry points](../operators.md)
 say what an author must write. If a statement here disagrees with those pages,
 those pages are right and this one is stale — report it.
