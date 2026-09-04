@@ -411,11 +411,10 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
             BogusClaimCache(), (ParameterJacobianKind,))
     end
 
-    @testset "declaration is normalized, stored, and does not change results" begin
+    @testset "declaration is normalized and does not change results" begin
         # instances normalize to their UnionAll kind type
         op = setup_operator(strategy, SourceDiffusionIntegrator(qrc, :u), dh;
                             requests = (ParameterVJPKind(zeros(n)), TimeSensitivityKind))
-        @test FerriteOperators._declared_kinds(op.engine) == (ParameterVJPKind, TimeSensitivityKind)
         u = sin.(0.3 .* (1:n))
         λ = ones(n)
         g = zeros(1); parameter_vjp!(g, op, λ, u, 1.7)
@@ -426,12 +425,15 @@ FerriteOperators.provides_analytic(::Type{BogusClaimCache}, ::ParameterJacobianK
     @testset "declared inadmissible kinds fail at setup, not first use" begin
         # condensed state, no analytic StateVJP kernel, no insensitivity declaration
         @test_throws ArgumentError visco_testbed(strategy, qrc; requests = (StateVJPKind,))
+        # an INSTANCE declares the same kind as its bare name: the payload
+        # normalizes away and the same setup rejection follows
+        @test_throws ArgumentError visco_testbed(strategy, qrc; requests = (StateVJPKind(nothing),))
         # time sensitivities stay declarable: the FD escape is a call-time choice
-        vop = visco_testbed(strategy, qrc; requests = (TimeSensitivityKind,)).op
-        @test FerriteOperators._declared_kinds(vop.engine) == (TimeSensitivityKind,)
+        @test visco_testbed(strategy, qrc; requests = (TimeSensitivityKind,)).op isa
+            FerriteOperators.LinearizedFerriteOperator
         # kinds made admissible above (analytic kernel / insensitivity) pass setup
-        vop2 = visco_testbed(strategy, qrc; requests = (ParameterJacobianKind, ParameterVJPKind)).op
-        @test FerriteOperators._declared_kinds(vop2.engine) == (ParameterJacobianKind, ParameterVJPKind)
+        @test visco_testbed(strategy, qrc; requests = (ParameterJacobianKind, ParameterVJPKind)).op isa
+            FerriteOperators.LinearizedFerriteOperator
     end
 end
 

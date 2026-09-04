@@ -33,8 +33,17 @@ init_operator_sparsity_pattern(spec::BlockedOperatorSpecification, dh) = BlockSp
 
 function setup_elements(integrator, dh, ad_backend, n_global_dofs)
     needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
-    return [decorate_element_cache(setup_element_cache(integrator, sdh), sdh, ad_backend, n)
+    return [setup_decorated_element_cache(integrator, sdh, ad_backend, n)
             for (sdh, n) in zip(dh.subdofhandlers, n_global_dofs)]
+end
+
+# One subdomain's element cache, built and decorated. Both counts the decorator
+# is sized from are the INTEGRATOR's declarations, resolved here, which is what
+# keeps `decorate_element_cache` itself integrator-free.
+function setup_decorated_element_cache(integrator, sdh, ad_backend, n_global_dofs::Int)
+    cache = setup_element_cache(integrator, sdh)
+    return decorate_element_cache(cache, sdh, ad_backend, n_global_dofs;
+                                  n_internal_dofs = resolve_internal_dofs_per_element(integrator, cache, sdh))
 end
 
 function _cell_internal_offsets(integrator, element_caches, dh)
@@ -63,6 +72,40 @@ end
 _declares_internal_dofs(hook, integrator, cache, arg) =
     has_internal_state(typeof(cache)) &&
     hasmethod(hook, Tuple{typeof(integrator), typeof(unwrap(cache)), typeof(arg)})
+
+"""
+    resolve_internal_dofs_per_element(integrator, cache, sdh) -> Int
+
+The condensed internal-dof count of ONE cell of `sdh`, from the same
+[`get_number_of_internal_dofs_per_element`](@ref) declaration the
+[`InternalVariableHandler`](@ref) lays the `q` block out from. This is what
+sizes [`ADElementCache`](@ref)'s `:q` seeds and configurations, so the length a
+generic route seeds is the length the [`InternalSource`](@ref) gather hands the
+kernel — a tensor-valued internal variable owns several internal dofs per
+quadrature point, which is why the quadrature-point count does not answer this.
+
+`0` where the cache declares no real internal block, matching the placeholder
+block `setup_internal_variable_handler` builds for the same caches; the
+decorator then builds no `:q` configuration and a generic `:q` route refuses by
+name.
+
+One configuration serves every cell of the subdomain, so a count that varies
+between them is refused here rather than surfacing as a `DimensionMismatch`
+inside the first generic sweep.
+"""
+function resolve_internal_dofs_per_element(integrator, cache, sdh)
+    _declares_internal_dofs(get_number_of_internal_dofs_per_element, integrator, cache, sdh) || return 0
+    counts = get_number_of_internal_dofs_per_element(integrator, cache, sdh)
+    isempty(counts) && return 0
+    allequal(counts) || throw(ArgumentError(
+        "$(nameof(typeof(unwrap(cache)))) declares internal-dof counts between " *
+        "$(minimum(counts)) and $(maximum(counts)) across this subdomain's cells. The AD " *
+        "decorator seeds `:q` through ONE ForwardDiff configuration per subdomain, whose seed " *
+        "length is fixed, so a count varying between cells cannot be swept generically. " *
+        "Declare a uniform count, or serve every AD-decorator kind analytically " *
+        "(`provides_analytic`) so no decorator is built for this subdomain."))
+    return Int(first(counts))
+end
 
 """
     setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
@@ -235,8 +278,9 @@ per-worker buffer each, and `requests` the request kinds whose trait ↔ kernel
 and internal-state admissibility checks run here instead of at first use.
 Declaring a kind builds no per-worker state; it moves that kind's checks
 forward. Kinds are normalized to their UnionAll bases, so an instance or a
-payload-parameterized type declares the same kind as its bare name. Both are
-stored on the engine.
+payload-parameterized type declares the same kind as its bare name. The engine
+carries `slots` — the per-worker buffers are sized for them — and not the kinds,
+which are consumed here and restrict nothing afterwards.
 
 Element caches lacking analytic coverage of some AD-decorator kind are wrapped
 in [`ADElementCache`](@ref) at construction, for every kind the integrator
@@ -281,7 +325,7 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     # is declared keeps a cells-only operator's element type concrete.
     subdomain_caches  = (isempty(facet_caches) && isempty(algebraic_caches)) ? cell_caches :
         vcat(Vector{SubdomainCache}(cell_caches), facet_caches, algebraic_caches)
-    return AssemblyEngine(strategy, subdomain_caches, dh, ivh, declared_slots, declared_kinds)
+    return AssemblyEngine(strategy, subdomain_caches, dh, ivh, declared_slots)
 end
 
 """

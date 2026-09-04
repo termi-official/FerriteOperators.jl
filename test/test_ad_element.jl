@@ -173,7 +173,9 @@ end
         FerriteOperators.setup_element_cache(integ, sdh),
         [zeros(nq, nd) for _ in 1:getncells(grid)],
     )
-    ad = ADElementCache(bootstrap_cache, sdh)
+    # One internal dof per quadrature point here, which the decorator still has
+    # to be TOLD: `setup_operator` resolves it from the count hook.
+    ad = ADElementCache(bootstrap_cache, sdh; n_internal_dofs = nq)
     @test !provides_analytic(GenericBootstrapCache, JacobianKind{:u, Consistent}())   # wrapper is NOT
     @test FerriteOperators.serves_kind(typeof(ad), JacobianKind{:u, Consistent}())    # the DECORATOR covers it generically
     @test !provides_analytic(typeof(ad), JacobianKind{:u, Consistent}())              # and does not claim a kernel for it
@@ -204,6 +206,104 @@ end
     assemble_cell!(ResidualRequest(rref), reference_cache, CellArgs((u = uₑ, q = qref), cc, nothing, ctx))
     @test Kfused ≈ Kref rtol = 1e-8
     @test rfused ≈ rref rtol = 1e-12
+end
+
+####################################
+## The same bootstrap on a MULTI-dof-per-quadrature-point internal variable
+####################################
+# The viscoelastic element condenses a symmetric viscous strain, SIX internal
+# dofs per quadrature point rather than one, so the `:q` seeds only fit when
+# they are sized from the element's declared internal-dof count. The wrapper
+# hides the analytic Jacobian exactly as `GenericBootstrapCache` does above;
+# its `condensed_corrector` is the local solve's tensor slope
+# `dεᵛ/dε = (𝕀/γ̃ + E₁/η₁ ℂ)⁻¹ : (E₁/η₁ ℂ)` contracted with each shape
+# function's strain, laid out in the `[6 × nqp]` order the element's `q` is
+# reshaped into.
+struct SLSBootstrapIntegrator{I} <: AbstractCondensedNonlinearIntegrator
+    inner::I
+    ncells::Int
+end
+struct SLSBootstrapCache{C} <: FerriteOperators.AbstractVolumetricElementCache
+    inner::C
+    blocks::Vector{Matrix{Float64}}   # per-cell 6nqp × ndofs, filled by condense_cell!
+end
+function FerriteOperators.setup_element_cache(m::SLSBootstrapIntegrator, sdh::SubDofHandler)
+    inner = FerriteOperators.setup_element_cache(m.inner, sdh)
+    nq    = getnquadpoints(inner.cv)
+    return SLSBootstrapCache(inner, [zeros(6nq, ndofs_per_cell(sdh)) for _ in 1:m.ncells])
+end
+FerriteOperators.reinit_values!(c::SLSBootstrapCache, cell) = FerriteOperators.reinit_values!(c.inner, cell)
+FerriteOperators.reinit_values!(c::SLSBootstrapCache, cell, kind) = FerriteOperators.reinit_values!(c.inner, cell, kind)
+Ferrite.getnquadpoints(c::SLSBootstrapCache) = getnquadpoints(c.inner)
+FerriteOperators.has_internal_state(::Type{<:SLSBootstrapCache}) = true
+FerriteOperators.get_number_of_internal_dofs_per_element(model, c::SLSBootstrapCache, sdh) =
+    FerriteOperators.get_number_of_internal_dofs_per_element(model, c.inner, sdh)
+# `blocks` is item-keyed, so workers share it; only the values object is copied.
+FerriteOperators.duplicate_for_device(device, c::SLSBootstrapCache) =
+    SLSBootstrapCache(FerriteOperators.duplicate_for_device(device, c.inner), c.blocks)
+# Deliberately NO `provides_analytic`: the generic bootstrap is the whole point.
+FerriteOperators.assemble_cell!(req::ResidualRequest, c::SLSBootstrapCache, args) =
+    FerriteOperators.assemble_cell!(req, c.inner, args)
+function FerriteOperators.condense_cell!(c::SLSBootstrapCache, args, weights)
+    report = FerriteOperators.condense_cell!(c.inner, args, weights)
+    (; E₁, η₁, ν) = c.inner.material_parameters
+    cv    = c.inner.cv
+    γ̃     = stage_scaling(args.ctx)
+    block = c.blocks[cellid(args.cell)]
+    for qp in 1:getnquadpoints(cv)
+        ε    = symmetric(function_gradient(cv, qp, args.states.u))
+        ℂ    = FerriteOperatorsExampleElements._sls_unit_stiffness(ε, ν)
+        B    = (E₁ / η₁) * ℂ
+        dqdε = inv(one(ℂ) / γ̃ + B) ⊡ B
+        for j in 1:getnbasefunctions(cv)
+            block[(6(qp - 1) + 1):(6qp), j] .= (dqdε ⊡ symmetric(shape_gradient(cv, qp, j))).data
+        end
+    end
+    return report
+end
+FerriteOperators.condensed_corrector(c::SLSBootstrapCache, args) = c.blocks[cellid(args.cell)]
+
+@testset "Condensed generic Consistent (six internal dofs per QP) vs its analytic kernel" begin
+    strategy = AssemblyStrategy(SequentialCPUDevice())
+    qrc      = QuadratureRuleCollection(2)
+    (; op, dh, grid) = visco_testbed(strategy, qrc, (2, 1, 1))
+    integ = SimpleCondensedLinearViscoelasticity(MaxwellParameters(), qrc, :u, :εᵛ)
+
+    sdh = dh.subdofhandlers[1]
+    nq  = getnquadpoints(FerriteOperators.setup_element_cache(integ, sdh).cv)
+    gop = setup_operator(strategy, SLSBootstrapIntegrator(integ, getncells(grid)), dh;
+                         slots = (:u, :q, :qprev))
+
+    # The `:q` buffers follow the DECLARED count, six per quadrature point —
+    # not the quadrature-point count the sizing used to assume.
+    @test length(first_element_cache(gop).buffers.Lₑ) == 6nq
+    @test FerriteOperators.serves_kind(typeof(first_element_cache(gop)), JacobianKind{:u, Consistent}())
+    @test !provides_analytic(typeof(first_element_cache(gop)), JacobianKind{:u, Consistent}())
+
+    u     = zeros(unknown_size(op)); u[1:ndofs(dh)] .= 0.02 .* sin.(1:ndofs(dh))
+    uprev = zeros(unknown_size(op))
+    ctx   = TimeIntegrationContext(0.0, 0.5, 0.5)
+
+    uref, ugen = copy(u), copy(u)
+    condense_internal!(op,  condensed_states(uref, uprev), nothing, ctx)
+    condense_internal!(gop, condensed_states(ugen, uprev), nothing, ctx)
+    @test uref ≈ ugen                                   # the same condensed εᵛ
+
+    rref = zeros(residual_size(op));  update_linearization!(op,  rref, condensed_states(uref, uprev), nothing, ctx)
+    rgen = zeros(residual_size(gop)); update_linearization!(gop, rgen, condensed_states(ugen, uprev), nothing, ctx)
+    @test rgen ≈ rref rtol = 1e-12
+    @test Matrix(gop.J) ≈ Matrix(op.J) rtol = 1e-7      # generic combination == analytic tangent
+
+    # A decorator built without the declaration has no `:q` configuration and
+    # refuses by name, rather than seeding a mis-sized sweep.
+    cc = Ferrite.CellCache(dh); reinit!(cc, 1)
+    undeclared = ADElementCache(FerriteOperators.setup_element_cache(
+        SLSBootstrapIntegrator(integ, getncells(grid)), sdh), sdh)
+    FerriteOperators.reinit_values!(undeclared, cc)
+    nd = ndofs_per_cell(sdh)
+    @test_throws "no ForwardDiff configuration for the `:q`" assemble_cell!(
+        JacobianRequest{:u, Consistent}(zeros(nd, nd)), undeclared,
+        CellArgs((u = zeros(nd), q = zeros(6nq)), cc, nothing, ctx))
 end
 
 # Two deliberately incomplete caches: setup validation must reject them by

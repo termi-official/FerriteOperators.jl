@@ -54,7 +54,6 @@ end
     @testset "SDIRK-W witness: the declarations reach the engine" begin
         tb = declared_testbed(; fused = true)
         @test FerriteOperators._declared_slots(tb.op.engine) == (:u, :du)
-        @test FerriteOperators._declared_kinds(tb.op.engine) == (WeightedJacobianKind, ResidualKind)
 
         u  = sin.(0.3 .* (1:tb.n)); du = cos.(0.2 .* (1:tb.n))
         states = (u = u, du = du)
@@ -114,13 +113,11 @@ end
         states = (u = u, du = du)
 
         # the testbed declares neither the state JVP nor a functional
-        @test !(StateJVPKind in FerriteOperators._declared_kinds(tb.op.engine))
         Jv = zeros(tb.n); v = cos.(0.11 .* (1:tb.n))
         state_jvp!(Jv, tb.op, v, states, nothing, ctx)
         @test Jv ≈ tb.Kop.A * v rtol = 1e-10
 
         # a functional sweep reads no state, so an undeclared one just runs
-        @test !(FunctionalKind in FerriteOperators._declared_kinds(tb.op.engine))
         area = evaluate_functional(tb.op, FunctionalKind(:mass), states, nothing, ctx)
         @test area ≈ 4.0 rtol = 1e-12          # the [-1,1]² reference grid
 

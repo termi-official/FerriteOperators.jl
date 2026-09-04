@@ -107,33 +107,34 @@ resolved cache ends up analytic or decorated.
     wseed      # zeroed unknown-sized seed point of the weighted-Jacobian sweep
     wdual      # Dual slot buffers of the weighted sweep, grown to the slot count on first use
     θ          # flat primal parameter copy (nθ), grown on first use
-    jac_cfg_q  # ∂F/∂q JacobianConfig, ndofs × nqp — `nothing` unless the inner carries internal state
-    Kq         # ndofs × nqp scratch for the condensed generic Consistent combination, or `nothing`
-    L_cfg      # ∂L/∂q JacobianConfig, nqp × nqp (`local_conditions!`), or `nothing`
-    Lₑ         # nqp local-conditions output of the differentiated calls, or `nothing`
-    Lq         # nqp × nqp ∂L/∂q, consumed by its own factorization, or `nothing`
-    Lθ         # nqp × nθ ∂L/∂θ, overwritten by dq/dθ; grown on first use
-    qsc        # nqp scratch: ∂L/∂t, and the parameter VJP's (∂F/∂q)ᵀλ
+    jac_cfg_q  # ∂F/∂q JacobianConfig, ndofs × nq — `nothing` unless a `:q` block was declared
+    Kq         # ndofs × nq scratch for the condensed generic Consistent combination, or `nothing`
+    L_cfg      # ∂L/∂q JacobianConfig, nq × nq (`local_conditions!`), or `nothing`
+    Lₑ         # nq local-conditions output of the differentiated calls, or `nothing`
+    Lq         # nq × nq ∂L/∂q, consumed by its own factorization, or `nothing`
+    Lθ         # nq × nθ ∂L/∂θ, overwritten by dq/dθ; grown on first use
+    qsc        # nq scratch: ∂L/∂t, and the parameter VJP's (∂F/∂q)ᵀλ
 end
 
-function create_ad_element_buffers(inner, sdh, n_global_dofs::Int = 0)
+function create_ad_element_buffers(inner, sdh, n_global_dofs::Int = 0, n_internal_dofs::Int = 0)
     vₑ = pad_element_vector(allocate_element_unknown_vector(inner, sdh), n_global_dofs)
     re = pad_element_vector(allocate_element_residual_vector(inner, sdh), n_global_dofs)
-    return _ad_element_buffers(vₑ, re, has_internal_state(typeof(inner)) ? getnquadpoints(inner) : 0)
+    return _ad_element_buffers(vₑ, re, n_internal_dofs)
 end
 
-# The `:q` configs are sized from `getnquadpoints`, a cell-cache contract, so an
-# item family described by a dof count alone (an algebraic item) keeps them at
+# An item family described by a dof count alone (an algebraic item) declares its
+# internal block through `get_number_of_internal_dofs_per_algebraic_item`, whose
+# counts the item workspace owns, so this constructor keeps the `:q` configs at
 # `nothing`.
 create_ad_element_buffers(inner, ndofs::Int, ::Type{T}) where {T} =
     _ad_element_buffers(zeros(T, ndofs), zeros(T, ndofs), 0)
 
 # Every mutable member — the ForwardDiff configs included, which own the Dual
 # work buffers a sweep writes into — is allocated here, from the unknown- and
-# residual-sized prototypes and the item's `nqp` (0 where there is no `:q`
-# slot). A worker's buffers are therefore CONSTRUCTED, never assembled field by
-# field out of another worker's.
-function _ad_element_buffers(vₑ, re, nqp::Int)
+# residual-sized prototypes and the item's internal-dof count `nq` (0 where
+# there is no `:q` slot). A worker's buffers are therefore CONSTRUCTED, never
+# assembled field by field out of another worker's.
+function _ad_element_buffers(vₑ, re, nq::Int)
     T   = eltype(re)
     tag       = ForwardDiff.Tag{FerriteOperatorsADTag, T}()
     chunk     = ForwardDiff.Chunk(vₑ)
@@ -150,18 +151,18 @@ function _ad_element_buffers(vₑ, re, nqp::Int)
     L_cfg     = nothing
     Lₑ        = nothing
     Lq        = nothing
-    if nqp > 0
-        qseed     = zeros(T, nqp)
+    if nq > 0
+        qseed     = zeros(T, nq)
         chunk_q   = ForwardDiff.Chunk(qseed)
         jac_cfg_q = ForwardDiff.JacobianConfig(nothing, re, qseed, chunk_q, tag)
-        Kq        = zeros(T, ndofs, nqp)
-        # ∂L/∂q is nqp × nqp, so the ndofs × nqp `jac_cfg_q` cannot be shared.
-        Lₑ        = zeros(T, nqp)
+        Kq        = zeros(T, ndofs, nq)
+        # ∂L/∂q is nq × nq, so the ndofs × nq `jac_cfg_q` cannot be shared.
+        Lₑ        = zeros(T, nq)
         L_cfg     = ForwardDiff.JacobianConfig(nothing, Lₑ, qseed, chunk_q, tag)
-        Lq        = zeros(T, nqp, nqp)
+        Lq        = zeros(T, nq, nq)
     end
     return ADElementBuffers(re, jac_cfg, deriv_cfg, grad_cfg, u_dual, re_dual, wseed, wdual, Vector{T}(),
-                            jac_cfg_q, Kq, L_cfg, Lₑ, Lq, Matrix{T}(undef, nqp, 0), _copy_or_nothing(Lₑ))
+                            jac_cfg_q, Kq, L_cfg, Lₑ, Lq, Matrix{T}(undef, nq, 0), _copy_or_nothing(Lₑ))
 end
 
 _copy_or_nothing(::Nothing) = nothing
@@ -199,15 +200,15 @@ function _local_theta_block!(buf::ADElementBuffers, nθ::Int)
     return buf.Lθ
 end
 
-# Slot-sized config: `:q` needs its own (nqp generally ≠ ndofs); every other
-# slot shares the `:u`-sized one, assuming non-condensed state slots are all
-# field-dof-shaped.
+# Slot-sized config: `:q` needs its own (the internal-dof count generally ≠
+# ndofs); every other slot shares the `:u`-sized one, assuming non-condensed
+# state slots are all field-dof-shaped.
 _jac_config_for(buf::ADElementBuffers, ::Val{:q}) = buf.jac_cfg_q
 _jac_config_for(buf::ADElementBuffers, ::Val{slot}) where {slot} = buf.jac_cfg
 
 """
     ADElementCache{Inner, Backend, Buffers} <: AbstractVolumetricElementCache
-    ADElementCache(inner, sdh; backend = ForwardDiffAD(), n_global_dofs = 0)
+    ADElementCache(inner, sdh; backend = ForwardDiffAD(), n_global_dofs = 0, n_internal_dofs = 0)
     ADElementCache(inner, ndofs::Int, ::Type{T} = Float64; backend = ForwardDiffAD())
 
 Decorates `inner`'s mandatory residual kernel with automatic differentiation,
@@ -234,6 +235,17 @@ lets a condensed volumetric element sit on a subdomain carrying a tying term.
 The `ndofs` form sizes the buffers from a dof count alone, for an item family
 that has no `SubDofHandler` to allocate against.
 
+`n_internal_dofs` is the condensed internal-dof count of ONE cell and sizes the
+`:q` seeds and configs the generic routes above sweep with — the same
+[`get_number_of_internal_dofs_per_element`](@ref) declaration the
+[`InternalVariableHandler`](@ref) lays the `q` block out from, resolved by
+`setup_operator` ([`resolve_internal_dofs_per_element`](@ref)) so a config's
+seed length is exactly what the [`InternalSource`](@ref) gather hands the
+kernel. It is NOT `getnquadpoints`: an element carrying a tensor-valued
+internal variable owns several internal dofs per quadrature point. The default
+`0` builds no `:q` configuration at all, and a generic `:q` route then refuses
+by name rather than seeding a mis-sized sweep.
+
 `setup_operator` wraps automatically (`ad_backend = nothing` opts out).
 """
 struct ADElementCache{Inner, Backend, Buffers} <: AbstractElementCacheDecorator{Inner}
@@ -241,9 +253,11 @@ struct ADElementCache{Inner, Backend, Buffers} <: AbstractElementCacheDecorator{
     backend::Backend
     buffers::Buffers
 end
-function ADElementCache(inner, sdh; backend = ForwardDiffAD(), n_global_dofs::Int = 0)
+function ADElementCache(inner, sdh; backend = ForwardDiffAD(), n_global_dofs::Int = 0,
+        n_internal_dofs::Int = 0)
     _reject_condensed_global_dofs(inner, n_global_dofs)
-    return ADElementCache(inner, backend, create_ad_element_buffers(inner, sdh, n_global_dofs))
+    return ADElementCache(inner, backend,
+                          create_ad_element_buffers(inner, sdh, n_global_dofs, n_internal_dofs))
 end
 ADElementCache(inner, ndofs::Int, ::Type{T} = Float64; backend = ForwardDiffAD()) where {T} =
     ADElementCache(inner, backend, create_ad_element_buffers(inner, ndofs, T))
@@ -355,15 +369,17 @@ function evaluate_item_residual!(r, cache, args)
     return r
 end
 
-# An algebraic cache reaches an AD `:q` sweep with no config and is told so here
-# instead of failing inside ForwardDiff. The branch is on a field TYPE and folds
-# away.
+# A decorator built without a `:q` block reaches an AD `:q` sweep with no config
+# and is told so here instead of failing inside ForwardDiff. The branch is on a
+# field TYPE and folds away.
 _require_slot_config(cfg, ::Val, ad) = cfg
 _require_slot_config(::Nothing, ::Val{slot}, ad::ADElementCache{Inner}) where {slot, Inner} = throw(ArgumentError(
     "$(nameof(unwrap(Inner))) has no ForwardDiff configuration for the `:$slot` " *
-    "slot. `:q` configurations are sized from `getnquadpoints`, a CELL-cache contract, so an " *
-    "item family described by a dof count alone (an algebraic item) has none: serve " *
-    "`JacobianKind{:$slot}` with the analytic `assemble_algebraic!` kernel instead."))
+    "slot. `:q` configurations are sized from the decorator's `n_internal_dofs`, which " *
+    "`setup_operator` resolves from `get_number_of_internal_dofs_per_element`: a cache " *
+    "declaring no such block — an item family described by a dof count alone (an algebraic " *
+    "item), or a hand-built decorator left at the default 0 — has none. Serve " *
+    "`JacobianKind{:$slot}` with the analytic kernel instead, or declare the count."))
 
 # ∂F/∂slot — writes K, overwriting `y` with the primal residual. Only the named
 # slot is seeded; every other stays primal, including `AffineRate`-reconstructed

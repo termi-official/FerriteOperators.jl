@@ -60,7 +60,7 @@ const AnyMultiDomainIntegrator = Union{NonlinearMultiDomainIntegrator, BilinearM
 function setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler, ad_backend, n_global_dofs)
     resolved = zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers, n_global_dofs)
     needs_ad_decoration(integrator) || return [setup_element_cache(sub, sdh) for (sub, sdh, _) in resolved]
-    return [decorate_element_cache(setup_element_cache(sub, sdh), sdh, ad_backend, n) for (sub, sdh, n) in resolved]
+    return [setup_decorated_element_cache(sub, sdh, ad_backend, n) for (sub, sdh, n) in resolved]
 end
 
 # A subdomain's global dofs are its sub-integrator's, like its caches — one

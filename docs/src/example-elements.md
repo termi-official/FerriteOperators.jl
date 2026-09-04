@@ -73,8 +73,9 @@ AD route reaches through two levels: the decorator's generic `Consistent`
 combination ([`condensed_corrector`](@ref)) and the [`local_conditions!`](@ref)
 route both differentiate ONE element kernel, and a kernel that runs a nested
 operator's sweeps is not eltype-generic — it hands Float64 buffers to another
-operator. Those routes are also sized for one internal dof per quadrature point,
-which the `nqp × (micro ū + micro q)` count of a nested element is not.
+operator. Their `q` seeds do FIT a nested element — they are sized from the
+element's declared internal-dof count, `nqp × (micro ū + micro q)` here — so
+what does not reach through is the differentiation, not the buffer shape.
 `SimpleNestedHomogenization` therefore declares [`provides_analytic`](@ref) for
 the Jacobian-shaped kinds it serves and nothing else, and the sweep's parameter
 bag is not passed down: parameter and time sensitivities through two levels need
