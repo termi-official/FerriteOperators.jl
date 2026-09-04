@@ -48,7 +48,7 @@ It owns no time discretization and no scheme coefficients. `states` arrive as
 whatever the solver assembled them to be; `ctx` carries the scalars of *this*
 evaluation; weights are per-request payload.
 
-[`evaluate!`](@ref) is layer-polymorphic by design. It evaluates whatever the
+[`evaluate!`](@ref) is deliberately polymorphic. It evaluates whatever the
 integrator encodes — a nonlinear residual, the action of the linear operator a
 bilinear form induces (its element matrix acting on the element vector), or a
 hand-fused scheme residual — and the name says exactly that much and no more.

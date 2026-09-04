@@ -3,6 +3,7 @@ using Test
 using SparseArrays
 using BlockArrays
 using SparseMatricesCSR
+using Polyester
 
 # Assembling into a `BlockMatrix` of CSR blocks needs Ferrite's block/CSR
 # constraint-application layer (`Ferrite.addindex!(::SparseMatrixCSR, …)`),
@@ -73,6 +74,23 @@ else
             update_linearization!(opmono, u, nothing)
             update_linearization!(opblk, u, nothing)
             @test Matrix(opblk.J) ≈ Matrix(opmono.J)
+        end
+
+        # A parallel device duplicates the block assembler per worker, which no blocked test
+        # reached before: the sequential device holds a single assembler and never duplicates.
+        @testset "parallel device matches the sequential blocked assembly" begin
+            parallel = AssemblyStrategy(FullAssembly(blocked_spec), SequentialScheduling(),
+                                        PolyesterDevice(min_items_per_worker = 2))
+            oppar = setup_operator(parallel, integrator, dh)
+
+            rs = zeros(n); update_linearization!(opblk, rs, u, nothing)
+            rp = zeros(n); update_linearization!(oppar, rp, u, nothing)
+            @test rp ≈ rs
+            @test Matrix(oppar.J) ≈ Matrix(opblk.J)
+
+            rs2 = zeros(n); evaluate!(opblk, rs2, u, nothing)
+            rp2 = zeros(n); evaluate!(oppar, rp2, u, nothing)
+            @test rp2 ≈ rs2
         end
 
         @testset "bilinear operator on a blocked target" begin

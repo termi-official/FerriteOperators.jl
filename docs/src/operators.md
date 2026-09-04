@@ -19,9 +19,10 @@ its integrator. Every entry point funnels into one sweep over the engine's
 subdomain caches, so the difference between a residual, a Jacobian, and a
 sensitivity is the request kind, not a separate driver.
 
-[`evaluate!`](@ref) is layer-polymorphic by design: it evaluates whatever the
+[`evaluate!`](@ref) is deliberately polymorphic: it evaluates whatever the
 integrator encodes — a nonlinear residual, the action of the linear operator a
-bilinear form induces, a hand-fused scheme residual.
+bilinear form induces, a hand-fused scheme residual — and the name says exactly
+that much.
 
 Which assembly entry point an operator takes follows its integrator family. A
 nonlinear operator assembles through [`update_linearization!`](@ref) — `op.J`
