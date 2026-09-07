@@ -1,37 +1,22 @@
+"""
+    LinearFerriteOperator <: AbstractLinearOperator
+
+The operator [`setup_operator`](@ref) returns for an [`AbstractLinearIntegrator`](@ref):
+the assembled load vector `op.b` plus the [`AssemblyEngine`](@ref) and
+integrator that built it.
+"""
 @concrete struct LinearFerriteOperator <: AbstractLinearOperator
     b
-    strategy
-    subdomain_caches
-    dh
+    engine
     integrator
 end
 
-@concrete struct AssembleLinearTerm
-    inner_assembler
-    p
-end
-duplicate_for_device(device, task::AssembleLinearTerm{<:AbstractVector}) = task
-duplicate_for_device(device, task::AssembleLinearTerm) = AssembleLinearTerm(duplicate_for_device(device, task.inner_assembler), task.p)
+"""
+    update_operator!(op::LinearFerriteOperator, p, ctx = nothing)
 
-function execute_single_task!(task::AssembleLinearTerm, ws::AssemblyWorkspace)
-    pₑ = query_element_parameters(ws.element, ws.cell, ws.ivh, task.p)
-    rₑ = ws.re
-
-    fill!(rₑ, 0.0)
-
-    @timeit_debug "assemble element" assemble_element!(rₑ, ws.cell, ws.element, pₑ)
-    @timeit_debug "assemble boundary" assemble_element!(rₑ, ws.cell, ws.boundary_element, pₑ)
-
-    assemble!(task.inner_assembler, ws.cell, rₑ)
-end
-
-function update_operator!(op::LinearFerriteOperator, p)
-    (; b, strategy, subdomain_caches) = op
-
-    assembler = start_assemble(strategy, b)
-    task = AssembleLinearTerm(assembler, p)
-
-    execute_on_subdomains!(task, strategy, subdomain_caches)
-
-    finalize_assembly!(assembler)
-end
+Assemble the operator's vector `op.b` from the element kernels. `ctx` is the
+sweep's context, read by kernels through [`evaluation_time`](@ref) and friends:
+a load like `f(x, t)` needs one, a constant one does not.
+"""
+update_operator!(op::LinearFerriteOperator, p, ctx = nothing) =
+    assemble_into!(LinearKind(), (op.b,), op, (;), p, ctx)
