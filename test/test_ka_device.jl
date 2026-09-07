@@ -1,0 +1,224 @@
+using FerriteOperators
+using FerriteOperatorsExampleElements
+using Test
+using SparseArrays
+using LinearAlgebra
+# FerriteKAExt — which supplies `distribute_to_workers`, the device handler and
+# every Adapt rule the device kernel builds on — is triggered by these four
+# together, not by KernelAbstractions alone.
+import Adapt, GPUArrays, GPUArraysCore
+import KernelAbstractions as KA
+
+# The CPU backend runs the very same kernels as a GPU backend, so it covers the
+# device path on CI, where there is no GPU. `test/gpu/` runs the same
+# equivalence assertions on `CUDABackend()`.
+ka_device(::Type{T} = Float64, ::Type{I} = Int) where {T, I} =
+    KernelAbstractionsDevice(KA.CPU(); value_type = T, index_type = I,
+                             items_per_worker = 2, max_workgroup_size = 8)
+ka_strategy(args...) = AssemblyStrategy(ka_device(args...); scheduling = ColoredScheduling())
+
+function quad_testbed(::Type{T} = Float64; dims = (6, 5)) where {T}
+    grid = generate_grid(Quadrilateral, dims,
+                         Vec{2}((-one(T), -one(T))), Vec{2}((one(T), one(T))))
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    return dh
+end
+
+function hex_testbed(::Type{T} = Float64; dims = (3, 3, 3)) where {T}
+    grid = generate_grid(Hexahedron, dims,
+                         Vec{3}((-one(T), -one(T), -one(T))), Vec{3}((one(T), one(T), one(T))))
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefHexahedron, 1}())
+    close!(dh)
+    return dh
+end
+
+@testset "KernelAbstractionsDevice" begin
+    qrc = QuadratureRuleCollection(2)
+
+    @testset "matches the sequential result ($(nameof(typeof(integrator))), $T, $label)" for
+            (label, testbed) in (("quad", quad_testbed), ("hex", hex_testbed)),
+            T in (Float64, Float32),
+            integrator in (SimpleBilinearDiffusionIntegrator(2.5, qrc, :u),
+                           SimpleBilinearMassIntegrator(1.7, qrc, :u),
+                           SimpleLinearIntegrator(3.1, qrc, :u))
+
+        dh  = testbed(T)
+        I   = T === Float32 ? Int32 : Int
+        rtol = T === Float32 ? 1.0f-5 : 1.0e-12
+
+        # The coloring has to actually split the cells, or the test would pass
+        # with a single barrier and never exercise the synchronization.
+        @test length(Ferrite.create_coloring(Ferrite.get_grid(dh))) > 1
+
+        reference = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, I}()), integrator, dh)
+        update_operator!(reference, nothing)
+        device = setup_operator(ka_strategy(T, I), integrator, dh)
+        update_operator!(device, nothing)
+
+        target = FerriteOperators.operator_payload(device)
+        @test eltype(target) === T
+        @test target ≈ FerriteOperators.operator_payload(reference) rtol = rtol
+
+        # Coloring fixes the accumulation order per entry, so a repeated sweep
+        # reproduces the previous one exactly.
+        first_run = copy(target)
+        update_operator!(device, nothing)
+        @test first_run == FerriteOperators.operator_payload(device)
+    end
+
+    @testset "per-sweep host allocations stay O(1)" begin
+        dh = hex_testbed(Float32; dims = (6, 6, 6))
+        op = setup_operator(ka_strategy(Float32, Int32),
+                            SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(op, nothing)
+        update_operator!(op, nothing)
+        # Nothing is transferred or rebuilt per sweep: the workspaces, the
+        # coloring and the device handler were all built at setup. What is left
+        # is the per-color kernel object and the distributed assembler, so the
+        # count must not scale with the 216 cells.
+        allocations = @allocated update_operator!(op, nothing)
+        @test allocations < 200_000
+    end
+
+    @testset "launch geometry" begin
+        device = ka_device()
+        # One worker per `items_per_worker` items, capped by the workgroup size,
+        # and monotone: a barrier never launches more workers than the largest
+        # barrier's `n_workers` allocated caches for.
+        @test prod(FerriteOperators.launch_geometry(device, 4)) == 2
+        @test prod(FerriteOperators.launch_geometry(device, 100)) ≥ prod(FerriteOperators.launch_geometry(device, 40))
+        @test FerriteOperators.launch_geometry(device, 0) == (1, 0)
+        counts = [prod(FerriteOperators.launch_geometry(device, n)) for n in 1:400]
+        @test issorted(counts)
+        @test FerriteOperators.n_workers(device, [collect(1:40), collect(1:7)]) == prod(FerriteOperators.launch_geometry(device, 40))
+    end
+end
+
+####################################
+## Scope walls
+####################################
+
+# Each wall needs an integrator carrying exactly one offending declaration; the
+# element cache itself is the plain diffusion one throughout.
+struct FacetWallIntegrator <: AbstractBilinearIntegrator
+    qrc::QuadratureRuleCollection
+    facetset::Any
+end
+FerriteOperators.setup_element_cache(m::FacetWallIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T} =
+    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh, T)
+FerriteOperators.facet_items(m::FacetWallIntegrator, ::SubDofHandler) = m.facetset
+
+struct AlgebraicWallIntegrator <: AbstractBilinearIntegrator
+    qrc::QuadratureRuleCollection
+end
+FerriteOperators.setup_element_cache(m::AlgebraicWallIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T} =
+    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh, T)
+FerriteOperators.algebraic_items(::AlgebraicWallIntegrator, dh) = ([1],)
+
+struct GlobalDofWallIntegrator <: AbstractBilinearIntegrator
+    qrc::QuadratureRuleCollection
+end
+FerriteOperators.setup_element_cache(m::GlobalDofWallIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T} =
+    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh, T)
+FerriteOperators.global_dofs(::GlobalDofWallIntegrator, ::SubDofHandler) = (1,)
+
+struct NonlinearWallIntegrator <: AbstractNonlinearIntegrator
+    qrc::QuadratureRuleCollection
+end
+FerriteOperators.setup_element_cache(m::NonlinearWallIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T} =
+    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh, T)
+
+@testset "KernelAbstractionsDevice scope walls" begin
+    qrc = QuadratureRuleCollection(2)
+    dh  = quad_testbed()
+    bilinear = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
+
+    @testset "requires ColoredScheduling" begin
+        strategy = AssemblyStrategy(ka_device())   # SequentialScheduling by default
+        err = @test_throws ArgumentError setup_operator(strategy, bilinear, dh)
+        @test occursin("ColoredScheduling", err.value.msg)
+        @test occursin("race", err.value.msg)
+    end
+
+    @testset "rejects a blocked specification" begin
+        strategy = AssemblyStrategy(
+            FullAssembly(BlockedOperatorSpecification([ndofs(dh)], SparseMatrixCSC{Float64, Int})),
+            ColoredScheduling(), ka_device())
+        err = @test_throws ArgumentError setup_operator(strategy, bilinear, dh)
+        @test occursin("BlockedOperatorSpecification", err.value.msg)
+    end
+
+    @testset "rejects constraints on the specification" begin
+        ch = ConstraintHandler(dh)
+        add!(ch, Dirichlet(:u, getfacetset(Ferrite.get_grid(dh), "left"), (x, t) -> 0.0))
+        close!(ch)
+        strategy = AssemblyStrategy(
+            FullAssembly(StandardOperatorSpecification(; constraint_handler = ch)),
+            ColoredScheduling(), ka_device())
+        err = @test_throws ArgumentError setup_operator(strategy, bilinear, dh)
+        @test occursin("constraint_handler", err.value.msg)
+    end
+
+    @testset "rejects a matrix type it cannot assemble into" begin
+        strategy = AssemblyStrategy(
+            FullAssembly(StandardOperatorSpecification(; matrix_type = Matrix{Float64})),
+            ColoredScheduling(), ka_device())
+        err = @test_throws ArgumentError setup_operator(strategy, bilinear, dh)
+        @test occursin("start_assemble", err.value.msg)
+
+        mismatched = AssemblyStrategy(
+            FullAssembly(StandardOperatorSpecification(; matrix_type = SparseMatrixCSC{Float32, Int32})),
+            ColoredScheduling(), ka_device())
+        err = @test_throws ArgumentError setup_operator(mismatched, bilinear, dh)
+        @test occursin("element type", err.value.msg)
+    end
+
+    @testset "rejects nonlinear integrators" begin
+        err = @test_throws ArgumentError setup_operator(ka_strategy(), NonlinearWallIntegrator(qrc), dh)
+        @test occursin("bilinear and linear forms only", err.value.msg)
+    end
+
+    @testset "rejects facet items" begin
+        integrator = FacetWallIntegrator(qrc, getfacetset(Ferrite.get_grid(dh), "left"))
+        err = @test_throws ArgumentError setup_operator(ka_strategy(), integrator, dh)
+        @test occursin("facet item family", err.value.msg)
+    end
+
+    @testset "rejects algebraic items" begin
+        err = @test_throws ArgumentError setup_operator(ka_strategy(), AlgebraicWallIntegrator(qrc), dh)
+        @test occursin("algebraic item family", err.value.msg)
+    end
+
+    @testset "rejects global_dofs declarations" begin
+        err = @test_throws ArgumentError setup_operator(ka_strategy(), GlobalDofWallIntegrator(qrc), dh)
+        @test occursin("global_dofs", err.value.msg)
+    end
+
+    @testset "rejects condensed internal state" begin
+        ivh = InternalVariableHandler(cumsum(zeros(Int, getncells(Ferrite.get_grid(dh)) + 1)), nothing, ndofs(dh), 0)
+        err = @test_throws ArgumentError FerriteOperators.assert_device_internal_state_supported(ka_device(), ivh)
+        @test occursin("condensed internal state", err.value.msg)
+    end
+
+    @testset "rejects transfer and patch operators" begin
+        err = @test_throws ArgumentError setup_transfer_operator(
+            ka_strategy(), MassProlongatorIntegrator(qrc, :u), dh, dh)
+        @test occursin("sequential", lowercase(err.value.msg))
+    end
+
+    @testset "rejects state-dependent sweeps" begin
+        op = setup_operator(ka_strategy(), bilinear, dh)
+        err = @test_throws ArgumentError evaluate!(op, zeros(ndofs(dh)), zeros(ndofs(dh)), nothing)
+        @test occursin("state slots", err.value.msg)
+    end
+
+    @testset "rejects value-returning sweeps" begin
+        op = setup_evaluation_operator(ka_strategy(), bilinear, dh)
+        err = @test_throws ArgumentError evaluate_functional(
+            op, FunctionalKind{:anything}(), (u = zeros(ndofs(dh)),), nothing)
+        @test occursin("value-returning", err.value.msg)
+    end
+end

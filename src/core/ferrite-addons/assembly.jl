@@ -21,13 +21,28 @@ struct VectorAssembler{T, VT <: AbstractVector{T}, atomic} <: Ferrite.AbstractAs
     f::VT
 end
 
-Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix; fillzero::Bool=true) = start_assemble(J, atomic = dof_scatter_needs_atomic(strategy); fillzero)
-Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix, residual::AbstractVector; fillzero::Bool=true) = start_assemble(J, residual, atomic = dof_scatter_needs_atomic(strategy); fillzero)
+Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix; fillzero::Bool=true) =
+    _start_matrix_assemble(strategy.device, strategy, J; fillzero)
+Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix, residual::AbstractVector; fillzero::Bool=true) =
+    _start_matrix_assemble(strategy.device, strategy, J, residual; fillzero)
+_start_matrix_assemble(::AbstractDevice, strategy, args...; fillzero::Bool) =
+    start_assemble(args..., atomic = dof_scatter_needs_atomic(strategy); fillzero)
+# Ferrite's device `start_assemble` takes no `atomic` keyword, and there is
+# nothing to pass: its `DeviceCSCAssembler` accumulates with a plain `+=`.
+# `AbstractThreadSafeAssembler` means "safe to alias across workers GIVEN a
+# valid coloring", NOT race-free — which is why a GPU device requires
+# `ColoredScheduling` and rejects `SequentialScheduling` at setup.
+_start_matrix_assemble(::AbstractGPUDevice, strategy, args...; fillzero::Bool) =
+    start_assemble(args...; fillzero)
 function Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, residual::AbstractVector{T}; fillzero::Bool=true) where T
     fillzero && fill!(residual, zero(T))
     return VectorAssembler{T, typeof(residual), dof_scatter_needs_atomic(strategy)}(residual)
 end
 duplicate_for_device(device, a::VectorAssembler) = a
+# The GPU counterpart of the line above: every worker gets the same assembler.
+# It carries no per-worker scratch — the scatter is a bare indexed accumulation
+# — so aliasing it is exactly what a colored sweep wants.
+Ferrite.get_substruct(a::VectorAssembler, worker) = a
 
 # FIXME we might want to upstream this
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, Ke::AbstractMatrix, fe::AbstractVector) = assemble!(assembler, celldofs(cell), Ke, fe)
@@ -75,3 +90,12 @@ duplicate_for_device(device, a::ParameterVJPAssembler) = a
 
 allocate_vector(::Vector{T}, dh) where T = zeros(T, ndofs(dh))
 allocate_vector(::Type{Vector{T}}, dh) where T = zeros(T, ndofs(dh))
+
+"""
+    allocate_vector(device, dh)
+
+The operator's global vector for `device`. A device whose vectors are a plain
+`Vector` answers through `vector_type`; one whose allocator needs the backend
+OBJECT rather than a type — a GPU device — has its own method.
+"""
+allocate_vector(device::AbstractDevice, dh) = allocate_vector(vector_type(device), dh)

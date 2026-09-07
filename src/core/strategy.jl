@@ -1,8 +1,8 @@
 """
-    StandardOperatorSpecification(; algebraic_couplings = (), constraint_handler = nothing)
+    StandardOperatorSpecification(; algebraic_couplings = (), constraint_handler = nothing,
+                                    matrix_type = nothing)
 
-The operator's global matrix as a monolithic
-`SparseMatrixCSC{value_type(device), index_type(device)}`, over the pattern
+The operator's global matrix as a monolithic sparse matrix over the pattern
 [`create_system_matrix`](@ref) builds from two declarations
 [`BlockedOperatorSpecification`](@ref) shares (the zero-argument form is
 [`FullAssembly`](@ref)'s default):
@@ -16,13 +16,24 @@ The operator's global matrix as a monolithic
 - `constraint_handler` — sparsity room for the constraint entries
   (`add_constraint_entries!`). Applying the constraints stays the caller's,
   through Ferrite's `apply!`/`apply_assemble!`.
+- `matrix_type` — the concrete matrix type to allocate, `nothing` (the default)
+  meaning `SparseMatrixCSC{value_type(device), index_type(device)}`. Naming one
+  is what a DEVICE matrix takes: this package depends on no GPU vendor package,
+  so the user loads it and names the type
+  (`StandardOperatorSpecification(; matrix_type = CuSparseMatrixCSC{Float32, Int32})`),
+  exactly as [`BlockedOperatorSpecification`](@ref) does for its block storage.
+  The pattern stays this package's, so the coupling declarations above still
+  hold. Its element type must be the device's `value_type`, and Ferrite must
+  have a `start_assemble` method for it — both checked at setup.
 """
-struct StandardOperatorSpecification{C, CH}
+struct StandardOperatorSpecification{C, CH, MT}
     algebraic_couplings::C
     constraint_handler::CH
+    matrix_type::MT
 end
-StandardOperatorSpecification(; algebraic_couplings = (), constraint_handler = nothing) =
-    StandardOperatorSpecification(algebraic_couplings, constraint_handler)
+StandardOperatorSpecification(; algebraic_couplings = (), constraint_handler = nothing,
+        matrix_type = nothing) =
+    StandardOperatorSpecification(algebraic_couplings, constraint_handler, matrix_type)
 
 """
     BlockedOperatorSpecification(block_sizes, matrix_type; algebraic_couplings = (), constraint_handler = nothing)
@@ -197,12 +208,12 @@ ones are (re)allocated once their column count is known — `θ`/`Bₑ`/`gθ` by
     Kqₑ       # local ∂F/∂q block (residual × the item's condensed internal dof count)
 end
 
-function create_sensitivity_buffers(element, sdh, n_global_dofs::Int = 0)
-    vₑ  = pad_element_vector(allocate_element_unknown_vector(element, sdh), n_global_dofs)
-    gu  = pad_element_vector(allocate_element_unknown_vector(element, sdh), n_global_dofs)
-    λₑ  = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
-    Jvₑ = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
-    gₜ  = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
+function create_sensitivity_buffers(element, sdh, n_global_dofs::Int = 0, ::Type{Tv} = Float64) where {Tv}
+    vₑ  = pad_element_vector(allocate_element_unknown_vector(element, sdh, Tv), n_global_dofs)
+    gu  = pad_element_vector(allocate_element_unknown_vector(element, sdh, Tv), n_global_dofs)
+    λₑ  = pad_element_vector(allocate_element_residual_vector(element, sdh, Tv), n_global_dofs)
+    Jvₑ = pad_element_vector(allocate_element_residual_vector(element, sdh, Tv), n_global_dofs)
+    gₜ  = pad_element_vector(allocate_element_residual_vector(element, sdh, Tv), n_global_dofs)
     T   = eltype(Jvₑ)
     return SensitivityBuffers(λₑ, vₑ, Jvₑ, gu, gₜ, Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0),
                               Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0))
@@ -303,12 +314,13 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
         keys(ws.slot_buffers);
         needs_sensitivity = ws.sensitivity !== nothing,
         global_dofs = _declared_global_dofs(ws),
+        value_type = eltype(ws.Ke),
     )
 end
 
 """
     create_assembly_workspace(element, sdh, ivh, slots;
-                              needs_sensitivity = true, global_dofs = ())
+                              needs_sensitivity = true, global_dofs = (), value_type = Float64)
 
 Create one [`AssemblyWorkspace`](@ref) with freshly allocated element-local
 buffers, one state buffer per declared slot name and sized to `ndofs_per_cell`;
@@ -322,22 +334,44 @@ STRUCTURAL, decided by the integrator family ([`needs_ad_decoration`](@ref)).
 `global_dofs` is the subdomain's [`global_dofs`](@ref) declaration: every
 element-local buffer is padded by its length, and the workspace carries the
 augmented dof vector the sweep's gathers and scatters address.
+
+`value_type` is the scalar type the element-local buffers carry, the device's
+[`value_type`](@ref) as `setup_engine` resolved it.
 """
 function create_assembly_workspace(element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
-        needs_sensitivity::Bool = true, global_dofs = ()) where {N}
+        needs_sensitivity::Bool = true, global_dofs = (), value_type::Type{Tv} = Float64) where {N, Tv}
     n = length(global_dofs)
-    slot_buffers = NamedTuple{slots}(ntuple(_ -> pad_element_vector(allocate_element_unknown_vector(element, sdh), n), N))
+    slot_buffers = NamedTuple{slots}(ntuple(_ -> pad_element_vector(allocate_element_unknown_vector(element, sdh, Tv), n), N))
     return AssemblyWorkspace(
-        pad_element_matrix(allocate_element_matrix(element, sdh), n),
+        pad_element_matrix(allocate_element_matrix(element, sdh, Tv), n),
         slot_buffers,
-        pad_element_vector(allocate_element_residual_vector(element, sdh), n),
+        pad_element_vector(allocate_element_residual_vector(element, sdh, Tv), n),
         CellCache(sdh),
         ivh,
         element,
-        needs_sensitivity ? create_sensitivity_buffers(element, sdh, n) : nothing,
+        needs_sensitivity ? create_sensitivity_buffers(element, sdh, n, Tv) : nothing,
         _augmented_dof_vector(sdh, global_dofs),
     )
 end
+
+"""
+    device_worker_view(ws::AssemblyWorkspace, worker)
+
+Worker `worker`'s slice of the batched workspace a GPU device's
+[`setup_device_instances`](@ref) built: the element buffers become worker rows
+of the shared batches, the geometry cache and the element cache their own
+per-worker views, and the internal-variable handler is shared read-only.
+"""
+device_worker_view(ws::AssemblyWorkspace, worker) = AssemblyWorkspace(
+    device_worker_view(ws.Ke, worker),
+    map(b -> device_worker_view(b, worker), ws.slot_buffers),
+    device_worker_view(ws.re, worker),
+    device_worker_view(ws.cell, worker),
+    ws.ivh,
+    device_worker_view(ws.element, worker),
+    ws.sensitivity,
+    ws.dofs,
+)
 
 function _augmented_dof_vector(sdh, global_dofs)
     n = length(global_dofs)
@@ -389,12 +423,19 @@ once, and `min_items_per_worker` is the smallest share a worker is given, so
 the count is the smaller of the thread count and the number of such shares the
 largest barrier of `partition` holds. Workspaces are therefore per WORKER, not
 per share: a worker walks the items it was given with the one workspace it owns.
+
+A [`KernelAbstractionsDevice`](@ref) sizes them from its launch policy
+([`launch_geometry`](@ref)) over the largest barrier, since every barrier
+launches at most that geometry and the kernel indexes the per-worker caches
+unchecked.
 """
 n_workers(::SequentialCPUDevice, partition) = 1
 function n_workers(device::PolyesterDevice, partition)
     ncellsmax = maximum(length, partition)
     return min(Threads.nthreads(), cld(ncellsmax, device.min_items_per_worker))
 end
+n_workers(device::KernelAbstractionsDevice, partition) =
+    max(1, prod(launch_geometry(device, maximum(length, partition; init = 0))))
 
 
 ####################################
@@ -402,9 +443,12 @@ end
 ####################################
 
 matrix_type(strategy::AssemblyStrategy) = matrix_type(strategy.device, strategy.form.operator_specification)
-matrix_type(device::AbstractDevice, ::StandardOperatorSpecification) = SparseMatrixCSC{value_type(device), index_type(device)}
-# The blocked spec names its own type: block and entry storage are the user's
-# choice, and this package carries neither dependency.
+matrix_type(device::AbstractDevice, ::StandardOperatorSpecification{<:Any, <:Any, Nothing}) =
+    SparseMatrixCSC{value_type(device), index_type(device)}
+# A spec that names its own type wins: block and entry storage (blocked) and
+# device residency (standard) are the user's choice, and this package carries
+# neither dependency.
+matrix_type(::AbstractDevice, spec::StandardOperatorSpecification) = spec.matrix_type
 matrix_type(::AbstractDevice, spec::BlockedOperatorSpecification) = spec.matrix_type
 vector_type(strategy::AbstractAssemblyStrategy) = vector_type(strategy.device)
 vector_type(device::AbstractDevice) = Vector{value_type(device)}

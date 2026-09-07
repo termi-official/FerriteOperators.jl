@@ -57,10 +57,11 @@ const AnyMultiDomainIntegrator = Union{NonlinearMultiDomainIntegrator, BilinearM
 # Resolution is hoisted to the plural hook: once per operator setup instead of
 # once per subdomain. Decoration stays per-subdomain, since neighbouring
 # sub-integrators may differ in needing it.
-function setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler, ad_backend, n_global_dofs)
+function setup_elements(integrator::AnyMultiDomainIntegrator, dh::AbstractDofHandler, ad_backend, n_global_dofs,
+        ::Type{T} = Float64) where {T}
     resolved = zip(subintegrators_per_subdomain(integrator, dh), dh.subdofhandlers, n_global_dofs)
-    needs_ad_decoration(integrator) || return [setup_element_cache(sub, sdh) for (sub, sdh, _) in resolved]
-    return [setup_decorated_element_cache(sub, sdh, ad_backend, n) for (sub, sdh, n) in resolved]
+    needs_ad_decoration(integrator) || return [setup_element_cache(sub, sdh, T) for (sub, sdh, _) in resolved]
+    return [setup_decorated_element_cache(sub, sdh, ad_backend, n, T) for (sub, sdh, n) in resolved]
 end
 
 # A subdomain's global dofs are its sub-integrator's, like its caches — one
@@ -131,6 +132,8 @@ end
 # plural hook above.
 setup_element_cache(element_model::AnyMultiDomainIntegrator, sdh::SubDofHandler) =
     setup_element_cache(subintegrator_for_subdomain(element_model.subintegrators, sdh), sdh)
+setup_element_cache(element_model::AnyMultiDomainIntegrator, sdh::SubDofHandler, ::Type{T}) where {T} =
+    setup_element_cache(subintegrator_for_subdomain(element_model.subintegrators, sdh), sdh, T)
 
 """
     subintegrators_per_subdomain(integrator, dh) -> Vector

@@ -23,14 +23,35 @@ abstract type AbstractVolumetricElementCache end
     allocate_element_unknown_vector(element_cache, sdh)
     allocate_element_residual_vector(element_cache, sdh)
 
+    allocate_element_matrix(element_cache, sdh, ::Type{T})
+    allocate_element_unknown_vector(element_cache, sdh, ::Type{T})
+    allocate_element_residual_vector(element_cache, sdh, ::Type{T})
+
 The element-local buffers of one item, sized in the FIELD SPACE — the
 `ndofs_per_cell(sdh)` dofs `celldofs` carries. Where the integrator declares
 [`global_dofs`](@ref) the engine PADS what these return, so an override states
 the field-space size and never the augmented one.
+
+The engine calls the three-argument form, `T` being the device's
+[`value_type`](@ref). Its generic method re-types what the two-argument form
+returns, keeping that form the single definition point: an override of it is
+honoured whatever `T` the device asks for, and is what a cache overrides unless
+it can build the buffer in `T` directly.
 """
 allocate_element_matrix(element_cache, sdh)          = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
 @doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh)  = zeros(ndofs_per_cell(sdh))
 @doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh) = zeros(ndofs_per_cell(sdh))
+
+@doc (@doc allocate_element_matrix) allocate_element_matrix(element_cache, sdh, ::Type{T}) where {T} =
+    _retyped_element_buffer(allocate_element_matrix(element_cache, sdh), T)
+@doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh, ::Type{T}) where {T} =
+    _retyped_element_buffer(allocate_element_unknown_vector(element_cache, sdh), T)
+@doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh, ::Type{T}) where {T} =
+    _retyped_element_buffer(allocate_element_residual_vector(element_cache, sdh), T)
+
+# Identity for the default `Float64` election, so the common path allocates once.
+_retyped_element_buffer(buffer::AbstractArray{T}, ::Type{T}) where {T} = buffer
+_retyped_element_buffer(buffer::AbstractArray, ::Type{T}) where {T} = fill!(similar(buffer, T), zero(T))
 
 # The padding itself: `similar` keeps whatever array type the element chose.
 function pad_element_matrix(Ke, n::Int)
@@ -133,10 +154,18 @@ evaluate_cell_functional(kind, ::EmptyVolumetricElementCache, args) = nothing
 
 """
     setup_element_cache(integrator, sdh)
+    setup_element_cache(integrator, sdh, ::Type{T})
 
 Setup the element cache on a given subdofhandler. There is deliberately no
 silent no-op fallback: a missing method is a loud setup error, not an
 operator that assembles nothing.
+
+The engine calls the three-argument form, `T` being the device's
+[`value_type`](@ref) — the channel a `Float32` device builds `Float32`
+`CellValues` through, via the three-argument
+[`getquadraturerule`](@ref) and `CellValues(T, qr, ip, ip_geo)`. It falls back
+to the two-argument form, so an integrator that only ever assembles in `Float64`
+needs no method of its own.
 """
 function setup_element_cache(integrator, sdh)
     throw(ArgumentError(
@@ -144,6 +173,8 @@ function setup_element_cache(integrator, sdh)
         "Implement `setup_element_cache(integrator, sdh)` (return `EmptyVolumetricElementCache()` " *
         "explicitly if the integrator has no volumetric term)."))
 end
+@doc (@doc setup_element_cache) setup_element_cache(integrator, sdh, ::Type{T}) where {T} =
+    setup_element_cache(integrator, sdh)
 
 """
 Supertype for all caches to integrate over surfaces.

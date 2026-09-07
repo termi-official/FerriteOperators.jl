@@ -14,20 +14,25 @@ end
 """
 The cache associated with [`SimpleLinearIntegrator`](@ref) to assemble element "constant" vectors.
 """
-struct SimpleLinearElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+struct SimpleLinearElementCache{CV} <: AbstractVolumetricElementCache
     f::Float64
     cellvalues::CV
 end
 
 Ferrite.getnquadpoints(e::SimpleLinearElementCache) = getnquadpoints(e.cellvalues)
 reinit_values!(e::SimpleLinearElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
-function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofHandler)
-    qr         = getquadraturerule(element_model.qrc, sdh)
+function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T}
+    qr         = getquadraturerule(element_model.qrc, sdh, T)
     field_name = element_model.field_name
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
-    return SimpleLinearElementCache(element_model.f, CellValues(qr, ip, ip_geo))
+    return SimpleLinearElementCache(element_model.f, CellValues(T, qr, ip, ip_geo))
 end
+
+setup_device_instances(device::AbstractGPUDevice, cache::SimpleLinearElementCache, n) =
+    SimpleLinearElementCache(cache.f, setup_device_instances(device, cache.cellvalues, n))
+device_worker_view(cache::SimpleLinearElementCache, worker) =
+    SimpleLinearElementCache(cache.f, device_worker_view(cache.cellvalues, worker))
 
 # The load form is state-independent: the kernel reads nothing from `args.states`.
 function assemble_cell!(req::ResidualRequest, cache::SimpleLinearElementCache, args::CellArgs)
@@ -58,7 +63,7 @@ end
 """
 The cache associated with [`SimpleBilinearMassIntegrator`](@ref) to assemble element mass matrices.
 """
-struct SimpleBilinearMassElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+struct SimpleBilinearMassElementCache{CV} <: AbstractVolumetricElementCache
     ρ::Float64
     cellvalues::CV
 end
@@ -72,12 +77,17 @@ function duplicate_for_device(device, cache::SimpleBilinearMassElementCache)
     )
 end
 
-function setup_element_cache(element_model::SimpleBilinearMassIntegrator, sdh::SubDofHandler)
-    qr         = getquadraturerule(element_model.qrc, sdh)
+setup_device_instances(device::AbstractGPUDevice, cache::SimpleBilinearMassElementCache, n) =
+    SimpleBilinearMassElementCache(cache.ρ, setup_device_instances(device, cache.cellvalues, n))
+device_worker_view(cache::SimpleBilinearMassElementCache, worker) =
+    SimpleBilinearMassElementCache(cache.ρ, device_worker_view(cache.cellvalues, worker))
+
+function setup_element_cache(element_model::SimpleBilinearMassIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T}
+    qr         = getquadraturerule(element_model.qrc, sdh, T)
     field_name = element_model.field_name
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
-    return SimpleBilinearMassElementCache(element_model.ρ, CellValues(qr, ip, ip_geo))
+    return SimpleBilinearMassElementCache(element_model.ρ, CellValues(T, qr, ip, ip_geo))
 end
 
 # The bilinear form induces a linear operator, so its residual is the element

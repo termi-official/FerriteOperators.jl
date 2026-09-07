@@ -246,4 +246,16 @@ MyBackend())`.
 
 **New devices and scheduling** — `execute_on_device!`,
 `setup_device_instances` and `compute_partition` are the three hooks a device
-or scheduling policy implements; the item loop and the workspaces are shared.
+or scheduling policy implements; the item loop and the workspaces are shared. A
+device whose per-worker state is a struct of arrays rather than an array of
+structs — [`KernelAbstractionsDevice`](@ref) is the shipped one — additionally
+implements [`device_worker_view`](@ref) (the in-kernel slice),
+[`n_workers`](@ref), [`adapt_partition`](@ref) and, where its geometry cache
+needs a device-resident handler, [`setup_device_handler`](@ref). It answers
+`allocate_vector(device, dh)` for the global vector, and
+[`allocate_operator_matrix`](@ref) for the global matrix whose type the
+operator specification names.
+
+A device that cannot serve an item family says so at setup through
+`assert_device_supported` rather than failing inside the first sweep; the GPU
+method there is the list of what the device kernel covers today.

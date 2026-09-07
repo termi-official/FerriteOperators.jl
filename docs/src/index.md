@@ -70,7 +70,8 @@ Which machinery an operator is built on is one composite choice, and the three
 axes are orthogonal: the *operator form* ([`AbstractAssemblyForm`](@ref) — the
 MFEM assembly level), the *scheduling policy* ([`SequentialScheduling`](@ref) /
 [`ColoredScheduling`](@ref) — how parallel work is made race-safe), and the
-*device* (sequential CPU, threaded via Polyester).
+*device* (sequential CPU, threaded via Polyester, GPU via
+KernelAbstractions.jl).
 [`AssemblyStrategy`](@ref)`(device; form, scheduling)` is the keyword
 convenience constructor for the common compositions: `AssemblyStrategy(device)`
 and `AssemblyStrategy(device; scheduling = ColoredScheduling())`.
@@ -79,6 +80,56 @@ and `AssemblyStrategy(device; scheduling = ColoredScheduling())`.
 activates it, and without that load the type exists with no execution route.
 [`default_strategy`](@ref) resolves that at call time — the Polyester device
 where the extension is loaded, [`SequentialCPUDevice`](@ref) otherwise.
+
+## GPU assembly
+
+[`KernelAbstractionsDevice`](@ref) assembles bilinear and linear forms on a
+KernelAbstractions.jl backend. This package depends on no GPU vendor package:
+the backend object and the device matrix type both come from the caller.
+
+```julia
+using CUDA, Adapt, KernelAbstractions   # `using CUDA` loads all of these
+import CUDA: CUSPARSE.CuSparseMatrixCSC
+
+device   = KernelAbstractionsDevice(CUDABackend(); value_type = Float32, index_type = Int32)
+spec     = StandardOperatorSpecification(; matrix_type = CuSparseMatrixCSC{Float32, Int32})
+strategy = AssemblyStrategy(FullAssembly(spec), ColoredScheduling(), device)
+
+op = setup_operator(strategy, integrator, dh)   # op.A lives on the device
+update_operator!(op, p)
+```
+
+`value_type` reaches the element caches through the three-argument
+[`setup_element_cache`](@ref), so a `Float32` device builds `Float32`
+`CellValues`. Build the grid with `Float32` coordinates as well: a `Float64`
+grid assembles correctly, but its coordinates are what the geometry mapping
+computes in, so the device pays `Float64` memory and arithmetic for it. The
+linear operator's vector is allocated on the device too, and the assembled
+matrix stays there — a sweep transfers nothing.
+
+What the device covers is CELL items under [`ColoredScheduling`](@ref), which
+is REQUIRED: Ferrite's device matrix assembler accumulates without atomics.
+Rejected at setup, each with a message naming the limitation:
+[`SequentialScheduling`](@ref), facet items, algebraic items, patch and
+transfer operators, condensed internal state, nonlinear integrators, a
+[`BlockedOperatorSpecification`](@ref), constraints declared on the operator
+specification, [`global_dofs`](@ref) declarations, value-returning sweeps
+(functionals, quadrature evaluation), and a device matrix type Ferrite has no
+assembler for.
+
+An element cache reaches the device by declaring which of its fields are
+batched per worker and which are shared, through
+[`setup_device_instances`](@ref) and [`device_worker_view`](@ref):
+
+```julia
+setup_device_instances(dev::AbstractGPUDevice, c::MyCache, n) =
+    MyCache(c.D, setup_device_instances(dev, c.cellvalues, n))
+device_worker_view(c::MyCache, w) = MyCache(c.D, device_worker_view(c.cellvalues, w))
+```
+
+The cache's field type parameters have to admit the batched layout — a
+`cellvalues::CV` field holds a struct-of-arrays container over `n` workers on
+the device, not a `CellValues`.
 
 [`FullAssembly`](@ref) assembles the global matrix and vector and serves every
 operator family. It is the form axis' sole member; the axis and the `form`

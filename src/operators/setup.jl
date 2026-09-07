@@ -13,7 +13,7 @@ constraints to the assembled system stays the caller's, through Ferrite's
 `apply!`/`apply_assemble!`.
 """
 create_system_matrix(strategy, dh) = _create_system_matrix(strategy, strategy.form.operator_specification, dh)
-create_system_vector(strategy, dh) = allocate_vector(vector_type(strategy), dh)
+create_system_vector(strategy, dh) = allocate_vector(strategy.device, dh)
 
 function _create_system_matrix(strategy, spec, dh)
     sp = init_operator_sparsity_pattern(spec, dh)
@@ -25,23 +25,43 @@ function _create_system_matrix(strategy, spec, dh)
     else
         add_sparsity_entries!(sp, dh, spec.constraint_handler; algebraic_couplings = couplings)
     end
-    return allocate_matrix(matrix_type(strategy), sp)
+    return allocate_operator_matrix(strategy.device, matrix_type(strategy), sp)
 end
+
+"""
+    allocate_operator_matrix(device, matrix_type, sp)
+
+The operator's global matrix over the sparsity pattern `sp`
+[`create_system_matrix`](@ref) built.
+
+Ferrite ships no `allocate_matrix(::Type{<:device matrix}, ::SparsityPattern)`
+— only the `DofHandler` form, which rebuilds the pattern from the handler and
+would drop this package's coupling declarations. So a GPU device allocates the
+host `SparseMatrixCSC` over the SAME pattern every other device uses and hands
+it to the device type's constructor, which is the conversion Ferrite's
+`DofHandler` form performs internally. The type parameters come from that
+constructor (CUSPARSE fixes the index type at `Cint`), not from the requested
+spelling.
+"""
+allocate_operator_matrix(::AbstractDevice, ::Type{MT}, sp) where {MT} = allocate_matrix(MT, sp)
+allocate_operator_matrix(device::AbstractGPUDevice, ::Type{MT}, sp) where {MT} =
+    Base.typename(MT).wrapper(
+        allocate_matrix(SparseMatrixCSC{value_type(device), index_type(device)}, sp))
 
 init_operator_sparsity_pattern(::StandardOperatorSpecification, dh) = Ferrite.init_sparsity_pattern(dh)
 init_operator_sparsity_pattern(spec::BlockedOperatorSpecification, dh) = BlockSparsityPattern(spec.block_sizes)
 
-function setup_elements(integrator, dh, ad_backend, n_global_dofs)
-    needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
-    return [setup_decorated_element_cache(integrator, sdh, ad_backend, n)
+function setup_elements(integrator, dh, ad_backend, n_global_dofs, ::Type{T} = Float64) where {T}
+    needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh, T) for sdh in dh.subdofhandlers]
+    return [setup_decorated_element_cache(integrator, sdh, ad_backend, n, T)
             for (sdh, n) in zip(dh.subdofhandlers, n_global_dofs)]
 end
 
 # One subdomain's element cache, built and decorated. Both counts the decorator
 # is sized from are the INTEGRATOR's declarations, resolved here, which is what
 # keeps `decorate_element_cache` itself integrator-free.
-function setup_decorated_element_cache(integrator, sdh, ad_backend, n_global_dofs::Int)
-    cache = setup_element_cache(integrator, sdh)
+function setup_decorated_element_cache(integrator, sdh, ad_backend, n_global_dofs::Int, ::Type{T} = Float64) where {T}
+    cache = setup_element_cache(integrator, sdh, T)
     return decorate_element_cache(cache, sdh, ad_backend, n_global_dofs;
                                   n_internal_dofs = resolve_internal_dofs_per_element(integrator, cache, sdh))
 end
@@ -144,15 +164,21 @@ end
 function setup_subdomain_caches(strategy, element_caches, ivh, dh;
         slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, global_dof_sets)
     device = strategy.device
+    # One device-resident handler for the whole operator, split per subdomain
+    # below: it is what a device geometry cache must be built from, and
+    # rebuilding it per subdomain would upload the cell-id maps of every other
+    # subdomain again.
+    device_dh = setup_device_handler(device, dh)
     return [begin
-        partition = compute_partition(strategy, sdh)
+        partition = adapt_partition(device, compute_partition(strategy, sdh))
         n = n_workers(device, partition)
         ws = create_assembly_workspace(element_cache, sdh, ivh, slots;
-                                       needs_sensitivity, global_dofs = gdofs)
-        dc = setup_device_instances(device, ws, n)
+                                       needs_sensitivity, global_dofs = gdofs,
+                                       value_type = value_type(device))
+        dc = setup_device_instances(device, ws, n, device_subdomain_handler(device_dh, index))
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
-    end for (sdh, element_cache, gdofs) in
-        zip(dh.subdofhandlers, element_caches, global_dof_sets)]
+    end for (index, (sdh, element_cache, gdofs)) in
+        enumerate(zip(dh.subdofhandlers, element_caches, global_dof_sets))]
 end
 
 # Each family's global-dof declaration is resolved once per subdomain, before
@@ -175,6 +201,11 @@ function _resolve_global_dof_sets(strategy, dh, sets, declaration)
 end
 
 function _reject_unsupported_global_dof_strategy(strategy::AssemblyStrategy, declaration)
+    strategy.device isa AbstractGPUDevice && throw(ArgumentError(
+        "A subdomain declaring `$declaration` cannot be assembled on " *
+        "$(nameof(typeof(strategy.device))): a GPU device assembles under `ColoredScheduling` " *
+        "only, and a dof shared by every item of a subdomain admits no coloring. Assemble this " *
+        "operator on a CPU device."))
     strategy.scheduling isa ColoredScheduling && throw(ArgumentError(
         "A subdomain declaring `$declaration` cannot be assembled under `ColoredScheduling`: " *
         "coloring makes a scatter race-free by giving no two items of a color a shared dof, " *
@@ -204,6 +235,86 @@ function _validate_global_dofs(index, sdh, gdofs, ndofs_total, declaration)
             "`[celldofs(cell); global dofs]`, so such a dof would receive every contribution " *
             "twice. Only the first cell of the subdomain is sampled."))
     end
+    return nothing
+end
+
+####################################
+## Device support walls
+####################################
+
+"""
+    assert_device_supported(device, strategy, integrator, dh)
+    assert_device_internal_state_supported(device, ivh)
+
+Reject at setup what a device cannot assemble. Both are no-ops for a CPU
+device, which serves every item family; the [`AbstractGPUDevice`](@ref) methods
+cover the cell-item, coloring-only slice a device kernel supports today, and
+each rejection names the limitation rather than surfacing as a `MethodError`
+inside the first sweep — or, for the scheduling one, as a silent data race.
+
+The first form runs on the strategy and the integrator's DECLARATIONS, before
+any cache is built; the second needs the resolved
+[`InternalVariableHandler`](@ref).
+"""
+assert_device_supported(::AbstractDevice, strategy, integrator, dh) = nothing
+
+function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblyStrategy, integrator, dh)
+    dev = nameof(typeof(device))
+    strategy.scheduling isa ColoredScheduling || throw(ArgumentError(
+        "$dev requires `ColoredScheduling` (got $(nameof(typeof(strategy.scheduling)))). " *
+        "Ferrite's device matrix assembler accumulates with a plain `+=` — its " *
+        "`AbstractThreadSafeAssembler` supertype means \"safe to alias across workers given a " *
+        "valid coloring\", not race-free — so an uncolored device sweep is a silent data race. " *
+        "Pass `scheduling = ColoredScheduling()`."))
+    spec = strategy.form.operator_specification
+    spec isa BlockedOperatorSpecification && throw(ArgumentError(
+        "$dev does not support `BlockedOperatorSpecification`: Ferrite ships no device " *
+        "`BlockAssembler`. Use a `StandardOperatorSpecification`, naming the device matrix type."))
+    spec.constraint_handler === nothing || throw(ArgumentError(
+        "$dev does not support a `constraint_handler` on the operator specification. Allocate " *
+        "the operator without one and apply the constraints yourself — Ferrite's `apply!` takes " *
+        "a device constraint handler (`adapt(backend, ch)`)."))
+    _assert_device_matrix_type(device, spec.matrix_type)
+
+    needs_ad_decoration(integrator) && throw(ArgumentError(
+        "$dev assembles bilinear and linear forms only (got $(nameof(typeof(integrator)))). A " *
+        "nonlinear integrator carries the `ADElementCache` decoration and the per-worker " *
+        "sensitivity buffers, neither of which has a device layout."))
+    isempty(algebraic_items(integrator, dh)) || throw(ArgumentError(
+        "$dev does not support the algebraic item family (`algebraic_items`): its items are a " *
+        "dof set with no cell, and the device geometry cache addresses cells."))
+    for sdh in dh.subdofhandlers
+        isempty(facet_items(integrator, sdh)) || throw(ArgumentError(
+            "$dev does not support the facet item family (`facet_items`): Ferrite 1.7 has no " *
+            "device `FacetValues`."))
+    end
+    return nothing
+end
+
+_assert_device_matrix_type(device, ::Nothing) = nothing
+function _assert_device_matrix_type(device, ::Type{MT}) where {MT}
+    eltype(MT) === value_type(device) || throw(ArgumentError(
+        "$(nameof(typeof(device))) assembles in $(value_type(device)) but the operator " *
+        "specification names the matrix type $MT, whose element type is $(eltype(MT)). Set the " *
+        "device's `value_type` and the matrix type's element type to the same scalar."))
+    # A capability check, not a name check: Ferrite 1.7 ships a device assembler
+    # for `CuSparseMatrixCSC` and nothing else — `CuSparseMatrixCSR` is
+    # allocatable but has no `start_assemble`/`assemble!`, so it would fail on
+    # the first sweep instead of here.
+    hasmethod(Ferrite.start_assemble, Tuple{MT}) || throw(ArgumentError(
+        "No `Ferrite.start_assemble` method accepts $MT, so it cannot be assembled into. " *
+        "Ferrite 1.7 ships a device assembler for CSC device matrices only; a CSR device " *
+        "matrix is allocatable but not assemblable."))
+    return nothing
+end
+
+assert_device_internal_state_supported(::AbstractDevice, ivh) = nothing
+
+function assert_device_internal_state_supported(device::AbstractGPUDevice, ivh)
+    has_internal_dof_block(ivh) && throw(ArgumentError(
+        "$(nameof(typeof(device))) does not support condensed internal state: the " *
+        "element-local solves `condense_internal!` runs, and the internal-variable handler " *
+        "that lays their block out, have no device path."))
     return nothing
 end
 
@@ -302,15 +413,18 @@ afterwards alongside the cell caches.
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler;
         slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD())
     assert_declaration_signatures(integrator, dh)
+    assert_device_supported(strategy.device, strategy, integrator, dh)
     declared_slots    = Tuple(slots)
     declared_kinds    = map(_kind_type, requests)
     global_dof_sets   = resolve_global_dof_sets(strategy, integrator, dh)
     facet_item_sets   = resolve_facet_item_global_dof_sets(strategy, integrator, dh)
-    element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
+    element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets),
+                                       value_type(strategy.device))
     foreach(cache -> validate_element_cache(cache, declared_kinds), element_caches)
     algebraic_domain  = resolve_algebraic_domain(integrator, dh, declared_kinds)
     ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
     needs_sensitivity = needs_ad_decoration(integrator)
+    assert_device_internal_state_supported(strategy.device, ivh)
     cell_caches       = setup_subdomain_caches(strategy, element_caches, ivh, dh;
                                                slots = declared_slots,
                                                needs_sensitivity,

@@ -29,9 +29,10 @@ import Ferrite: getnquadpoints
 
 import FerriteOperators: AbstractBilinearIntegrator, AbstractLinearIntegrator,
     AbstractCondensedNonlinearIntegrator, AbstractNonlinearIntegrator,
-    AbstractVolumetricElementCache
+    AbstractVolumetricElementCache, AbstractGPUDevice
 import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!,
     provides_analytic, has_internal_state, duplicate_for_device,
+    setup_device_instances, device_worker_view,
     geometric_subdomain_interpolation, get_number_of_internal_dofs_per_element,
     internal_variable_offset, internal_variable_range,
     evaluation_time, with_time, stage_scaling, CellArgs,

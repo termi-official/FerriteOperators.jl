@@ -45,6 +45,9 @@ reinit_values!(d::AbstractElementCacheDecorator, cell, kind) = reinit_values!(d.
 allocate_element_matrix(d::AbstractElementCacheDecorator, sdh) = allocate_element_matrix(d.inner, sdh)
 allocate_element_unknown_vector(d::AbstractElementCacheDecorator, sdh) = allocate_element_unknown_vector(d.inner, sdh)
 allocate_element_residual_vector(d::AbstractElementCacheDecorator, sdh) = allocate_element_residual_vector(d.inner, sdh)
+allocate_element_matrix(d::AbstractElementCacheDecorator, sdh, ::Type{T}) where {T} = allocate_element_matrix(d.inner, sdh, T)
+allocate_element_unknown_vector(d::AbstractElementCacheDecorator, sdh, ::Type{T}) where {T} = allocate_element_unknown_vector(d.inner, sdh, T)
+allocate_element_residual_vector(d::AbstractElementCacheDecorator, sdh, ::Type{T}) where {T} = allocate_element_residual_vector(d.inner, sdh, T)
 evaluate_cell_functional(kind, d::AbstractElementCacheDecorator, args) = evaluate_cell_functional(kind, d.inner, args)
 evaluate_algebraic_functional(kind, d::AbstractElementCacheDecorator, args) =
     evaluate_algebraic_functional(kind, d.inner, args)

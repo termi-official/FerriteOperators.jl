@@ -188,9 +188,10 @@ export get_first_cell, geometric_subdomain_interpolation
 export NullOperator, LinearNullOperator
 export AbstractNonlinearOperator
 
-export SequentialCPUDevice, PolyesterDevice
+export SequentialCPUDevice, PolyesterDevice, KernelAbstractionsDevice
 export AbstractCPUDevice, AbstractGPUDevice
 export value_type, duplicate_for_device
+export setup_device_instances, device_worker_view
 export default_strategy
 export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAssembly
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling

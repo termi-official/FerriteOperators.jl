@@ -415,7 +415,19 @@ end
 duplicate_for_device(device, task::AssemblyTask) =
     AssemblyTask(task.kind, duplicate_for_device(device, task.inner_assembler), task.states, task.p, task.ctx)
 
-execute_single_task!(task::AssemblyTask, ws::AssemblyWorkspace) = execute_kind!(task.kind, task, ws)
+"""
+    execute_single_task!(task, ws)
+
+One item's work: route `task`'s kind to its driver body (`execute_kind!`) on the
+workspace `ws` is positioned on. This is where the per-item debug timer sits.
+
+A DEVICE kernel calls `execute_kind!` directly instead. `@timeit_debug` expands
+to a `try`/`finally` whether or not the timings are enabled, and GPUCompiler
+rejects the exception frame outright — so an item loop that has to compile for a
+GPU cannot go through a timed entry point.
+"""
+execute_single_task!(task::AssemblyTask, ws::AssemblyWorkspace) =
+    @timeit_debug "assemble cell item" execute_kind!(task.kind, task, ws)
 
 # Loud once-per-sweep check instead of a raw NamedTuple field error per cell.
 function _check_declared_slots(engine, states::NamedTuple{names}) where {names}
@@ -521,6 +533,10 @@ The kernel it calls is `cell_kernel!(kind, …)`, whose generic method issues th
 kind's request analytically; the built-in kinds with an AD fallback specialize
 it. It writes nothing back: [`condense_internal!`](@ref) is the only writer of
 `q`, so a primal sweep is a pure evaluation at whatever `q` is stored.
+
+The body carries no `@timeit_debug` frame — it has to compile for a GPU, and
+GPUCompiler rejects the `try`/`finally` the macro expands to. The per-item
+timer sits at [`execute_single_task!`](@ref) instead.
 """
 function primal_cell_sweep!(kind, task, ws)
     assembles_matrix(kind) && fill!(ws.Ke, zero(eltype(ws.Ke)))
@@ -529,9 +545,9 @@ function primal_cell_sweep!(kind, task, ws)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     if depends_on_unknowns(kind)
         statesₑ = load_slots!(ws, task.states)
-        @timeit_debug "assemble element" cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx)
+        cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx)
     else
-        @timeit_debug "assemble element" cell_kernel!(kind, ws.element, ws, (;), pₑ, task.ctx)
+        cell_kernel!(kind, ws.element, ws, (;), pₑ, task.ctx)
     end
     scatter_local!(kind, task.inner_assembler, ws)
 end

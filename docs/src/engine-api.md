@@ -15,6 +15,7 @@ Pages = [
     "core/iterators.jl",
     "core/qvector.jl",
     "core/quadrature-task.jl",
+    "core/ferrite-addons/assembly.jl",
     "core/ferrite-addons/collections.jl",
     "core/ferrite-addons/internal_variable_handler.jl",
     "postprocessing/quadrature-grid.jl",

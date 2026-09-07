@@ -363,6 +363,8 @@ const AnyCompositeIntegrator = Union{NonlinearCompositeIntegrator, BilinearCompo
 
 setup_element_cache(element_model::AnyCompositeIntegrator, sdh::SubDofHandler) =
     compose_element_caches(map(sub -> setup_element_cache(sub, sdh), element_model.subintegrators))
+setup_element_cache(element_model::AnyCompositeIntegrator, sdh::SubDofHandler, ::Type{T}) where {T} =
+    compose_element_caches(map(sub -> setup_element_cache(sub, sdh, T), element_model.subintegrators))
 
 # The inners share one local system, so they share its tail: a composite
 # declares what its inners declare, and silent inners (the default `()`) read
