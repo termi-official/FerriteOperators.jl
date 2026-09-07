@@ -1,19 +1,19 @@
 # Adaption of the API presented in Ferrite.jl#1070 to general devices.
-# The assemblers reconstruct through `typeof(asm)`: the concrete type carries its own parameters, so
-# the duplication survives Ferrite adding or reordering type parameters as long as the field set
-# (shared matrix and vector, four permutation scratches) is stable.
 duplicate_for_device(device, ::Nothing) = nothing
-for Assembler in (:CSCAssembler, :SymmetricCSCAssembler, :CSRAssembler)
-    @eval function duplicate_for_device(device, asm::Ferrite.$Assembler)
-        return typeof(asm)(
-            asm.K,
-            asm.f,
-            duplicate_for_device(device, asm.rowpermutation),
-            duplicate_for_device(device, asm.colpermutation),
-            duplicate_for_device(device, asm.sortedrowdofs),
-            duplicate_for_device(device, asm.sortedcoldofs),
-        )
+
+# Per-worker duplication of a Ferrite assembler: `K` and `f` are shared — atomic scatter resolves
+# the concurrent writes, and sharing the scatter targets is the duplicate's purpose — and every
+# other field is per-worker scratch, whatever this Ferrite release calls it, so it is duplicated
+# generically rather than named. `typeof(asm)` carries the concrete type parameters.
+function duplicate_assembler(device, asm)
+    args = map(fieldnames(typeof(asm))) do name
+        field = getfield(asm, name)
+        name === :K || name === :f ? field : duplicate_for_device(device, field)
     end
+    return typeof(asm)(args...)
+end
+for Assembler in (:CSCAssembler, :SymmetricCSCAssembler, :CSRAssembler)
+    @eval duplicate_for_device(device, asm::Ferrite.$Assembler) = duplicate_assembler(device, asm)
 end
 
 # Ferrite's own `Base.copy` IS the per-worker duplication these types need: it

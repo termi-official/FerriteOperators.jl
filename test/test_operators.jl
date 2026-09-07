@@ -417,6 +417,28 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         @test size(lin_op) == (n,)
     end
 
+    @testset "Assembler duplication shares the scatter targets only" begin
+        # The rule is deliberately name-minimal: K and f are shared (atomic scatter resolves the
+        # concurrent writes), and EVERY other field is per-worker scratch — whatever Ferrite calls
+        # it in any release. Iterating fieldnames keeps this pin valid across Ferrite renaming or
+        # adding scratch fields, which is exactly the regression class it guards.
+        grid = generate_grid(Quadrilateral, (2, 2))
+        dh   = DofHandler(grid); add!(dh, :u, Lagrange{RefQuadrilateral, 1}()); close!(dh)
+        K, f = allocate_matrix(dh), zeros(ndofs(dh))
+        for asm in (start_assemble(K, f), start_assemble(K))
+            dup = FerriteOperators.duplicate_for_device(SequentialCPUDevice(), asm)
+            @test typeof(dup) === typeof(asm)
+            for name in fieldnames(typeof(asm))
+                f0, f1 = getfield(asm, name), getfield(dup, name)
+                if name === :K || name === :f
+                    @test f1 === f0
+                elseif !isbits(f0)
+                    @test f1 !== f0
+                end
+            end
+        end
+    end
+
     @testset "Device hooks a device type must implement" begin
         # `AbstractGPUDevice` is the seam a downstream device subtypes; with no
         # method of its own it must reach the loud generic hooks.
