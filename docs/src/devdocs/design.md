@@ -270,4 +270,15 @@ kind, whose driver body ([`matrix_free_cell_sweep!`](@ref)) differs from
 an execution choice a device has to realize — the element mapping — resolves it
 onto the device at setup through [`with_element_mapping`](@ref), because
 [`n_workers`](@ref), [`setup_device_instances`](@ref) and
-[`execute_on_device!`](@ref) receive the device and never the form.
+[`execute_on_device!`](@ref) receive the device and never the form. A form
+choice the ELEMENT has to realize — the `storage` election, which is what
+separates the ELEMENT, PARTIAL and NONE levels — resolves onto the caches
+through [`with_assembly_form`](@ref) for the same reason mirrored:
+`setup_element_cache` receives the subdomain and never the form. Its two
+per-quadrature-point members reach the element's own hook
+([`with_action_storage`](@ref)); the ELEMENT member is element-AGNOSTIC and
+wraps whatever cache the integrator built in an
+[`ElementAssemblyCache`](@ref), which is why a cache with no matrix-free kernel
+serves it. What either keeps is filled by a sweep of its own kind
+([`QuadratureDataKind`](@ref)), which scatters nothing and therefore carries no
+assembler.

@@ -29,8 +29,8 @@ function distorted_testbed(cellT, interpolation, ::Type{T}, dims, p; distortion 
     return dh
 end
 
-matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling()) where {T} = AssemblyStrategy(
-    MatrixFreeAction(; element_mapping = mapping), scheduling,
+matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling(), storage = Stored()) where {T} = AssemblyStrategy(
+    MatrixFreeAction(; element_mapping = mapping, storage), scheduling,
     KernelAbstractionsDevice(KA.CPU(); value_type = T, index_type = Int,
                              items_per_worker = 2, max_workgroup_size = 8))
 
@@ -68,6 +68,188 @@ matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling()) where {T
             mul!(y, op, u)
             @test y ≈ reference rtol = rtol
         end
+    end
+
+    # The SECOND consumer of the sum-factorization core: a different pointwise
+    # map (a scalar on the interpolated value rather than a tensor on the
+    # reference gradient) over the same contractions, mappings and elections.
+    @testset "the mass action matches the assembled mass operator ($label, $T, p = $p)" for
+            (label, cellT, interpolation, dims) in (
+                ("quad", Quadrilateral, o -> Lagrange{RefQuadrilateral, o}(), (4, 3)),
+                ("hex",  Hexahedron,    o -> Lagrange{RefHexahedron, o}(),    (3, 2, 2))),
+            T in (Float64, Float32), p in 1:3
+
+        dh   = distorted_testbed(cellT, interpolation, T, dims, p)
+        qrc  = QuadratureRuleCollection(T, p + 1)
+        rtol = T === Float32 ? 1.0f-3 : 1.0e-11
+
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, Int}()),
+                                   SimpleBilinearMassIntegrator(1.7, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(T, ndofs(dh), 7)
+        reference = assembled.A * u
+
+        integrator = SumFactorizedMassIntegrator(1.7, qrc, :u)
+        @testset "$arm" for (arm, strategy) in (
+                ("sequential", AssemblyStrategy(SequentialCPUDevice{T, Int}(); form = MatrixFreeAction())),
+                ("polyester",  AssemblyStrategy(PolyesterDevice{T, Int}(4); form = MatrixFreeAction(),
+                                                scheduling = ColoredScheduling())),
+                ("KA worker-per-element", matrix_free_ka(T, WorkerPerElement())),
+                ("KA cooperative",        matrix_free_ka(T, CooperativeElement())))
+            op = setup_operator(strategy, integrator, dh)
+            y = zeros(T, ndofs(dh))
+            mul!(y, op, u)
+            @test y ≈ reference rtol = rtol
+        end
+    end
+
+    # The three storage levels are three ways to keep the same operator.
+    # `Stored()` reads the pointwise factor the fill sweep formed and
+    # `Recompute()` forms it at the point of use — the SAME expression, so those
+    # two reproduce bit for bit on the sequential arm. `ElementAssembly()`
+    # contracts a different way (a dense product over columns the fill built
+    # from the action), so it agrees to a tolerance and not bitwise.
+    @testset "the storage levels agree ($(nameof(typeof(integrator))), p = $p)" for
+            integrator in (SumFactorizedDiffusionIntegrator(2.5, QuadratureRuleCollection(3), :u),
+                           SumFactorizedMassIntegrator(1.7, QuadratureRuleCollection(3), :u)),
+            p in 1:3
+
+        dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), p)
+        u = probe(Float64, ndofs(dh), 5)
+        actions = map((Stored(), Recompute(), ElementAssembly())) do storage
+            op = setup_operator(AssemblyStrategy(SequentialCPUDevice();
+                                                 form = MatrixFreeAction(; storage)), integrator, dh)
+            y = zeros(ndofs(dh))
+            mul!(y, op, u)
+            y
+        end
+        @test actions[1] == actions[2]
+        @test actions[3] ≈ actions[1] rtol = 1.0e-11
+    end
+
+    @testset "the storage levels agree on the device backend" begin
+        dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
+        integrator = SumFactorizedDiffusionIntegrator(2.5, QuadratureRuleCollection(3), :u)
+        u = probe(Float64, ndofs(dh), 5)
+        action(strategy) = (y = zeros(ndofs(dh)); mul!(y, setup_operator(strategy, integrator, dh), u); y)
+        @testset "$(nameof(typeof(mapping)))" for mapping in (WorkerPerElement(), CooperativeElement())
+            @test action(matrix_free_ka(Float64, mapping; storage = Stored())) ≈
+                  action(matrix_free_ka(Float64, mapping; storage = Recompute())) rtol = 1.0e-11
+        end
+        # The ELEMENT level is worker-per-element only, so it has one arm.
+        @test action(matrix_free_ka(Float64, WorkerPerElement(); storage = ElementAssembly())) ≈
+              action(matrix_free_ka(Float64, WorkerPerElement(); storage = Stored())) rtol = 1.0e-11
+    end
+
+    # The fill sweep carries no assembler, so its task can have every field a
+    # singleton — and a parallel device must not assume per-worker task state it
+    # can index. `min_items_per_worker = 1` is what puts more than one worker on
+    # this mesh's largest colour, which is where that assumption shows.
+    @testset "the fill sweep runs on several workers ($(nameof(typeof(storage))))" for
+            storage in (Stored(), ElementAssembly())
+
+        dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
+        qrc = QuadratureRuleCollection(3)
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice()),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(Float64, ndofs(dh), 5)
+        op = setup_operator(
+            AssemblyStrategy(MatrixFreeAction(; storage), ColoredScheduling(), PolyesterDevice{Float64, Int}(1)),
+            SumFactorizedDiffusionIntegrator(2.5, qrc, :u), dh)
+        y = zeros(ndofs(dh))
+        mul!(y, op, u)
+        @test y ≈ assembled.A * u rtol = 1.0e-11
+        update_operator!(op, nothing)
+        mul!(y, op, u)
+        @test y ≈ assembled.A * u rtol = 1.0e-11
+    end
+
+    # The ELEMENT level is element-agnostic: it keeps the dense matrices the
+    # element's own kernels produce, so a cache with an element-matrix kernel and
+    # NO matrix-free kernel serves it just as well as a sum-factorized one.
+    @testset "the ELEMENT level serves a cache with no matrix-free kernel" begin
+        dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
+        qrc = QuadratureRuleCollection(3)
+        u = probe(Float64, ndofs(dh), 5)
+        @testset "$(nameof(typeof(integrator)))" for integrator in (
+                SimpleBilinearDiffusionIntegrator(2.5, qrc, :u),
+                SimpleBilinearMassIntegrator(1.7, qrc, :u))
+            assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+            update_operator!(assembled, nothing)
+            op = setup_operator(AssemblyStrategy(SequentialCPUDevice();
+                                                 form = MatrixFreeAction(; storage = ElementAssembly())),
+                                integrator, dh)
+            y = zeros(ndofs(dh))
+            mul!(y, op, u)
+            @test y ≈ assembled.A * u rtol = 1.0e-12
+        end
+    end
+
+    # The ELEMENT level under every mapping-free arm, over the sum-factorized
+    # cache — whose matrices the fill builds from the action itself.
+    @testset "the ELEMENT level matches the assembled operator ($label, $T, p = $p)" for
+            (label, cellT, interpolation, dims) in (
+                ("quad", Quadrilateral, o -> Lagrange{RefQuadrilateral, o}(), (4, 3)),
+                ("hex",  Hexahedron,    o -> Lagrange{RefHexahedron, o}(),    (3, 2, 2))),
+            T in (Float64, Float32), p in 1:3
+
+        dh   = distorted_testbed(cellT, interpolation, T, dims, p)
+        qrc  = QuadratureRuleCollection(T, p + 1)
+        rtol = T === Float32 ? 1.0f-3 : 1.0e-11
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, Int}()),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(T, ndofs(dh), 7)
+        reference = assembled.A * u
+
+        integrator = SumFactorizedDiffusionIntegrator(T(2.5), qrc, :u)
+        ea = MatrixFreeAction(; storage = ElementAssembly())
+        @testset "$arm" for (arm, strategy) in (
+                ("sequential", AssemblyStrategy(SequentialCPUDevice{T, Int}(); form = ea)),
+                ("polyester",  AssemblyStrategy(PolyesterDevice{T, Int}(4); form = ea,
+                                                scheduling = ColoredScheduling())),
+                ("KA worker-per-element", matrix_free_ka(T, WorkerPerElement(); storage = ElementAssembly())))
+            op = setup_operator(strategy, integrator, dh)
+            y = zeros(T, ndofs(dh))
+            mul!(y, op, u)
+            @test y ≈ reference rtol = rtol
+        end
+    end
+
+    # The store is what a `Stored()` action reads, and `update_operator!` is what
+    # refills it — the same freshness contract an assembled operator has.
+    @testset "update_operator! refills the quadrature-data store" begin
+        dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
+        qrc = QuadratureRuleCollection(3)
+        integrator = SumFactorizedDiffusionIntegrator(2.5, qrc, :u)
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice()),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(Float64, ndofs(dh), 5)
+        reference = assembled.A * u
+
+        op = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction()), integrator, dh)
+        y = zeros(ndofs(dh))
+        # Setup filled it, so the operator acts correctly before any update.
+        mul!(y, op, u)
+        @test y ≈ reference rtol = 1.0e-11
+
+        store = get_subdomain_caches(op)[1].domain.element.qdata
+        fill!(store.data, zero(eltype(store.data)))
+        mul!(y, op, u)
+        @test iszero(y)
+
+        update_operator!(op, nothing)
+        mul!(y, op, u)
+        @test y ≈ reference rtol = 1.0e-11
+
+        recomputing = setup_operator(
+            AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction(; storage = Recompute())),
+            integrator, dh)
+        # Nothing is stored, so there is nothing to refill.
+        @test update_operator!(recomputing, nothing) === nothing
+        @test get_subdomain_caches(recomputing)[1].domain.element.qdata === nothing
     end
 
     @testset "colored scatter on the device backend" begin
@@ -163,6 +345,10 @@ end
 ## Capability walls
 ####################################
 
+# Neither an analytic `JacobianKind{:u}` kernel nor a matrix-free action, so
+# the ELEMENT level has no route to fill its matrices through.
+struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
+
 @testset "MatrixFreeAction capability walls" begin
     dh = distorted_testbed(Quadrilateral, o -> Lagrange{RefQuadrilateral, o}(), Float64, (3, 3), 1)
     qrc = QuadratureRuleCollection(2)
@@ -194,7 +380,7 @@ end
         @test occursin("apply_element_action!", err.value.msg)
         cache_type = typeof(setup_element_cache(assembled_form, dh.subdofhandlers[1]))
         err = @test_throws ArgumentError FerriteOperators._assert_cooperative_element(
-            CooperativeElement(), cache_type)
+            CooperativeElement(), Stored(), cache_type)
         @test occursin("cooperative_lattice_dim", err.value.msg)
         @test occursin("WorkerPerElement", err.value.msg)
     end
@@ -213,10 +399,31 @@ end
     end
 
     @testset "the matrix-free element has no element matrix" begin
-        op = setup_operator(AssemblyStrategy(SequentialCPUDevice()), sum_factorized, dh)
-        err = @test_throws ArgumentError update_operator!(op, nothing)
-        @test occursin("forms no element matrix", err.value.msg)
-        @test occursin("MatrixFreeAction", err.value.msg)
+        for integrator in (sum_factorized, SumFactorizedMassIntegrator(1.7, qrc, :u))
+            op = setup_operator(AssemblyStrategy(SequentialCPUDevice()), integrator, dh)
+            err = @test_throws ArgumentError update_operator!(op, nothing)
+            @test occursin("forms no element matrix", err.value.msg)
+            @test occursin("MatrixFreeAction", err.value.msg)
+        end
+    end
+
+    @testset "the storage election names the three levels" begin
+        err = @test_throws ArgumentError MatrixFreeAction(; storage = :stored)
+        @test occursin("Stored()", err.value.msg)
+        @test occursin("ElementAssembly()", err.value.msg)
+    end
+
+    @testset "the ELEMENT level is worker-per-element only" begin
+        err = @test_throws ArgumentError setup_operator(
+            matrix_free_ka(Float64, CooperativeElement(); storage = ElementAssembly()), sum_factorized, dh)
+        @test occursin("ElementAssembly", err.value.msg)
+        @test occursin("WorkerPerElement", err.value.msg)
+    end
+
+    @testset "a cache serving neither fill route is refused" begin
+        err = @test_throws ArgumentError FerriteOperators.element_matrix_fill_route(NoRouteCache)
+        @test occursin("provides_analytic", err.value.msg)
+        @test occursin("apply_element_action!", err.value.msg)
     end
 
     @testset "the cooperative kernel serves the action kind only" begin

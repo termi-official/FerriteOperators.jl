@@ -39,6 +39,21 @@ on a device whose per-worker slot buffer is a view into a shared batch.
 struct MatrixFreeActionKind end
 
 """
+    QuadratureDataKind()
+
+The PARTIAL-assembly fill: every cell's element cache writes the
+per-quadrature-point factors its action will read
+([`fill_quadrature_data!`](@ref)). It reaches no request and no assembler —
+cells write disjoint slices of a store the cache owns — and it is what a
+[`MatrixFreeFerriteOperator`](@ref) runs at setup and on every
+[`update_operator!`](@ref).
+
+Its `p`/`ctx` are the sweep's, so a factor that depends on a parameter or on the
+time is as fresh as the last such call, and no fresher.
+"""
+struct QuadratureDataKind end
+
+"""
     ParameterJacobianKind()
 
 Assembly of `∂F/∂θ` into a dense `residual_size × nθ` target, θ being the flat
@@ -363,6 +378,9 @@ has_cell_request(::Type{<:FunctionalKind}) = false
 # The matrix-free action reaches `apply_element_action!` with the local vectors
 # themselves; `setup_operator` validates that entry point instead.
 has_cell_request(::Type{MatrixFreeActionKind}) = false
+# The quadrature-data fill reaches `fill_quadrature_data!`, whose destination is
+# the cache's own store rather than a request buffer.
+has_cell_request(::Type{QuadratureDataKind}) = false
 
 materialize_request(::ResidualKind, ws)                    = ResidualRequest(ws.re)
 materialize_request(::LinearKind, ws)                      = ResidualRequest(ws.re)
@@ -597,6 +615,27 @@ function matrix_free_cell_sweep!(kind, task, ws)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     apply_element_action!(ws.re, ws.element, uₑ, _cell_args(ws, (u = uₑ,), pₑ, task.ctx))
     scatter_local!(kind, task.inner_assembler, ws)
+    return nothing
+end
+
+execute_kind!(kind::QuadratureDataKind, task, ws) = quadrature_data_sweep!(kind, task, ws)
+
+"""
+    quadrature_data_sweep!(kind, task, ws)
+
+The PARTIAL-assembly fill driver body: position the element's values on the
+cell, query its parameters, and let it write its own per-quadrature-point store
+([`fill_quadrature_data!`](@ref)). Nothing is gathered, nothing is scattered and
+no workspace buffer is touched — which is why this sweep needs no assembler and
+runs under either scheduling policy.
+
+It carries no `@timeit_debug` frame for the same reason
+[`primal_cell_sweep!`](@ref) carries none.
+"""
+function quadrature_data_sweep!(kind, task, ws)
+    reinit_values!(ws.element, ws.cell, kind)
+    pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
+    fill_quadrature_data!(ws.element, _cell_args(ws, (;), pₑ, task.ctx))
     return nothing
 end
 

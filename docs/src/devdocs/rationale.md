@@ -512,11 +512,26 @@ materialized* separate from *what the physics is*.
 
 MFEM's **assembly levels** — FULL, ELEMENT, PARTIAL, NONE — name the strategy
 axis, orthogonal to the device axis. [`FullAssembly`](@ref) and
-[`MatrixFreeAction`](@ref) are the shipped levels; the [`QVector`](@ref) is
-exactly the qdata store a partial-assembly level would precompute its geometric
-factors into, which the shipped matrix-free element deliberately does not use —
-it re-evaluates the Jacobian at the quadrature point that consumes it, trading
-flops for storage and for barriers a cooperative kernel would otherwise need.
+[`MatrixFreeAction`](@ref) are the shipped FORMS, and the latter spans the other
+three levels through its `storage` election ([`StorageElection`](@ref)): the
+[`QVector`](@ref) is the qdata store a `Stored()` element precomputes its
+geometric factors into (PARTIAL), a `Recompute()` one keeps none and
+re-evaluates the Jacobian at the quadrature point that consumes it (NONE), and
+an `ElementAssembly()` one keeps the dense element matrices (ELEMENT). The first
+two are the ELEMENT's storage, not the framework's — the fill
+([`fill_quadrature_data!`](@ref)) is the element's own kernel — because what is
+worth storing per quadrature point is a property of the pointwise map, and only
+the element knows it. The third is the framework's, because a dense `Kₑ` is not:
+[`ElementAssemblyCache`](@ref) wraps any bilinear cache and fills it from the
+element's matrix kernel or, where there is none, from `ndofs_per_cell`
+applications of its action.
+
+The split is the one deviation from MFEM's flat level axis, and it is
+deliberate: FULL is a different OPERATOR (it holds a global matrix, answers
+`get_matrix`, and every global-storage wall applies to it), while ELEMENT,
+PARTIAL and NONE are the same operator keeping different amounts of the same
+evaluation. The form axis separates what an operator IS; the storage election
+separates what it KEEPS.
 
 The matrix-free level is also where the SECOND mapping question appears, and
 the answer is a strategy-side one: [`AbstractElementMapping`](@ref) says whether

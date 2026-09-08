@@ -6,7 +6,10 @@ The operator [`setup_operator`](@ref) returns for an
 [`AssemblyEngine`](@ref) and integrator alone. There is no global matrix and no
 stored element matrix — every `mul!` re-evaluates the action from the element
 kernels ([`apply_element_action!`](@ref)) and scatters it, which is what the
-MFEM PARTIAL/NONE assembly level means.
+MFEM ELEMENT/PARTIAL/NONE assembly levels mean. Which of the three the operator
+runs at is the form's `storage` election: nothing kept, the element's own
+per-quadrature-point factors, or its dense element matrices
+([`ElementAssemblyCache`](@ref)) — never a global matrix.
 
 Surface: `mul!(y, op, u)` and the five-argument form, [`evaluate!`](@ref)
 (the same action with parameters and a context), `size`, `eltype`. There is no
@@ -59,11 +62,28 @@ end
 """
     update_operator!(op::MatrixFreeFerriteOperator, p, ctx = nothing)
 
-Nothing to do: a matrix-free operator holds no assembled array, and its action
-reads `p`/`ctx` where it is evaluated ([`evaluate!`](@ref)). Present so the
-operator composes into the [`AbstractBilinearOperator`](@ref) entry points.
+Refill what the operator's `storage` election keeps
+([`MatrixFreeAction`](@ref)) — the elements' per-quadrature-point factors under
+[`Stored`](@ref), the dense element matrices under [`ElementAssembly`](@ref) —
+with one [`QuadratureDataKind`](@ref) sweep carrying `p` and `ctx` to
+[`fill_quadrature_data!`](@ref). Under [`Recompute`](@ref) nothing is kept and
+this does nothing.
+
+FRESHNESS IS THE CALLER'S, exactly as for an assembled operator: the store holds
+what the last such call put there, `setup_operator` makes that call with
+`p = nothing`, and an action evaluated after `p` or the context time changed
+reads stale factors until this is called again. An element whose factors depend
+on neither is fresh from setup on.
 """
-update_operator!(::MatrixFreeFerriteOperator, p, ctx = nothing) = nothing
+function update_operator!(op::MatrixFreeFerriteOperator, p, ctx = nothing)
+    _keeps_storage(op.engine.strategy.form.storage) || return nothing
+    run_sweep!(QuadratureDataKind(), nothing, op, (;), p, ctx)
+    return nothing
+end
+
+# `Recompute()` is the one member with nothing to refill.
+_keeps_storage(::Recompute) = false
+_keeps_storage(::StorageElection) = true
 
 # The three-argument form is `update_operator!` and inherited; this one carries
 # `p` into the action instead of dropping it.
@@ -85,6 +105,12 @@ The form's [`AbstractElementMapping`](@ref) is resolved onto the device here
 ([`with_element_mapping`](@ref)) — the engine's strategy therefore carries the
 mapping on BOTH axes, the form's election and the device's realization of it,
 and the per-worker scratch the engine allocates is the one that mapping needs.
+Its `storage` election reaches the element caches through
+[`with_assembly_form`](@ref) inside [`setup_engine`](@ref), and what it elects
+to keep is FILLED here, with `p = nothing`: an operator is usable the moment it
+is set up, whichever election it carries, and a `p`-dependent factor is
+refreshed by [`update_operator!`](@ref).
+
 Only the bilinear family takes this form: a nonlinear residual is not the
 action of a stored operator, and a linear form has no `u` to act on.
 """
@@ -97,8 +123,10 @@ function setup_operator(strategy::AssemblyStrategy{<:MatrixFreeAction},
     execution = AssemblyStrategy(strategy.form, strategy.scheduling,
                                  with_element_mapping(strategy.device, strategy.form.element_mapping))
     engine = setup_engine(execution, integrator, dh; slots, requests, ad_backend)
-    assert_matrix_free_supported(execution.form.element_mapping, engine)
-    return MatrixFreeFerriteOperator(engine, integrator, ndofs(dh))
+    assert_matrix_free_supported(execution.form, engine)
+    op = MatrixFreeFerriteOperator(engine, integrator, ndofs(dh))
+    update_operator!(op, nothing, nothing)
+    return op
 end
 
 setup_operator(::AssemblyStrategy{<:MatrixFreeAction}, integrator::AbstractNonlinearIntegrator,
@@ -114,24 +142,37 @@ setup_operator(::AssemblyStrategy{<:MatrixFreeAction}, integrator::AbstractLinea
     "vector under `FullAssembly`."))
 
 """
-    assert_matrix_free_supported(mapping, engine)
+    assert_matrix_free_supported(form, engine)
 
-Reject at setup an element cache that cannot serve the elected mapping,
-naming the method it does not implement — the
+Reject at setup an element cache that cannot serve the elected mapping and
+storage level, naming the method it does not implement — the
 [`provides_analytic`](@ref)/[`serves_kind`](@ref) rule applied to the
 matrix-free entry points, which have no fallback to degrade to.
+
+Which capability is required is the STORAGE election's: the two
+per-quadrature-point levels reach [`apply_element_action!`](@ref) on every
+action, while [`ElementAssembly`](@ref) reaches it (or the element-matrix
+kernel) only at fill time and has already resolved that route when the cache was
+built ([`element_matrix_fill_route`](@ref)).
 """
-function assert_matrix_free_supported(mapping::AbstractElementMapping, engine::AssemblyEngine)
+function assert_matrix_free_supported(form::MatrixFreeAction, engine::AssemblyEngine)
     for sc in engine.subdomain_caches
         sc.contributes || continue
         sc.domain isa AssemblyDomain || throw(ArgumentError(
             "`MatrixFreeAction` covers the CELL item family only; this operator carries a " *
             "$(nameof(typeof(sc.domain))). Assemble the operator under `FullAssembly`."))
-        _assert_element_action(typeof(unwrap(sc.domain.element)))
-        _assert_cooperative_element(mapping, typeof(unwrap(sc.domain.element)))
+        _assert_action_capability(form.storage, typeof(unwrap(sc.domain.element)))
+        _assert_cooperative_element(form.element_mapping, form.storage,
+                                    typeof(unwrap(sc.domain.element)))
     end
     return nothing
 end
+
+# The ELEMENT level consumes the element's kernels once per fill and its own
+# store thereafter, so the action entry point is not what it needs;
+# `element_matrix_fill_route` already refused a cache serving neither route.
+_assert_action_capability(::ElementAssembly, ::Type) = nothing
+_assert_action_capability(::StorageElection, ::Type{C}) where {C} = _assert_element_action(C)
 
 function _assert_element_action(::Type{C}) where {C}
     hasmethod(apply_element_action!, Tuple{AbstractVector, C, AbstractVector, CellArgs}) || throw(ArgumentError(
@@ -143,9 +184,20 @@ function _assert_element_action(::Type{C}) where {C}
     return nothing
 end
 
-_assert_cooperative_element(::WorkerPerElement, ::Type) = nothing
+_assert_cooperative_element(::WorkerPerElement, ::StorageElection, ::Type) = nothing
 
-function _assert_cooperative_element(::CooperativeElement, ::Type{C}) where {C}
+# One workgroup per element splits the element's LATTICE; a dense `Kₑ·uₑ` has no
+# lattice, and the store the group would read is one matrix per cell rather than
+# per-lane slabs. The rejection is the storage level's, not the cache's — the
+# wrapped element may well implement the cooperative pipeline.
+_assert_cooperative_element(::CooperativeElement, ::ElementAssembly, ::Type) = throw(ArgumentError(
+    "`CooperativeElement` cannot execute the `ElementAssembly` storage level: one workgroup per " *
+    "element exists to split the element's lattice between lanes, and the ELEMENT level replaces " *
+    "that lattice with one dense `Kₑ·uₑ` per cell. Elect `element_mapping = WorkerPerElement()` " *
+    "for `storage = ElementAssembly()`, or keep the cooperative mapping with " *
+    "`storage = Stored()`/`Recompute()`."))
+
+function _assert_cooperative_element(::CooperativeElement, ::StorageElection, ::Type{C}) where {C}
     entries = ((cooperative_lattice_dim,   Tuple{C},                          "(::$(nameof(C)))"),
                (cooperative_group_size,    Tuple{C},                          "(::$(nameof(C)))"),
                (cooperative_scratch_shape, Tuple{C},                          "(::$(nameof(C)))"),

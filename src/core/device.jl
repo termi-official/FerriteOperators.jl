@@ -236,6 +236,18 @@ device_subdomain_handler(::Nothing, index) = nothing
 device_subdomain_handler(device_handler, index) = device_handler.subdofhandlers[index]
 
 """
+    adapt_shared(device, x) -> x
+
+Read-only data every worker reads UNCHANGED, as the device's kernels consume
+it: the identity on a CPU device, moved into device memory once at setup on a
+GPU one. The counterpart of [`setup_device_instances`](@ref) for what is not per
+worker — an element cache's quadrature-data store, a coefficient table — so a
+cache's device layout says which of its fields are batched and which are shared
+without naming a backend.
+"""
+adapt_shared(::AbstractDevice, x) = x
+
+"""
     adapt_partition(device, partition)
 
 The partition as the device's kernels consume it. The identity on a CPU device;

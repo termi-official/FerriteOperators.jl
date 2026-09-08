@@ -119,11 +119,12 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
 end
 
 @testset "CUDA matrix-free action" begin
-    # ONE element definition, two execution mappings, selected on the strategy
-    # side. The scatter is atomic, so the device result is compared with a
-    # tolerance rather than bitwise.
-    @testset "p = $p, $(nameof(typeof(mapping)))" for p in 1:3,
-            mapping in (WorkerPerElement(), CooperativeElement())
+    # ONE element definition, two execution mappings and two quadrature-data
+    # elections, all selected on the strategy side. The scatter is atomic, so
+    # the device result is compared with a tolerance rather than bitwise.
+    @testset "p = $p, $(nameof(typeof(mapping))), $(nameof(typeof(storage)))" for p in 1:3,
+            mapping in (WorkerPerElement(), CooperativeElement()),
+            storage in (Stored(), Recompute())
 
         dh  = distorted_hex_testbed(p)
         qrc = QuadratureRuleCollection(Tv, p + 1)
@@ -134,7 +135,7 @@ end
         u = probe(ndofs(dh), 7)
         reference = assembled.A * u
 
-        strategy = AssemblyStrategy(MatrixFreeAction(; element_mapping = mapping),
+        strategy = AssemblyStrategy(MatrixFreeAction(; element_mapping = mapping, storage),
                                     SequentialScheduling(), cuda_device())
         op = setup_operator(strategy, SumFactorizedDiffusionIntegrator(Tv(2.5), qrc, :u), dh)
         @test size(op) == (ndofs(dh), ndofs(dh))
@@ -151,6 +152,52 @@ end
         y2 = copy(base)
         mul!(y2, op, ud, -1.0f0, 1.0f0)
         @test Array(y2) ≈ Array(base) .- reference rtol = 1.0f-3
+    end
+
+    # The second consumer of the sum-factorization core on the device: a scalar
+    # pointwise map on the interpolated value, over the same contractions.
+    @testset "mass action, p = $p, $(nameof(typeof(mapping))), $(nameof(typeof(storage)))" for p in 1:3,
+            mapping in (WorkerPerElement(), CooperativeElement()),
+            storage in (Stored(), Recompute())
+
+        dh  = distorted_hex_testbed(p)
+        qrc = QuadratureRuleCollection(Tv, p + 1)
+
+        assembled = setup_operator(sequential_strategy(),
+                                   SimpleBilinearMassIntegrator(1.7, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(ndofs(dh), 7)
+
+        strategy = AssemblyStrategy(MatrixFreeAction(; element_mapping = mapping, storage),
+                                    SequentialScheduling(), cuda_device())
+        op = setup_operator(strategy, SumFactorizedMassIntegrator(1.7, qrc, :u), dh)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ assembled.A * u rtol = 1.0f-3
+    end
+
+    # The ELEMENT level on the device: dense per-cell matrices in a
+    # (cell, i, j) store, gathered, multiplied and scattered atomically.
+    @testset "ELEMENT level, p = $p, $(nameof(typeof(integrator)))" for p in 1:3,
+            integrator in (:sumfact, :assembled)
+
+        dh  = distorted_hex_testbed(p)
+        qrc = QuadratureRuleCollection(Tv, p + 1)
+        assembled = setup_operator(sequential_strategy(),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(ndofs(dh), 7)
+
+        # Both fill routes: the sum-factorized cache builds its matrices from the
+        # action, the standard cache from its own element-matrix kernel.
+        term = integrator === :sumfact ? SumFactorizedDiffusionIntegrator(Tv(2.5), qrc, :u) :
+                                         SimpleBilinearDiffusionIntegrator(2.5, qrc, :u)
+        strategy = AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
+                                    SequentialScheduling(), cuda_device())
+        op = setup_operator(strategy, term, dh)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ assembled.A * u rtol = 1.0f-3
     end
 
     @testset "per-mul! host allocations stay O(1)" begin

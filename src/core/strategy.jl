@@ -71,6 +71,80 @@ abstract type AbstractAssemblyStrategy end
 ## Operator form (the MFEM assembly level)
 ####################################
 
+####################################
+## Construction-time storage elections
+####################################
+
+"""
+    StorageElection
+    Stored <: StorageElection
+    Recompute <: StorageElection
+    ElementAssembly <: StorageElection
+
+WHAT a sweep keeps between evaluations, and thereby what it re-derives — a
+construction-time election trading memory against flops, spelled the same way
+wherever the framework offers one. Two consumers today: the `storage` field of
+[`MatrixFreeAction`](@ref), where the three members are MFEM's PARTIAL, NONE
+and ELEMENT assembly levels, and [`corrector_election`](@ref), where a
+condensed element's Jacobian correction is stored or re-derived.
+
+- [`Recompute`](@ref) — keep nothing.
+- [`Stored`](@ref) — keep the per-quadrature-point quantity (a matrix-free
+  element's geometric factors; a condensed element's corrector).
+- [`ElementAssembly`](@ref) — keep the dense element MATRICES. A
+  matrix-free-action election only; no other consumer implements it, and one
+  that does not says so ([`corrector_election_error`](@ref)).
+
+`CorrectorElection` is the former name of this supertype and remains as an
+alias.
+"""
+abstract type StorageElection end
+
+"""
+    Stored()
+
+Keep the per-quadrature-point quantity: a matrix-free element's geometric
+factors ([`fill_quadrature_data!`](@ref) — MFEM's PARTIAL level), or a
+condensed element's stored corrector ([`corrector_election`](@ref)).
+"""
+struct Stored <: StorageElection end
+
+"""
+    Recompute()
+
+Keep nothing and re-derive at every point of use: a matrix-free element's
+geometry at the quadrature point that consumes it (MFEM's NONE level), or a
+condensed element's corrector from the item's current `(u, q)`
+([`corrector_election`](@ref)). Recomputation is EXACT, not approximate — the
+same quantity the store would have held, at the same point.
+"""
+struct Recompute <: StorageElection end
+
+"""
+    ElementAssembly()
+
+Keep the dense element MATRICES — MFEM's ELEMENT level, and the third member of
+[`MatrixFreeAction`](@ref)'s `storage` ladder. Every `mul!` is then a gather, a
+dense `yₑ = Kₑ·uₑ` and the same scatter the other two levels use; nothing is
+contracted and no quadrature point is visited.
+
+The matrices are formed once at [`setup_operator`](@ref) and refilled by
+[`update_operator!`](@ref), through the element's own element-matrix kernel
+where it declares one ([`provides_analytic`](@ref) for `JacobianKind{:u}`) and
+through `ndofs_per_cell` applications of [`apply_element_action!`](@ref) to the
+unit vectors otherwise — a setup-time cost either way. An element serving
+neither is refused at setup.
+
+It costs `ndofs_per_cell²` scalars per cell, which grows far faster with the
+polynomial order than the per-quadrature-point store; it is the election for
+LOW order, where that square is small and the dense product is the fastest
+thing a device can do. [`WorkerPerElement`](@ref) only — one lane owning one
+dense product has no lattice to split.
+"""
+struct ElementAssembly <: StorageElection end
+
+@doc (@doc StorageElection) const CorrectorElection = StorageElection
+
 """
 Which representation of the operator is produced — the MFEM assembly level.
 Orthogonal to how the work is scheduled and to the device it runs on.
@@ -87,13 +161,13 @@ end
 FullAssembly() = FullAssembly(StandardOperatorSpecification())
 
 """
-    MatrixFreeAction(; element_mapping = WorkerPerElement())
+    MatrixFreeAction(; element_mapping = WorkerPerElement(), storage = Stored())
 
-PARTIAL/NONE level: the operator stores no global matrix and no element
-matrices, and evaluates its action `y = A·u` from the element kernels on every
-`mul!` ([`MatrixFreeFerriteOperator`](@ref)). `setup_operator` returns that
-operator for an [`AbstractBilinearIntegrator`](@ref) whose caches implement
-[`apply_element_action!`](@ref).
+ELEMENT/PARTIAL/NONE level: the operator stores no GLOBAL matrix and evaluates
+its action `y = A·u` element by element on every `mul!`
+([`MatrixFreeFerriteOperator`](@ref)). `setup_operator` returns that operator
+for an [`AbstractBilinearIntegrator`](@ref) whose caches serve the elected
+storage level.
 
 `element_mapping` selects how one element's action maps onto the device's
 workers ([`AbstractElementMapping`](@ref)) — the same element definition under
@@ -101,15 +175,45 @@ either. It is resolved onto the device at setup
 ([`with_element_mapping`](@ref)), so a mapping the device has no kernel for, or
 a cache that does not serve it, is a setup error.
 
+`storage` is WHAT the operator keeps between actions
+([`StorageElection`](@ref)), and separates the three MFEM levels this form
+spans:
+
+- [`Stored`](@ref) (the default) is PARTIAL. Each element precomputes its
+  per-quadrature-point factors into its own store
+  ([`fill_quadrature_data!`](@ref)) and every action is then contractions and
+  reads.
+- [`Recompute`](@ref) is NONE. Nothing is kept and every action re-derives the
+  geometry at the quadrature point that consumes it — the election for a mesh
+  whose factors do not fit, or a coefficient that changes faster than a store
+  can be refilled.
+- [`ElementAssembly`](@ref) is ELEMENT. The dense element matrices are kept and
+  every action is a gather, a dense product and a scatter — no quadrature point
+  is visited. `ndofs_per_cell²` scalars per cell, so it is the LOW-order
+  election, and [`WorkerPerElement`](@ref) only.
+
+The first two are the element's own storage and reach its cache through
+[`with_action_storage`](@ref); a cache that keeps nothing serves both
+identically. The third is the framework's ([`ElementAssemblyCache`](@ref)) and
+serves any bilinear cache. Both routes are filled at setup and refilled by
+[`update_operator!`](@ref).
+
 !!! warning "Experimental surface"
     The matrix-free form, its operator type and the element entry points it
     calls may change in a minor release.
 """
-struct MatrixFreeAction{M <: AbstractElementMapping} <: AbstractAssemblyForm
+struct MatrixFreeAction{M <: AbstractElementMapping, S} <: AbstractAssemblyForm
     element_mapping::M
+    storage::S
 end
-MatrixFreeAction(; element_mapping::AbstractElementMapping = WorkerPerElement()) =
-    MatrixFreeAction(element_mapping)
+function MatrixFreeAction(; element_mapping::AbstractElementMapping = WorkerPerElement(), storage = Stored())
+    storage isa StorageElection || throw(ArgumentError(
+        "`MatrixFreeAction`'s `storage` election is `Stored()` (the element's " *
+        "per-quadrature-point factors, the PARTIAL level), `Recompute()` (re-derive them per " *
+        "action, the NONE level) or `ElementAssembly()` (the dense element matrices, the " *
+        "ELEMENT level), got $(storage)."))
+    return MatrixFreeAction(element_mapping, storage)
+end
 
 """
     operator_specification(form) -> spec or `nothing`

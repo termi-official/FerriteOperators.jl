@@ -51,17 +51,21 @@ allocate_operator_matrix(device::AbstractGPUDevice, ::Type{MT}, sp) where {MT} =
 init_operator_sparsity_pattern(::StandardOperatorSpecification, dh) = Ferrite.init_sparsity_pattern(dh)
 init_operator_sparsity_pattern(spec::BlockedOperatorSpecification, dh) = BlockSparsityPattern(spec.block_sizes)
 
-function setup_elements(integrator, dh, ad_backend, n_global_dofs)
-    needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
-    return [setup_decorated_element_cache(integrator, sdh, ad_backend, n)
+# The form's element-side elections ([`with_assembly_form`](@ref)) are applied to
+# the raw cache, before any decoration and before the engine builds the
+# workspaces and device layouts from it.
+function setup_elements(integrator, dh, form, ad_backend, n_global_dofs)
+    needs_ad_decoration(integrator) ||
+        return [with_assembly_form(setup_element_cache(integrator, sdh), form, sdh) for sdh in dh.subdofhandlers]
+    return [setup_decorated_element_cache(integrator, sdh, form, ad_backend, n)
             for (sdh, n) in zip(dh.subdofhandlers, n_global_dofs)]
 end
 
 # One subdomain's element cache, built and decorated. Both counts the decorator
 # is sized from are the INTEGRATOR's declarations, resolved here, which is what
 # keeps `decorate_element_cache` itself integrator-free.
-function setup_decorated_element_cache(integrator, sdh, ad_backend, n_global_dofs::Int)
-    cache = setup_element_cache(integrator, sdh)
+function setup_decorated_element_cache(integrator, sdh, form, ad_backend, n_global_dofs::Int)
+    cache = with_assembly_form(setup_element_cache(integrator, sdh), form, sdh)
     return decorate_element_cache(cache, sdh, ad_backend, n_global_dofs;
                                   n_internal_dofs = resolve_internal_dofs_per_element(integrator, cache, sdh))
 end
@@ -438,7 +442,7 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     declared_kinds    = map(_kind_type, requests)
     global_dof_sets   = resolve_global_dof_sets(strategy, integrator, dh)
     facet_item_sets   = resolve_facet_item_global_dof_sets(strategy, integrator, dh)
-    element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
+    element_caches    = setup_elements(integrator, dh, strategy.form, ad_backend, map(length, global_dof_sets))
     foreach(cache -> validate_element_cache(cache, declared_kinds), element_caches)
     algebraic_domain  = resolve_algebraic_domain(integrator, dh, declared_kinds)
     ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)

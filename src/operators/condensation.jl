@@ -538,36 +538,23 @@ end
 ####################################
 
 """
-    CorrectorElection
-    Stored <: CorrectorElection
+    corrector_election(integrator) -> StorageElection
 
-Whether a condensed element's Jacobian correction is READ from a per-item
-corrector the condensation sweep stored (`Stored()`, the default) or
-RE-DERIVED from the item's current `(u, q)` wherever a `Consistent`-mode
-kernel needs it ([`Recompute`](@ref)) — an operator-construction election
-([`corrector_election`](@ref)) trading the store's per-quadrature-point memory
-against one extra evaluation of the element's local slopes per Jacobian-shaped
-sweep.
+Where a condensed element's Jacobian correction comes from — the
+[`StorageElection`](@ref) vocabulary applied to the per-item corrector, and an
+operator-construction choice of the INTEGRATOR (`Stored()` by default; a
+condensed integrator overrides this to report its own constructor-elected
+value).
 
-The election is invisible to kernels: a `Consistent` kernel reads its
-corrector through ONE access point, which either reads the store or
-recomputes. [`condensed_corrector`](@ref) is that access point for the AD
-decorator's generic combination, which is why it receives the args record.
-"""
-abstract type CorrectorElection end
-@doc (@doc CorrectorElection) struct Stored <: CorrectorElection end
-
-"""
-    Recompute <: CorrectorElection
-
-Keeps NO per-item corrector storage — [`condense_cell!`](@ref) writes the
-trial `q` and nothing else — and re-derives the corrector from the item's
-current `(u, q)` at every point of use.
-
-Targets memory-bound ASSEMBLED sweeps at scale, where per-quadrature-point
-corrector storage is the binding cost. For repeated operator actions at a
-fixed state (a Krylov `mul!`/JVP sequence) [`Stored`](@ref) is the right
-election, since every action would otherwise re-derive the same corrector.
+[`Stored`](@ref) keeps the corrector the condensation sweep computed, per
+quadrature point. [`Recompute`](@ref) keeps none and re-derives it from the
+item's current `(u, q)` wherever a `Consistent`-mode kernel needs one, trading
+the store's memory for one extra evaluation of the element's local slopes per
+Jacobian-shaped sweep — the right election for a memory-bound ASSEMBLED sweep
+at scale, the wrong one for a Krylov `mul!`/JVP sequence at a fixed state,
+which would re-derive the same corrector every time.
+[`ElementAssembly`](@ref) is not a corrector election and no condensed element
+implements it.
 
 Recomputation is EXACT, not approximate: the corrector is a closed-form
 function of the converged pair `(u, q)` — the implicit-function-theorem slopes
@@ -576,22 +563,19 @@ of the element's local conditions — so it is the same quantity
 chaining `weights` into its corrector retains them per cache, which is `O(1)`
 and not the storage this election trades away.
 
-Freshness: nothing is stored, so nothing can go stale and
-[`rollback_state!`](@ref) has no correctors to drop (restoring `u` restores its
-`q` tail with it). The q-freshness contract is unchanged — `q` is written only
-by [`condense_internal!`](@ref), so a `Consistent` sweep still requires a
+The election is invisible to kernels: a `Consistent` kernel reads its corrector
+through ONE access point, which either reads the store or recomputes.
+[`condensed_corrector`](@ref) is that access point for the AD decorator's
+generic combination, which is why it receives the args record.
+
+Freshness under [`Recompute`](@ref): nothing is stored, so nothing can go stale
+and [`rollback_state!`](@ref) has no correctors to drop (restoring `u` restores
+its `q` tail with it). The q-freshness contract is unchanged — `q` is written
+only by [`condense_internal!`](@ref), so a `Consistent` sweep still requires a
 condensation at the current trial point. What is lost is the DETECTION of a
 missing one: [`Stored`](@ref) throws through [`item_state`](@ref)'s freshness
 contract on a never-condensed or invalidated item, while a recomputing kernel
 silently derives a corrector from whatever `q` the tail currently holds.
-"""
-struct Recompute <: CorrectorElection end
-
-"""
-    corrector_election(integrator) -> CorrectorElection
-
-Default `Stored()`; a condensed integrator overrides it to report its own
-constructor-elected value.
 """
 corrector_election(integrator) = Stored()
 
@@ -599,7 +583,7 @@ corrector_election(integrator) = Stored()
     corrector_election_error(election)
 
 The loud, self-naming rejection a condensed integrator's constructor raises
-for a [`CorrectorElection`](@ref) it does not implement, so the seam exists
+for a [`StorageElection`](@ref) it does not implement, so the seam exists
 without silently accepting a selection the element cannot honor.
 """
 corrector_election_error(election) = throw(ArgumentError(

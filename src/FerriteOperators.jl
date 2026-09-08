@@ -100,8 +100,10 @@ operator is rejected at `setup_operator` — there is no matrix to lay out.
 """
 abstract type AbstractLinearIntegrator end
 
+include("elements/tensor_product.jl")         # Sum-factorization core for matrix-free tensor-product elements
 include("elements/composite_elements.jl")     # High-level composition of operators
 include("elements/ad_element.jl")             # ADElementCache: AD as an element cache decorator
+include("elements/element_assembly.jl")       # ElementAssemblyCache: the ELEMENT storage level of the matrix-free action
 
 include("operators/general.jl")         # Domain descriptors, NullOperator
 include("operators/nonlinear.jl")       # Assembly and action tasks
@@ -196,9 +198,16 @@ export setup_device_instances, device_worker_view
 export default_strategy
 export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAssembly
 export MatrixFreeAction, MatrixFreeFerriteOperator, MatrixFreeActionKind, apply_element_action!
+export QuadratureDataKind, fill_quadrature_data!, with_assembly_form, with_action_storage, adapt_shared
+export StorageElection, ElementAssembly, ElementAssemblyCache, element_matrix_fill_route
 export AbstractElementMapping, WorkerPerElement, CooperativeElement, with_element_mapping
 export cooperative_lattice_dim, cooperative_group_size, cooperative_scratch_shape
 export cooperative_load!, cooperative_stage!, cooperative_store!
+export TensorProductValues, AbstractTensorProductElementCache
+export AbstractQuadratureQuantity, QuadratureValue, QuadratureGradient
+export tensor_product_values, tensor_product_scratch, tensor_product_quantity, tensor_product_pointwise
+export tensor_product_jacobian, tensor_product_weight, tensor_product_contract!
+export allocate_tensor_product_scratch, tensor_product_scratch_prototype, quadrature_lattice_index
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling
 export StandardOperatorSpecification, BlockedOperatorSpecification
 

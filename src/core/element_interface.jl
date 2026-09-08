@@ -157,6 +157,69 @@ indexes them and neither resizes nor reallocates.
 function apply_element_action! end
 
 """
+    with_assembly_form(cache, form, sdh) -> cache
+
+The cache `setup_element_cache` built, carrying the element-side half of the
+operator FORM's elections — the seam between an [`AbstractAssemblyForm`](@ref)
+and what an element keeps for it. The identity for every form that elects
+nothing of the element; [`MatrixFreeAction`](@ref) resolves its storage
+election through [`with_action_storage`](@ref) here.
+
+The election belongs to the operator (two operators over the same integrator
+may differ) while the storage belongs to the element, and this is where the two
+meet — before the engine builds the workspaces and the device layouts, so a
+cache reaching a device is already the one the form asked for.
+
+!!! warning "Experimental surface"
+    This hook exists for the matrix-free form's storage election and may change
+    in a minor release.
+"""
+with_assembly_form(cache, form, sdh) = cache
+with_assembly_form(cache, form::MatrixFreeAction, sdh) = with_action_storage(cache, form.storage, sdh)
+
+"""
+    with_action_storage(cache, storage::StorageElection, sdh) -> cache
+
+The cache a matrix-free operator's `storage` election
+([`MatrixFreeAction`](@ref)) asks for. Two kinds of method meet here, and
+dispatch keeps them apart:
+
+- The ELEMENT's, specialized on ITS cache type and the member it keeps
+  something for — a `Stored()` method allocating the element's
+  per-quadrature-point store. An element that keeps nothing writes none and
+  serves `Stored()` and `Recompute()` identically.
+- The FRAMEWORK's, specialized on [`ElementAssembly`](@ref) and no cache type,
+  which wraps ANY bilinear cache in an [`ElementAssemblyCache`](@ref). It is
+  strictly more specific in the storage argument than an element's
+  `Recompute()` method and strictly less specific in the cache argument than an
+  element's `Stored()` one, so the two never collide.
+
+!!! warning "Experimental surface"
+    This hook exists for the matrix-free form's storage election and may change
+    in a minor release.
+"""
+with_action_storage(cache, storage, sdh) = cache
+
+"""
+    fill_quadrature_data!(cache, args::CellArgs)
+
+Fill the per-quadrature-point store `cache` owns for the current cell — the
+PARTIAL-assembly half of a matrix-free element, precomputing once what its
+kernel would otherwise re-derive at every action (the geometric factors
+`w_q·det(J_q)·…`).
+
+Called by a [`QuadratureDataKind`](@ref) sweep, which the operator runs at setup
+and again on every [`update_operator!`](@ref), so a factor depending on `p` or on
+the context's time is refreshed there and nowhere else. The default is a no-op:
+a cache that stores nothing has nothing to fill.
+
+The store is the cache's own — its layout, its element type, its freshness. The
+sweep visits every cell of the subdomain exactly once and cells write disjoint
+slices, so no synchronization is needed and none is provided.
+"""
+fill_quadrature_data!(cache, args::CellArgs) = nothing
+
+"""
     cooperative_lattice_dim(cache) -> Int
     cooperative_group_size(cache) -> Int
     cooperative_scratch_shape(cache) -> (Val(length), Val(count))

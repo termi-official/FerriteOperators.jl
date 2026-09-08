@@ -7,7 +7,7 @@ import KernelAbstractions as KA
 import KernelAbstractions: @kernel, @index, @Const, @localmem, @synchronize, @uniform, @groupsize
 
 import FerriteOperators: KernelAbstractionsDevice, AssemblyWorkspace, AssemblyTask, VectorAssembler
-import FerriteOperators: CooperativeElement, WorkerPerElement
+import FerriteOperators: CooperativeElement, WorkerPerElement, QVector
 import FerriteOperators: device_worker_view, launch_geometry, n_workers, value_type
 import FerriteOperators: cooperative_group_size, cooperative_scratch_shape,
     cooperative_load!, cooperative_stage!, cooperative_store!
@@ -33,6 +33,9 @@ end
 
 Adapt.@adapt_structure AssemblyWorkspace
 Adapt.@adapt_structure AssemblyTask
+# The flat per-cell quadrature store: its `data` is what moves, the offset layout
+# being an isbits range wherever the point count is uniform.
+Adapt.@adapt_structure QVector
 
 # The `atomic` parameter is a compile-time constant, not a field, so the
 # generated rule's positional constructor would drop it.
@@ -62,6 +65,16 @@ end
 
 FerriteOperators.adapt_partition(device::KernelAbstractionsDevice, partition) =
     [adapt(device.backend, collect(Int, color)) for color in partition]
+
+"""
+    adapt_shared(device::KernelAbstractionsDevice, x)
+
+Shared read-only cache data, moved into device memory once at setup — a plain
+`adapt` onto the backend, which is what makes an element cache's
+quadrature-data store reach the kernel without the cache naming a backend
+itself.
+"""
+FerriteOperators.adapt_shared(device::KernelAbstractionsDevice, x) = adapt(device.backend, x)
 
 FerriteOperators.allocate_vector(device::KernelAbstractionsDevice, dh) =
     KA.zeros(device.backend, value_type(device), ndofs(dh))
@@ -134,7 +147,8 @@ end
 @kernel function _cell_sweep_kernel!(task, workspaces, @Const(items))
     worker = @index(Global, Linear)
     stride = prod(KA.@ndrange())
-    local_task = AssemblyTask(task.kind, task.inner_assembler[worker], task.states, task.p, task.ctx)
+    local_task = AssemblyTask(task.kind, _worker_assembler(task.inner_assembler, worker),
+                              task.states, task.p, task.ctx)
     ws = device_worker_view(workspaces, worker)
     for i in worker:stride:length(items)
         Ferrite.reinit!(ws, items[i])
@@ -148,8 +162,18 @@ end
 # shared, which is what the `get_substruct` method beside it says.
 _worker_assemblers(backend, assembler::VectorAssembler, n) = Ferrite.SoAContainer(assembler, n)
 _worker_assemblers(backend, assembler, n) = Ferrite.distribute_to_workers(backend, assembler, n)
+# A sweep that scatters nothing carries no assembler (`QuadratureDataKind` writes
+# into the element cache's own store), and a worker's share of none is none.
+_worker_assemblers(backend, ::Nothing, n) = nothing
+@inline _worker_assembler(assemblers, worker) = assemblers[worker]
+@inline _worker_assembler(::Nothing, worker) = nothing
 
-function FerriteOperators.execute_on_device!(task, device::KernelAbstractionsDevice, workspaces, items)
+FerriteOperators.execute_on_device!(task, device::KernelAbstractionsDevice, workspaces, items) =
+    _grid_stride_sweep!(task, device, workspaces, items)
+
+# One work item per grid-stride step, the mapping every device kind but the
+# cooperative one runs in.
+function _grid_stride_sweep!(task, device::KernelAbstractionsDevice, workspaces, items)
     # The built-in primal driver gathers the global vectors into the per-worker
     # slot buffers through `load_slots!`, and that gather RESIZES them — which a
     # worker's view of a shared batch cannot do. A kind carrying its own driver
@@ -313,9 +337,15 @@ and it launches one group per item rather than grid-striding, because a barrier
 cannot live inside a loop the CPU backend has to split. That is why
 [`n_workers`](@ref) is the largest barrier here: every item of it holds a
 workspace slice concurrently.
+
+The PARTIAL-assembly fill a cooperative operator also runs
+([`QuadratureDataKind`](@ref)) has no lattice pipeline — one cell fills its own
+per-quadrature-point slice — and takes the grid-stride mapping instead.
 """
 function FerriteOperators.execute_on_device!(task,
         device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, CooperativeElement}, workspaces, items)
+    task.kind isa FerriteOperators.QuadratureDataKind &&
+        return _grid_stride_sweep!(task, device, workspaces, items)
     task.kind isa FerriteOperators.MatrixFreeActionKind || throw(ArgumentError(
         "`CooperativeElement` executes the matrix-free action and nothing else (got " *
         "$(nameof(typeof(task.kind)))): its kernel is the element's own lattice pipeline, not " *

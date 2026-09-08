@@ -140,12 +140,12 @@ the device, not a `CellValues`.
 [`FullAssembly`](@ref) assembles the global matrix and vector and serves every
 operator family — the FULL level, and the default.
 
-[`MatrixFreeAction`](@ref) is the PARTIAL/NONE level: the operator stores no
-global matrix and no element matrices, and every `mul!` re-evaluates `y = A·u`
-from the element kernels. `setup_operator` returns a
-[`MatrixFreeFerriteOperator`](@ref) for a bilinear integrator whose caches
-implement [`apply_element_action!`](@ref), and a cache that does not is a setup
-error naming the method.
+[`MatrixFreeAction`](@ref) covers the other three: the operator stores no GLOBAL
+matrix and every `mul!` evaluates `y = A·u` element by element. `setup_operator`
+returns a [`MatrixFreeFerriteOperator`](@ref) for a bilinear integrator whose
+caches serve the elected storage level — [`apply_element_action!`](@ref) for the
+two per-quadrature-point levels — and a cache that does not is a setup error
+naming the method.
 
 ```julia
 strategy = AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction())
@@ -176,9 +176,48 @@ The election is realized on the device at setup
 mapping: one element definition, two execution mappings, chosen on the strategy
 side.
 
+It carries a third choice, `storage`, which is WHAT the operator keeps between
+actions ([`StorageElection`](@ref)) — MFEM's other three assembly levels:
+
+```julia
+form = MatrixFreeAction(; storage = ElementAssembly())   # `Stored()` is the default
+```
+
+- [`Recompute`](@ref) is NONE: nothing is kept and the geometry is re-derived at
+  the quadrature point that consumes it.
+- [`Stored`](@ref) is PARTIAL: the element precomputes its per-quadrature-point
+  factors ([`fill_quadrature_data!`](@ref)) and every action is contractions and
+  reads.
+- [`ElementAssembly`](@ref) is ELEMENT: the dense element matrices are kept and
+  every action is a gather, a dense `yₑ = Kₑ·uₑ` and a scatter. It costs
+  `ndofs_per_cell²` scalars per cell, so it is the LOW-order election, and it
+  runs [`WorkerPerElement`](@ref) only.
+
+Both stored levels are filled at setup and refilled by
+[`update_operator!`](@ref), whose freshness contract is the one an assembled
+operator has: a factor that depends on `p` or on the context time is as fresh as
+the last such call.
+
+The first two are the element's own storage and reach its cache through
+[`with_action_storage`](@ref) at setup — an element that keeps nothing serves
+both identically. The third is the framework's
+([`ElementAssemblyCache`](@ref)) and serves ANY bilinear cache: an element with
+an ordinary element-matrix kernel and no matrix-free kernel at all runs the
+ELEMENT level, and a matrix-free one has its matrices filled from its own
+action.
+
+Writing such an element is [`AbstractTensorProductElementCache`](@ref) plus a
+POINTWISE MAP ([`tensor_product_pointwise`](@ref)): the 1D operators, the
+lattice permutations, the contractions and both mapping pipelines are the
+core's, and what remains is the `D` block of the operator decomposition. The
+example elements ship two of them over that one core — a diffusion action
+(a tensor on the reference gradient) and a mass action (a scalar on the
+interpolated value).
+
 !!! warning "Experimental surface"
-    The matrix-free form, [`MatrixFreeFerriteOperator`](@ref) and the element
-    entry points they call may change in a minor release.
+    The matrix-free form, [`MatrixFreeFerriteOperator`](@ref), the
+    tensor-product core and the element entry points they call may change in a
+    minor release.
 
 All operator entry points funnel into one task body executed by a shared
 device loop:
