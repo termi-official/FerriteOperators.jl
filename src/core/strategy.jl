@@ -208,12 +208,12 @@ ones are (re)allocated once their column count is known — `θ`/`Bₑ`/`gθ` by
     Kqₑ       # local ∂F/∂q block (residual × the item's condensed internal dof count)
 end
 
-function create_sensitivity_buffers(element, sdh, n_global_dofs::Int = 0, ::Type{Tv} = Float64) where {Tv}
-    vₑ  = pad_element_vector(allocate_element_unknown_vector(element, sdh, Tv), n_global_dofs)
-    gu  = pad_element_vector(allocate_element_unknown_vector(element, sdh, Tv), n_global_dofs)
-    λₑ  = pad_element_vector(allocate_element_residual_vector(element, sdh, Tv), n_global_dofs)
-    Jvₑ = pad_element_vector(allocate_element_residual_vector(element, sdh, Tv), n_global_dofs)
-    gₜ  = pad_element_vector(allocate_element_residual_vector(element, sdh, Tv), n_global_dofs)
+function create_sensitivity_buffers(element, sdh, n_global_dofs::Int = 0)
+    vₑ  = pad_element_vector(allocate_element_unknown_vector(element, sdh), n_global_dofs)
+    gu  = pad_element_vector(allocate_element_unknown_vector(element, sdh), n_global_dofs)
+    λₑ  = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
+    Jvₑ = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
+    gₜ  = pad_element_vector(allocate_element_residual_vector(element, sdh), n_global_dofs)
     T   = eltype(Jvₑ)
     return SensitivityBuffers(λₑ, vₑ, Jvₑ, gu, gₜ, Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0),
                               Vector{T}(), Matrix{T}(undef, length(Jvₑ), 0))
@@ -314,13 +314,12 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
         keys(ws.slot_buffers);
         needs_sensitivity = ws.sensitivity !== nothing,
         global_dofs = _declared_global_dofs(ws),
-        value_type = eltype(ws.Ke),
     )
 end
 
 """
     create_assembly_workspace(element, sdh, ivh, slots;
-                              needs_sensitivity = true, global_dofs = (), value_type = Float64)
+                              needs_sensitivity = true, global_dofs = ())
 
 Create one [`AssemblyWorkspace`](@ref) with freshly allocated element-local
 buffers, one state buffer per declared slot name and sized to `ndofs_per_cell`;
@@ -335,21 +334,22 @@ STRUCTURAL, decided by the integrator family ([`needs_ad_decoration`](@ref)).
 element-local buffer is padded by its length, and the workspace carries the
 augmented dof vector the sweep's gathers and scatters address.
 
-`value_type` is the scalar type the element-local buffers carry, the device's
-[`value_type`](@ref) as `setup_engine` resolved it.
+The buffers carry whatever scalar the `allocate_element_*` hooks return, which
+is the ELEMENT's precision ([`element_value_type`](@ref)) and need not be the
+device's.
 """
 function create_assembly_workspace(element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
-        needs_sensitivity::Bool = true, global_dofs = (), value_type::Type{Tv} = Float64) where {N, Tv}
+        needs_sensitivity::Bool = true, global_dofs = ()) where {N}
     n = length(global_dofs)
-    slot_buffers = NamedTuple{slots}(ntuple(_ -> pad_element_vector(allocate_element_unknown_vector(element, sdh, Tv), n), N))
+    slot_buffers = NamedTuple{slots}(ntuple(_ -> pad_element_vector(allocate_element_unknown_vector(element, sdh), n), N))
     return AssemblyWorkspace(
-        pad_element_matrix(allocate_element_matrix(element, sdh, Tv), n),
+        pad_element_matrix(allocate_element_matrix(element, sdh), n),
         slot_buffers,
-        pad_element_vector(allocate_element_residual_vector(element, sdh, Tv), n),
+        pad_element_vector(allocate_element_residual_vector(element, sdh), n),
         CellCache(sdh),
         ivh,
         element,
-        needs_sensitivity ? create_sensitivity_buffers(element, sdh, n, Tv) : nothing,
+        needs_sensitivity ? create_sensitivity_buffers(element, sdh, n) : nothing,
         _augmented_dof_vector(sdh, global_dofs),
     )
 end

@@ -36,6 +36,11 @@ end
 query_cell_parameters(composite::CompositeVolumetricElementCache, cell, p) =
     CompositeParameters(map(inner -> query_cell_parameters(inner, cell, p), composite.inner_caches))
 
+# The inners share ONE local system, so its scalar has to hold every inner's:
+# a `Float32` term composed with a `Float64` one accumulates in `Float64`.
+element_value_type(composite::CompositeVolumetricElementCache) =
+    promote_type(map(element_value_type, composite.inner_caches)...)
+
 assemble_cell!(req::AbstractAssemblyRequest, composite::CompositeVolumetricElementCache, args) =
     _composite_assemble_cell!(req, composite.inner_caches, args, args.p)
 
@@ -182,6 +187,9 @@ end
 
 query_facet_parameters(composite::CompositeFacetItemCache, cell, local_facet_index, p) =
     CompositeParameters(map(inner -> query_facet_parameters(inner, cell, local_facet_index, p), composite.inner_caches))
+
+element_value_type(composite::CompositeFacetItemCache) =
+    promote_type(map(element_value_type, composite.inner_caches)...)
 
 duplicate_for_device(device, cache::CompositeFacetItemCache) = CompositeFacetItemCache(
     map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),
@@ -363,8 +371,6 @@ const AnyCompositeIntegrator = Union{NonlinearCompositeIntegrator, BilinearCompo
 
 setup_element_cache(element_model::AnyCompositeIntegrator, sdh::SubDofHandler) =
     compose_element_caches(map(sub -> setup_element_cache(sub, sdh), element_model.subintegrators))
-setup_element_cache(element_model::AnyCompositeIntegrator, sdh::SubDofHandler, ::Type{T}) where {T} =
-    compose_element_caches(map(sub -> setup_element_cache(sub, sdh, T), element_model.subintegrators))
 
 # The inners share one local system, so they share its tail: a composite
 # declares what its inners declare, and silent inners (the default `()`) read

@@ -36,15 +36,16 @@ function hex_testbed(::Type{T} = Float64; dims = (3, 3, 3)) where {T}
 end
 
 @testset "KernelAbstractionsDevice" begin
-    qrc = QuadratureRuleCollection(2)
-
-    @testset "matches the sequential result ($(nameof(typeof(integrator))), $T, $label)" for
+    # The device's `value_type` is the GLOBAL system's; the element precision is
+    # elected on the integrator's quadrature collection, and both are `T` here.
+    @testset "matches the sequential result ($name, $T, $label)" for
             (label, testbed) in (("quad", quad_testbed), ("hex", hex_testbed)),
             T in (Float64, Float32),
-            integrator in (SimpleBilinearDiffusionIntegrator(2.5, qrc, :u),
-                           SimpleBilinearMassIntegrator(1.7, qrc, :u),
-                           SimpleLinearIntegrator(3.1, qrc, :u))
+            (name, build) in (("diffusion", q -> SimpleBilinearDiffusionIntegrator(2.5, q, :u)),
+                              ("mass",      q -> SimpleBilinearMassIntegrator(1.7, q, :u)),
+                              ("linear",    q -> SimpleLinearIntegrator(3.1, q, :u)))
 
+        integrator = build(QuadratureRuleCollection(T, 2))
         dh  = testbed(T)
         I   = T === Float32 ? Int32 : Int
         rtol = T === Float32 ? 1.0f-5 : 1.0e-12
@@ -69,10 +70,28 @@ end
         @test first_run == FerriteOperators.operator_payload(device)
     end
 
+    @testset "mixed local and global precision" begin
+        # The two elections are independent by design: the element evaluates in
+        # what its collection says, the device accumulates in its `value_type`,
+        # and the scatter converts entry-wise.
+        dh = quad_testbed(Float64)
+        for (Te, Tg, Ig) in ((Float64, Float32, Int32), (Float32, Float64, Int))
+            integrator = SimpleBilinearDiffusionIntegrator(2.5, QuadratureRuleCollection(Te, 2), :u)
+            reference  = setup_operator(AssemblyStrategy(SequentialCPUDevice{Tg, Ig}()), integrator, dh)
+            update_operator!(reference, nothing)
+            op = setup_operator(ka_strategy(Tg, Ig), integrator, dh)
+            update_operator!(op, nothing)
+
+            payload = FerriteOperators.operator_payload(op)
+            @test eltype(payload) === Tg
+            @test payload ≈ FerriteOperators.operator_payload(reference) rtol = 1.0f-5
+        end
+    end
+
     @testset "per-sweep host allocations stay O(1)" begin
         dh = hex_testbed(Float32; dims = (6, 6, 6))
         op = setup_operator(ka_strategy(Float32, Int32),
-                            SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+                            SimpleBilinearDiffusionIntegrator(2.5, QuadratureRuleCollection(Float32, 2), :u), dh)
         update_operator!(op, nothing)
         update_operator!(op, nothing)
         # Nothing is transferred or rebuilt per sweep: the workspaces, the
@@ -107,29 +126,29 @@ struct FacetWallIntegrator <: AbstractBilinearIntegrator
     qrc::QuadratureRuleCollection
     facetset::Any
 end
-FerriteOperators.setup_element_cache(m::FacetWallIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T} =
-    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh, T)
+FerriteOperators.setup_element_cache(m::FacetWallIntegrator, sdh::SubDofHandler) =
+    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh)
 FerriteOperators.facet_items(m::FacetWallIntegrator, ::SubDofHandler) = m.facetset
 
 struct AlgebraicWallIntegrator <: AbstractBilinearIntegrator
     qrc::QuadratureRuleCollection
 end
-FerriteOperators.setup_element_cache(m::AlgebraicWallIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T} =
-    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh, T)
+FerriteOperators.setup_element_cache(m::AlgebraicWallIntegrator, sdh::SubDofHandler) =
+    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh)
 FerriteOperators.algebraic_items(::AlgebraicWallIntegrator, dh) = ([1],)
 
 struct GlobalDofWallIntegrator <: AbstractBilinearIntegrator
     qrc::QuadratureRuleCollection
 end
-FerriteOperators.setup_element_cache(m::GlobalDofWallIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T} =
-    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh, T)
+FerriteOperators.setup_element_cache(m::GlobalDofWallIntegrator, sdh::SubDofHandler) =
+    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh)
 FerriteOperators.global_dofs(::GlobalDofWallIntegrator, ::SubDofHandler) = (1,)
 
 struct NonlinearWallIntegrator <: AbstractNonlinearIntegrator
     qrc::QuadratureRuleCollection
 end
-FerriteOperators.setup_element_cache(m::NonlinearWallIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T} =
-    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh, T)
+FerriteOperators.setup_element_cache(m::NonlinearWallIntegrator, sdh::SubDofHandler) =
+    FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh)
 
 @testset "KernelAbstractionsDevice scope walls" begin
     qrc = QuadratureRuleCollection(2)

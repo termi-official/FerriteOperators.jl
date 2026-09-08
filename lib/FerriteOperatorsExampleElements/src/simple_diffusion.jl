@@ -56,13 +56,19 @@ function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleBilinearD
     end
 end
 
-function setup_element_cache(element_model::SimpleBilinearDiffusionIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T}
-    qr         = getquadraturerule(element_model.qrc, sdh, T)
+# The integrator elects the evaluation precision through its quadrature
+# collection; `CellValues(qr, ip, ip_geo)` would be `Float64` whatever the rule
+# says, so `T` is spelled out.
+function setup_element_cache(element_model::SimpleBilinearDiffusionIntegrator, sdh::SubDofHandler)
+    qr         = getquadraturerule(element_model.qrc, sdh)
+    T          = element_value_type(element_model.qrc)
     field_name = element_model.field_name
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleBilinearDiffusionElementCache(element_model.D, CellValues(T, qr, ip, ip_geo))
 end
+
+element_value_type(cache::SimpleBilinearDiffusionElementCache) = element_value_type(cache.cellvalues)
 
 provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind{:u}) = true
 # The bilinear form induces a linear operator, so its residual is the element

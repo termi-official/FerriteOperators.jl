@@ -400,7 +400,10 @@ function setup_algebraic_caches(strategy, algebraic_domain, slots::NTuple{<:Any,
     algebraic_domain === nothing && return SubdomainCache[]
     cache, items = algebraic_domain
     device = strategy.device
-    T      = value_type(device)
+    # An algebraic item has no values object to elect from, so the cache's own
+    # [`element_value_type`](@ref) — `Float64` unless it declares otherwise —
+    # is the scalar its local system carries, exactly as for a cell cache.
+    T      = element_value_type(cache)
     resolved  = needs_sensitivity ? decorate_algebraic_cache(cache, length(first(items)), ad_backend, T) : cache
     partition = compute_partition(strategy, AlgebraicItems(items))
     ws = create_algebraic_workspace(resolved, items, slots, T, ivh; needs_sensitivity)

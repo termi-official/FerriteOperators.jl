@@ -129,7 +129,7 @@ include("postprocessing/quadrature-query.jl") # VTKQuadratureFile + write_quadra
 
 export QuadratureRuleCollection, InternalVariableHandler
 export internal_variable_offset, internal_variable_range
-export getquadraturerule
+export getquadraturerule, element_value_type
 export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
 export AbstractCondensedNonlinearIntegrator
 export get_number_of_internal_dofs_per_element, setup_internal_variable_handler

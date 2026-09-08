@@ -33,6 +33,50 @@ include(joinpath(@__DIR__, "fixture_elements.jl"))
     @test opp.b ≈ op.b rtol = 1e-13
 end
 
+# The integrator's election of its evaluation precision: which spellings build a
+# collection, what the rule and the cache carry, and where the buffers follow.
+@testset "Evaluation precision rides the quadrature collection" begin
+    FQRC = FerriteOperators.FacetQuadratureRuleCollection
+
+    @testset "every constructor spelling" begin
+        @test QuadratureRuleCollection(2) === QuadratureRuleCollection{2, Float64}()
+        @test QuadratureRuleCollection{2}() === QuadratureRuleCollection{2, Float64}()
+        @test QuadratureRuleCollection(Float64, 2) === QuadratureRuleCollection{2, Float64}()
+        @test QuadratureRuleCollection(Float32, 2) === QuadratureRuleCollection{2, Float32}()
+        @test FQRC(2) === FQRC{2, Float64}()
+        @test FQRC{2}() === FQRC{2, Float64}()
+        @test FQRC(Float32, 2) === FQRC{2, Float32}()
+        # The one-parameter annotation is a UnionAll, so it still matches.
+        @test QuadratureRuleCollection(Float32, 2) isa QuadratureRuleCollection{2}
+        @test element_value_type(QuadratureRuleCollection(2)) === Float64
+        @test element_value_type(QuadratureRuleCollection(Float32, 2)) === Float32
+        @test element_value_type(FQRC(Float32, 2)) === Float32
+    end
+
+    grid = generate_grid(Quadrilateral, (2, 2))
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+    close!(dh)
+    sdh = first(dh.subdofhandlers)
+
+    @testset "the rule, the cache and its buffers carry it: $T" for T in (Float64, Float32)
+        qrc = QuadratureRuleCollection(T, 2)
+        @test eltype(Ferrite.getweights(getquadraturerule(qrc, sdh))) === T
+        @test element_value_type(getquadraturerule(qrc, sdh)) === T
+        @test element_value_type(getquadraturerule(FQRC(T, 2), sdh)) === T
+
+        cache = FerriteOperators.setup_element_cache(
+            SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), sdh)
+        @test element_value_type(cache) === T
+        @test eltype(FerriteOperators.allocate_element_matrix(cache, sdh)) === T
+        @test eltype(FerriteOperators.allocate_element_residual_vector(cache, sdh)) === T
+    end
+
+    # A cache that declares nothing stays in double precision, whatever the
+    # device around it assembles in.
+    @test element_value_type(EmptyVolumetricElementCache()) === Float64
+end
+
 @testset "Element API" begin
     import FerriteOperators: assemble_cell!, assemble_facet!
     import FerriteOperators: setup_element_cache

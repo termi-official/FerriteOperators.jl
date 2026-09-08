@@ -74,13 +74,17 @@ workers touch adjacent addresses, and the geometry cache and element cache
 recurse into their own struct-of-arrays layouts.
 [`device_worker_view`](@ref) is the inverse.
 
+Each batch carries the ELTYPE of the host buffer it replaces, so the element's
+own precision follows onto the device rather than the device's `value_type`
+overriding it.
+
 The geometry cache is built from `device_sdh`, the subdomain's
 `DeviceSubDofHandler` — the host `SubDofHandler` the workspace carries would
 give a cache over the host grid, which `adapt` returns unchanged and no error
 reports.
 """
-function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice{<:Any, T},
-        ws::AssemblyWorkspace, n_instances::Int, device_sdh) where {T}
+function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice,
+        ws::AssemblyWorkspace, n_instances::Int, device_sdh)
     device_sdh === nothing && throw(ArgumentError(
         "$(nameof(typeof(device))) needs the subdomain's device handler to build a device " *
         "geometry cache. Workspaces reach it through the four-argument " *
@@ -88,12 +92,12 @@ function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevic
     backend = device.backend
     ndofs_local = size(ws.Ke, 1)
     return AssemblyWorkspace(
-        KA.zeros(backend, T, n_instances, ndofs_local, ndofs_local),
+        KA.zeros(backend, eltype(ws.Ke), n_instances, ndofs_local, ndofs_local),
         # Batched for layout symmetry; a device sweep never gathers into them
         # (`load_slots!` resizes, which a worker view cannot do — see
         # `execute_on_device!`).
-        map(buffer -> KA.zeros(backend, T, n_instances, length(buffer)), ws.slot_buffers),
-        KA.zeros(backend, T, n_instances, length(ws.re)),
+        map(buffer -> KA.zeros(backend, eltype(buffer), n_instances, length(buffer)), ws.slot_buffers),
+        KA.zeros(backend, eltype(ws.re), n_instances, length(ws.re)),
         Ferrite.distribute_to_workers(backend, CellCache(device_sdh), n_instances),
         FerriteOperators.DeviceInternalVariableHandler(),
         FerriteOperators.setup_device_instances(device, ws.element, n_instances),

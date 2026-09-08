@@ -95,17 +95,21 @@ device   = KernelAbstractionsDevice(CUDABackend(); value_type = Float32, index_t
 spec     = StandardOperatorSpecification(; matrix_type = CuSparseMatrixCSC{Float32, Int32})
 strategy = AssemblyStrategy(FullAssembly(spec), ColoredScheduling(), device)
 
+integrator = MyIntegrator(QuadratureRuleCollection(Float32, 2), :u)  # element precision
 op = setup_operator(strategy, integrator, dh)   # op.A lives on the device
 update_operator!(op, p)
 ```
 
-`value_type` reaches the element caches through the three-argument
-[`setup_element_cache`](@ref), so a `Float32` device builds `Float32`
-`CellValues`. Build the grid with `Float32` coordinates as well: a `Float64`
-grid assembles correctly, but its coordinates are what the geometry mapping
-computes in, so the device pays `Float64` memory and arithmetic for it. The
-linear operator's vector is allocated on the device too, and the assembled
-matrix stays there — a sweep transfers nothing.
+`value_type` governs the GLOBAL system alone. The precision the element caches
+evaluate in is the INTEGRATOR's, elected through its quadrature collection
+(`QuadratureRuleCollection(Float32, 2)` — see
+[Evaluation precision](elements.md#Evaluation-precision)), so a device run
+elects it there as well. The two are free to differ: the scatter converts.
+Build the grid with `Float32` coordinates too: a `Float64` grid assembles
+correctly, but its coordinates are what the geometry mapping computes in, so
+the device pays `Float64` memory and arithmetic for it. The linear operator's
+vector is allocated on the device too, and the assembled matrix stays there — a
+sweep transfers nothing.
 
 What the device covers is CELL items under [`ColoredScheduling`](@ref), which
 is REQUIRED: Ferrite's device matrix assembler accumulates without atomics.

@@ -19,39 +19,47 @@ slot sourced by [`InternalSource`](@ref) (see [`condense_internal!`](@ref)).
 abstract type AbstractVolumetricElementCache end
 
 """
+    element_value_type(x) -> Type
+
+The scalar type an ELEMENT evaluates and stores in — the integrator's own
+election, independent of the [`value_type`](@ref) a device accumulates the
+GLOBAL system in.
+
+Defined on the quadrature collections an integrator carries
+([`QuadratureRuleCollection`](@ref), [`FacetQuadratureRuleCollection`](@ref)),
+which is where `setup_element_cache` reads the election from, on Ferrite's
+values objects, and on element caches, where it is the scalar the generic
+`allocate_element_*` buffers carry.
+
+The cache method DEFAULTS to `Float64`, so an element that never leaves double
+precision needs none. A cache built in another scalar declares it, and reads it
+off the values object it already holds:
+
+    FerriteOperators.element_value_type(c::MyCache) = element_value_type(c.cv)
+
+Overriding the `allocate_element_*` hooks instead is what expresses a
+DELIBERATE mismatch — `Float32` values accumulating into `Float64` element
+buffers, say.
+"""
+element_value_type(element_cache) = Float64
+element_value_type(v::Ferrite.AbstractValues) = eltype(Ferrite.shape_value_type(v))
+element_value_type(qr::QuadratureRule) = eltype(Ferrite.getweights(qr))
+element_value_type(qr::FacetQuadratureRule) = eltype(Ferrite.getweights(qr, 1))
+
+"""
     allocate_element_matrix(element_cache, sdh)
     allocate_element_unknown_vector(element_cache, sdh)
     allocate_element_residual_vector(element_cache, sdh)
 
-    allocate_element_matrix(element_cache, sdh, ::Type{T})
-    allocate_element_unknown_vector(element_cache, sdh, ::Type{T})
-    allocate_element_residual_vector(element_cache, sdh, ::Type{T})
-
 The element-local buffers of one item, sized in the FIELD SPACE — the
-`ndofs_per_cell(sdh)` dofs `celldofs` carries. Where the integrator declares
+`ndofs_per_cell(sdh)` dofs `celldofs` carries — and carrying the cache's
+[`element_value_type`](@ref). Where the integrator declares
 [`global_dofs`](@ref) the engine PADS what these return, so an override states
 the field-space size and never the augmented one.
-
-The engine calls the three-argument form, `T` being the device's
-[`value_type`](@ref). Its generic method re-types what the two-argument form
-returns, keeping that form the single definition point: an override of it is
-honoured whatever `T` the device asks for, and is what a cache overrides unless
-it can build the buffer in `T` directly.
 """
-allocate_element_matrix(element_cache, sdh)          = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
-@doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh)  = zeros(ndofs_per_cell(sdh))
-@doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh) = zeros(ndofs_per_cell(sdh))
-
-@doc (@doc allocate_element_matrix) allocate_element_matrix(element_cache, sdh, ::Type{T}) where {T} =
-    _retyped_element_buffer(allocate_element_matrix(element_cache, sdh), T)
-@doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh, ::Type{T}) where {T} =
-    _retyped_element_buffer(allocate_element_unknown_vector(element_cache, sdh), T)
-@doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh, ::Type{T}) where {T} =
-    _retyped_element_buffer(allocate_element_residual_vector(element_cache, sdh), T)
-
-# Identity for the default `Float64` election, so the common path allocates once.
-_retyped_element_buffer(buffer::AbstractArray{T}, ::Type{T}) where {T} = buffer
-_retyped_element_buffer(buffer::AbstractArray, ::Type{T}) where {T} = fill!(similar(buffer, T), zero(T))
+allocate_element_matrix(element_cache, sdh)          = zeros(element_value_type(element_cache), ndofs_per_cell(sdh), ndofs_per_cell(sdh))
+@doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh)  = zeros(element_value_type(element_cache), ndofs_per_cell(sdh))
+@doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh) = zeros(element_value_type(element_cache), ndofs_per_cell(sdh))
 
 # The padding itself: `similar` keeps whatever array type the element chose.
 function pad_element_matrix(Ke, n::Int)
@@ -154,18 +162,19 @@ evaluate_cell_functional(kind, ::EmptyVolumetricElementCache, args) = nothing
 
 """
     setup_element_cache(integrator, sdh)
-    setup_element_cache(integrator, sdh, ::Type{T})
 
 Setup the element cache on a given subdofhandler. There is deliberately no
 silent no-op fallback: a missing method is a loud setup error, not an
 operator that assembles nothing.
 
-The engine calls the three-argument form, `T` being the device's
-[`value_type`](@ref) — the channel a `Float32` device builds `Float32`
-`CellValues` through, via the three-argument
-[`getquadraturerule`](@ref) and `CellValues(T, qr, ip, ip_geo)`. It falls back
-to the two-argument form, so an integrator that only ever assembles in `Float64`
-needs no method of its own.
+The INTEGRATOR decides the precision its cache evaluates in; the engine passes
+no scalar type. The convention is to read it off the quadrature collection the
+integrator carries, since `CellValues(qr, ip, ip_geo)` is `Float64` whatever the
+rule says:
+
+    qr = getquadraturerule(integrator.qrc, sdh)
+    T  = element_value_type(integrator.qrc)
+    MyCache(CellValues(T, qr, ip, ip_geo))
 """
 function setup_element_cache(integrator, sdh)
     throw(ArgumentError(
@@ -173,8 +182,6 @@ function setup_element_cache(integrator, sdh)
         "Implement `setup_element_cache(integrator, sdh)` (return `EmptyVolumetricElementCache()` " *
         "explicitly if the integrator has no volumetric term)."))
 end
-@doc (@doc setup_element_cache) setup_element_cache(integrator, sdh, ::Type{T}) where {T} =
-    setup_element_cache(integrator, sdh)
 
 """
 Supertype for all caches to integrate over surfaces.

@@ -41,7 +41,9 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
 
 @testset "CUDA assembly equivalence" begin
     dh  = hex_testbed()
-    qrc = QuadratureRuleCollection(2)
+    # The element precision is the integrator's election; the device's
+    # `value_type` above is the global system's. Here they agree.
+    qrc = QuadratureRuleCollection(Tv, 2)
 
     @testset "bilinear $(nameof(typeof(integrator)))" for integrator in (
             SimpleBilinearDiffusionIntegrator(2.5, qrc, :u),

@@ -21,10 +21,12 @@ end
 
 function FerriteOperators.setup_element_cache(m::MyIntegrator, sdh::SubDofHandler)
     qr = getquadraturerule(m.qrc, sdh)
+    T  = element_value_type(m.qrc)
     ip = Ferrite.getfieldinterpolation(sdh, m.field_name)
     ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
-    return MyCache(CellValues(qr, ip, ip_geo))
+    return MyCache(CellValues(T, qr, ip, ip_geo))
 end
+FerriteOperators.element_value_type(c::MyCache) = element_value_type(c.cv)
 FerriteOperators.duplicate_for_device(device, c::MyCache) =
     MyCache(FerriteOperators.duplicate_for_device(device, c.cv))
 
@@ -187,6 +189,48 @@ chunk passes, split Jacobian-then-residual fallbacks) do not reinitialize
 again. Facet kernels reinitialize their own `FacetValues` per facet, since the
 local facet index is theirs.
 
+## Evaluation precision
+
+**The integrator decides the precision its elements evaluate in.** The engine
+passes no scalar type into `setup_element_cache`; the election travels on the
+integrator's own data, conventionally its quadrature collection:
+
+```julia
+integrator = MyIntegrator(QuadratureRuleCollection(Float32, 2), :u)
+```
+
+[`getquadraturerule`](@ref) then returns a `Float32` rule, and
+[`element_value_type`](@ref) reads the election back off the collection.
+Spelling `T` into the values object is REQUIRED: Ferrite's
+`CellValues(qr, ip, ip_geo)` is `Float64` whatever the rule carries, so an
+element that elects a precision writes `CellValues(T, qr, ip, ip_geo)`.
+
+**Element-local buffers follow the element.** The `allocate_element_*` defaults
+size themselves in [`element_value_type`](@ref) of the CACHE, which is
+`Float64` unless the cache declares otherwise — one line, read off the values
+object it already holds:
+
+```julia
+FerriteOperators.element_value_type(c::MyCache) = element_value_type(c.cv)
+```
+
+**The device and the operator specification govern the GLOBAL system**, and
+nothing else: [`value_type`](@ref)`(device)` and the specification's
+`matrix_type` are the scalar of the system matrix and vector the operator
+assembles into (see [GPU assembly](index.md#GPU-assembly)).
+
+The two sides are independent, which is what makes MIXED PRECISION expressible:
+
+- Terms of one operator may evaluate at different precisions — each integrator
+  carries its own collection — and a composite's local system takes their
+  promotion.
+- The local precision need not be the global one. A `Float32` element
+  assembling into a `Float64` system, or the reverse, converts entry-wise on
+  scatter.
+- `Float32` values with `Float64` accumulation is an element-level choice:
+  declare the values object in `Float32` and override the `allocate_element_*`
+  hooks to return `Float64` buffers.
+
 ## Facets
 
 A boundary term declares the facets it is supported on
@@ -245,7 +289,8 @@ end
 
 function FerriteOperators.setup_element_cache(m::MyIntegrator, sdh::SubDofHandler)
     ip = Ferrite.getfieldinterpolation(sdh, m.field_name)
-    cv = CellValues(getquadraturerule(m.qrc, sdh), ip, FerriteOperators.geometric_subdomain_interpolation(sdh))
+    cv = CellValues(element_value_type(m.qrc), getquadraturerule(m.qrc, sdh), ip,
+                    FerriteOperators.geometric_subdomain_interpolation(sdh))
     return MyCache(cv, AlgebraicValues(m.variable), dof_range(sdh, m.field_name), global_dof_range(m, sdh))
 end
 

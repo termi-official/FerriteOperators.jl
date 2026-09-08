@@ -21,8 +21,10 @@ abstract type AbstractGPUDevice{ValueType, IndexType} <: AbstractDevice{ValueTyp
 """
     value_type(device) -> Type
 
-The scalar element type `device` assembles with (the `ValueType` type
-parameter of its `AbstractDevice`).
+The scalar element type of the GLOBAL system `device` assembles into (the
+`ValueType` type parameter of its `AbstractDevice`): the system matrix and
+vector it allocates. The ELEMENT-local scalar is the integrator's own election
+([`element_value_type`](@ref)) and need not match — the scatter converts.
 """
 value_type(::AbstractDevice{ValueType}) where ValueType = ValueType
 index_type(::AbstractDevice{<:Any, IndexType}) where IndexType = IndexType
@@ -305,10 +307,10 @@ Adapt.jl to activate this device; the vendor package (and the device matrix type
 it names, see [`StandardOperatorSpecification`](@ref)) is the caller's, this
 package depends on none.
 
-`value_type`/`index_type` are the scalar and matrix-index types the operator
-assembles with — `Float32`/`Int32` is the usual GPU election, and the element
-caches are built for `value_type` through the three-argument
-[`setup_element_cache`](@ref).
+`value_type`/`index_type` are the scalar and matrix-index types of the GLOBAL
+system — `Float32`/`Int32` is the usual GPU election. The precision the element
+caches evaluate in is the integrator's, elected through its quadrature
+collection ([`element_value_type`](@ref)), and the two are free to differ.
 
 `items_per_worker` and `max_workgroup_size` are the LAUNCH POLICY, and
 [`n_workers`](@ref) derives the per-worker cache size from them, so a sweep

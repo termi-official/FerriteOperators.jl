@@ -46,7 +46,7 @@ end
 
 function main()
     dh  = testbed(N)
-    qrc = QuadratureRuleCollection(2)
+    qrc = QuadratureRuleCollection(Tv, 2)
     integrator = SimpleBilinearDiffusionIntegrator(2.5, qrc, :u)
     ncells = getncells(Ferrite.get_grid(dh))
     @printf("Bilinear diffusion, %d linear hexahedra, %d dofs, %s\n", ncells, ndofs(dh), Tv)

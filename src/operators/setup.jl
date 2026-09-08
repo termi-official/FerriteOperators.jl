@@ -51,17 +51,17 @@ allocate_operator_matrix(device::AbstractGPUDevice, ::Type{MT}, sp) where {MT} =
 init_operator_sparsity_pattern(::StandardOperatorSpecification, dh) = Ferrite.init_sparsity_pattern(dh)
 init_operator_sparsity_pattern(spec::BlockedOperatorSpecification, dh) = BlockSparsityPattern(spec.block_sizes)
 
-function setup_elements(integrator, dh, ad_backend, n_global_dofs, ::Type{T} = Float64) where {T}
-    needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh, T) for sdh in dh.subdofhandlers]
-    return [setup_decorated_element_cache(integrator, sdh, ad_backend, n, T)
+function setup_elements(integrator, dh, ad_backend, n_global_dofs)
+    needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
+    return [setup_decorated_element_cache(integrator, sdh, ad_backend, n)
             for (sdh, n) in zip(dh.subdofhandlers, n_global_dofs)]
 end
 
 # One subdomain's element cache, built and decorated. Both counts the decorator
 # is sized from are the INTEGRATOR's declarations, resolved here, which is what
 # keeps `decorate_element_cache` itself integrator-free.
-function setup_decorated_element_cache(integrator, sdh, ad_backend, n_global_dofs::Int, ::Type{T} = Float64) where {T}
-    cache = setup_element_cache(integrator, sdh, T)
+function setup_decorated_element_cache(integrator, sdh, ad_backend, n_global_dofs::Int)
+    cache = setup_element_cache(integrator, sdh)
     return decorate_element_cache(cache, sdh, ad_backend, n_global_dofs;
                                   n_internal_dofs = resolve_internal_dofs_per_element(integrator, cache, sdh))
 end
@@ -173,8 +173,7 @@ function setup_subdomain_caches(strategy, element_caches, ivh, dh;
         partition = adapt_partition(device, compute_partition(strategy, sdh))
         n = n_workers(device, partition)
         ws = create_assembly_workspace(element_cache, sdh, ivh, slots;
-                                       needs_sensitivity, global_dofs = gdofs,
-                                       value_type = value_type(device))
+                                       needs_sensitivity, global_dofs = gdofs)
         dc = setup_device_instances(device, ws, n, device_subdomain_handler(device_dh, index))
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
     end for (index, (sdh, element_cache, gdofs)) in
@@ -292,6 +291,12 @@ function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblySt
 end
 
 _assert_device_matrix_type(device, ::Nothing) = nothing
+
+# The GLOBAL side alone: the device's `value_type` and the named matrix type
+# describe the same system matrix, so they have to agree. The ELEMENT-local
+# scalar is the integrator's own election ([`element_value_type`](@ref)) and is
+# deliberately not part of this check — a `Float64` element scattering into a
+# `Float32` system converts entry-wise, which is a supported configuration.
 function _assert_device_matrix_type(device, ::Type{MT}) where {MT}
     eltype(MT) === value_type(device) || throw(ArgumentError(
         "$(nameof(typeof(device))) assembles in $(value_type(device)) but the operator " *
@@ -418,8 +423,7 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     declared_kinds    = map(_kind_type, requests)
     global_dof_sets   = resolve_global_dof_sets(strategy, integrator, dh)
     facet_item_sets   = resolve_facet_item_global_dof_sets(strategy, integrator, dh)
-    element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets),
-                                       value_type(strategy.device))
+    element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
     foreach(cache -> validate_element_cache(cache, declared_kinds), element_caches)
     algebraic_domain  = resolve_algebraic_domain(integrator, dh, declared_kinds)
     ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)

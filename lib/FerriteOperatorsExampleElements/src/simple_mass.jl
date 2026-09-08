@@ -21,13 +21,16 @@ end
 
 Ferrite.getnquadpoints(e::SimpleLinearElementCache) = getnquadpoints(e.cellvalues)
 reinit_values!(e::SimpleLinearElementCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
-function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T}
-    qr         = getquadraturerule(element_model.qrc, sdh, T)
+function setup_element_cache(element_model::SimpleLinearIntegrator, sdh::SubDofHandler)
+    qr         = getquadraturerule(element_model.qrc, sdh)
+    T          = element_value_type(element_model.qrc)
     field_name = element_model.field_name
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleLinearElementCache(element_model.f, CellValues(T, qr, ip, ip_geo))
 end
+
+element_value_type(cache::SimpleLinearElementCache) = element_value_type(cache.cellvalues)
 
 setup_device_instances(device::AbstractGPUDevice, cache::SimpleLinearElementCache, n) =
     SimpleLinearElementCache(cache.f, setup_device_instances(device, cache.cellvalues, n))
@@ -82,13 +85,16 @@ setup_device_instances(device::AbstractGPUDevice, cache::SimpleBilinearMassEleme
 device_worker_view(cache::SimpleBilinearMassElementCache, worker) =
     SimpleBilinearMassElementCache(cache.ρ, device_worker_view(cache.cellvalues, worker))
 
-function setup_element_cache(element_model::SimpleBilinearMassIntegrator, sdh::SubDofHandler, ::Type{T} = Float64) where {T}
-    qr         = getquadraturerule(element_model.qrc, sdh, T)
+function setup_element_cache(element_model::SimpleBilinearMassIntegrator, sdh::SubDofHandler)
+    qr         = getquadraturerule(element_model.qrc, sdh)
+    T          = element_value_type(element_model.qrc)
     field_name = element_model.field_name
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
     return SimpleBilinearMassElementCache(element_model.ρ, CellValues(T, qr, ip, ip_geo))
 end
+
+element_value_type(cache::SimpleBilinearMassElementCache) = element_value_type(cache.cellvalues)
 
 # The bilinear form induces a linear operator, so its residual is the element
 # matrix acting on the element vector.
