@@ -29,6 +29,25 @@ function hex_testbed(dims = (5, 5, 5))
     return dh
 end
 
+# Deterministic, dependency-free probes, matching `test/test_matrix_free.jl`.
+probe(n, k) = Tv[sin(Tv(0.7) * k * i + Tv(0.3) * k) for i in 1:n]
+wobble(node, d) = Tv(sin(2.7 * node + 1.3 * d))
+
+# Perturbed interior nodes: the matrix-free element evaluates the Jacobian per
+# quadrature point and must not be validated on an affine mesh.
+function distorted_hex_testbed(order, dims = (4, 4, 4); distortion = 0.15f0)
+    grid = generate_grid(Hexahedron, dims,
+                         Vec{3}((-1.0f0, -1.0f0, -1.0f0)), Vec{3}((1.0f0, 1.0f0, 1.0f0)))
+    h = 2.0f0 / maximum(dims)
+    nodes = [Ferrite.Node(Vec{3, Tv}(ntuple(d -> node.x[d] +
+                (all(abs.(node.x) .< 1 - 1.0f-4) ? distortion * h * wobble(i, d) : 0.0f0), 3)))
+             for (i, node) in enumerate(Ferrite.getnodes(grid))]
+    dh = DofHandler(Grid(Ferrite.getcells(grid), nodes))
+    add!(dh, :u, Lagrange{RefHexahedron, order}())
+    close!(dh)
+    return dh
+end
+
 cuda_device() = KernelAbstractionsDevice(CUDABackend(); value_type = Tv, index_type = Ti,
                                          items_per_worker = 2, max_workgroup_size = 256)
 
@@ -96,5 +115,52 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
         err = @test_throws ArgumentError setup_operator(
             strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
         @test occursin("start_assemble", err.value.msg)
+    end
+end
+
+@testset "CUDA matrix-free action" begin
+    # ONE element definition, two execution mappings, selected on the strategy
+    # side. The scatter is atomic, so the device result is compared with a
+    # tolerance rather than bitwise.
+    @testset "p = $p, $(nameof(typeof(mapping)))" for p in 1:3,
+            mapping in (WorkerPerElement(), CooperativeElement())
+
+        dh  = distorted_hex_testbed(p)
+        qrc = QuadratureRuleCollection(Tv, p + 1)
+
+        assembled = setup_operator(sequential_strategy(),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(ndofs(dh), 7)
+        reference = assembled.A * u
+
+        strategy = AssemblyStrategy(MatrixFreeAction(; element_mapping = mapping),
+                                    SequentialScheduling(), cuda_device())
+        op = setup_operator(strategy, SumFactorizedDiffusionIntegrator(Tv(2.5), qrc, :u), dh)
+        @test size(op) == (ndofs(dh), ndofs(dh))
+        @test eltype(op) === Tv
+
+        ud = CuVector(u)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, ud)
+        @test Array(yd) ≈ reference rtol = 1.0f-3
+
+        # The action is linear, so the five-argument form is the same sweep
+        # with the accumulator scaled.
+        base = CuVector(probe(ndofs(dh), 9))
+        y2 = copy(base)
+        mul!(y2, op, ud, -1.0f0, 1.0f0)
+        @test Array(y2) ≈ Array(base) .- reference rtol = 1.0f-3
+    end
+
+    @testset "per-mul! host allocations stay O(1)" begin
+        dh  = distorted_hex_testbed(2, (6, 6, 6))
+        op  = setup_operator(AssemblyStrategy(MatrixFreeAction(), SequentialScheduling(), cuda_device()),
+                             SumFactorizedDiffusionIntegrator(Tv(2.5), QuadratureRuleCollection(Tv, 3), :u), dh)
+        u = CUDA.rand(Tv, ndofs(dh))
+        y = CUDA.zeros(Tv, ndofs(dh))
+        mul!(y, op, u)
+        mul!(y, op, u)
+        @test (@allocated mul!(y, op, u)) < 200_000
     end
 end

@@ -74,9 +74,9 @@ abstract type AbstractAssemblyStrategy end
 """
 Which representation of the operator is produced — the MFEM assembly level.
 Orthogonal to how the work is scheduled and to the device it runs on.
-[`FullAssembly`](@ref) is the sole member; the axis and the `form` keyword of
-[`AssemblyStrategy`](@ref) are the extension point a further assembly level
-(element assembly, matrix-free) is added at.
+[`FullAssembly`](@ref) and [`MatrixFreeAction`](@ref) are the members; the axis
+and the `form` keyword of [`AssemblyStrategy`](@ref) are the extension point a
+further assembly level is added at.
 """
 abstract type AbstractAssemblyForm end
 
@@ -85,6 +85,42 @@ struct FullAssembly{Spec} <: AbstractAssemblyForm
     operator_specification::Spec
 end
 FullAssembly() = FullAssembly(StandardOperatorSpecification())
+
+"""
+    MatrixFreeAction(; element_mapping = WorkerPerElement())
+
+PARTIAL/NONE level: the operator stores no global matrix and no element
+matrices, and evaluates its action `y = A·u` from the element kernels on every
+`mul!` ([`MatrixFreeFerriteOperator`](@ref)). `setup_operator` returns that
+operator for an [`AbstractBilinearIntegrator`](@ref) whose caches implement
+[`apply_element_action!`](@ref).
+
+`element_mapping` selects how one element's action maps onto the device's
+workers ([`AbstractElementMapping`](@ref)) — the same element definition under
+either. It is resolved onto the device at setup
+([`with_element_mapping`](@ref)), so a mapping the device has no kernel for, or
+a cache that does not serve it, is a setup error.
+
+!!! warning "Experimental surface"
+    The matrix-free form, its operator type and the element entry points it
+    calls may change in a minor release.
+"""
+struct MatrixFreeAction{M <: AbstractElementMapping} <: AbstractAssemblyForm
+    element_mapping::M
+end
+MatrixFreeAction(; element_mapping::AbstractElementMapping = WorkerPerElement()) =
+    MatrixFreeAction(element_mapping)
+
+"""
+    operator_specification(form) -> spec or `nothing`
+
+The global-storage declaration a form carries, `nothing` for a form that
+allocates no global array ([`MatrixFreeAction`](@ref)). The setup-time device
+walls read the specification through this, so a storage-free form skips the
+checks that describe storage instead of naming a field it does not have.
+"""
+operator_specification(form::FullAssembly) = form.operator_specification
+operator_specification(::MatrixFreeAction) = nothing
 
 ####################################
 ## Scheduling policy
@@ -427,7 +463,9 @@ per share: a worker walks the items it was given with the one workspace it owns.
 A [`KernelAbstractionsDevice`](@ref) sizes them from its launch policy
 ([`launch_geometry`](@ref)) over the largest barrier, since every barrier
 launches at most that geometry and the kernel indexes the per-worker caches
-unchecked.
+unchecked. Under [`CooperativeElement`](@ref) the worker IS the workgroup and
+the group's barriers forbid a grid-stride loop over items, so every item of a
+barrier gets its own group — and the count is the largest barrier itself.
 """
 n_workers(::SequentialCPUDevice, partition) = 1
 function n_workers(device::PolyesterDevice, partition)
@@ -436,6 +474,8 @@ function n_workers(device::PolyesterDevice, partition)
 end
 n_workers(device::KernelAbstractionsDevice, partition) =
     max(1, prod(launch_geometry(device, maximum(length, partition; init = 0))))
+n_workers(::KernelAbstractionsDevice{<:Any, <:Any, <:Any, CooperativeElement}, partition) =
+    max(1, maximum(length, partition; init = 0))
 
 
 ####################################

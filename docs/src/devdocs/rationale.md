@@ -511,9 +511,17 @@ materialized* separate from *what the physics is*.
 | `D` | pointwise quadrature-point operation | the quadrature-point kernel tier |
 
 MFEM's **assembly levels** — FULL, ELEMENT, PARTIAL, NONE — name the strategy
-axis, orthogonal to the device axis. Full sparse assembly is the shipped level;
-the [`QVector`](@ref) is exactly the qdata store a partial-assembly level needs,
-which is why it is described as matrix-free precomputation.
+axis, orthogonal to the device axis. [`FullAssembly`](@ref) and
+[`MatrixFreeAction`](@ref) are the shipped levels; the [`QVector`](@ref) is
+exactly the qdata store a partial-assembly level would precompute its geometric
+factors into, which the shipped matrix-free element deliberately does not use —
+it re-evaluates the Jacobian at the quadrature point that consumes it, trading
+flops for storage and for barriers a cooperative kernel would otherwise need.
+
+The matrix-free level is also where the SECOND mapping question appears, and
+the answer is a strategy-side one: [`AbstractElementMapping`](@ref) says whether
+one worker or one workgroup evaluates an element, the element implements both
+decompositions of the SAME math, and the term names neither.
 
 **The deliberate deviation from libCEED:** an element may own the whole `Bᵀ D B`
 block, because condensed materials with element-level local solves do not

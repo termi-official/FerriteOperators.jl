@@ -259,3 +259,15 @@ operator specification names.
 A device that cannot serve an item family says so at setup through
 `assert_device_supported` rather than failing inside the first sweep; the GPU
 method there is the list of what the device kernel covers today.
+
+**New assembly levels** — a form member decides what `setup_operator` returns
+and, through [`operator_specification`](@ref), whether the global-storage walls
+apply to it at all. [`MatrixFreeAction`](@ref) is the second member: it
+allocates nothing, and its operator's `mul!` rides the ordinary sweep
+(`run_sweep!` → `execute_on_subdomains!` → `execute_on_device!`) under its own
+kind, whose driver body ([`matrix_free_cell_sweep!`](@ref)) differs from
+[`primal_cell_sweep!`](@ref) only in gathering fixed-width. A form that carries
+an execution choice a device has to realize — the element mapping — resolves it
+onto the device at setup through [`with_element_mapping`](@ref), because
+[`n_workers`](@ref), [`setup_device_instances`](@ref) and
+[`execute_on_device!`](@ref) receive the device and never the form.

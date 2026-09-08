@@ -9,7 +9,7 @@ import SparseArrays: AbstractSparseMatrixCSC, getcolptr
 
 using ConcreteStructs
 
-import LinearAlgebra: mul!, ldiv!, qr, lu!, cholesky!, Symmetric, dot, norm
+import LinearAlgebra: mul!, rmul!, ldiv!, qr, lu!, cholesky!, Symmetric, dot, norm
 
 import ForwardDiff
 
@@ -112,6 +112,7 @@ include("operators/transfer.jl")        # Prolongation/restriction operators
 include("elements/prolongators.jl")     # Mass-based prolongator integrators
 include("operators/ad_decoration.jl")   # Construction-time ADElementCache/FusedFromSplit wrapping policy
 include("operators/setup.jl")           # Operator setup, so callers need not poke into internals
+include("operators/matrix_free.jl")     # MatrixFreeAction: the operator's action without a matrix
 include("elements/domain_elements.jl")  # Subdomain routing; specializes setup.jl's per-DofHandler cache seam
 include("operators/components.jl")      # Component bags over a shared sparsity pattern + combine!
 include("operators/stage_block.jl")     # Fully implicit Runge-Kutta stage blocks
@@ -194,6 +195,10 @@ export value_type, duplicate_for_device
 export setup_device_instances, device_worker_view
 export default_strategy
 export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAssembly
+export MatrixFreeAction, MatrixFreeFerriteOperator, MatrixFreeActionKind, apply_element_action!
+export AbstractElementMapping, WorkerPerElement, CooperativeElement, with_element_mapping
+export cooperative_lattice_dim, cooperative_group_size, cooperative_scratch_shape
+export cooperative_load!, cooperative_stage!, cooperative_store!
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling
 export StandardOperatorSpecification, BlockedOperatorSpecification
 

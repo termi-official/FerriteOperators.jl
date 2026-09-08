@@ -135,6 +135,72 @@ function reinit_values! end
 reinit_values!(cache, cell, kind) = reinit_values!(cache, cell)
 
 """
+    apply_element_action!(yₑ, cache, uₑ, args::CellArgs)
+
+The MATRIX-FREE element kernel: accumulate `yₑ += Kₑ·uₑ` for the current cell
+WITHOUT forming `Kₑ`. `yₑ` and `uₑ` are the cell's local vectors in
+`celldofs` order and `args` the ordinary [`CellArgs`](@ref); `yₑ` arrives
+zeroed.
+
+Implementing it is what makes a cache usable under [`MatrixFreeAction`](@ref),
+and `setup_operator` checks for the method rather than letting a missing one
+surface as a per-cell `MethodError`. It is a separate entry point from the
+mandatory `assemble_cell!(::ResidualRequest, …)` because the two make different
+promises: the residual kernel evaluates the form, this one evaluates the
+operator's action at the cost the matrix-free level exists for. An element
+whose action is `Kₑ·uₑ` at `O(ndofs²)` gains nothing from the form and should
+not declare it.
+
+Both arguments may be views into a shared device batch, so an implementation
+indexes them and neither resizes nor reallocates.
+"""
+function apply_element_action! end
+
+"""
+    cooperative_lattice_dim(cache) -> Int
+    cooperative_group_size(cache) -> Int
+    cooperative_scratch_shape(cache) -> (Val(length), Val(count))
+    cooperative_load!(scratch, cache, uₑ, lane::Int, nlanes::Int)
+    cooperative_stage!(scratch, cache, args, stage::Int, lane::Int, nlanes::Int)
+    cooperative_store!(yₑ, scratch, cache, lane::Int, nlanes::Int)
+
+The [`CooperativeElement`](@ref) entries: one WORKGROUP evaluates one element's
+action, its `nlanes` workers splitting the element's lattice between them and
+staging everything in group-local memory.
+
+The device kernel owns the barriers, because a KernelAbstractions
+`@synchronize` is a lexical split of the kernel body and cannot live in a
+callee. So the element declares a FIXED PIPELINE and the kernel synchronizes
+between its steps:
+
+    cooperative_load!            # gather uₑ into the scratch lattice
+    cooperative_stage!(…, 1)     # …
+    ⋮                            # `2 * cooperative_lattice_dim(cache) - 1` stages
+    cooperative_store!           # write the local result into yₑ
+
+`cooperative_scratch_shape` sizes the group-local scratch, a `length × count`
+array the kernel allocates and hands to every step — the cooperative
+counterpart of the per-worker buffers [`WorkerPerElement`](@ref) batches, and
+the reason the two mappings need different [`setup_device_instances`](@ref)
+shapes. `cooperative_group_size` is the workgroup the kernel launches with, and
+`cooperative_lattice_dim` selects the pipeline length. Every step is called by
+all `nlanes` workers with `lane` in `1:nlanes` and writes only what that lane
+owns.
+
+The pipeline is the PROTOTYPE's shape: it is the one a tensor-product gradient
+operator needs (`dim` forward contractions with the pointwise map fused into
+the last, then `dim` backward contractions with the store fused into the last).
+Serving an element whose pipeline has a different length or a data-dependent
+one is an open design question, not a supported case.
+"""
+function cooperative_lattice_dim end
+@doc (@doc cooperative_lattice_dim) function cooperative_group_size end
+@doc (@doc cooperative_lattice_dim) function cooperative_scratch_shape end
+@doc (@doc cooperative_lattice_dim) function cooperative_load! end
+@doc (@doc cooperative_lattice_dim) function cooperative_stage! end
+@doc (@doc cooperative_lattice_dim) function cooperative_store! end
+
+"""
     evaluate_cell_functional(kind::FunctionalKind, cache, args) -> value
 
 Element kernel for functional (reduction) queries: returns this cell's

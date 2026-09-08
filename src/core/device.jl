@@ -298,6 +298,71 @@ PolyesterDevice(; min_items_per_worker::Int = 32) = PolyesterDevice{Float64, Int
 
 
 """
+    AbstractElementMapping
+
+How ONE item's work maps onto a device's workers. The election lives on the
+operator's FORM ([`MatrixFreeAction`](@ref)) and is realized on the device
+through [`with_element_mapping`](@ref), because the seams that change shape with
+it — [`n_workers`](@ref), [`setup_device_instances`](@ref),
+[`execute_on_device!`](@ref) — all read the device.
+
+[`WorkerPerElement`](@ref) is what every device does today; assembling forms
+know no other.
+"""
+abstract type AbstractElementMapping end
+
+"""
+    WorkerPerElement()
+
+One worker owns one item from gather to scatter — the classical mapping, and
+the only one an assembling form takes.
+"""
+struct WorkerPerElement <: AbstractElementMapping end
+
+"""
+    CooperativeElement()
+
+One WORKGROUP owns one item: the group's workers split the element's lattice
+between them, stage the element state and the intermediates in group-local
+memory and synchronize between contraction stages. Needs group-local memory and
+barriers, so it is a [`KernelAbstractionsDevice`](@ref) mapping only, and an
+element serves it only where it implements the cooperative kernel entries
+([`cooperative_stage!`](@ref)).
+"""
+struct CooperativeElement <: AbstractElementMapping end
+
+"""
+    with_element_mapping(device, mapping) -> device
+
+The device that executes `mapping` ([`AbstractElementMapping`](@ref)), which a
+matrix-free operator resolves once at [`setup_operator`](@ref): the mapping is
+elected on the FORM, and the two setup seams that must change shape with it —
+[`n_workers`](@ref) and [`setup_device_instances`](@ref) — read the device and
+nothing else.
+
+[`WorkerPerElement`](@ref) is every device's own execution and returns it
+unchanged. A mapping a device has no kernel for is rejected here, at setup,
+rather than as a missing method inside the first sweep.
+"""
+with_element_mapping(device::AbstractDevice, ::WorkerPerElement) = device
+
+"""
+    element_mapping(device) -> AbstractElementMapping
+
+The mapping `device` executes, [`WorkerPerElement`](@ref) unless
+[`with_element_mapping`](@ref) put another one there. This is how a CACHE
+answers the mapping at setup — its per-worker scratch is not needed under
+[`CooperativeElement`](@ref), whose kernel stages the same buffers in
+group-local memory instead.
+"""
+element_mapping(::AbstractDevice) = WorkerPerElement()
+with_element_mapping(device::AbstractDevice, mapping::AbstractElementMapping) = throw(ArgumentError(
+    "$(nameof(typeof(device))) cannot execute $(nameof(typeof(mapping))): mapping one element " *
+    "onto a cooperating group of workers needs group-local memory and barriers, which only a " *
+    "KernelAbstractions backend exposes. Use `element_mapping = WorkerPerElement()`, or a " *
+    "`KernelAbstractionsDevice`."))
+
+"""
     KernelAbstractionsDevice(backend; value_type = Float64, index_type = Int,
                              items_per_worker = 2, max_workgroup_size = 64)
 
@@ -322,24 +387,40 @@ favours. `items_per_worker` trades the per-worker scratch (element buffers,
 geometry cache and values objects, all sized by the worker count) against that
 parallelism.
 
-REQUIRES [`ColoredScheduling`](@ref) and covers CELL items only. What is
-rejected at setup, each with a message naming the limitation:
-[`SequentialScheduling`](@ref), facet items, algebraic items, patch and transfer
-operators, condensed internal state, nonlinear (AD-decorated) integrators, a
+`element_mapping` is resolved from the operator's form
+([`with_element_mapping`](@ref)) and is not a constructor argument: a
+[`FullAssembly`](@ref) operator is always [`WorkerPerElement`](@ref), and a
+[`MatrixFreeAction`](@ref) one elects between that and
+[`CooperativeElement`](@ref).
+
+An ASSEMBLING sweep requires [`ColoredScheduling`](@ref) and covers CELL items
+only. What is rejected at setup, each with a message naming the limitation:
+[`SequentialScheduling`](@ref) under [`FullAssembly`](@ref), facet items,
+algebraic items, patch and transfer operators, condensed internal state,
+nonlinear (AD-decorated) integrators, a
 [`BlockedOperatorSpecification`](@ref), constraints declared on the operator
 specification, [`global_dofs`](@ref) declarations, and a matrix type Ferrite has
 no assembler for. Value-returning sweeps (functionals, quadrature evaluation)
 are rejected when they run.
 """
-struct KernelAbstractionsDevice{Backend, ValueType, IndexType} <: AbstractGPUDevice{ValueType, IndexType}
+struct KernelAbstractionsDevice{Backend, ValueType, IndexType, Mapping} <: AbstractGPUDevice{ValueType, IndexType}
     backend::Backend
     items_per_worker::Int
     max_workgroup_size::Int
+    element_mapping::Mapping
 end
 KernelAbstractionsDevice(backend; value_type::Type = Float64, index_type::Type = Int,
         items_per_worker::Int = 2, max_workgroup_size::Int = 64) =
-    KernelAbstractionsDevice{typeof(backend), value_type, index_type}(
-        backend, items_per_worker, max_workgroup_size)
+    KernelAbstractionsDevice{typeof(backend), value_type, index_type, WorkerPerElement}(
+        backend, items_per_worker, max_workgroup_size, WorkerPerElement())
+
+element_mapping(device::KernelAbstractionsDevice) = device.element_mapping
+
+for Mapping in (:WorkerPerElement, :CooperativeElement)
+    @eval with_element_mapping(device::KernelAbstractionsDevice{B, V, I}, mapping::$Mapping) where {B, V, I} =
+        KernelAbstractionsDevice{B, V, I, $Mapping}(
+            device.backend, device.items_per_worker, device.max_workgroup_size, mapping)
+end
 
 """
     launch_geometry(device::KernelAbstractionsDevice, n_items) -> (workgroup_size, n_workgroups)

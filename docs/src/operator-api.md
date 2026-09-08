@@ -10,6 +10,7 @@ Pages = [
     "operators/general.jl",
     "operators/ad_decoration.jl",
     "operators/setup.jl",
+    "operators/matrix_free.jl",
     "operators/nonlinear.jl",
     "operators/bilinear.jl",
     "operators/linear.jl",

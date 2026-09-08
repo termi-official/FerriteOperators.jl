@@ -135,10 +135,50 @@ The cache's field type parameters have to admit the batched layout — a
 `cellvalues::CV` field holds a struct-of-arrays container over `n` workers on
 the device, not a `CellValues`.
 
+## Assembly levels
+
 [`FullAssembly`](@ref) assembles the global matrix and vector and serves every
-operator family. It is the form axis' sole member; the axis and the `form`
-keyword are the extension point a further assembly level (element assembly,
-matrix-free) is added at.
+operator family — the FULL level, and the default.
+
+[`MatrixFreeAction`](@ref) is the PARTIAL/NONE level: the operator stores no
+global matrix and no element matrices, and every `mul!` re-evaluates `y = A·u`
+from the element kernels. `setup_operator` returns a
+[`MatrixFreeFerriteOperator`](@ref) for a bilinear integrator whose caches
+implement [`apply_element_action!`](@ref), and a cache that does not is a setup
+error naming the method.
+
+```julia
+strategy = AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction())
+op = setup_operator(strategy, SumFactorizedDiffusionIntegrator(2.5, qrc, :u), dh)
+mul!(y, op, u)          # no matrix anywhere
+```
+
+The form carries a second choice, how ONE element's work maps onto the device's
+workers ([`AbstractElementMapping`](@ref)):
+
+- [`WorkerPerElement`](@ref) — one worker owns one element from gather to
+  scatter. Runs on every device.
+- [`CooperativeElement`](@ref) — one WORKGROUP owns one element, its workers
+  splitting the element's lattice between them with the state and every
+  intermediate in group-local memory. A [`KernelAbstractionsDevice`](@ref)
+  mapping only, and served by caches that implement the cooperative pipeline
+  ([`cooperative_stage!`](@ref)).
+
+```julia
+form = MatrixFreeAction(; element_mapping = CooperativeElement())
+op   = setup_operator(AssemblyStrategy(form, SequentialScheduling(), device), integrator, dh)
+```
+
+The election is realized on the device at setup
+([`with_element_mapping`](@ref)), because the seams that change shape with it —
+[`n_workers`](@ref), [`setup_device_instances`](@ref),
+[`execute_on_device!`](@ref) — all read the device. The TERM never names the
+mapping: one element definition, two execution mappings, chosen on the strategy
+side.
+
+!!! warning "Experimental surface"
+    The matrix-free form, [`MatrixFreeFerriteOperator`](@ref) and the element
+    entry points they call may change in a minor release.
 
 All operator entry points funnel into one task body executed by a shared
 device loop:

@@ -23,6 +23,22 @@ struct BilinearKind end             # u-independent matrix
 struct LinearKind end               # u-independent vector
 
 """
+    MatrixFreeActionKind()
+
+The ACTION `y = A·u` of the operator a bilinear form induces, evaluated element
+by element and scattered into the operator's target vector — the sweep a
+[`MatrixFreeAction`](@ref) operator's `mul!` runs. The kernel it reaches is
+[`apply_element_action!`](@ref), never a request: an element serving this kind
+computes `yₑ += Kₑ·uₑ` without forming `Kₑ`, so there is no element matrix for
+a request to point at.
+
+Its state gather writes exactly `ndofs_per_cell` entries, unlike the
+[`ResidualKind`](@ref) gather that resizes — which is what lets the sweep run
+on a device whose per-worker slot buffer is a view into a shared batch.
+"""
+struct MatrixFreeActionKind end
+
+"""
     ParameterJacobianKind()
 
 Assembly of `∂F/∂θ` into a dense `residual_size × nθ` target, θ being the flat
@@ -226,6 +242,9 @@ assembles_matrix(kind) = kind isa MatrixAssemblyKind
 @doc (@doc assembles_matrix) assembles_vector(kind) = kind isa VectorAssemblyKind
 @doc (@doc assembles_matrix) depends_on_unknowns(kind) = kind isa UnknownDependentKind
 
+assembles_vector(::MatrixFreeActionKind) = true
+depends_on_unknowns(::MatrixFreeActionKind) = true
+
 """
     NoFamily
     FunctionalFamily
@@ -341,6 +360,9 @@ requires_admissibility_check(::JacobianResidualKind{FrozenQ}) = false
 # Functional kernels return their contribution through `evaluate_cell_functional`
 # rather than filling a request, so there is no cell request to validate.
 has_cell_request(::Type{<:FunctionalKind}) = false
+# The matrix-free action reaches `apply_element_action!` with the local vectors
+# themselves; `setup_operator` validates that entry point instead.
+has_cell_request(::Type{MatrixFreeActionKind}) = false
 
 materialize_request(::ResidualKind, ws)                    = ResidualRequest(ws.re)
 materialize_request(::LinearKind, ws)                      = ResidualRequest(ws.re)
@@ -550,6 +572,41 @@ function primal_cell_sweep!(kind, task, ws)
         cell_kernel!(kind, ws.element, ws, (;), pₑ, task.ctx)
     end
     scatter_local!(kind, task.inner_assembler, ws)
+end
+
+execute_kind!(kind::MatrixFreeActionKind, task, ws) = matrix_free_cell_sweep!(kind, task, ws)
+
+"""
+    matrix_free_cell_sweep!(kind, task, ws)
+
+The matrix-free ACTION driver body: gather the trial state into the workspace's
+`:u` slot buffer, evaluate `yₑ = Kₑ·uₑ` through [`apply_element_action!`](@ref)
+into `ws.re`, and scatter it. No element matrix is formed and none is stored.
+
+It is [`primal_cell_sweep!`](@ref) with one difference, and that difference is
+what makes it run on a device: the gather is FIXED-WIDTH ([`item_dofs`](@ref)
+entries, the length the buffer already has) instead of `load_slots!`'s
+resize-then-broadcast, which a per-worker view into a shared device batch
+cannot serve. It carries no `@timeit_debug` frame for the same reason
+[`primal_cell_sweep!`](@ref) carries none.
+"""
+function matrix_free_cell_sweep!(kind, task, ws)
+    fill!(ws.re, zero(eltype(ws.re)))
+    uₑ = _gather_item_dofs!(ws.slot_buffers.u, task.states.u, item_dofs(ws))
+    reinit_values!(ws.element, ws.cell, kind)
+    pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
+    apply_element_action!(ws.re, ws.element, uₑ, _cell_args(ws, (u = uₑ,), pₑ, task.ctx))
+    scatter_local!(kind, task.inner_assembler, ws)
+    return nothing
+end
+
+# Entry-by-entry so the destination is neither resized nor broadcast into: on a
+# device it is one worker's row of a shared batch.
+@inline function _gather_item_dofs!(buf, src, dofs)
+    for i in eachindex(dofs)
+        @inbounds buf[i] = src[dofs[i]]
+    end
+    return buf
 end
 
 # The single CellArgs/FacetArgs construction seams.

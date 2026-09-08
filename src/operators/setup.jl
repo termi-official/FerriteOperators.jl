@@ -259,21 +259,20 @@ assert_device_supported(::AbstractDevice, strategy, integrator, dh) = nothing
 
 function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblyStrategy, integrator, dh)
     dev = nameof(typeof(device))
-    strategy.scheduling isa ColoredScheduling || throw(ArgumentError(
-        "$dev requires `ColoredScheduling` (got $(nameof(typeof(strategy.scheduling)))). " *
-        "Ferrite's device matrix assembler accumulates with a plain `+=` — its " *
-        "`AbstractThreadSafeAssembler` supertype means \"safe to alias across workers given a " *
-        "valid coloring\", not race-free — so an uncolored device sweep is a silent data race. " *
-        "Pass `scheduling = ColoredScheduling()`."))
-    spec = strategy.form.operator_specification
-    spec isa BlockedOperatorSpecification && throw(ArgumentError(
-        "$dev does not support `BlockedOperatorSpecification`: Ferrite ships no device " *
-        "`BlockAssembler`. Use a `StandardOperatorSpecification`, naming the device matrix type."))
-    spec.constraint_handler === nothing || throw(ArgumentError(
-        "$dev does not support a `constraint_handler` on the operator specification. Allocate " *
-        "the operator without one and apply the constraints yourself — Ferrite's `apply!` takes " *
-        "a device constraint handler (`adapt(backend, ch)`)."))
-    _assert_device_matrix_type(device, spec.matrix_type)
+    # The coloring requirement is the MATRIX assembler's: Ferrite's device one
+    # accumulates with a plain `+=` — its `AbstractThreadSafeAssembler` supertype
+    # means "safe to alias across workers given a valid coloring", not race-free
+    # — so an uncolored device sweep into a matrix is a silent data race. A form
+    # that assembles no matrix scatters through this package's own
+    # `VectorAssembler`, which IS atomic-capable on device, and takes either
+    # scheduling.
+    (operator_specification(strategy.form) === nothing || strategy.scheduling isa ColoredScheduling) || throw(ArgumentError(
+        "$dev requires `ColoredScheduling` for an assembling form (got " *
+        "$(nameof(typeof(strategy.scheduling)))). Ferrite's device matrix assembler accumulates " *
+        "with a plain `+=` — its `AbstractThreadSafeAssembler` supertype means \"safe to alias " *
+        "across workers given a valid coloring\", not race-free — so an uncolored device sweep " *
+        "is a silent data race. Pass `scheduling = ColoredScheduling()`."))
+    _assert_device_specification(device, operator_specification(strategy.form))
 
     needs_ad_decoration(integrator) && throw(ArgumentError(
         "$dev assembles bilinear and linear forms only (got $(nameof(typeof(integrator)))). A " *
@@ -287,6 +286,22 @@ function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblySt
             "$dev does not support the facet item family (`facet_items`): Ferrite 1.7 has no " *
             "device `FacetValues`."))
     end
+    return nothing
+end
+
+# A form that allocates no global array declares no storage to check.
+_assert_device_specification(device, ::Nothing) = nothing
+
+function _assert_device_specification(device, spec)
+    dev = nameof(typeof(device))
+    spec isa BlockedOperatorSpecification && throw(ArgumentError(
+        "$dev does not support `BlockedOperatorSpecification`: Ferrite ships no device " *
+        "`BlockAssembler`. Use a `StandardOperatorSpecification`, naming the device matrix type."))
+    spec.constraint_handler === nothing || throw(ArgumentError(
+        "$dev does not support a `constraint_handler` on the operator specification. Allocate " *
+        "the operator without one and apply the constraints yourself — Ferrite's `apply!` takes " *
+        "a device constraint handler (`adapt(backend, ch)`)."))
+    _assert_device_matrix_type(device, spec.matrix_type)
     return nothing
 end
 
