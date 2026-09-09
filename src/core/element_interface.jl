@@ -61,6 +61,26 @@ allocate_element_matrix(element_cache, sdh)          = zeros(element_value_type(
 @doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh)  = zeros(element_value_type(element_cache), ndofs_per_cell(sdh))
 @doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh) = zeros(element_value_type(element_cache), ndofs_per_cell(sdh))
 
+"""
+    element_local_length(element_cache) -> Val{N} or nothing
+
+The length of `element_cache`'s element-local unknown vector as a COMPILE-TIME
+constant, or `nothing` where the cache does not name one. It is what lets the
+matrix-free action gather `uₑ` into an immutable static vector — registers on a
+device — instead of into the per-worker buffer the fallback fills; a cache
+whose extent is a type parameter (an [`ElementAssemblyCache`](@ref)'s dense
+block) can answer, and one sized only at run time cannot.
+
+Declaring it is a promise about the KERNELS, not just about the size: they may
+only read `uₑ`, an immutable vector having no `setindex!`.
+
+Return a literal `Val`: the gather's shape folds out of it.
+
+!!! warning "Experimental surface"
+    Internal to the matrix-free action; it may change in a minor release.
+"""
+element_local_length(element_cache) = nothing
+
 # The padding itself: `similar` keeps whatever array type the element chose.
 function pad_element_matrix(Ke, n::Int)
     n == 0 && return Ke

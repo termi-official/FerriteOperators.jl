@@ -47,6 +47,11 @@ setup_device_instances(device::AbstractGPUDevice, c::SumFactorizedMassElementCac
 device_worker_view(c::SumFactorizedMassElementCache, worker) =
     SumFactorizedMassElementCache(c.ρ, c.values, c.qdata, device_worker_view(c.scratch, worker))
 
+# As for the diffusion cache: `Recompute()` re-derives `w_q det(J_q)` from the
+# cell's coordinates, the stored level reads it by cell id.
+item_update_flags(::MatrixFreeActionKind, c::SumFactorizedMassElementCache) =
+    Ferrite.UpdateFlags(nodes = false, coords = c.qdata === nothing, dofs = true)
+
 function setup_element_cache(model::SumFactorizedMassIntegrator, sdh::SubDofHandler)
     values = TensorProductValues(sdh, model.field_name, model.qrc)
     return SumFactorizedMassElementCache(element_value_type(values)(model.ρ), values,

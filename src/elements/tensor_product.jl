@@ -368,6 +368,19 @@ mapping itself.
 tensor_product_scratch_prototype(device, scratch) =
     element_mapping(device) isa CooperativeElement ? similar(scratch, 0, 0) : scratch
 
+# The lattice pipeline addresses the cell's dofs and, where the pointwise map
+# re-derives its geometry, the cell's coordinates; node ids take no part in it.
+# A cache whose map reads STORED factors instead narrows the coordinates away in
+# its own `item_update_flags`.
+item_update_flags(::MatrixFreeActionKind, ::AbstractTensorProductElementCache) =
+    Ferrite.UpdateFlags(nodes = false, coords = true, dofs = true)
+
+# `element_local_length` is deliberately NOT declared here even though the dof
+# count is a type parameter: the pipeline addresses `uₑ` through the dof lattice,
+# so a static gather would have to be indexed dynamically anyway. Measured on an
+# RTX 2080 it moved the Stored action by -3% at p = 1 and +10% at p = 3, and grew
+# the kernel's local depot; the worker slab is the better fallback here.
+
 element_value_type(cache::AbstractTensorProductElementCache) =
     element_value_type(tensor_product_values(cache))
 Ferrite.getnquadpoints(cache::AbstractTensorProductElementCache) =
@@ -533,7 +546,7 @@ over the worker's own scratch. One element definition, two execution mappings �
 the stage bodies are shared verbatim, and only the slab range a worker walks
 differs.
 """
-apply_element_action!(yₑ, cache::AbstractTensorProductElementCache, uₑ, args::CellArgs) =
+@inline apply_element_action!(yₑ, cache::AbstractTensorProductElementCache, uₑ, args::CellArgs) =
     _tp_apply!(yₑ, cache, tensor_product_values(cache), uₑ, args)
 
 @inline function _tp_apply!(yₑ, cache, ::TensorProductValues{dim}, uₑ, args) where {dim}

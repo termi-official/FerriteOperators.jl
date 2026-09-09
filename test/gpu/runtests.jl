@@ -35,12 +35,14 @@ wobble(node, d) = Tv(sin(2.7 * node + 1.3 * d))
 
 # Perturbed interior nodes: the matrix-free element evaluates the Jacobian per
 # quadrature point and must not be validated on an affine mesh.
-function distorted_hex_testbed(order, dims = (4, 4, 4); distortion = 0.15f0)
+function distorted_hex_testbed(order, dims = (4, 4, 4); distortion = 0.15f0,
+        coordinate_type::Type = Tv)
+    T = coordinate_type
     grid = generate_grid(Hexahedron, dims,
                          Vec{3}((-1.0f0, -1.0f0, -1.0f0)), Vec{3}((1.0f0, 1.0f0, 1.0f0)))
     h = 2.0f0 / maximum(dims)
-    nodes = [Ferrite.Node(Vec{3, Tv}(ntuple(d -> node.x[d] +
-                (all(abs.(node.x) .< 1 - 1.0f-4) ? distortion * h * wobble(i, d) : 0.0f0), 3)))
+    nodes = [Ferrite.Node(Vec{3, T}(ntuple(d -> T(node.x[d] +
+                (all(abs.(node.x) .< 1 - 1.0f-4) ? distortion * h * wobble(i, d) : 0.0f0)), 3)))
              for (i, node) in enumerate(Ferrite.getnodes(grid))]
     dh = DofHandler(Grid(Ferrite.getcells(grid), nodes))
     add!(dh, :u, Lagrange{RefHexahedron, order}())
@@ -198,6 +200,38 @@ end
         yd = CUDA.zeros(Tv, ndofs(dh))
         mul!(yd, op, CuVector(u))
         @test Array(yd) ≈ assembled.A * u rtol = 1.0f-3
+    end
+
+    # The device action positions its items on a cursor that stages no dof row
+    # and, at the two stored levels, no coordinates either. These pin the whole
+    # ladder against the assembled CPU reference on a distorted mesh, where a
+    # cell whose geometry is not re-derived per point would be visibly wrong.
+    @testset "device action vs CPU reference ($T, $(nameof(typeof(storage))), p = $p)" for
+            T in (Float32, Float64), p in 1:3,
+            storage in (Stored(), Recompute(), ElementAssembly())
+
+        dh  = distorted_hex_testbed(p, (4, 4, 4); coordinate_type = T)
+        qrc = QuadratureRuleCollection(T, p + 1)
+        cpu = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, Int}()),
+                             SimpleBilinearDiffusionIntegrator(T(2.5), qrc, :u), dh)
+        update_operator!(cpu, nothing)
+        u = T[sin(T(0.7) * 7 * i + T(0.3) * 7) for i in 1:ndofs(dh)]
+        reference = cpu.A * u
+
+        device = KernelAbstractionsDevice(CUDABackend(); value_type = T, index_type = Ti,
+                                          items_per_worker = 2, max_workgroup_size = 256)
+        op = setup_operator(AssemblyStrategy(MatrixFreeAction(; storage), SequentialScheduling(), device),
+                            SumFactorizedDiffusionIntegrator(T(2.5), qrc, :u), dh)
+        yd = CUDA.zeros(T, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ reference rtol = (T === Float32 ? 1.0f-3 : 1.0e-8)
+
+        # `update_operator!` refills through the same iterator, on the kind whose
+        # positioning DOES stage coordinates.
+        update_operator!(op, nothing)
+        fill!(yd, zero(T))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ reference rtol = (T === Float32 ? 1.0f-3 : 1.0e-8)
     end
 
     @testset "per-mul! host allocations stay O(1)" begin

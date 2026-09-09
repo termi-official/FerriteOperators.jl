@@ -141,6 +141,34 @@ matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling(), storage 
               action(matrix_free_ka(Float64, WorkerPerElement(); storage = Stored())) rtol = 1.0e-11
     end
 
+    # The device sweeps position their items on ONE iterator but refresh what
+    # each KIND reads: the two stored levels' action reads a cell id and a dof
+    # range, while the quadrature-data fill forms the geometry. Interleaving the
+    # two is what would catch an action leaving the iterator in a state the next
+    # fill reads, or a fill's staging being skipped.
+    @testset "the action and the fill share one device iterator ($(nameof(typeof(storage))))" for
+            storage in (Stored(), Recompute(), ElementAssembly())
+
+        dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
+        qrc = QuadratureRuleCollection(3)
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice()),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(Float64, ndofs(dh), 5)
+        reference = assembled.A * u
+
+        op = setup_operator(matrix_free_ka(Float64, WorkerPerElement(); storage),
+                            SumFactorizedDiffusionIntegrator(2.5, qrc, :u), dh)
+        y = zeros(ndofs(dh))
+        for _ in 1:2
+            mul!(y, op, u)
+            @test y ≈ reference rtol = 1.0e-11
+            update_operator!(op, nothing)
+        end
+        mul!(y, op, u)
+        @test y ≈ reference rtol = 1.0e-11
+    end
+
     # The fill sweep carries no assembler, so its task can have every field a
     # singleton — and a parallel device must not assume per-worker task state it
     # can index. `min_items_per_worker = 1` is what puts more than one worker on

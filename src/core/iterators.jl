@@ -1,6 +1,78 @@
-## Cell iterators for assembling rectangular (transfer/prolongation) operators:
-## SameGridCellIterator for two DofHandlers on the *same* grid (p-multigrid),
-## NestedGridCellIterator for a fine grid nested inside a coarse one (geometric multigrid).
+## The item-iteration seam of a square-operator sweep, and the cell iterators for
+## assembling rectangular (transfer/prolongation) operators: SameGridCellIterator
+## for two DofHandlers on the *same* grid (p-multigrid), NestedGridCellIterator
+## for a fine grid nested inside a coarse one (geometric multigrid).
+
+##########################################
+## The assembly iteration seam          ##
+##########################################
+
+"""
+    assembly_iterator(kind, element_cache, sdh)
+
+INTERNAL, EXPERIMENTAL. What a sweep of `kind` positions on one item of `sdh`,
+and what rides `args.cell` while the element kernels run. Resolved ONCE per
+(sweep kind, element cache, subdomain) at [`setup_operator`](@ref) and stored on
+the workspace; a sweep only calls [`position_item`](@ref) on it.
+
+The default is Ferrite's `CellCache` over `sdh`: the node ids, the coordinates
+and the cell dofs staged into per-worker buffers, which covers every accessor a
+cell kernel may reach for. Overloads are what narrow that — the matrix-free
+action over a DEVICE handler resolves to a cursor that stages NOTHING it can
+address directly, the cell's dof range being a view into the handler's own flat
+`cell_dofs` at the item index the kernel already holds in a register.
+
+`sdh` is the subdomain's HOST `SubDofHandler` for the workspace the engine
+allocates, and its device-resident counterpart for the device layout built from
+it; one overload therefore answers for both, dispatching on the handler.
+
+Which of the positioned cache's members a given sweep REFRESHES is a separate,
+per-kind declaration — [`item_update_flags`](@ref), in Ferrite's `UpdateFlags`
+vocabulary — because one workspace serves every kind an operator sweeps (the
+matrix-free action and the quadrature-data fill share one), while what each
+reads differs.
+
+!!! warning "Experimental surface"
+    This seam is internal: it is not exported, and its spelling may change in a
+    minor release. The public element-extension protocol is a separate design
+    round.
+"""
+assembly_iterator(kind, element_cache, sdh) = CellCache(sdh)
+
+"""
+    item_update_flags(kind, element_cache) -> Ferrite.UpdateFlags
+
+INTERNAL, EXPERIMENTAL. What a sweep of `kind` over `element_cache` READS off
+the cache [`assembly_iterator`](@ref) positions, in Ferrite's `UpdateFlags`
+vocabulary: the node ids, the coordinates, the cell dofs. Every flag is set by
+default, so an undeclared kind/cache pair is positioned exactly as before.
+
+An iterator that stages a member consults this to decide whether a positioning
+refreshes it. Staging is the only thing it governs — a declaration that
+UNDER-states what the kernels read is a stale read rather than an error, the
+same contract Ferrite's own `UpdateFlags` carries.
+
+Queried on the kind INSTANCE and the cache INSTANCE, both of which the sweep
+holds, and answered with a literal: the decision is then a compile-time constant
+and the staging it guards is eliminated where it is not needed.
+
+    FerriteOperators.item_update_flags(::MatrixFreeActionKind, ::MyCache) =
+        Ferrite.UpdateFlags(nodes = false, coords = false, dofs = true)
+"""
+item_update_flags(kind, element_cache) = Ferrite.UpdateFlags()
+
+"""
+    position_item(ws, item, kind) -> ws
+
+Position the workspace `ws` on `item` for a sweep of `kind`, and return the
+POSITIONED workspace — which need not be `ws` itself: an iterator whose
+positioning is the construction of an immutable value (a device cursor) hands
+back a workspace carrying that value, and only the returned one is positioned.
+
+The default is `Ferrite.reinit!(ws, item)` for every workspace family, so a
+sweep adopting this seam positions exactly as it did before.
+"""
+@inline position_item(ws, item, kind) = (Ferrite.reinit!(ws, item); ws)
 
 ####################################
 ## SameGridCellCache      ##

@@ -17,11 +17,25 @@
 # unknowns; Ferrite ships `Lagrange{RefHexahedron, order}` for order ≤ 3.
 #
 # CUDA is optional: without a functional GPU the script reports the CPU arms.
+#
+# THE IDLE-CLOCK TRAP. A GPU at rest sits at its idle clocks (300 MHz SM /
+# 405 MHz memory on an RTX 2080) and takes on the order of a SECOND of sustained
+# load to ramp to its boost clocks — far longer than one action. A short warm-up
+# therefore samples an arm mid-ramp, and min-of-N does not protect against it:
+# every sample of the window is slow. Measured on this benchmark's own arms,
+# back-to-back stock runs disagreed by up to 5x on the short ones (the assembled
+# SpMV read 0.105 ms hot and 1.667 ms cold). Every arm here is therefore preceded
+# by a SUSTAINED burn of that same arm (`WARMUP_SECONDS`) and repeated over
+# `PASSES` independent burn+sample rounds, and the SM/memory clocks are queried
+# around each arm so a cold measurement is visible rather than silent.
 using FerriteOperators, FerriteOperatorsExampleElements
 using LinearAlgebra
 using Printf
 using SparseArrays
 using Polyester
+import KernelAbstractions as KA
+import KernelAbstractions: @kernel, @index, @Const
+import FerriteOperators: Atomix
 
 const CUDA_AVAILABLE = try
     @eval using CUDA
@@ -36,6 +50,8 @@ const Tv = Float32
 const Ti = Int32
 const TARGET_DOFS = length(ARGS) ≥ 1 ? parse(Int, ARGS[1]) : 140_000
 const ORDERS = 1:3
+const WARMUP_SECONDS = 1.5
+const PASSES = 3
 
 function distorted_testbed(order, n; distortion = 0.15f0)
     grid = generate_grid(Hexahedron, (n, n, n),
@@ -50,20 +66,87 @@ function distorted_testbed(order, n; distortion = 0.15f0)
     return dh
 end
 
-# Min-of-N wall time of one action, plus the host allocations of one call.
-#
-# The warm-up is a timed BURN, not a single call: a GPU sitting at its idle clock
-# takes longer than one action to ramp, and min-of-N does not protect an arm whose
-# whole sampling window lands in a low-clock state — the same arm reads 1 ms or
-# 5 ms between runs without it.
-function measure(action!; samples = 20, warmup = 0.25)
-    deadline = time() + warmup
-    action!()
-    while time() < deadline
-        action!()
+# The SM and memory clocks, as `nvidia-smi` reports them, or `nothing` where the
+# query is unavailable. Reported per arm so a number taken on a ramping device is
+# visible in the output instead of silently wrong (see the idle-clock trap above).
+function clocks()
+    try
+        sm, mem = split(strip(read(`nvidia-smi --query-gpu=clocks.sm,clocks.mem
+                                    --format=csv,noheader,nounits`, String)), ',')
+        return (parse(Int, strip(sm)), parse(Int, strip(mem)))
+    catch
+        return nothing
     end
-    times = [(@elapsed action!()) for _ in 1:samples]
-    return minimum(times), (@allocated action!())
+end
+
+_clock_note(::Nothing) = ""
+_clock_note((sm, mem)) = @sprintf(" [%d/%d MHz]", sm, mem)
+
+# Min-of-N wall time of one action over `PASSES` independent rounds, plus the
+# host allocations of one call.
+#
+# Each round BURNS the arm for `WARMUP_SECONDS` before sampling it, so no round
+# is sampled while the device clocks are ramping, and the reported time is the
+# minimum over rounds — a round that still caught a cold device is discarded by
+# the outer minimum rather than averaged into the result.
+function measure(action!; samples = 20, passes = PASSES, warmup = WARMUP_SECONDS)
+    best = Inf
+    for _ in 1:passes
+        deadline = time() + warmup
+        action!()
+        while time() < deadline
+            action!()
+        end
+        best = min(best, minimum((@elapsed action!()) for _ in 1:samples))
+    end
+    return best, (@allocated action!())
+end
+
+# The ELEMENT level with nothing around it: one worker per cell, the dof range
+# read straight from the flat `cell_dofs`, `uₑ` gathered into registers, each row
+# of `Kₑ·uₑ` accumulated in a register and scattered atomically. The dof array
+# carries the device handler's own `Int`, so the index traffic is the one the
+# engine pays.
+@kernel function _floor_action!(y, @Const(u), @Const(K), @Const(cell_dofs),
+        ::Val{ND}, ncells) where {ND}
+    worker = @index(Global, Linear)
+    stride = prod(KA.@ndrange())
+    for cell in worker:stride:ncells
+        base = (cell - 1) * ND
+        uₑ = ntuple(b -> (@inbounds u[cell_dofs[base + b]]), Val(ND))
+        for a in 1:ND
+            acc = zero(eltype(K))
+            for b in 1:ND
+                @inbounds acc += K[cell, a, b] * uₑ[b]
+            end
+            @inbounds Atomix.@atomic y[cell_dofs[base + a]] += acc
+        end
+    end
+end
+
+element_floor_time!(args...) = nothing
+
+if CUDA_AVAILABLE
+    @eval function element_floor_time!(yd, ud, integrator, dh, nd, ncells)
+        backend = CUDABackend()
+        device = KernelAbstractionsDevice(backend; value_type = Tv, index_type = Ti,
+                                          items_per_worker = 2, max_workgroup_size = 256)
+        op = setup_operator(AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
+                                             SequentialScheduling(), device), integrator, dh)
+        K = op.engine.subdomain_caches[1].device_cache.element.K
+        cell_dofs = CuVector(dh.cell_dofs)
+        workgroup, blocks = FerriteOperators.launch_geometry(device, ncells)
+        kernel = _floor_action!(backend, workgroup)
+        time = first(measure(() -> (kernel(yd, ud, K, cell_dofs, Val(nd), ncells;
+                                           ndrange = workgroup * blocks);
+                                    KA.synchronize(backend))))
+        op = nothing
+        K = nothing
+        cell_dofs = nothing
+        GC.gc()
+        CUDA.reclaim()
+        return time
+    end
 end
 
 const STORAGE = (("Stored", Stored()), ("Recompute", Recompute()), ("EA", ElementAssembly()))
@@ -94,6 +177,9 @@ function run_order(order)
 
     results = Pair{String, Tuple{Float64, Int}}[]
     fills = Pair{String, Float64}[]
+    # SM/memory clocks as each device arm finished sampling, so a cold arm is
+    # visible in the table.
+    clockstamps = Dict{String, Any}()
     u = Tv[sin(Tv(4.9) * i + Tv(2.1)) for i in 1:n_dofs]
     y = zeros(Tv, n_dofs)
 
@@ -142,6 +228,7 @@ function run_order(order)
             @printf("  assembled matrix: %d stored entries (%.0f MB on device), %d B per cell, %d B per dof\n",
                     nnz(A), entry_bytes / 2^20, entry_bytes ÷ ncells, entry_bytes ÷ n_dofs)
             push!(results, "CUDA assembled SpMV" => measure(() -> (mul!(yd, A, ud); CUDA.synchronize())))
+            clockstamps["CUDA assembled SpMV"] = clocks()
             op = nothing
             A = nothing
             GC.gc()
@@ -162,7 +249,20 @@ function run_order(order)
                                                 SequentialScheduling(), device), integrator, dh)
             end
             push!(results, "$name [$label]" => time)
+            clockstamps["$name [$label]"] = clocks()
             storage isa Recompute || push!(fills, "$name [$label]" => fill)
+        end
+
+        # The MATH FLOOR of the ELEMENT level: the same dense `Kₑ·uₑ` per cell,
+        # written as one hand-rolled kernel that reads the dof range straight out
+        # of the flat `cell_dofs`, gathers into registers and scatters the rows
+        # atomically. It carries no workspace, no element cache and no assembler,
+        # so the gap between it and the `[EA]` arm above is what the engine's
+        # per-item plumbing costs.
+        floor_time = element_floor_time!(yd, ud, integrator, dh, nd, ncells)
+        if floor_time !== nothing
+            push!(results, "CUDA ELEMENT math floor (hand-rolled)" => (floor_time, 0))
+            clockstamps["CUDA ELEMENT math floor (hand-rolled)"] = clocks()
         end
     end
 
@@ -170,7 +270,8 @@ function run_order(order)
     baseline = reference === nothing ? results[1].second[1] : results[reference].second[1]
     @printf("  %-46s %12s %10s %14s\n", "arm", "min time", "vs base", "host allocs")
     for (name, (time, allocations)) in results
-        @printf("  %-46s %10.3f ms %9.2fx %12d B\n", name, 1.0e3 * time, baseline / time, allocations)
+        @printf("  %-46s %10.3f ms %9.2fx %12d B%s\n", name, 1.0e3 * time, baseline / time,
+                allocations, _clock_note(get(clockstamps, name, nothing)))
     end
     isempty(fills) || println("  storage fill (update_operator!, min of 5):")
     for (name, time) in fills

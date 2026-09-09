@@ -149,7 +149,7 @@ _reduce_partials(a, b) = a + b
 
 """
     setup_device_instances(device, object, n_instances)
-    setup_device_instances(device, object, n_instances, device_handler)
+    setup_device_instances(device, object, n_instances, iterator)
 
 Device scratch: `object` duplicated for `n_instances` parallel workers.
 [`SequentialCPUDevice`](@ref) returns the 1-element tuple `(object,)`, a
@@ -158,10 +158,12 @@ threaded CPU device a `Vector` of `n_instances` independent
 whose per-worker slice is [`device_worker_view`](@ref).
 
 The 4-argument form is what the engine calls on a subdomain's WORKSPACE, and
-`device_handler` is that subdomain's device-resident `SubDofHandler`
-([`setup_device_handler`](@ref)) — the only handler a device `Ferrite.CellCache`
-may be built from. It defaults to the 3-argument form, which every nested call
-(element caches, values objects) uses.
+`iterator` is that subdomain's DEVICE-resident item iterator
+([`assembly_iterator`](@ref) over the device handler
+[`setup_device_handler`](@ref) resolved) — the workspace the host allocated
+carries a host geometry cache, which `adapt` returns unchanged and no error
+reports. It defaults to the 3-argument form, which every nested call (element
+caches, values objects) uses.
 """
 function setup_device_instances(device::AbstractDevice, obj, n_instances)
     throw(ArgumentError(
@@ -174,7 +176,7 @@ function setup_device_instances(device::AbstractCPUDevice, obj, n_instances)
     return [duplicate_for_device(device, obj) for _ in 1:n_instances]
 end
 
-setup_device_instances(device::AbstractDevice, obj, n_instances, device_handler) =
+setup_device_instances(device::AbstractDevice, obj, n_instances, iterator) =
     setup_device_instances(device, obj, n_instances)
 
 # The author-facing half of the contract: what is missing on a GPU device is
@@ -212,9 +214,11 @@ function device_worker_view end
 
 # The two shapes `setup_device_instances` returns for a GPU device: a batched
 # array whose LEADING index is the worker (stride-1, so consecutive workers
-# touch adjacent addresses), and Ferrite's struct-of-arrays container.
+# touch adjacent addresses), and Ferrite's struct-of-arrays container. A field
+# an iterator does not stage is batched as nothing and sliced as nothing.
 device_worker_view(a::AbstractArray, worker) = Ferrite.view_from_shared(a, worker)
 device_worker_view(c::Ferrite.SoAContainer, worker) = c[worker]
+device_worker_view(::Nothing, worker) = nothing
 
 """
     setup_device_handler(device, dh) -> handler

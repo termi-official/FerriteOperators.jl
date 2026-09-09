@@ -50,9 +50,14 @@ Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, Ke::Abs
 Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, fe::AbstractVector) = assemble!(assembler, celldofs(cell), fe)
 Ferrite.assemble!(assembler::VectorAssembler, cell::CellCache, fe::AbstractVector) =
     assemble!(assembler, celldofs(cell), fe)
-function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic}, dofs::AbstractVector{<:Integer}, fe::AbstractVector) where {atomic}
-    for (i, dof) in enumerate(dofs)
-        _accum!(Val(atomic), assembler.f, fe[i], dof)
+# `@inline`: on a device this is the scatter INSIDE the per-item kernel, and a
+# call would marshal the dof view and the element vector through per-thread local
+# memory instead of keeping them in registers.
+@inline function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic}, dofs::AbstractVector{<:Integer}, fe::AbstractVector) where {atomic}
+    @boundscheck length(fe) == length(dofs) || throw(DimensionMismatch(
+        "the local vector and the dof vector of a scatter must have the same length"))
+    for i in eachindex(dofs)
+        @inbounds _accum!(Val(atomic), assembler.f, fe[i], dofs[i])
     end
     return
 end

@@ -165,11 +165,26 @@ function _build_internal_variable_handler(integrator, element_caches, algebraic_
     return InternalVariableHandler(cell_offsets, item_offsets, ndofs(dh), cell_len + item_len)
 end
 
+"""
+    iteration_kind(form) -> kind
+
+The sweep kind an operator of `form` resolves its item iterator for
+([`assembly_iterator`](@ref)). `nothing` for a form whose sweeps are the primal
+family — every one of them positions on the full geometry cache, so there is no
+kind to narrow by. A [`MatrixFreeAction`](@ref) operator answers with its ACTION
+kind: that is the sweep run per `mul!`, and the quadrature-data fill it also
+runs rides the same iterator (which is why what each sweep REFRESHES is
+[`item_update_flags`](@ref)'s per-kind declaration and not the iterator's).
+"""
+iteration_kind(form) = nothing
+iteration_kind(::MatrixFreeAction) = MatrixFreeActionKind()
+
 function setup_subdomain_caches(strategy, element_caches, ivh, dh;
         slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, global_dof_sets)
     device = strategy.device
+    kind = iteration_kind(strategy.form)
     # One device-resident handler for the whole operator, split per subdomain
-    # below: it is what a device geometry cache must be built from, and
+    # below: it is what a device item iterator must be built from, and
     # rebuilding it per subdomain would upload the cell-id maps of every other
     # subdomain again.
     device_dh = setup_device_handler(device, dh)
@@ -177,12 +192,19 @@ function setup_subdomain_caches(strategy, element_caches, ivh, dh;
         partition = adapt_partition(device, compute_partition(strategy, sdh))
         n = n_workers(device, partition)
         ws = create_assembly_workspace(element_cache, sdh, ivh, slots;
-                                       needs_sensitivity, global_dofs = gdofs)
-        dc = setup_device_instances(device, ws, n, device_subdomain_handler(device_dh, index))
+                                       needs_sensitivity, global_dofs = gdofs,
+                                       iterator = assembly_iterator(kind, element_cache, sdh))
+        dc = setup_device_instances(device, ws, n,
+            _device_iterator(kind, element_cache, device_subdomain_handler(device_dh, index)))
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
     end for (index, (sdh, element_cache, gdofs)) in
         enumerate(zip(dh.subdofhandlers, element_caches, global_dof_sets))]
 end
+
+# A CPU device has no device handler and therefore no device iterator; the
+# workspace it duplicates already carries the host one.
+_device_iterator(kind, element_cache, ::Nothing) = nothing
+_device_iterator(kind, element_cache, device_sdh) = assembly_iterator(kind, element_cache, device_sdh)
 
 # Each family's global-dof declaration is resolved once per subdomain, before
 # any cache exists, and validated here rather than surfacing later as an

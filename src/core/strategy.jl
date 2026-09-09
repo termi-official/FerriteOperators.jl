@@ -432,11 +432,23 @@ Core fields:
     dofs
 end
 
-function Ferrite.reinit!(ws::AssemblyWorkspace, cellid)
-    reinit!(ws.cell, cellid)
-    _refresh_dof_head!(ws.dofs, ws.cell)
+Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = _position_cell(ws, ws.cell, cellid, nothing)
+@inline position_item(ws::AssemblyWorkspace, item, kind) = _position_cell(ws, ws.cell, item, kind)
+
+# Position `ws`'s item iterator, dispatching on the ITERATOR: a cache positioned
+# in place (Ferrite's `CellCache`) leaves the workspace its own positioned value,
+# while one positioned by construction returns a workspace carrying the new one.
+@inline function _position_cell(ws::AssemblyWorkspace, cell, item, kind)
+    reinit!(cell, item)
+    _refresh_dof_head!(ws.dofs, cell)
     return ws
 end
+
+# `ws` with its item iterator replaced — what a positioning by construction
+# returns, the workspace being immutable.
+@inline _with_cell(ws::AssemblyWorkspace, cell) = AssemblyWorkspace(
+    ws.Ke, ws.slot_buffers, ws.re, cell, ws.ivh, ws.element, ws.sensitivity, ws.dofs)
+
 @inline _refresh_dof_head!(::Nothing, cell) = nothing
 @inline _refresh_dof_head!(dofs, cell) = copyto!(dofs, celldofs(cell))
 
@@ -454,12 +466,17 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
         keys(ws.slot_buffers);
         needs_sensitivity = ws.sensitivity !== nothing,
         global_dofs = _declared_global_dofs(ws),
+        iterator = duplicate_for_device(device, ws.cell),
     )
 end
 
+# A worker's own geometry cache, over the same handler and refreshing the same
+# members — a per-worker copy is what makes the staging private.
+duplicate_for_device(::AbstractCPUDevice, cc::CellCache) = CellCache(cc.dh, cc.flags)
+
 """
-    create_assembly_workspace(element, sdh, ivh, slots;
-                              needs_sensitivity = true, global_dofs = ())
+    create_assembly_workspace(element, sdh, ivh, slots; needs_sensitivity = true,
+                              global_dofs = (), iterator = assembly_iterator(nothing, element, sdh))
 
 Create one [`AssemblyWorkspace`](@ref) with freshly allocated element-local
 buffers, one state buffer per declared slot name and sized to `ndofs_per_cell`;
@@ -474,19 +491,23 @@ STRUCTURAL, decided by the integrator family ([`needs_ad_decoration`](@ref)).
 element-local buffer is padded by its length, and the workspace carries the
 augmented dof vector the sweep's gathers and scatters address.
 
+`iterator` is what positions the workspace on an item and what rides
+`args.cell`, [`assembly_iterator`](@ref)'s answer for this subdomain.
+
 The buffers carry whatever scalar the `allocate_element_*` hooks return, which
 is the ELEMENT's precision ([`element_value_type`](@ref)) and need not be the
 device's.
 """
 function create_assembly_workspace(element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
-        needs_sensitivity::Bool = true, global_dofs = ()) where {N}
+        needs_sensitivity::Bool = true, global_dofs = (),
+        iterator = assembly_iterator(nothing, element, sdh)) where {N}
     n = length(global_dofs)
     slot_buffers = NamedTuple{slots}(ntuple(_ -> pad_element_vector(allocate_element_unknown_vector(element, sdh), n), N))
     return AssemblyWorkspace(
         pad_element_matrix(allocate_element_matrix(element, sdh), n),
         slot_buffers,
         pad_element_vector(allocate_element_residual_vector(element, sdh), n),
-        CellCache(sdh),
+        iterator,
         ivh,
         element,
         needs_sensitivity ? create_sensitivity_buffers(element, sdh, n) : nothing,

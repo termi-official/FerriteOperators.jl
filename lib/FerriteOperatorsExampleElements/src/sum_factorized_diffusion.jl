@@ -56,6 +56,13 @@ setup_device_instances(device::AbstractGPUDevice, c::SumFactorizedDiffusionEleme
 device_worker_view(c::SumFactorizedDiffusionElementCache, worker) =
     SumFactorizedDiffusionElementCache(c.D, c.values, c.qdata, device_worker_view(c.scratch, worker))
 
+# `Recompute()` forms `W_q` at the quadrature point that consumes it and needs
+# the cell's coordinates; the stored levels read a factor addressed by the cell
+# id alone. The store's presence is a type parameter, so the answer is a
+# compile-time constant and the coordinate staging folds away with it.
+item_update_flags(::MatrixFreeActionKind, c::SumFactorizedDiffusionElementCache) =
+    Ferrite.UpdateFlags(nodes = false, coords = c.qdata === nothing, dofs = true)
+
 ####################################
 ## Setup
 ####################################

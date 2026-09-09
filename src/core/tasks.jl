@@ -592,7 +592,7 @@ function primal_cell_sweep!(kind, task, ws)
     scatter_local!(kind, task.inner_assembler, ws)
 end
 
-execute_kind!(kind::MatrixFreeActionKind, task, ws) = matrix_free_cell_sweep!(kind, task, ws)
+@inline execute_kind!(kind::MatrixFreeActionKind, task, ws) = matrix_free_cell_sweep!(kind, task, ws)
 
 """
     matrix_free_cell_sweep!(kind, task, ws)
@@ -605,12 +605,21 @@ It is [`primal_cell_sweep!`](@ref) with one difference, and that difference is
 what makes it run on a device: the gather is FIXED-WIDTH ([`item_dofs`](@ref)
 entries, the length the buffer already has) instead of `load_slots!`'s
 resize-then-broadcast, which a per-worker view into a shared device batch
-cannot serve. It carries no `@timeit_debug` frame for the same reason
+cannot serve. Where the cache names that width as a compile-time constant
+([`element_local_length`](@ref)) the gather targets an immutable static vector
+instead of the buffer, which is what puts `uₑ` in a device kernel's registers.
+
+The body is `@inline`: the workspace is a struct of array views, and a device
+kernel that CALLS this instead of containing it passes that struct through
+per-thread local memory — measured at 2.5 kB of local depot per thread and half
+the sweep's time.
+
+It carries no `@timeit_debug` frame for the same reason
 [`primal_cell_sweep!`](@ref) carries none.
 """
-function matrix_free_cell_sweep!(kind, task, ws)
+@inline function matrix_free_cell_sweep!(kind, task, ws)
     fill!(ws.re, zero(eltype(ws.re)))
-    uₑ = _gather_item_dofs!(ws.slot_buffers.u, task.states.u, item_dofs(ws))
+    uₑ = _gather_element_unknowns(ws, task.states.u, element_local_length(ws.element))
     reinit_values!(ws.element, ws.cell, kind)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     apply_element_action!(ws.re, ws.element, uₑ, _cell_args(ws, (u = uₑ,), pₑ, task.ctx))
@@ -618,7 +627,15 @@ function matrix_free_cell_sweep!(kind, task, ws)
     return nothing
 end
 
-execute_kind!(kind::QuadratureDataKind, task, ws) = quadrature_data_sweep!(kind, task, ws)
+@inline _gather_element_unknowns(ws, src, ::Nothing) =
+    _gather_item_dofs!(ws.slot_buffers.u, src, item_dofs(ws))
+@inline function _gather_element_unknowns(ws, src, ::Val{ND}) where {ND}
+    dofs = item_dofs(ws)
+    T = eltype(ws.re)
+    return SVector{ND, T}(ntuple(i -> convert(T, @inbounds src[dofs[i]]), Val(ND)))
+end
+
+@inline execute_kind!(kind::QuadratureDataKind, task, ws) = quadrature_data_sweep!(kind, task, ws)
 
 """
     quadrature_data_sweep!(kind, task, ws)
@@ -630,9 +647,10 @@ no workspace buffer is touched — which is why this sweep needs no assembler an
 runs under either scheduling policy.
 
 It carries no `@timeit_debug` frame for the same reason
-[`primal_cell_sweep!`](@ref) carries none.
+[`primal_cell_sweep!`](@ref) carries none, and is `@inline` for the same reason
+[`matrix_free_cell_sweep!`](@ref) is: it shares that sweep's device kernel.
 """
-function quadrature_data_sweep!(kind, task, ws)
+@inline function quadrature_data_sweep!(kind, task, ws)
     reinit_values!(ws.element, ws.cell, kind)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     fill_quadrature_data!(ws.element, _cell_args(ws, (;), pₑ, task.ctx))
@@ -762,7 +780,7 @@ the three routes are selected at compile time and a downstream kind is
 scattered by the same body. The item is addressed through
 [`scatter_address`](@ref).
 """
-function scatter_local!(kind, assembler, ws)
+@inline function scatter_local!(kind, assembler, ws)
     address = scatter_address(ws)
     if assembles_matrix(kind) && assembles_vector(kind)
         assemble!(assembler, address, ws.Ke, ws.re)

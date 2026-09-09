@@ -7,11 +7,12 @@ import KernelAbstractions as KA
 import KernelAbstractions: @kernel, @index, @Const, @localmem, @synchronize, @uniform, @groupsize
 
 import FerriteOperators: KernelAbstractionsDevice, AssemblyWorkspace, AssemblyTask, VectorAssembler
-import FerriteOperators: CooperativeElement, WorkerPerElement, QVector
+import FerriteOperators: CooperativeElement, WorkerPerElement, QVector, MatrixFreeActionKind
 import FerriteOperators: device_worker_view, launch_geometry, n_workers, value_type
 import FerriteOperators: cooperative_group_size, cooperative_scratch_shape,
     cooperative_load!, cooperative_stage!, cooperative_store!
 import FerriteOperators: element_value_type, item_dofs, query_cell_parameters
+import FerriteOperators: assembly_iterator, item_update_flags, position_item
 
 # Ferrite's own KA extension supplies `distribute_to_workers`, the device
 # `CellCache` and every `Adapt` rule this one builds on, and it needs four
@@ -55,6 +56,107 @@ _adapt_fields(to, x::T) where {T} =
     Base.typename(T).wrapper(ntuple(i -> adapt(to, getfield(x, i)), Val(fieldcount(T)))...)
 
 ####################################
+## Device item iteration
+####################################
+
+"""
+    DeviceCellDofs(cell_dofs, base, n) <: AbstractVector{Int}
+
+One cell's dof range as a VIEW into the device handler's flat `cell_dofs`: three
+registers, no storage and no copy. It is what [`DeviceCellCursor`](@ref) answers
+`celldofs` with, and the reason a device action sweep neither stages a dof row
+nor reads one back.
+"""
+struct DeviceCellDofs{I <: Integer, V <: AbstractVector{I}} <: AbstractVector{I}
+    cell_dofs::V
+    base::Int
+    n::Int
+end
+Base.size(d::DeviceCellDofs) = (d.n,)
+Base.IndexStyle(::Type{<:DeviceCellDofs}) = IndexLinear()
+Base.@propagate_inbounds Base.getindex(d::DeviceCellDofs, i::Int) = d.cell_dofs[d.base + i]
+
+"""
+    DeviceCellCursor
+
+The device counterpart of Ferrite's `CellCache` for a sweep positioned by
+CONSTRUCTION: an immutable value the kernel holds in registers, carrying the
+item's id and the offset of its dof range in the handler's own `cell_dofs`.
+Positioning it is one indexed read of `cell_dofs_offset` — the item index is
+already in a register — where a `CellCache` would copy the cell's dof row into a
+per-worker slab that the gather and the scatter then read back out of global
+memory.
+
+`coords` is the per-worker coordinate slab, the one member a positioning may
+still stage, and only for a sweep whose [`item_update_flags`](@ref) ask for it:
+the two stored levels of the matrix-free action read the cell id alone, while
+`Recompute()` re-derives the geometry per quadrature point and the
+quadrature-data fill forms it once. The node ids are answered from the grid
+instead of staged, there being no sweep that reads them per point.
+
+!!! warning "Experimental surface"
+    Internal to the device sweep; it may change in a minor release.
+"""
+struct DeviceCellCursor{SDH, X}
+    sdh::SDH
+    coords::X
+    cellid::Int
+    dofbase::Int
+end
+
+Adapt.@adapt_structure DeviceCellCursor
+
+Ferrite.cellid(c::DeviceCellCursor) = c.cellid
+Ferrite.celldofs(c::DeviceCellCursor) =
+    DeviceCellDofs(c.sdh.cell_dofs, c.dofbase, Ferrite.ndofs_per_cell(c.sdh))
+Ferrite.getcoordinates(c::DeviceCellCursor) = c.coords
+Ferrite.getnodes(c::DeviceCellCursor) =
+    Ferrite.get_node_ids(Ferrite.getcells(Ferrite.get_grid(c.sdh), c.cellid))
+Ferrite.reinit!(cv::Ferrite.AbstractCellValues, c::DeviceCellCursor) = Ferrite.reinit!(
+    cv, Ferrite.reinit_needs_cell(cv) ? Ferrite.getcells(Ferrite.get_grid(c.sdh), c.cellid) : nothing,
+    c.coords)
+
+# The scatter addresses the dof view directly: every assembler in this package
+# reads `celldofs` off the address it is handed, and the cursor's is already the
+# handler's own range.
+@inline FerriteOperators._scatter_address(::Nothing, c::DeviceCellCursor) = Ferrite.celldofs(c)
+
+@inline function FerriteOperators._position_cell(ws::AssemblyWorkspace, cell::DeviceCellCursor, item, kind)
+    positioned = _reposition(cell, item, item_update_flags(kind, ws.element))
+    FerriteOperators._refresh_dof_head!(ws.dofs, positioned)
+    return FerriteOperators._with_cell(ws, positioned)
+end
+
+@inline function _reposition(c::DeviceCellCursor, item, flags::Ferrite.UpdateFlags)
+    i = Int(item)
+    flags.coords && Ferrite.getcoordinates!(c.coords, Ferrite.get_grid(c.sdh), i)
+    return DeviceCellCursor(c.sdh, c.coords, i, Int(@inbounds c.sdh.cell_dofs_offset[i]) - 1)
+end
+
+"""
+    assembly_iterator(::MatrixFreeActionKind, element_cache, sdh)
+
+The matrix-free action's iterator: Ferrite's `CellCache` over a HOST
+`SubDofHandler` — the CPU sweeps are unchanged — and a [`DeviceCellCursor`](@ref)
+over a device handler, which is where staging a dof row per item is the
+dominant cost of the sweep.
+"""
+FerriteOperators.assembly_iterator(::MatrixFreeActionKind, element_cache, sdh) = _action_iterator(sdh)
+_action_iterator(sdh::Ferrite.SubDofHandler) = Ferrite.CellCache(sdh)
+_action_iterator(sdh) = DeviceCellCursor(sdh, nothing, -1, 0)
+
+# The coordinate slab is the cursor's only batched member; the handler behind it
+# is shared read-only, and the position is per item rather than per worker.
+FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice, c::DeviceCellCursor, n_instances::Int) =
+    DeviceCellCursor(c.sdh,
+        KA.zeros(device.backend, Ferrite.get_coordinate_type(Ferrite.get_grid(c.sdh)),
+                 n_instances, Ferrite.nnodes_per_cell(c.sdh)),
+        c.cellid, c.dofbase)
+
+device_worker_view(c::DeviceCellCursor, worker) =
+    DeviceCellCursor(c.sdh, device_worker_view(c.coords, worker), c.cellid, c.dofbase)
+
+####################################
 ## Setup
 ####################################
 
@@ -95,11 +197,11 @@ FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice, a::Abs
     KA.zeros(device.backend, eltype(a), n_instances, size(a)...)
 
 """
-    setup_device_instances(device::KernelAbstractionsDevice, ws::AssemblyWorkspace, n, device_sdh)
+    setup_device_instances(device::KernelAbstractionsDevice, ws::AssemblyWorkspace, n, iterator)
 
 The batched workspace `n` GPU workers share: the element buffers become one
 array each with the WORKER as the leading (stride-1) index, so consecutive
-workers touch adjacent addresses, and the geometry cache and element cache
+workers touch adjacent addresses, and the item iterator and element cache
 recurse into their own struct-of-arrays layouts.
 [`device_worker_view`](@ref) is the inverse.
 
@@ -107,17 +209,17 @@ Each batch carries the ELTYPE of the host buffer it replaces, so the element's
 own precision follows onto the device rather than the device's `value_type`
 overriding it.
 
-The geometry cache is built from `device_sdh`, the subdomain's
-`DeviceSubDofHandler` — the host `SubDofHandler` the workspace carries would
-give a cache over the host grid, which `adapt` returns unchanged and no error
-reports.
+`iterator` is the subdomain's DEVICE item iterator
+([`assembly_iterator`](@ref) over the device handler) — the host
+`SubDofHandler` the workspace's own iterator carries would give a cache over the
+host grid, which `adapt` returns unchanged and no error reports.
 """
 function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice,
-        ws::AssemblyWorkspace, n_instances::Int, device_sdh)
-    device_sdh === nothing && throw(ArgumentError(
-        "$(nameof(typeof(device))) needs the subdomain's device handler to build a device " *
-        "geometry cache. Workspaces reach it through the four-argument " *
-        "`setup_device_instances`, which `setup_subdomain_caches` calls."))
+        ws::AssemblyWorkspace, n_instances::Int, iterator)
+    iterator === nothing && throw(ArgumentError(
+        "$(nameof(typeof(device))) needs the subdomain's device item iterator to build a device " *
+        "workspace. Workspaces reach it through the four-argument `setup_device_instances`, " *
+        "which `setup_subdomain_caches` calls."))
     backend = device.backend
     ndofs_local = size(ws.Ke, 1)
     return AssemblyWorkspace(
@@ -127,13 +229,24 @@ function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevic
         # `execute_on_device!`).
         map(buffer -> KA.zeros(backend, eltype(buffer), n_instances, length(buffer)), ws.slot_buffers),
         KA.zeros(backend, eltype(ws.re), n_instances, length(ws.re)),
-        Ferrite.distribute_to_workers(backend, CellCache(device_sdh), n_instances),
+        _batch_iterator(device, iterator, n_instances),
         FerriteOperators.DeviceInternalVariableHandler(),
         FerriteOperators.setup_device_instances(device, ws.element, n_instances),
         ws.sensitivity,
         ws.dofs,
     )
 end
+
+# Ferrite's own geometry cache batches through its struct-of-arrays route; a
+# cursor batches only what it stages.
+_batch_iterator(device, cc::CellCache, n) = Ferrite.distribute_to_workers(device.backend, cc, n)
+_batch_iterator(device, c::DeviceCellCursor, n) = FerriteOperators.setup_device_instances(device, c, n)
+# A cooperative sweep positions its item in ONE segment of a barrier-split kernel
+# and reads it in the next, so its geometry cache has to be the MUTABLE one every
+# segment recovers for itself — a cursor is positioned by construction, and the
+# value would not survive the barrier.
+_batch_iterator(device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, CooperativeElement},
+        c::DeviceCellCursor, n) = Ferrite.distribute_to_workers(device.backend, CellCache(c.sdh), n)
 
 ####################################
 ## Execution
@@ -149,9 +262,13 @@ end
     stride = prod(KA.@ndrange())
     local_task = AssemblyTask(task.kind, _worker_assembler(task.inner_assembler, worker),
                               task.states, task.p, task.ctx)
-    ws = device_worker_view(workspaces, worker)
-    for i in worker:stride:length(items)
-        Ferrite.reinit!(ws, items[i])
+    base = device_worker_view(workspaces, worker)
+    n_items = length(items)
+    for i in worker:stride:n_items
+        # `position_item` rather than `reinit!`: a device iterator positions by
+        # CONSTRUCTION, so only the workspace it returns is on the item, and it
+        # stages what this KIND reads and nothing else.
+        ws = position_item(base, @inbounds(items[i]), local_task.kind)
         FerriteOperators.execute_kind!(local_task.kind, local_task, ws)
     end
 end
