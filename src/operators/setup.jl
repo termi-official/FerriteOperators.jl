@@ -195,16 +195,20 @@ function setup_subdomain_caches(strategy, element_caches, ivh, dh;
                                        needs_sensitivity, global_dofs = gdofs,
                                        iterator = assembly_iterator(kind, element_cache, sdh))
         dc = setup_device_instances(device, ws, n,
-            _device_iterator(kind, element_cache, device_subdomain_handler(device_dh, index)))
+            _device_iterator(kind, element_cache, sdh, device_subdomain_handler(device_dh, index)))
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
     end for (index, (sdh, element_cache, gdofs)) in
         enumerate(zip(dh.subdofhandlers, element_caches, global_dof_sets))]
 end
 
 # A CPU device has no device handler and therefore no device iterator; the
-# workspace it duplicates already carries the host one.
-_device_iterator(kind, element_cache, ::Nothing) = nothing
-_device_iterator(kind, element_cache, device_sdh) = assembly_iterator(kind, element_cache, device_sdh)
+# workspace it duplicates already carries the host one. `sdh` is the HOST
+# subdomain — `with_uniform_dof_stride`'s uniformity check reads its
+# `cell_dofs_offset` even to decorate a DEVICE iterator, since the check has no
+# device counterpart worth paying for.
+_device_iterator(kind, element_cache, sdh, ::Nothing) = nothing
+_device_iterator(kind, element_cache, sdh, device_sdh) =
+    with_uniform_dof_stride(assembly_iterator(kind, element_cache, device_sdh), sdh)
 
 # Each family's global-dof declaration is resolved once per subdomain, before
 # any cache exists, and validated here rather than surfacing later as an

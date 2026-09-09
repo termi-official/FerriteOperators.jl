@@ -94,14 +94,23 @@ the two stored levels of the matrix-free action read the cell id alone, while
 quadrature-data fill forms it once. The node ids are answered from the grid
 instead of staged, there being no sweep that reads them per point.
 
+`stride` is the subdomain's constant per-cell dof count where
+[`with_uniform_dof_stride`](@ref) found `cell_dofs_offset` affine in the cell
+id (`Int`), letting a positioning compute `dofbase` by arithmetic instead of
+reading that array — or `Nothing`, the array-read fallback every other
+subdomain shape takes. It is a TYPE parameter rather than a runtime branch, so
+the two `_reposition` methods below compile to two different kernels and
+neither pays for the other's check.
+
 !!! warning "Experimental surface"
     Internal to the device sweep; it may change in a minor release.
 """
-struct DeviceCellCursor{SDH, X}
+struct DeviceCellCursor{SDH, X, S}
     sdh::SDH
     coords::X
     cellid::Int
     dofbase::Int
+    stride::S
 end
 
 Adapt.@adapt_structure DeviceCellCursor
@@ -127,10 +136,36 @@ Ferrite.reinit!(cv::Ferrite.AbstractCellValues, c::DeviceCellCursor) = Ferrite.r
     return FerriteOperators._with_cell(ws, positioned)
 end
 
-@inline function _reposition(c::DeviceCellCursor, item, flags::Ferrite.UpdateFlags)
+@inline function _reposition(c::DeviceCellCursor{<:Any, <:Any, Int}, item, flags::Ferrite.UpdateFlags)
     i = Int(item)
     flags.coords && Ferrite.getcoordinates!(c.coords, Ferrite.get_grid(c.sdh), i)
-    return DeviceCellCursor(c.sdh, c.coords, i, Int(@inbounds c.sdh.cell_dofs_offset[i]) - 1)
+    return DeviceCellCursor(c.sdh, c.coords, i, (i - 1) * c.stride, c.stride)
+end
+@inline function _reposition(c::DeviceCellCursor{<:Any, <:Any, Nothing}, item, flags::Ferrite.UpdateFlags)
+    i = Int(item)
+    flags.coords && Ferrite.getcoordinates!(c.coords, Ferrite.get_grid(c.sdh), i)
+    return DeviceCellCursor(c.sdh, c.coords, i, Int(@inbounds c.sdh.cell_dofs_offset[i]) - 1, nothing)
+end
+
+"""
+    with_uniform_dof_stride(c::DeviceCellCursor, sdh::Ferrite.SubDofHandler)
+
+Where `sdh`'s flat `cell_dofs_offset` is affine in the cell id — every cell up
+to and including this subdomain's shares one dof count — carries that count on
+the cursor so `_reposition` computes `dofbase` by arithmetic. `nothing`
+otherwise (a grid mixing element types/orders before this subdomain's cells),
+which keeps the array-read `_reposition` method.
+"""
+FerriteOperators.with_uniform_dof_stride(c::DeviceCellCursor, sdh::Ferrite.SubDofHandler) =
+    DeviceCellCursor(c.sdh, c.coords, c.cellid, c.dofbase, _uniform_dof_stride(sdh))
+
+function _uniform_dof_stride(sdh::Ferrite.SubDofHandler)
+    stride = Ferrite.ndofs_per_cell(sdh)
+    offsets = sdh.dh.cell_dofs_offset
+    for cid in sdh.cellset
+        offsets[cid] == (cid - 1) * stride + 1 || return nothing
+    end
+    return stride
 end
 
 """
@@ -143,7 +178,7 @@ dominant cost of the sweep.
 """
 FerriteOperators.assembly_iterator(::MatrixFreeActionKind, element_cache, sdh) = _action_iterator(sdh)
 _action_iterator(sdh::Ferrite.SubDofHandler) = Ferrite.CellCache(sdh)
-_action_iterator(sdh) = DeviceCellCursor(sdh, nothing, -1, 0)
+_action_iterator(sdh) = DeviceCellCursor(sdh, nothing, -1, 0, nothing)
 
 # The coordinate slab is the cursor's only batched member; the handler behind it
 # is shared read-only, and the position is per item rather than per worker.
@@ -151,10 +186,10 @@ FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice, c::Dev
     DeviceCellCursor(c.sdh,
         KA.zeros(device.backend, Ferrite.get_coordinate_type(Ferrite.get_grid(c.sdh)),
                  n_instances, Ferrite.nnodes_per_cell(c.sdh)),
-        c.cellid, c.dofbase)
+        c.cellid, c.dofbase, c.stride)
 
 device_worker_view(c::DeviceCellCursor, worker) =
-    DeviceCellCursor(c.sdh, device_worker_view(c.coords, worker), c.cellid, c.dofbase)
+    DeviceCellCursor(c.sdh, device_worker_view(c.coords, worker), c.cellid, c.dofbase, c.stride)
 
 ####################################
 ## Setup
@@ -166,7 +201,11 @@ function FerriteOperators.setup_device_handler(device::KernelAbstractionsDevice,
 end
 
 FerriteOperators.adapt_partition(device::KernelAbstractionsDevice, partition) =
-    [adapt(device.backend, collect(Int, color)) for color in partition]
+    [_adapt_chunk(device, color) for color in partition]
+# A `UnitRange` chunk (`compute_partition`'s contiguous-cellset case) needs no
+# device copy: it is already isbits, and the kernel indexes it by arithmetic.
+_adapt_chunk(device::KernelAbstractionsDevice, color::AbstractUnitRange{Int}) = color
+_adapt_chunk(device::KernelAbstractionsDevice, color) = adapt(device.backend, collect(Int, color))
 
 """
     adapt_shared(device::KernelAbstractionsDevice, x)

@@ -40,6 +40,24 @@ reads differs.
 assembly_iterator(kind, element_cache, sdh) = CellCache(sdh)
 
 """
+    with_uniform_dof_stride(iterator, sdh)
+
+INTERNAL. Decorates a DEVICE item iterator with the HOST subdomain `sdh`'s
+constant per-cell dof stride, where one exists: `sdh`'s flat `cell_dofs_offset`
+affine in the cell id, i.e. every cell up to and including this subdomain's, in
+GLOBAL cell numbering, carries the same dof count. A cursor that carries the
+stride computes its dof-window offset by arithmetic instead of reading
+`cell_dofs_offset`. Resolved ONCE per subdomain at [`setup_operator`](@ref),
+from the HOST `sdh` even for a device iterator, since the check itself has no
+device counterpart worth paying for.
+
+The identity for every iterator that carries no such offset — Ferrite's
+`CellCache` (the CPU sweep; the HOST `sdh` branch of [`assembly_iterator`](@ref)
+never reaches this), and `nothing` (a CPU device's iterator slot).
+"""
+with_uniform_dof_stride(iterator, sdh) = iterator
+
+"""
     item_update_flags(kind, element_cache) -> Ferrite.UpdateFlags
 
 INTERNAL, EXPERIMENTAL. What a sweep of `kind` over `element_cache` READS off

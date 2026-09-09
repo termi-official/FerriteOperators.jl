@@ -618,7 +618,12 @@ entries, the length the buffer already has) instead of `load_slots!`'s
 resize-then-broadcast, which a per-worker view into a shared device batch
 cannot serve. Where the cache names that width as a compile-time constant
 ([`element_local_length`](@ref)) the gather targets an immutable static vector
-instead of the buffer, which is what puts `uₑ` in a device kernel's registers.
+instead of the buffer, which is what puts `uₑ` in a device kernel's registers —
+and the SAME static vector is the dof window the scatter needs, so it is read
+off the item's cell ONCE rather than once per gather and once per scatter
+(`DeviceCellDofs`, on a device cursor, is a view whose indexing is itself a
+global load). Without a static extent the scatter re-derives the window through
+the usual [`scatter_address`](@ref) seam, exactly as before.
 
 The body is `@inline`: the workspace is a struct of array views, and a device
 kernel that CALLS this instead of containing it passes that struct through
@@ -630,20 +635,22 @@ It carries no `@timeit_debug` frame for the same reason
 """
 @inline function matrix_free_cell_sweep!(kind, task, ws)
     fill!(ws.re, zero(eltype(ws.re)))
-    uₑ = _gather_element_unknowns(ws, task.states.u, element_local_length(ws.element))
+    uₑ, dofs = _gather_element_unknowns(ws, task.states.u, element_local_length(ws.element))
     reinit_values!(ws.element, ws.cell, kind)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     apply_element_action!(ws.re, ws.element, uₑ, _cell_args(ws, (u = uₑ,), pₑ, task.ctx))
-    scatter_local!(kind, task.inner_assembler, ws)
+    scatter_local!(kind, task.inner_assembler, ws, dofs === nothing ? scatter_address(ws) : dofs)
     return nothing
 end
 
 @inline _gather_element_unknowns(ws, src, ::Nothing) =
-    _gather_item_dofs!(ws.slot_buffers.u, src, item_dofs(ws))
+    (_gather_item_dofs!(ws.slot_buffers.u, src, item_dofs(ws)), nothing)
 @inline function _gather_element_unknowns(ws, src, ::Val{ND}) where {ND}
-    dofs = item_dofs(ws)
+    d = item_dofs(ws)
+    dofs = SVector{ND, Int}(ntuple(i -> (@inbounds d[i]), Val(ND)))
     T = eltype(ws.re)
-    return SVector{ND, T}(ntuple(i -> convert(T, @inbounds src[dofs[i]]), Val(ND)))
+    uₑ = SVector{ND, T}(ntuple(i -> convert(T, @inbounds src[dofs[i]]), Val(ND)))
+    return uₑ, dofs
 end
 
 @inline execute_kind!(kind::QuadratureDataKind, task, ws) = quadrature_data_sweep!(kind, task, ws)
@@ -783,16 +790,17 @@ end
 
 
 """
-    scatter_local!(kind, assembler, ws)
+    scatter_local!(kind, assembler, ws, address = scatter_address(ws))
 
 Hand the local buffers a sweep of `kind` filled to the assembler. Which
 buffers those are is [`assembles_matrix`](@ref)/[`assembles_vector`](@ref), so
 the three routes are selected at compile time and a downstream kind is
 scattered by the same body. The item is addressed through
-[`scatter_address`](@ref).
+[`scatter_address`](@ref) by default; a caller that already holds the same
+address ([`matrix_free_cell_sweep!`](@ref), off its own gather) passes it
+instead of having this re-derive it.
 """
-@inline function scatter_local!(kind, assembler, ws)
-    address = scatter_address(ws)
+@inline function scatter_local!(kind, assembler, ws, address = scatter_address(ws))
     if assembles_matrix(kind) && assembles_vector(kind)
         assemble!(assembler, address, ws.Ke, ws.re)
     elseif assembles_matrix(kind)

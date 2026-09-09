@@ -142,6 +142,68 @@ matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling(), storage 
               action(matrix_free_ka(Float64, WorkerPerElement(); storage = Stored())) rtol = 1.0e-11
     end
 
+    # Two device-cursor shortcuts are elected purely from a subdomain's shape: a
+    # sequential partition's chunk is a `UnitRange` where the cellset is
+    # contiguous, and a cursor's dof-window offset is computed by arithmetic
+    # where `cell_dofs_offset` is affine in the cell id. Every test above runs
+    # one contiguous, single-order subdomain and so takes both shortcuts; these
+    # two put the subdomain out of that shape and check the fallback each one
+    # keeps, still against an assembled reference.
+    @testset "the action matches the assembled operator over a non-contiguous cellset" begin
+        grid = generate_grid(Hexahedron, (3, 2, 2), Vec{3}((-1.0, -1.0, -1.0)), Vec{3}((1.0, 1.0, 1.0)))
+        ncells = getncells(grid)
+        addcellset!(grid, "odd", Set(1:2:ncells))
+        addcellset!(grid, "even", Set(2:2:ncells))
+
+        dh = DofHandler(grid)
+        sdh1 = SubDofHandler(dh, getcellset(grid, "odd"));  add!(sdh1, :u, Lagrange{RefHexahedron, 1}())
+        sdh2 = SubDofHandler(dh, getcellset(grid, "even")); add!(sdh2, :u, Lagrange{RefHexahedron, 1}())
+        close!(dh)
+
+        qrc = QuadratureRuleCollection(2)
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice()),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(Float64, ndofs(dh), 5)
+        reference = assembled.A * u
+
+        integrator = SumFactorizedDiffusionIntegrator(2.5, qrc, :u)
+        op = setup_operator(matrix_free_ka(Float64, WorkerPerElement(); storage = ElementAssembly()), integrator, dh)
+        y = zeros(ndofs(dh))
+        mul!(y, op, u)
+        @test y ≈ reference rtol = 1.0e-11
+
+        # Interleaved cell ids: neither subdomain's chunk is contiguous, so
+        # `compute_partition` keeps the `Vector` fallback rather than a `UnitRange`.
+        @test all(sc -> all(chunk -> chunk isa Vector{Int}, sc.partition), get_subdomain_caches(op))
+    end
+
+    @testset "the action matches the assembled operator over a mixed-order subdomain" begin
+        grid = generate_grid(Hexahedron, (4, 2, 2), Vec{3}((-1.0, -1.0, -1.0)), Vec{3}((1.0, 1.0, 1.0)))
+        ncells = getncells(grid)
+        k = ncells ÷ 2
+        addcellset!(grid, "p1", Set(1:k))
+        addcellset!(grid, "p2", Set((k + 1):ncells))
+
+        dh = DofHandler(grid)
+        sdh1 = SubDofHandler(dh, getcellset(grid, "p1")); add!(sdh1, :u, Lagrange{RefHexahedron, 1}())
+        sdh2 = SubDofHandler(dh, getcellset(grid, "p2")); add!(sdh2, :u, Lagrange{RefHexahedron, 2}())
+        close!(dh)
+
+        qrc = QuadratureRuleCollection(3)
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice()),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(Float64, ndofs(dh), 5)
+        reference = assembled.A * u
+
+        integrator = SumFactorizedDiffusionIntegrator(2.5, qrc, :u)
+        op = setup_operator(matrix_free_ka(Float64, WorkerPerElement(); storage = ElementAssembly()), integrator, dh)
+        y = zeros(ndofs(dh))
+        mul!(y, op, u)
+        @test y ≈ reference rtol = 1.0e-11
+    end
+
     # The device sweeps position their items on ONE iterator but refresh what
     # each KIND reads: the two stored levels' action reads a cell id and a dof
     # range, while the quadrature-data fill forms the geometry. Interleaving the

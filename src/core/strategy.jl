@@ -592,7 +592,22 @@ items that may run in parallel (cell ids).
 """
 compute_partition(strategy::AssemblyStrategy, sdh::SubDofHandler) = compute_partition(strategy.scheduling, CellItems(sdh))
 compute_partition(strategy::AssemblyStrategy, provider) = compute_partition(strategy.scheduling, provider)
-compute_partition(::SequentialScheduling, provider::CellItems) = (collect(provider.sdh.cellset),)
+compute_partition(::SequentialScheduling, provider::CellItems) = (_cell_chunk(provider.sdh.cellset),)
+
+# The one chunk `SequentialScheduling` hands out, as a `UnitRange` where the
+# cellset is contiguous — the very common single-subdomain-over-the-whole-grid
+# case — so a device kernel's item id is `first(chunk) + i - 1`, arithmetic
+# instead of an indexed load, and `adapt_partition` (the KernelAbstractions
+# extension) skips moving it into device memory at all. Checked once here at
+# setup; a non-contiguous cellset keeps the `Vector` and the loop that walks it
+# unchanged.
+function _cell_chunk(cellset)
+    cells = collect(cellset)
+    if !isempty(cells) && issorted(cells) && cells[end] - cells[1] == length(cells) - 1
+        return cells[1]:cells[end]
+    end
+    return cells
+end
 
 function compute_partition(scheduling::ColoredScheduling, provider::CellItems)
     return Ferrite.create_coloring(get_grid(provider.sdh.dh), collect(provider.sdh.cellset); alg=scheduling.alg)
