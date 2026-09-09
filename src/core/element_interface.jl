@@ -173,6 +173,9 @@ not declare it.
 
 Both arguments may be views into a shared device batch, so an implementation
 indexes them and neither resizes nor reallocates.
+
+!!! warning "Experimental surface"
+    This entry point may change in a minor release.
 """
 function apply_element_action! end
 
@@ -236,6 +239,9 @@ a cache that stores nothing has nothing to fill.
 The store is the cache's own — its layout, its element type, its freshness. The
 sweep visits every cell of the subdomain exactly once and cells write disjoint
 slices, so no synchronization is needed and none is provided.
+
+!!! warning "Experimental surface"
+    This entry point may change in a minor release.
 """
 fill_quadrature_data!(cache, args::CellArgs) = nothing
 
@@ -275,6 +281,9 @@ operator needs (`dim` forward contractions with the pointwise map fused into
 the last, then `dim` backward contractions with the store fused into the last).
 Serving an element whose pipeline has a different length or a data-dependent
 one is an open design question, not a supported case.
+
+!!! warning "Experimental surface"
+    These entry points may change in a minor release.
 """
 function cooperative_lattice_dim end
 @doc (@doc cooperative_lattice_dim) function cooperative_group_size end

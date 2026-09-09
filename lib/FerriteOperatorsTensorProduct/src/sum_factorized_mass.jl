@@ -1,7 +1,7 @@
 @doc raw"""
     SumFactorizedMassIntegrator(ρ, qrc, field_name)
 
-The same bilinear form as [`SimpleBilinearMassIntegrator`](@ref),
+The same bilinear form as [`SimpleBilinearMassIntegrator`](@ref FerriteOperatorsExampleElements.SimpleBilinearMassIntegrator),
 ``a(u,v) = \int v \, \rho \, u \,dx``, written for the MATRIX-FREE level: its
 cache evaluates the ACTION `yₑ = Mₑ·uₑ` by sum factorization, reusing
 [`AbstractTensorProductElementCache`](@ref) whole. `ρ` is a constant scalar.
@@ -14,7 +14,7 @@ two element mappings, the two `storage` elections — is
 [`AbstractTensorProductElementCache`](@ref)'s.
 
 Set the operator up with `form = MatrixFreeAction()`. The cache has no
-element-matrix kernel; assemble [`SimpleBilinearMassIntegrator`](@ref) for a
+element-matrix kernel; assemble [`SimpleBilinearMassIntegrator`](@ref FerriteOperatorsExampleElements.SimpleBilinearMassIntegrator) for a
 matrix of the same form.
 """
 struct SumFactorizedMassIntegrator{QRC} <: AbstractBilinearIntegrator

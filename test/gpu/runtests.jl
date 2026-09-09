@@ -8,6 +8,7 @@
 # The [sources] section wires the repo in by path, so this needs Julia ≥ 1.11.
 using FerriteOperators
 using FerriteOperatorsExampleElements
+using FerriteOperatorsTensorProduct
 using Test
 using SparseArrays
 using LinearAlgebra

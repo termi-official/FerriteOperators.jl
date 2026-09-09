@@ -1,5 +1,6 @@
 using FerriteOperators
 using FerriteOperatorsExampleElements
+using FerriteOperatorsTensorProduct
 using Test
 using LinearAlgebra
 using Polyester

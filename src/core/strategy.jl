@@ -97,6 +97,9 @@ condensed element's Jacobian correction is stored or re-derived.
 
 `CorrectorElection` is the former name of this supertype and remains as an
 alias.
+
+!!! warning "Experimental surface"
+    This election family may change in a minor release.
 """
 abstract type StorageElection end
 
@@ -140,6 +143,28 @@ polynomial order than the per-quadrature-point store; it is the election for
 LOW order, where that square is small and the dense product is the fastest
 thing a device can do. [`WorkerPerElement`](@ref) only — one lane owning one
 dense product has no lattice to split.
+
+Measured against the same form's assembled global matrix, on a tensor-product
+hexahedral mesh with one `Float32` scalar field (bytes/cell, `p` = polynomial
+order):
+
+| `p` | `ElementAssembly` (`ndofs_per_cell² · 4`) | assembled (global CSR, amortized) |
+|---|---|---|
+| 1 | 256 | 220 |
+| 2 | 2916 | 4157 |
+| 3 | 16384 | 27318 |
+
+`ndofs_per_cell²` overtakes the assembled matrix's per-cell share between
+`p = 1` and `p = 2` and keeps widening — this election is the cheaper
+MATRIX-FREE storage at `p = 1`–`2` on the measured card and the one worth
+electing there; [`Stored`](@ref)/[`Recompute`](@ref) are the per-quadrature-
+point elections above that. The fill itself (`ndofs_per_cell` element actions,
+or one analytic kernel call, per cell) is paid once at [`setup_operator`](@ref)
+and again on every [`update_operator!`](@ref) — never on a bare `mul!`.
+
+Storing only the symmetric half of `Kₑ` for a symmetric bilinear form would
+roughly halve this table's first column; that is a recorded future election,
+not one this cache implements.
 """
 struct ElementAssembly <: StorageElection end
 

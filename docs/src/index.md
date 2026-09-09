@@ -193,6 +193,21 @@ form = MatrixFreeAction(; storage = ElementAssembly())   # `Stored()` is the def
   `ndofs_per_cell²` scalars per cell, so it is the LOW-order election, and it
   runs [`WorkerPerElement`](@ref) only.
 
+Measured bytes/cell against the same form's assembled matrix (`Float32`,
+tensor-product hexahedra):
+
+| `p` | `ElementAssembly` | assembled |
+|---|---|---|
+| 1 | 256 | 220 |
+| 2 | 2916 | 4157 |
+| 3 | 16384 | 27318 |
+
+`ElementAssembly` is the cheapest matrix-free storage at `p = 1`–`2` on the
+measured card; `ndofs_per_cell²` overtakes the assembled matrix's per-cell
+share above that, which is where [`Stored`](@ref)/[`Recompute`](@ref) take
+over. See [`ElementAssembly`](@ref)'s own docstring for the fill cost and a
+recorded future election (storing only `Kₑ`'s symmetric half).
+
 Both stored levels are filled at setup and refilled by
 [`update_operator!`](@ref), whose freshness contract is the one an assembled
 operator has: a factor that depends on `p` or on the context time is as fresh as
@@ -206,8 +221,8 @@ an ordinary element-matrix kernel and no matrix-free kernel at all runs the
 ELEMENT level, and a matrix-free one has its matrices filled from its own
 action.
 
-Writing such an element is [`AbstractTensorProductElementCache`](@ref) plus a
-POINTWISE MAP ([`tensor_product_pointwise`](@ref)): the 1D operators, the
+Writing such an element is [`AbstractTensorProductElementCache`](@ref FerriteOperatorsTensorProduct.AbstractTensorProductElementCache)
+plus a POINTWISE MAP ([`tensor_product_pointwise`](@ref FerriteOperatorsTensorProduct.tensor_product_pointwise)): the 1D operators, the
 lattice permutations, the contractions and both mapping pipelines are the
 core's, and what remains is the `D` block of the operator decomposition. The
 example elements ship two of them over that one core — a diffusion action

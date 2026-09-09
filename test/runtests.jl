@@ -16,6 +16,8 @@ let specs = Pkg.PackageSpec[]
         push!(specs, Pkg.PackageSpec(path = joinpath(@__DIR__, "..")))
     resolvable("FerriteOperatorsExampleElements", "465fd1ee-fdf1-4c5c-a097-38ab1ffcf927") ||
         push!(specs, Pkg.PackageSpec(path = joinpath(@__DIR__, "..", "lib", "FerriteOperatorsExampleElements")))
+    resolvable("FerriteOperatorsTensorProduct", "3201a26f-dd62-453f-b9f2-4be67ac8202a") ||
+        push!(specs, Pkg.PackageSpec(path = joinpath(@__DIR__, "..", "lib", "FerriteOperatorsTensorProduct")))
     isempty(specs) || Pkg.develop(specs)
 end
 

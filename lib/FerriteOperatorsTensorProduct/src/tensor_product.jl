@@ -277,8 +277,9 @@ An element evaluating its operator's ACTION by Deville–Fischer–Mund sum
 factorization over a tensor-product lattice, in `O(p^{d+1})` per cell instead of
 forming `Kₑ`. The core supplies the contractions, the lattice bookkeeping and
 BOTH matrix-free entries — [`apply_element_action!`](@ref) for
-[`WorkerPerElement`](@ref) and the [`cooperative_stage!`](@ref) pipeline for
-[`CooperativeElement`](@ref) — over one definition of the element math.
+[`WorkerPerElement`](@ref FerriteOperators.WorkerPerElement) and the
+[`cooperative_stage!`](@ref) pipeline for [`CooperativeElement`](@ref) — over
+one definition of the element math.
 
 What a concrete cache brings:
 
@@ -289,14 +290,16 @@ What a concrete cache brings:
 - [`tensor_product_pointwise`](@ref) — THE POINTWISE MAP, the one place the
   form enters
 - optionally [`fill_quadrature_data!`](@ref), where that map reads factors a
-  [`QuadratureDataKind`](@ref) sweep stored instead of re-deriving them
+  [`QuadratureDataKind`](@ref FerriteOperators.QuadratureDataKind) sweep
+  stored instead of re-deriving them
 - the device struct-of-arrays trio ([`setup_device_instances`](@ref),
   [`device_worker_view`](@ref), [`duplicate_for_device`](@ref)), which names the
   concrete type and is therefore not derivable here; `scratch` is the one
   per-worker field and everything else is shared read-only
 
 The cache has NO element-matrix kernel: assembling it under
-[`FullAssembly`](@ref) is refused where the matrix would be formed.
+[`FullAssembly`](@ref FerriteOperators.FullAssembly) is refused where the
+matrix would be formed.
 
 !!! warning "Experimental surface"
     This supertype, its accessors and the pipeline it drives may change in a
@@ -345,9 +348,10 @@ function tensor_product_pointwise end
 The per-cell contraction box both element mappings work in: `1 + 2·nc` lattice
 boxes of `max(Nb, Nq)^dim` entries, `nc` being the component count `quantity`
 names — the element state, and a working pair per component.
-[`WorkerPerElement`](@ref) gives every worker its own, batched with the worker
-as the leading index on a device; [`CooperativeElement`](@ref) stages the same
-boxes in group-local memory instead
+[`WorkerPerElement`](@ref FerriteOperators.WorkerPerElement) gives every
+worker its own, batched with the worker as the leading index on a device;
+[`CooperativeElement`](@ref) stages the same boxes in group-local memory
+instead
 ([`tensor_product_scratch_prototype`](@ref)).
 """
 function allocate_tensor_product_scratch(values::TensorProductValues{dim, Nb, Nq, Nn, T},

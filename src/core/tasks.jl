@@ -35,6 +35,9 @@ a request to point at.
 Its state gather writes exactly `ndofs_per_cell` entries, unlike the
 [`ResidualKind`](@ref) gather that resizes — which is what lets the sweep run
 on a device whose per-worker slot buffer is a view into a shared batch.
+
+!!! warning "Experimental surface"
+    This kind may change in a minor release.
 """
 struct MatrixFreeActionKind end
 
@@ -50,6 +53,9 @@ cells write disjoint slices of a store the cache owns — and it is what a
 
 Its `p`/`ctx` are the sweep's, so a factor that depends on a parameter or on the
 time is as fresh as the last such call, and no fresher.
+
+!!! warning "Experimental surface"
+    This kind may change in a minor release.
 """
 struct QuadratureDataKind end
 

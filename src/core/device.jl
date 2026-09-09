@@ -248,6 +248,9 @@ GPU one. The counterpart of [`setup_device_instances`](@ref) for what is not per
 worker — an element cache's quadrature-data store, a coefficient table — so a
 cache's device layout says which of its fields are batched and which are shared
 without naming a backend.
+
+!!! warning "Experimental surface"
+    This hook may change in a minor release.
 """
 adapt_shared(::AbstractDevice, x) = x
 
@@ -324,6 +327,9 @@ it — [`n_workers`](@ref), [`setup_device_instances`](@ref),
 
 [`WorkerPerElement`](@ref) is what every device does today; assembling forms
 know no other.
+
+!!! warning "Experimental surface"
+    This mapping family may change in a minor release.
 """
 abstract type AbstractElementMapping end
 

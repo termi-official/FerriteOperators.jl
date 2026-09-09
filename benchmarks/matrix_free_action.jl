@@ -28,7 +28,7 @@
 # by a SUSTAINED burn of that same arm (`WARMUP_SECONDS`) and repeated over
 # `PASSES` independent burn+sample rounds, and the SM/memory clocks are queried
 # around each arm so a cold measurement is visible rather than silent.
-using FerriteOperators, FerriteOperatorsExampleElements
+using FerriteOperators, FerriteOperatorsExampleElements, FerriteOperatorsTensorProduct
 using LinearAlgebra
 using Printf
 using SparseArrays

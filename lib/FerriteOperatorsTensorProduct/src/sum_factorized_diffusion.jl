@@ -1,7 +1,7 @@
 @doc raw"""
     SumFactorizedDiffusionIntegrator(D, qrc, field_name)
 
-The same bilinear form as [`SimpleBilinearDiffusionIntegrator`](@ref),
+The same bilinear form as [`SimpleBilinearDiffusionIntegrator`](@ref FerriteOperatorsExampleElements.SimpleBilinearDiffusionIntegrator),
 ``a(u,v) = \int \nabla v \cdot D \nabla u \,dx``, written for the MATRIX-FREE
 level: its cache evaluates the ACTION `yₑ = Kₑ·uₑ` by sum factorization
 (Deville–Fischer–Mund) in `O(p^{d+1})` per cell instead of forming `Kₑ`.
@@ -20,7 +20,7 @@ cells included) is this integrator's.
 
 The cache has no element-matrix kernel: `FullAssembly` over this integrator is
 refused where the matrix would be formed. Assemble
-[`SimpleBilinearDiffusionIntegrator`](@ref) for a matrix of the same form.
+[`SimpleBilinearDiffusionIntegrator`](@ref FerriteOperatorsExampleElements.SimpleBilinearDiffusionIntegrator) for a matrix of the same form.
 """
 struct SumFactorizedDiffusionIntegrator{DT, QRC} <: AbstractBilinearIntegrator
     D::DT

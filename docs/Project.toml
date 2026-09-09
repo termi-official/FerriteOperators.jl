@@ -2,7 +2,9 @@
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 FerriteOperators = "27d9367a-5072-424e-9c5f-fe582399bac3"
 FerriteOperatorsExampleElements = "465fd1ee-fdf1-4c5c-a097-38ab1ffcf927"
+FerriteOperatorsTensorProduct = "3201a26f-dd62-453f-b9f2-4be67ac8202a"
 
 [sources]
 FerriteOperators = {path = ".."}
 FerriteOperatorsExampleElements = {path = "../lib/FerriteOperatorsExampleElements"}
+FerriteOperatorsTensorProduct = {path = "../lib/FerriteOperatorsTensorProduct"}
