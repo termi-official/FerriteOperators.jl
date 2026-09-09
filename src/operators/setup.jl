@@ -204,6 +204,12 @@ function _resolve_global_dof_sets(strategy, dh, sets, declaration)
 end
 
 function _reject_unsupported_global_dof_strategy(strategy::AssemblyStrategy, declaration)
+    strategy.form isa MatrixFreeAction && throw(ArgumentError(
+        "A subdomain declaring `$declaration` cannot be evaluated under `MatrixFreeAction`: the " *
+        "element action is defined on the cell's FIELD space (`apply_element_action!` receives " *
+        "`uₑ`/`yₑ` in `celldofs` order and the ELEMENT level's matrices are `ndofs_per_cell` " *
+        "square), so the declared tail would be gathered, ignored by the element, and scattered " *
+        "back as zero. Assemble this operator under `FullAssembly`."))
     strategy.device isa AbstractGPUDevice && throw(ArgumentError(
         "A subdomain declaring `$declaration` cannot be assembled on " *
         "$(nameof(typeof(strategy.device))): a GPU device assembles under `ColoredScheduling` " *
@@ -276,7 +282,13 @@ function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblySt
         "with a plain `+=` — its `AbstractThreadSafeAssembler` supertype means \"safe to alias " *
         "across workers given a valid coloring\", not race-free — so an uncolored device sweep " *
         "is a silent data race. Pass `scheduling = ColoredScheduling()`."))
-    _assert_device_specification(device, operator_specification(strategy.form))
+    (operator_specification(strategy.form) === nothing || element_mapping(device) isa WorkerPerElement) ||
+        throw(ArgumentError(
+            "$dev carries `$(nameof(typeof(element_mapping(device))))`, which executes the " *
+            "matrix-free action only. An assembling form is `WorkerPerElement`; build the device " *
+            "without `with_element_mapping`, or set the operator up with `form = MatrixFreeAction(; " *
+            "element_mapping = CooperativeElement())`, which resolves the mapping itself."))
+    _assert_device_specification(device, operator_specification(strategy.form), integrator)
 
     needs_ad_decoration(integrator) && throw(ArgumentError(
         "$dev assembles bilinear and linear forms only (got $(nameof(typeof(integrator)))). A " *
@@ -294,9 +306,9 @@ function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblySt
 end
 
 # A form that allocates no global array declares no storage to check.
-_assert_device_specification(device, ::Nothing) = nothing
+_assert_device_specification(device, ::Nothing, integrator) = nothing
 
-function _assert_device_specification(device, spec)
+function _assert_device_specification(device, spec, integrator)
     dev = nameof(typeof(device))
     spec isa BlockedOperatorSpecification && throw(ArgumentError(
         "$dev does not support `BlockedOperatorSpecification`: Ferrite ships no device " *
@@ -306,8 +318,33 @@ function _assert_device_specification(device, spec)
         "the operator without one and apply the constraints yourself — Ferrite's `apply!` takes " *
         "a device constraint handler (`adapt(backend, ch)`)."))
     _assert_device_matrix_type(device, spec.matrix_type)
+    _assert_no_silent_host_matrix(device, spec, integrator)
     return nothing
 end
+
+# `matrix_type(device, spec)` resolves a `StandardOperatorSpecification` with
+# no `matrix_type` named — or one explicitly given as a host type — to the
+# host `SparseMatrixCSC`, and [`allocate_operator_matrix`](@ref) allocates
+# exactly that: the system matrix would silently land on the HOST. Loud here,
+# at setup, before any cache is built. Scoped to the integrator families that
+# actually allocate the global MATRIX under this form ([`create_system_matrix`](@ref));
+# a linear integrator allocates a vector, whose type this spec's `matrix_type`
+# has no say over. The `KernelAbstractions.CPU` debug backend is genuinely
+# host-resident — there is no device memory to have missed — and is exempt.
+_assert_no_silent_host_matrix(device, spec, ::AbstractLinearIntegrator) = nothing
+function _assert_no_silent_host_matrix(device, spec, integrator)
+    MT = matrix_type(device, spec)
+    (MT <: SparseMatrixCSC && !_host_resident_backend(device)) && throw(ArgumentError(
+        "$(nameof(typeof(device))) resolves the operator specification's matrix type to the " *
+        "host $MT: no device matrix type was named (or a host one was named explicitly), so " *
+        "`StandardOperatorSpecification`'s default is what gets allocated on a device whose " *
+        "system matrix belongs off the host. Pass `StandardOperatorSpecification(matrix_type = " *
+        "<device matrix type>)`."))
+    return nothing
+end
+
+_host_resident_backend(::AbstractGPUDevice) = false
+_host_resident_backend(device::KernelAbstractionsDevice) = nameof(typeof(device.backend)) === :CPU
 
 _assert_device_matrix_type(device, ::Nothing) = nothing
 

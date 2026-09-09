@@ -10,7 +10,7 @@ The whole element is its pointwise map ``\rho \, w_q \det(J_q)`` — a SCALAR
 factor on the interpolated value, where
 [`SumFactorizedDiffusionIntegrator`](@ref) has a tensor on the reference
 gradient. Everything else — the 1D operators, the lattice, the contractions, the
-two element mappings, the two `qdata` elections — is
+two element mappings, the two `storage` elections — is
 [`AbstractTensorProductElementCache`](@ref)'s.
 
 Set the operator up with `form = MatrixFreeAction()`. The cache has no
@@ -27,7 +27,7 @@ end
     SumFactorizedMassElementCache
 
 The cache [`SumFactorizedMassIntegrator`](@ref) sets up: the density, one
-`TensorProductValues`, the per-quadrature-point factor store the form's `qdata`
+`TensorProductValues`, the per-quadrature-point factor store the form's `storage`
 election allocated (`nothing` under `Recompute()`), and the contraction scratch.
 """
 struct SumFactorizedMassElementCache{T, VT, QT, ST} <: AbstractTensorProductElementCache

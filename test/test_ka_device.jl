@@ -150,6 +150,11 @@ end
 FerriteOperators.setup_element_cache(m::NonlinearWallIntegrator, sdh::SubDofHandler) =
     FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh)
 
+# A backend double that is not `KernelAbstractions.CPU`, so the host-resident
+# exemption does not apply — this stands in for a real accelerator backend
+# without depending on one.
+struct FakeGPUBackend end
+
 @testset "KernelAbstractionsDevice scope walls" begin
     qrc = QuadratureRuleCollection(2)
     dh  = quad_testbed()
@@ -193,6 +198,33 @@ FerriteOperators.setup_element_cache(m::NonlinearWallIntegrator, sdh::SubDofHand
             ColoredScheduling(), ka_device())
         err = @test_throws ArgumentError setup_operator(mismatched, bilinear, dh)
         @test occursin("element type", err.value.msg)
+    end
+
+    @testset "rejects a silent host matrix on a non-CPU GPU-class device" begin
+        # No `matrix_type` named: `matrix_type(device, spec)` resolves to the
+        # host `SparseMatrixCSC`, which a real accelerator device must not get
+        # silently. Caught here, through the full `setup_operator` route, since
+        # `assert_device_supported` runs before any device cache is built and
+        # so needs nothing from `FakeGPUBackend` beyond its type name.
+        fake_device = KernelAbstractionsDevice(FakeGPUBackend(); value_type = Float64, index_type = Int)
+        strategy = AssemblyStrategy(FullAssembly(), ColoredScheduling(), fake_device)
+        err = @test_throws ArgumentError setup_operator(strategy, bilinear, dh)
+        @test occursin("matrix_type", err.value.msg)
+        @test occursin("host", err.value.msg)
+
+        # A linear integrator allocates a VECTOR, never this matrix type, so
+        # the same device and the same (absent) `matrix_type` is not an error
+        # — checked directly, since a full `setup_operator` round trip on
+        # `FakeGPUBackend` would need real KernelAbstractions backend support
+        # past this point, which is not what is under test here.
+        spec = StandardOperatorSpecification()
+        linear = SimpleLinearIntegrator(3.1, qrc, :u)
+        @test FerriteOperators._assert_no_silent_host_matrix(fake_device, spec, linear) === nothing
+
+        # `KernelAbstractions.CPU()`, exercised throughout this file with the
+        # very same default spec, is exempt — the debug backend is genuinely
+        # host-resident.
+        @test FerriteOperators._assert_no_silent_host_matrix(ka_device(), spec, bilinear) === nothing
     end
 
     @testset "rejects nonlinear integrators" begin

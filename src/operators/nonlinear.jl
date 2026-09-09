@@ -325,6 +325,7 @@ Apply the (scaled) action of the assembled linearization to the vector `in`.
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector) = mul!(out, op.J, in)
 mul!(out::AbstractVector, op::LinearizedFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.J, in, α, β)
 operator_payload(op::LinearizedFerriteOperator) = op.J
+get_matrix(op::LinearizedFerriteOperator) = op.J
 
 """
     residual_size(op) -> Int

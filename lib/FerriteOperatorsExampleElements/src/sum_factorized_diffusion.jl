@@ -8,7 +8,7 @@ level: its cache evaluates the ACTION `yₑ = Kₑ·uₑ` by sum factorization
 
 `D` is a constant scalar (isotropic) or a `SymmetricTensor{2, dim}`. Set the
 operator up with `form = MatrixFreeAction()`; the cache serves both element
-mappings and both `qdata` elections, so one definition of the element math runs
+mappings and both `storage` elections, so one definition of the element math runs
 one worker per element and one workgroup per element, with the geometric factors
 stored or re-derived.
 
@@ -33,7 +33,7 @@ end
 
 The cache [`SumFactorizedDiffusionIntegrator`](@ref) sets up: the diffusion
 tensor in the reference frame, one `TensorProductValues`, the per-quadrature-point
-factor store the form's `qdata` election allocated (`nothing` under
+factor store the form's `storage` election allocated (`nothing` under
 `Recompute()`), and the contraction scratch.
 """
 struct SumFactorizedDiffusionElementCache{DT, VT, QT, ST} <: AbstractTensorProductElementCache
@@ -77,7 +77,7 @@ end
 _factor_type(::TensorProductValues{dim, Nb, Nq, Nn, T}) where {dim, Nb, Nq, Nn, T} =
     SMatrix{dim, dim, T, dim * dim}
 
-# The form's `qdata` election: one `W_q` per quadrature point of every cell of
+# The form's `storage` election: one `W_q` per quadrature point of every cell of
 # the subdomain, or nothing to store.
 with_action_storage(cache::SumFactorizedDiffusionElementCache, storage::Stored, sdh) =
     SumFactorizedDiffusionElementCache(cache.D, cache.values,

@@ -50,10 +50,17 @@ mul!(y::AbstractVector, op::MatrixFreeFerriteOperator, u::AbstractVector) =
 # The action is linear in `u`, so `α` rides the accumulator instead of the
 # element kernels: scale the incoming `y` by `β/α`, accumulate the unscaled
 # action into it, and scale the sum by `α`. No temporary, and the common
-# solver spellings (α = ±1) are exact.
+# solver spellings (α = ±1) are exact. `β = 0` ASSIGNS rather than scales
+# (`rmul!(y, 0)` would propagate a NaN/Inf already in `y`), matching the
+# LinearAlgebra 5-arg `mul!` convention.
 function mul!(y::AbstractVector, op::MatrixFreeFerriteOperator, u::AbstractVector, α, β)
-    iszero(α) && return rmul!(y, β)
-    rmul!(y, β / α)
+    if iszero(β)
+        fill!(y, zero(eltype(y)))
+        iszero(α) && return y
+    else
+        iszero(α) && return rmul!(y, β)
+        rmul!(y, β / α)
+    end
     run_sweep!(MatrixFreeActionKind(), start_assemble(op.engine.strategy, y; fillzero = false),
                op, (u = u,), nothing, nothing)
     return rmul!(y, α)

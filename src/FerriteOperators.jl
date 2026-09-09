@@ -161,7 +161,7 @@ export CondensationReport, condense_internal!, condense_cell!, condense_algebrai
 export local_conditions!
 export rollback_state!, commit_state!, invalidate_correctors!
 export allocate_internal_jacobian, update_internal_jacobian!
-export CorrectorElection, Stored, Recompute, corrector_election, corrector_election_error
+export CorrectorElection, corrector_election, corrector_election_error
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
 export WeightedJacobianRequest
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
@@ -199,7 +199,7 @@ export default_strategy
 export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAssembly
 export MatrixFreeAction, MatrixFreeFerriteOperator, MatrixFreeActionKind, apply_element_action!
 export QuadratureDataKind, fill_quadrature_data!, with_assembly_form, with_action_storage, adapt_shared
-export StorageElection, ElementAssembly, ElementAssemblyCache, element_matrix_fill_route
+export StorageElection, Stored, Recompute, ElementAssembly, ElementAssemblyCache, element_matrix_fill_route
 export AbstractElementMapping, WorkerPerElement, CooperativeElement, with_element_mapping
 export cooperative_lattice_dim, cooperative_group_size, cooperative_scratch_shape
 export cooperative_load!, cooperative_stage!, cooperative_store!

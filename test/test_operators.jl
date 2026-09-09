@@ -126,6 +126,8 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
             update_operator!(bilinop_base, 0.0)
             @test norm_baseline == norm(bilinop_base.A)
 
+            @test get_matrix(bilinop_base) === bilinop_base.A
+
             # The bilinear form induces a linear operator, so the residual
             # entry point must reproduce its action.
             ub = sin.(0.4 .* (1:ndofs(dh)))
@@ -203,6 +205,7 @@ FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, c::TimedMassCache, arg
         update_linearization!(nlop_base, u, 0.0)
         Jnorm_baseline = norm(nlop_base.J)
         @test Jnorm_baseline > 0.0
+        @test get_matrix(nlop_base) === nlop_base.J
         yref = zero(u)
         mul!(yref, nlop_base.J, u)
 

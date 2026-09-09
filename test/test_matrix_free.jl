@@ -324,6 +324,25 @@ matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling(), storage 
         @test op * u ≈ action rtol = 1.0e-12
     end
 
+    @testset "β = 0 ASSIGNS rather than scales, even against a NaN-filled y" begin
+        # `rmul!(y, 0)` propagates a NaN/Inf already sitting in `y`; the LinearAlgebra convention
+        # for the 5-arg `mul!` is that `β = 0` overwrites `y` instead, regardless of its contents.
+        dh = distorted_testbed(Quadrilateral, o -> Lagrange{RefQuadrilateral, o}(), Float64, (4, 4), 2)
+        op = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction()),
+                            SumFactorizedDiffusionIntegrator(2.5, QuadratureRuleCollection(3), :u), dh)
+        u = probe(Float64, ndofs(dh), 17)
+        action = zeros(ndofs(dh))
+        mul!(action, op, u)
+
+        y = fill(NaN, ndofs(dh))
+        mul!(y, op, u, 1.0, 0.0)
+        @test y ≈ action rtol = 1.0e-11
+
+        y = fill(NaN, ndofs(dh))
+        mul!(y, op, u, 0.0, 0.0)
+        @test all(iszero, y)
+    end
+
     @testset "evaluate! is the action with parameters and a context" begin
         dh = distorted_testbed(Quadrilateral, o -> Lagrange{RefQuadrilateral, o}(), Float64, (3, 3), 1)
         op = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction()),
@@ -433,5 +452,18 @@ struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
         err = @test_throws ArgumentError FerriteOperators.execute_on_device!(
             task, device, nothing, ())
         @test occursin("BilinearKind", err.value.msg)
+    end
+
+    # Complements the call-time check just above: an assembling form on a
+    # `CooperativeElement` device is refused at `setup_operator`, before any
+    # cache or sweep exists, rather than surfacing only inside the first
+    # `execute_on_device!` call.
+    @testset "an assembling form on a CooperativeElement device is refused at setup" begin
+        device = FerriteOperators.with_element_mapping(
+            KernelAbstractionsDevice(KA.CPU()), CooperativeElement())
+        strategy = AssemblyStrategy(device; scheduling = ColoredScheduling())
+        err = @test_throws ArgumentError setup_operator(strategy, assembled_form, dh)
+        @test occursin("CooperativeElement", err.value.msg)
+        @test occursin("WorkerPerElement", err.value.msg)
     end
 end
