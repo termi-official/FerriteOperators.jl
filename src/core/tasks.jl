@@ -554,7 +554,7 @@ function load_slot!(buf, src::InternalSource, ws)
     return buf
 end
 
-execute_kind!(kind::PrimalKind, task, ws) = primal_cell_sweep!(kind, task, ws)
+@inline execute_kind!(kind::PrimalKind, task, ws) = primal_cell_sweep!(kind, task, ws)
 
 """
     primal_cell_sweep!(kind, task, ws)
@@ -577,8 +577,13 @@ it. It writes nothing back: [`condense_internal!`](@ref) is the only writer of
 The body carries no `@timeit_debug` frame — it has to compile for a GPU, and
 GPUCompiler rejects the `try`/`finally` the macro expands to. The per-item
 timer sits at [`execute_single_task!`](@ref) instead.
+
+It is `@inline` for the same reason [`matrix_free_cell_sweep!`](@ref) is: this
+is [`FullAssembly`](@ref)'s device sweep body, and a device kernel that CALLS
+it instead of containing it passes `ws` — a struct of array views — through
+per-thread local memory instead of registers.
 """
-function primal_cell_sweep!(kind, task, ws)
+@inline function primal_cell_sweep!(kind, task, ws)
     assembles_matrix(kind) && fill!(ws.Ke, zero(eltype(ws.Ke)))
     assembles_vector(kind) && fill!(ws.re, zero(eltype(ws.re)))
     reinit_values!(ws.element, ws.cell, kind)

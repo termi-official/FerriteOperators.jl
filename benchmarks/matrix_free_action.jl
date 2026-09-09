@@ -221,7 +221,7 @@ function run_order(order)
             device   = KernelAbstractionsDevice(CUDABackend(); value_type = Tv, index_type = Ti)
             spec     = StandardOperatorSpecification(; matrix_type = CuSparseMatrixCSC{Tv, Ti})
             strategy = AssemblyStrategy(FullAssembly(spec), ColoredScheduling(), device)
-            op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+            op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(2.5f0, qrc, :u), dh)
             update_operator!(op, nothing)
             A = op.A
             entry_bytes = nnz(A) * (sizeof(Tv) + sizeof(Ti))

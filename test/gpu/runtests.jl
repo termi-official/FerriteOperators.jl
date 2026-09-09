@@ -118,6 +118,21 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
             strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
         @test occursin("start_assemble", err.value.msg)
     end
+
+    # `primal_cell_sweep!` is `@inline`, so the compiled device kernel must contain its
+    # body rather than call out to it — a call would marshal the workspace through
+    # per-thread local memory (see its docstring). A regression that drops the
+    # annotation reappears here as a `julia_primal_cell_sweep_` device function in the PTX.
+    @testset "FullAssembly device sweep has no call to primal_cell_sweep!" begin
+        strategy = cuda_strategy(; matrix_type = CuSparseMatrixCSC{Tv, Ti})
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(op, nothing) # warm up: JIT before the capture below
+
+        io = IOBuffer()
+        CUDA.@device_code_ptx io=io update_operator!(op, nothing)
+        ptx = String(take!(io))
+        @test !occursin("primal_cell_sweep", ptx)
+    end
 end
 
 @testset "CUDA matrix-free action" begin
