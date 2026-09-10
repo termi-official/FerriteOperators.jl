@@ -46,6 +46,7 @@ allocate_element_matrix(d::AbstractElementCacheDecorator, sdh) = allocate_elemen
 allocate_element_unknown_vector(d::AbstractElementCacheDecorator, sdh) = allocate_element_unknown_vector(d.inner, sdh)
 allocate_element_residual_vector(d::AbstractElementCacheDecorator, sdh) = allocate_element_residual_vector(d.inner, sdh)
 element_value_type(d::AbstractElementCacheDecorator) = element_value_type(d.inner)
+element_matrix_symmetry(d::AbstractElementCacheDecorator) = element_matrix_symmetry(d.inner)
 evaluate_cell_functional(kind, d::AbstractElementCacheDecorator, args) = evaluate_cell_functional(kind, d.inner, args)
 evaluate_algebraic_functional(kind, d::AbstractElementCacheDecorator, args) =
     evaluate_algebraic_functional(kind, d.inner, args)

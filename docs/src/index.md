@@ -196,17 +196,20 @@ form = MatrixFreeAction(; storage = ElementAssembly())   # `Stored()` is the def
 Measured bytes/cell against the same form's assembled matrix (`Float32`,
 tensor-product hexahedra):
 
-| `p` | `ElementAssembly` | assembled |
-|---|---|---|
-| 1 | 256 | 220 |
-| 2 | 2916 | 4157 |
-| 3 | 16384 | 27318 |
+| `p` | `ElementAssembly` | packed (symmetric) | assembled |
+|---|---|---|---|
+| 1 | 256 | 144 | 220 |
+| 2 | 2916 | 1512 | 4157 |
+| 3 | 16384 | 8320 | 27318 |
 
 `ElementAssembly` is the cheapest matrix-free storage at `p = 1`–`2` on the
 measured card; `ndofs_per_cell²` overtakes the assembled matrix's per-cell
 share above that, which is where [`Stored`](@ref)/[`Recompute`](@ref) take
-over. See [`ElementAssembly`](@ref)'s own docstring for the fill cost and a
-recorded future election (storing only `Kₑ`'s symmetric half).
+over. An element whose form is symmetric may additionally elect
+[`SymmetricElementMatrix`](@ref) ([`element_matrix_symmetry`](@ref)), the
+`packed` column above — below the assembled matrix's own per-cell share at
+every measured order. See [`ElementAssembly`](@ref)'s own docstring for the
+fill cost.
 
 Both stored levels are filled at setup and refilled by
 [`update_operator!`](@ref), whose freshness contract is the one an assembled

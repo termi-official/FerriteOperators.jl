@@ -35,6 +35,64 @@ matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling(), storage 
     KernelAbstractionsDevice(KA.CPU(); value_type = T, index_type = Int,
                              items_per_worker = 2, max_workgroup_size = 8))
 
+####################################
+## A MatrixKernelFill + SymmetricElementMatrix() fixture
+####################################
+#
+# `SimpleBilinearDiffusionIntegrator`'s cache verbatim, plus the symmetry
+# declaration: the sum-factorized caches below never exercise the
+# MatrixKernelFill route under ElementAssembly() (they have no analytic
+# Jacobian kernel, only the action route), so this is the only way to cover
+# the packed election's "per-worker ndofs² scratch" fill path (design.md C11).
+struct SymmetricAnalyticDiffusionCache{CV} <: FerriteOperators.AbstractVolumetricElementCache
+    D::Float64
+    cellvalues::CV
+end
+Ferrite.getnquadpoints(e::SymmetricAnalyticDiffusionCache) = getnquadpoints(e.cellvalues)
+FerriteOperators.reinit_values!(e::SymmetricAnalyticDiffusionCache, cell) = Ferrite.reinit!(e.cellvalues, cell)
+FerriteOperators.element_value_type(c::SymmetricAnalyticDiffusionCache) = element_value_type(c.cellvalues)
+FerriteOperators.provides_analytic(::Type{<:SymmetricAnalyticDiffusionCache}, ::JacobianKind{:u}) = true
+FerriteOperators.element_matrix_symmetry(::SymmetricAnalyticDiffusionCache) = SymmetricElementMatrix()
+
+function FerriteOperators.assemble_cell!(req::JacobianRequest{:u}, cache::SymmetricAnalyticDiffusionCache, args::CellArgs)
+    Kₑ = req.K
+    (; cellvalues, D) = cache
+    for qp in 1:getnquadpoints(cellvalues)
+        dΩ = getdetJdV(cellvalues, qp)
+        for i in 1:getnbasefunctions(cellvalues)
+            ∇Nᵢ = shape_gradient(cellvalues, qp, i)
+            for j in 1:getnbasefunctions(cellvalues)
+                ∇Nⱼ = shape_gradient(cellvalues, qp, j)
+                Kₑ[i, j] += D * ∇Nⱼ ⋅ ∇Nᵢ * dΩ
+            end
+        end
+    end
+end
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::SymmetricAnalyticDiffusionCache, args::CellArgs)
+    (; cellvalues, D) = cache
+    uₑ = args.states.u
+    for qp in 1:getnquadpoints(cellvalues)
+        dΩ = getdetJdV(cellvalues, qp)
+        ∇u = function_gradient(cellvalues, qp, uₑ)
+        for i in 1:getnbasefunctions(cellvalues)
+            req.r[i] += D * (∇u ⋅ shape_gradient(cellvalues, qp, i)) * dΩ
+        end
+    end
+end
+
+struct SymmetricAnalyticDiffusionIntegrator <: AbstractBilinearIntegrator
+    D::Float64
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+end
+function FerriteOperators.setup_element_cache(m::SymmetricAnalyticDiffusionIntegrator, sdh::SubDofHandler)
+    qr     = getquadraturerule(m.qrc, sdh)
+    T      = element_value_type(m.qrc)
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = FerriteOperators.geometric_subdomain_interpolation(sdh)
+    return SymmetricAnalyticDiffusionCache(m.D, CellValues(T, qr, ip, ip_geo))
+end
+
 @testset "MatrixFreeAction" begin
     # ONE element definition under every execution mapping the strategy axis
     # offers, against the assembled matrix of the same bilinear form.
@@ -274,6 +332,11 @@ matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling(), storage 
             y = zeros(ndofs(dh))
             mul!(y, op, u)
             @test y ≈ assembled.A * u rtol = 1.0e-12
+            # Neither cache declares `element_matrix_symmetry`, so the election
+            # stays OFF (`GeneralElementMatrix()`) and `K` stays dense.
+            cache = get_subdomain_caches(op)[1].domain.element
+            @test cache.symmetry isa GeneralElementMatrix
+            @test ndims(cache.K) == 3
         end
     end
 
@@ -305,7 +368,86 @@ matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling(), storage 
             y = zeros(T, ndofs(dh))
             mul!(y, op, u)
             @test y ≈ reference rtol = rtol
+            # Isotropic D is symmetric, so the tensor-product cache declares
+            # SymmetricElementMatrix() and this arm runs the PACKED layout —
+            # the "GPU floor vs assembled" table this proves matches the
+            # assembled reference is the packed one.
+            cache = get_subdomain_caches(op)[1].domain.element
+            @test cache.symmetry isa SymmetricElementMatrix
+            @test ndims(cache.K) == 2
+            @test size(cache.K, 2) == (ndofs_per_cell(dh.subdofhandlers[1]) * (ndofs_per_cell(dh.subdofhandlers[1]) + 1)) ÷ 2
         end
+    end
+
+    # The MatrixKernelFill route (an analytic element-matrix kernel, unlike the
+    # sum-factorized caches above which only ever fill via the action) under a
+    # symmetric election — the "per-worker ndofs² scratch" fill path
+    # (design.md C11) the sum-factorized caches never exercise. Same physics as
+    # `SimpleBilinearDiffusionIntegrator`, so the packed action and the dense
+    # one it is compared against are the SAME `Kₑ`, filled through the SAME
+    # kernel, differing only in the symmetry declaration.
+    @testset "ElementAssembly, MatrixKernelFill route, packed matches dense ($T, p = $p)" for
+            T in (Float64, Float32), p in 1:3
+
+        dh   = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), T, (3, 2, 2), p)
+        qrc  = QuadratureRuleCollection(T, p + 1)
+        rtol = T === Float32 ? 1.0f-3 : 1.0e-11
+        u = probe(T, ndofs(dh), 7)
+
+        dense_op = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, Int}();
+                                                    form = MatrixFreeAction(; storage = ElementAssembly())),
+                                  SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        y_dense = zeros(T, ndofs(dh))
+        mul!(y_dense, dense_op, u)
+        dense_cache = get_subdomain_caches(dense_op)[1].domain.element
+        @test dense_cache.symmetry isa GeneralElementMatrix
+        @test dense_cache.route isa FerriteOperators.MatrixKernelFill
+
+        packed_op = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, Int}();
+                                                     form = MatrixFreeAction(; storage = ElementAssembly())),
+                                   SymmetricAnalyticDiffusionIntegrator(2.5, qrc, :u), dh)
+        y_packed = zeros(T, ndofs(dh))
+        mul!(y_packed, packed_op, u)
+        packed_cache = get_subdomain_caches(packed_op)[1].domain.element
+        @test packed_cache.symmetry isa SymmetricElementMatrix
+        @test packed_cache.route isa FerriteOperators.MatrixKernelFill
+
+        @test y_packed ≈ y_dense rtol = rtol
+    end
+
+    # The hazard `element_matrix_symmetry`'s docstring warns about: a
+    # declared-symmetric element whose assembled `Kₑ` really ISN'T symmetric
+    # would silently symmetrize the operator. This is the suite's direct check
+    # on a genuinely non-diagonal, off-diagonal-coupled `D` — a diagonal
+    # coefficient would never exercise the packed index's off-diagonal
+    # arithmetic (`_packed_index`) at all.
+    @testset "a declared-symmetric element's ElementAssembly operator stays symmetric (anisotropic D)" begin
+        dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
+        qrc = QuadratureRuleCollection(3)
+        D = SymmetricTensor{2, 3}((2.0, 0.3, -0.2, 1.4, 0.1, 3.1))
+        integrator = SumFactorizedDiffusionIntegrator(D, qrc, :u)
+
+        op = setup_operator(AssemblyStrategy(SequentialCPUDevice();
+                                             form = MatrixFreeAction(; storage = ElementAssembly())),
+                            integrator, dh)
+        cache = get_subdomain_caches(op)[1].domain.element
+        @test cache.symmetry isa SymmetricElementMatrix
+        @test ndims(cache.K) == 2
+
+        u = probe(Float64, ndofs(dh), 3)
+        v = probe(Float64, ndofs(dh), 4)
+        Au, Av = zeros(ndofs(dh)), zeros(ndofs(dh))
+        mul!(Au, op, u)
+        mul!(Av, op, v)
+        @test dot(v, Au) ≈ dot(u, Av) rtol = 1.0e-12
+
+        # Independent reference: the SAME anisotropic form under `Stored()`,
+        # a completely different code path (sum-factorized contraction, no
+        # dense `Kₑ` at all).
+        stored = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction()), integrator, dh)
+        y_stored = zeros(ndofs(dh))
+        mul!(y_stored, stored, u)
+        @test Au ≈ y_stored rtol = 1.0e-11
     end
 
     # The store is what a `Stored()` action reads, and `update_operator!` is what

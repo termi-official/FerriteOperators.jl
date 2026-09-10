@@ -199,6 +199,7 @@ export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAss
 export MatrixFreeAction, MatrixFreeFerriteOperator, MatrixFreeActionKind, apply_element_action!
 export QuadratureDataKind, fill_quadrature_data!, with_assembly_form, with_action_storage, adapt_shared
 export StorageElection, Stored, Recompute, ElementAssembly, ElementAssemblyCache, element_matrix_fill_route
+export element_matrix_symmetry, GeneralElementMatrix, SymmetricElementMatrix
 export AbstractElementMapping, WorkerPerElement, CooperativeElement, with_element_mapping
 export cooperative_lattice_dim, cooperative_group_size, cooperative_scratch_shape
 export cooperative_load!, cooperative_stage!, cooperative_store!

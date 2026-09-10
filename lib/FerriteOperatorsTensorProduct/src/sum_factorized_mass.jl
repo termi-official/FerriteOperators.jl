@@ -52,6 +52,13 @@ device_worker_view(c::SumFactorizedMassElementCache, worker) =
 item_update_flags(::MatrixFreeActionKind, c::SumFactorizedMassElementCache) =
     Ferrite.UpdateFlags(nodes = false, coords = c.qdata === nothing, dofs = true)
 
+# `a(u, v) = ∫ v ρ u` is symmetric for every scalar `ρ` — `u` and `v` enter
+# through the same scalar multiplication, so the form commutes unconditionally
+# ([`element_matrix_symmetry`](@ref)). Same measured ACTION-time trade-off as
+# the diffusion cache (`sum_factorized_diffusion.jl`, same packed index-fold
+# question, order-independent of the physics): a p = 1 win, a p ≥ 2 cost.
+element_matrix_symmetry(::SumFactorizedMassElementCache) = SymmetricElementMatrix()
+
 function setup_element_cache(model::SumFactorizedMassIntegrator, sdh::SubDofHandler)
     values = TensorProductValues(sdh, model.field_name, model.qrc)
     return SumFactorizedMassElementCache(element_value_type(values)(model.ρ), values,

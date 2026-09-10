@@ -63,6 +63,31 @@ device_worker_view(c::SumFactorizedDiffusionElementCache, worker) =
 item_update_flags(::MatrixFreeActionKind, c::SumFactorizedDiffusionElementCache) =
     Ferrite.UpdateFlags(nodes = false, coords = c.qdata === nothing, dofs = true)
 
+# `a(u, v) = ∫ ∇v · D ∇u` is symmetric for ANY `D` with `D = Dᵀ`, but `cache.D`
+# is stored as a plain `SMatrix` (built from a scalar or a `SymmetricTensor` —
+# `_diffusion_matrix` has no method for a general `Tensor{2,dim}`), which
+# carries no compile-time symmetry guarantee of its own. Checking the VALUE
+# once, at `ElementAssemblyCache` construction, is the conservative form of the
+# election ([`element_matrix_symmetry`](@ref)): true for every `D` this cache
+# can currently be built from, and automatically false should a future
+# anisotropic (non-symmetric) diffusion tensor be threaded through.
+#
+# Measured (RTX 2080, Float32, ElementAssembly action, worker-per-element,
+# `benchmarks/matrix_free_action.jl`): packing wins bytes/cell at every order
+# (144/1512/8320 B vs 256/2916/16384 B dense, p = 1/2/3) but wins the ACTION
+# only at p = 1 (0.145 ms packed vs 0.182 ms dense, −20%); at p = 2 it is
+# 96% SLOWER (0.470 vs 0.239 ms) and at p = 3 43% slower (0.630 vs 0.440 ms).
+# Root cause: `_packed_index`'s (i, j) → t map is a runtime computation per
+# loop step, and LLVM/the GPU compiler folds it to literals at ND = 8 but not
+# at ND = 27 or 64 — a fully-unrolled variant recovers a 2x win at ND = 27
+# alone and REGRESSES ND = 8 and ND = 64, so no single kernel shape wins at
+# every order without per-order specialization. Declared here anyway because
+# the byte win is unconditional and ElementAssembly's own election is
+# documented as a p = 1–2 concern; the p ≥ 2 action-time cost is a real,
+# measured trade-off for the maintainer to weigh, not a hidden one.
+element_matrix_symmetry(c::SumFactorizedDiffusionElementCache) =
+    c.D ≈ c.D' ? SymmetricElementMatrix() : GeneralElementMatrix()
+
 ####################################
 ## Setup
 ####################################

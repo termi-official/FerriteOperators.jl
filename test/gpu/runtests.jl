@@ -195,7 +195,11 @@ end
     end
 
     # The ELEMENT level on the device: dense per-cell matrices in a
-    # (cell, i, j) store, gathered, multiplied and scattered atomically.
+    # (cell, i, j) store, gathered, multiplied and scattered atomically — or,
+    # for `:sumfact` (which now declares `element_matrix_symmetry` for an
+    # isotropic D), the packed `(cell, t)` layout. This is the "packed vs
+    # full device equivalence" the S5 gate asks for: `:assembled` never
+    # declares the election and stays the dense/full comparison arm.
     @testset "ELEMENT level, p = $p, $(nameof(typeof(integrator)))" for p in 1:3,
             integrator in (:sumfact, :assembled)
 
@@ -216,6 +220,47 @@ end
         yd = CUDA.zeros(Tv, ndofs(dh))
         mul!(yd, op, CuVector(u))
         @test Array(yd) ≈ assembled.A * u rtol = 1.0f-3
+
+        cache = op.engine.subdomain_caches[1].device_cache.element
+        if integrator === :sumfact
+            @test cache.symmetry isa SymmetricElementMatrix
+            @test ndims(cache.K) == 2
+        else
+            @test cache.symmetry isa GeneralElementMatrix
+            @test ndims(cache.K) == 3
+        end
+    end
+
+    # The mass form's cache declares SymmetricElementMatrix() unconditionally
+    # (a scalar coefficient is always symmetric) — the second, MASS-form
+    # consumer of the packed ELEMENT level on the device.
+    @testset "ELEMENT level (mass), p = $p, $(nameof(typeof(integrator)))" for p in 1:3,
+            integrator in (:sumfact, :assembled)
+
+        dh  = distorted_hex_testbed(p)
+        qrc = QuadratureRuleCollection(Tv, p + 1)
+        assembled = setup_operator(sequential_strategy(),
+                                   SimpleBilinearMassIntegrator(1.7, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(ndofs(dh), 7)
+
+        term = integrator === :sumfact ? SumFactorizedMassIntegrator(1.7, qrc, :u) :
+                                         SimpleBilinearMassIntegrator(1.7, qrc, :u)
+        strategy = AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
+                                    SequentialScheduling(), cuda_device())
+        op = setup_operator(strategy, term, dh)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ assembled.A * u rtol = 1.0f-3
+
+        cache = op.engine.subdomain_caches[1].device_cache.element
+        if integrator === :sumfact
+            @test cache.symmetry isa SymmetricElementMatrix
+            @test ndims(cache.K) == 2
+        else
+            @test cache.symmetry isa GeneralElementMatrix
+            @test ndims(cache.K) == 3
+        end
     end
 
     # The device action positions its items on a cursor that stages no dof row

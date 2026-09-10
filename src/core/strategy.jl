@@ -167,13 +167,14 @@ dense product has no lattice to split.
 
 Measured against the same form's assembled global matrix, on a tensor-product
 hexahedral mesh with one `Float32` scalar field (bytes/cell, `p` = polynomial
-order):
+order); the `packed` column is [`SymmetricElementMatrix`](@ref)'s election
+([`element_matrix_symmetry`](@ref)):
 
-| `p` | `ElementAssembly` (`ndofs_per_cell² · 4`) | assembled (global CSR, amortized) |
-|---|---|---|
-| 1 | 256 | 220 |
-| 2 | 2916 | 4157 |
-| 3 | 16384 | 27318 |
+| `p` | `ElementAssembly` (`ndofs_per_cell² · 4`) | packed (`ndofs_per_cell·(ndofs_per_cell+1)/2 · 4`) | assembled (global CSR, amortized) |
+|---|---|---|---|
+| 1 | 256 | **144** | 220 |
+| 2 | 2916 | **1512** | 4157 |
+| 3 | 16384 | **8320** | 27318 |
 
 `ndofs_per_cell²` overtakes the assembled matrix's per-cell share between
 `p = 1` and `p = 2` and keeps widening — this election is the cheaper
@@ -183,13 +184,62 @@ point elections above that. The fill itself (`ndofs_per_cell` element actions,
 or one analytic kernel call, per cell) is paid once at [`setup_operator`](@ref)
 and again on every [`update_operator!`](@ref) — never on a bare `mul!`.
 
-Storing only the symmetric half of `Kₑ` for a symmetric bilinear form would
-roughly halve this table's first column; that is a recorded future election,
-not one this cache implements.
+An element whose bilinear form is symmetric may additionally elect
+[`SymmetricElementMatrix`](@ref) ([`element_matrix_symmetry`](@ref)), which
+packs `Kₑ`'s upper triangle only — the `packed` column above — at the price of
+a per-worker `ndofs_per_cell²` scratch buffer at FILL time only (never on the
+action).
 """
 struct ElementAssembly <: StorageElection end
 
 @doc (@doc StorageElection) const CorrectorElection = StorageElection
+
+####################################
+## The ELEMENT level's symmetry election
+####################################
+
+"""
+    element_matrix_symmetry(cache) -> GeneralElementMatrix()
+                                    -> SymmetricElementMatrix()
+
+Whether `cache`'s bilinear form is symmetric — an ELEMENT CAPABILITY election,
+since only the element knows the property of the form it evaluates. Consumed
+by [`ElementAssemblyCache`](@ref) ONLY, read once off the wrapped cache at
+construction and carried as a field beside `route`
+([`element_matrix_fill_route`](@ref)), so the action has no runtime branch.
+
+`GeneralElementMatrix()` (the default) makes no claim, and `Kₑ` is stored
+dense. [`SymmetricElementMatrix`](@ref) is a declaration
+[`ElementAssemblyCache`](@ref) TRUSTS UNCHECKED, exactly as
+[`provides_analytic`](@ref) is: a wrong declaration silently reads only the
+upper triangle the fill happened to see, which SYMMETRIZES the assembled
+operator rather than erroring. Declare it only where the FORM is provably
+symmetric for every value the cache's coefficients can take — a runtime check
+against the coefficient at construction (as the `FerriteOperatorsTensorProduct`
+diffusion cache makes) is the conservative shape where the coefficient is not
+symmetric BY TYPE.
+
+!!! warning "Experimental surface"
+    This election and the two singletons below may change in a minor release.
+"""
+element_matrix_symmetry(cache) = GeneralElementMatrix()
+
+"""
+    GeneralElementMatrix()
+
+The default [`element_matrix_symmetry`](@ref) election: no symmetry claim,
+`Kₑ` stored dense.
+"""
+struct GeneralElementMatrix end
+
+"""
+    SymmetricElementMatrix()
+
+Declares `Kₑ = Kₑᵀ` for every cell of the subdomain — see
+[`element_matrix_symmetry`](@ref) for the trust contract and the hazard of a
+wrong declaration.
+"""
+struct SymmetricElementMatrix end
 
 """
 Which representation of the operator is produced — the MFEM assembly level.

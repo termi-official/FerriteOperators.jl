@@ -37,7 +37,8 @@ import FerriteOperators: element_value_type, get_first_cell, AbstractVolumetricE
     AbstractBilinearIntegrator, AbstractGPUDevice,
     duplicate_for_device, setup_device_instances, device_worker_view, adapt_shared,
     setup_element_cache, with_action_storage, fill_quadrature_data!, Stored,
-    setup_qvector, get_range_for_cell
+    setup_qvector, get_range_for_cell,
+    element_matrix_symmetry, GeneralElementMatrix, SymmetricElementMatrix
 
 include("tensor_product.jl")             # 1D operators, lattice, contractions, both mapping pipelines
 include("sum_factorized_diffusion.jl")   # Reference consumer: diffusion bilinear form

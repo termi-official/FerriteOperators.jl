@@ -13,6 +13,12 @@
 # that crossover, and whether one workgroup per element beats one worker per
 # element.
 #
+# The diffusion form's D is isotropic, hence symmetric, so
+# `SumFactorizedDiffusionIntegrator`'s `[EA]` arm runs the PACKED layout
+# (`element_matrix_symmetry` — S5); `[EA general]` is the same order/mesh under
+# the standard analytic-Jacobian cache, which never declares the election, for
+# a direct packed-vs-full comparison.
+#
 # The mesh is resized per order so every arm carries roughly `target_dofs`
 # unknowns; Ferrite ships `Lagrange{RefHexahedron, order}` for order ≤ 3.
 #
@@ -200,8 +206,14 @@ if CUDA_AVAILABLE
         backend = CUDABackend()
         device = KernelAbstractionsDevice(backend; value_type = Tv, index_type = Ti,
                                           items_per_worker = 2, max_workgroup_size = 256)
+        # The hand-rolled kernels below index `K[cell, a, b]` directly — the DENSE
+        # (slot, i, j) layout, never the S5 packed one. `integrator` may now declare
+        # `element_matrix_symmetry` (the tensor-product diffusion cache does, for
+        # isotropic D), so the floor's own operator is always built over the
+        # analytic-Jacobian cache instead, which never declares the election.
+        floor_integrator = SimpleBilinearDiffusionIntegrator(2.5, integrator.qrc, :u)
         op = setup_operator(AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
-                                             SequentialScheduling(), device), integrator, dh)
+                                             SequentialScheduling(), device), floor_integrator, dh)
         K = op.engine.subdomain_caches[1].device_cache.element.K
         cell_dofs = CuVector(dh.cell_dofs)
         workgroup, blocks = FerriteOperators.launch_geometry(device, ncells)
@@ -250,10 +262,14 @@ function run_order(order)
     nd = (order + 1)^3                       # dofs per hexahedron
     pa_bytes = nqp * 9 * sizeof(Tv)          # one full 3x3 factor per quadrature point
     ea_bytes = nd * nd * sizeof(Tv)          # one dense element matrix per cell
-    @printf("  storage per cell: NONE 0 B | PARTIAL %d B (%.0f MB) | ELEMENT %d B (%.0f MB)\n",
-            pa_bytes, ncells * pa_bytes / 2^20, ea_bytes, ncells * ea_bytes / 2^20)
-    @printf("  storage per dof:  NONE 0 B | PARTIAL %d B | ELEMENT %d B\n",
-            (ncells * pa_bytes) ÷ n_dofs, (ncells * ea_bytes) ÷ n_dofs)
+    # S5: SymmetricElementMatrix() packs the upper triangle (diagonal included)
+    # instead of the full nd x nd block.
+    ea_packed_bytes = ((nd * (nd + 1)) ÷ 2) * sizeof(Tv)
+    @printf("  storage per cell: NONE 0 B | PARTIAL %d B (%.0f MB) | ELEMENT %d B (%.0f MB) | ELEMENT packed %d B (%.0f MB)\n",
+            pa_bytes, ncells * pa_bytes / 2^20, ea_bytes, ncells * ea_bytes / 2^20,
+            ea_packed_bytes, ncells * ea_packed_bytes / 2^20)
+    @printf("  storage per dof:  NONE 0 B | PARTIAL %d B | ELEMENT %d B | ELEMENT packed %d B\n",
+            (ncells * pa_bytes) ÷ n_dofs, (ncells * ea_bytes) ÷ n_dofs, (ncells * ea_packed_bytes) ÷ n_dofs)
 
     results = Pair{String, Tuple{Float64, Int}}[]
     fills = Pair{String, Float64}[]
@@ -332,6 +348,23 @@ function run_order(order)
             clockstamps["$name [$label]"] = clocks()
             storage isa Recompute || push!(fills, "$name [$label]" => fill)
         end
+
+        # S5: `SumFactorizedDiffusionIntegrator` declares `element_matrix_symmetry`
+        # for this isotropic D, so the "[EA]" arm above already reports the PACKED
+        # layout. This is the matched "full" comparison at the SAME order/mesh:
+        # the standard analytic-Jacobian diffusion cache never declares the
+        # election, so its ElementAssembly() store stays dense. Both fill through
+        # an action-derived or analytic Kₑ that is numerically the same form.
+        general_time, general_fill = device_arm!() do
+            device = KernelAbstractionsDevice(CUDABackend(); value_type = Tv, index_type = Ti,
+                                              items_per_worker = 2, max_workgroup_size = 256)
+            setup_operator(AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
+                                            SequentialScheduling(), device),
+                          SimpleBilinearDiffusionIntegrator(2.5f0, qrc, :u), dh)
+        end
+        push!(results, "CUDA worker-per-element action [EA general]" => general_time)
+        clockstamps["CUDA worker-per-element action [EA general]"] = clocks()
+        push!(fills, "CUDA worker-per-element action [EA general]" => general_fill)
 
         # The MATH FLOOR of the ELEMENT level: the same dense `Kₑ·uₑ` per cell,
         # written as one hand-rolled kernel that reads the dof range straight out
