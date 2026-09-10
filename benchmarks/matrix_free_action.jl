@@ -124,10 +124,79 @@ end
     end
 end
 
-element_floor_time!(args...) = nothing
+# The SAME floor with `yₑ` moved out of the register and into one worker's row of
+# a global slab shaped exactly like the engine's `ws.re`
+# (`ext/FerriteOperatorsKernelAbstractionsExt.jl:272`: `n_workers` rows of `ND`,
+# worker index LEADING and therefore coalesced across a warp), put through the
+# engine's own choreography — zeroed, accumulated into, read back by the scatter.
+# Every other term is held fixed, so the delta against `_floor_action!` IS the
+# price of the round-trip design.md C10 proposes to remove.
+#
+# The zero pass precedes the gather for the same reason the engine's `fill!` does:
+# the gather's loads may alias the slab, and that is what stops the zero stores
+# from being dead-store-eliminated against the accumulate pass's stores.
+@kernel function _floor_action_re!(y, @Const(u), @Const(K), @Const(cell_dofs), re,
+        ::Val{ND}, ncells) where {ND}
+    worker = @index(Global, Linear)
+    stride = prod(KA.@ndrange())
+    for cell in worker:stride:ncells
+        for a in 1:ND
+            @inbounds re[worker, a] = zero(eltype(re))
+        end
+        base = (cell - 1) * ND
+        uₑ = ntuple(b -> (@inbounds u[cell_dofs[base + b]]), Val(ND))
+        for a in 1:ND
+            acc = zero(eltype(K))
+            for b in 1:ND
+                @inbounds acc += K[cell, a, b] * uₑ[b]
+            end
+            @inbounds re[worker, a] += acc
+        end
+        for a in 1:ND
+            @inbounds Atomix.@atomic y[cell_dofs[base + a]] += re[worker, a]
+        end
+    end
+end
+
+# The same two residencies with the element matrix REMOVED: gather, move,
+# scatter. Stripping the O(ND^2) `Kₑ` stream takes away the traffic the
+# round-trip can hide behind, which is what separates "the round-trip is absorbed
+# by the memory system" from "the round-trip is negligible in absolute terms".
+@kernel function _floor_move!(y, @Const(u), @Const(cell_dofs), ::Val{ND}, ncells) where {ND}
+    worker = @index(Global, Linear)
+    stride = prod(KA.@ndrange())
+    for cell in worker:stride:ncells
+        base = (cell - 1) * ND
+        uₑ = ntuple(b -> (@inbounds u[cell_dofs[base + b]]), Val(ND))
+        for a in 1:ND
+            @inbounds Atomix.@atomic y[cell_dofs[base + a]] += uₑ[a]
+        end
+    end
+end
+
+@kernel function _floor_move_re!(y, @Const(u), @Const(cell_dofs), re,
+        ::Val{ND}, ncells) where {ND}
+    worker = @index(Global, Linear)
+    stride = prod(KA.@ndrange())
+    for cell in worker:stride:ncells
+        for a in 1:ND
+            @inbounds re[worker, a] = zero(eltype(re))
+        end
+        base = (cell - 1) * ND
+        uₑ = ntuple(b -> (@inbounds u[cell_dofs[base + b]]), Val(ND))
+        for a in 1:ND
+            @inbounds re[worker, a] += uₑ[a]
+        end
+        for a in 1:ND
+            @inbounds Atomix.@atomic y[cell_dofs[base + a]] += re[worker, a]
+        end
+    end
+end
+
+element_floor_times(args...) = ()
 
 if CUDA_AVAILABLE
-    @eval function element_floor_time!(yd, ud, integrator, dh, nd, ncells)
+    @eval function element_floor_times(yd, ud, integrator, dh, nd, ncells)
         backend = CUDABackend()
         device = KernelAbstractionsDevice(backend; value_type = Tv, index_type = Ti,
                                           items_per_worker = 2, max_workgroup_size = 256)
@@ -136,16 +205,27 @@ if CUDA_AVAILABLE
         K = op.engine.subdomain_caches[1].device_cache.element.K
         cell_dofs = CuVector(dh.cell_dofs)
         workgroup, blocks = FerriteOperators.launch_geometry(device, ncells)
-        kernel = _floor_action!(backend, workgroup)
-        time = first(measure(() -> (kernel(yd, ud, K, cell_dofs, Val(nd), ncells;
-                                           ndrange = workgroup * blocks);
-                                    KA.synchronize(backend))))
+        ndrange = workgroup * blocks
+        # The engine's residual slab at the size and layout the engine gives it:
+        # `n_workers(device, partition)` rows, which is this launch geometry.
+        re = CUDA.zeros(Tv, ndrange, nd)
+        sample(kernel, args...) =
+            first(measure(() -> (kernel(args...; ndrange); KA.synchronize(backend))))
+        times = ("CUDA ELEMENT math floor (registers)" =>
+                     sample(_floor_action!(backend, workgroup), yd, ud, K, cell_dofs, Val(nd), ncells),
+                 "CUDA ELEMENT math floor (ws.re slab)" =>
+                     sample(_floor_action_re!(backend, workgroup), yd, ud, K, cell_dofs, re, Val(nd), ncells),
+                 "CUDA gather+scatter floor (registers)" =>
+                     sample(_floor_move!(backend, workgroup), yd, ud, cell_dofs, Val(nd), ncells),
+                 "CUDA gather+scatter floor (ws.re slab)" =>
+                     sample(_floor_move_re!(backend, workgroup), yd, ud, cell_dofs, re, Val(nd), ncells))
         op = nothing
         K = nothing
         cell_dofs = nothing
+        re = nothing
         GC.gc()
         CUDA.reclaim()
-        return time
+        return times
     end
 end
 
@@ -259,10 +339,14 @@ function run_order(order)
         # atomically. It carries no workspace, no element cache and no assembler,
         # so the gap between it and the `[EA]` arm above is what the engine's
         # per-item plumbing costs.
-        floor_time = element_floor_time!(yd, ud, integrator, dh, nd, ncells)
-        if floor_time !== nothing
-            push!(results, "CUDA ELEMENT math floor (hand-rolled)" => (floor_time, 0))
-            clockstamps["CUDA ELEMENT math floor (hand-rolled)"] = clocks()
+        #
+        # Each floor is run in BOTH `yₑ` residencies — the register the math needs
+        # and the per-worker global slab the engine's `ws.re` actually is — so the
+        # round-trip's price is a measured difference between two arms that differ
+        # in nothing else, rather than an arithmetic estimate of bytes moved.
+        for (name, time) in element_floor_times(yd, ud, integrator, dh, nd, ncells)
+            push!(results, name => (time, 0))
+            clockstamps[name] = clocks()
         end
     end
 
