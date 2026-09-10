@@ -86,7 +86,7 @@ end
 # The blanket fan-out method satisfies any `hasmethod` check, so validation must
 # recurse: each inner is its own validation subject, kernels and admissibility
 # alike.
-function _validate_element_kernels(composite::CompositeVolumetricElementCache, declared_requests::Tuple)
+function _validate_element_kernels(composite::CompositeVolumetricElementCache, declared_requests::Tuple; iterator_type::Type = CellCache)
     stateful = filter(inner -> has_internal_state(typeof(inner)), composite.inner_caches)
     isempty(stateful) || throw(ArgumentError(
         "Composing condensed elements is not supported yet, but $(_cache_names(stateful)) " *
@@ -95,7 +95,7 @@ function _validate_element_kernels(composite::CompositeVolumetricElementCache, d
         "variable handler keys on the outer integrator — so the internal dofs would never be " *
         "allocated and `condense_internal!`'s write-back would have nowhere to land. Assemble " *
         "the condensed element as its own operator term."))
-    foreach(cache -> validate_element_cache(cache, declared_requests), composite.inner_caches)
+    foreach(cache -> validate_element_cache(cache, declared_requests; iterator_type), composite.inner_caches)
     return nothing
 end
 

@@ -203,12 +203,11 @@ end
 
 # A CPU device has no device handler and therefore no device iterator; the
 # workspace it duplicates already carries the host one. `sdh` is the HOST
-# subdomain — `with_uniform_dof_stride`'s uniformity check reads its
-# `cell_dofs_offset` even to decorate a DEVICE iterator, since the check has no
-# device counterpart worth paying for.
+# subdomain, passed alongside `device_sdh` since a device iterator may need a
+# host-only setup-time fact (`device_assembly_iterator`, C2).
 _device_iterator(kind, element_cache, sdh, ::Nothing) = nothing
 _device_iterator(kind, element_cache, sdh, device_sdh) =
-    with_uniform_dof_stride(assembly_iterator(kind, element_cache, device_sdh), sdh)
+    device_assembly_iterator(kind, element_cache, sdh, device_sdh)
 
 # Each family's global-dof declaration is resolved once per subdomain, before
 # any cache exists, and validated here rather than surfacing later as an
@@ -489,6 +488,12 @@ The declaration hooks are signature-checked first
 ([`assert_declaration_signatures`](@ref)), since each defaults to an empty
 declaration and a drifted method would otherwise assemble a silent subset.
 
+Each subdomain's [`validate_element_cache`](@ref) call probes `reinit_values!`
+against that subdomain's RESOLVED host [`assembly_iterator`](@ref) type rather
+than against `CellCache` unconditionally, so an author-annotated
+`reinit_values!(c, ::MyIterator)` method is validated on the type it was
+written against.
+
 Facet item ([`facet_items`](@ref)) and then algebraic item
 ([`algebraic_items`](@ref)) caches are appended after the cell subdomains, so
 traversal order follows the declarations rather than which families are
@@ -506,7 +511,10 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     global_dof_sets   = resolve_global_dof_sets(strategy, integrator, dh)
     facet_item_sets   = resolve_facet_item_global_dof_sets(strategy, integrator, dh)
     element_caches    = setup_elements(integrator, dh, strategy.form, ad_backend, map(length, global_dof_sets))
-    foreach(cache -> validate_element_cache(cache, declared_kinds), element_caches)
+    kind              = iteration_kind(strategy.form)
+    foreach(element_caches, dh.subdofhandlers) do cache, sdh
+        validate_element_cache(cache, declared_kinds; iterator_type = typeof(assembly_iterator(kind, cache, sdh)))
+    end
     algebraic_domain  = resolve_algebraic_domain(integrator, dh, declared_kinds)
     ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
     needs_sensitivity = needs_ad_decoration(integrator)

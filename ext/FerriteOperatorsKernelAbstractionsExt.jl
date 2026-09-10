@@ -12,7 +12,8 @@ import FerriteOperators: device_worker_view, launch_geometry, n_workers, value_t
 import FerriteOperators: cooperative_group_size, cooperative_scratch_shape,
     cooperative_load!, cooperative_stage!, cooperative_store!
 import FerriteOperators: element_value_type, item_dofs, query_cell_parameters
-import FerriteOperators: assembly_iterator, item_update_flags, position_item
+import FerriteOperators: assembly_iterator, device_assembly_iterator, item_update_flags, position_item
+import FerriteOperators: position_iterator, iterator_dofs
 
 # Ferrite's own KA extension supplies `distribute_to_workers`, the device
 # `CellCache` and every `Adapt` rule this one builds on, and it needs four
@@ -95,12 +96,12 @@ quadrature-data fill forms it once. The node ids are answered from the grid
 instead of staged, there being no sweep that reads them per point.
 
 `stride` is the subdomain's constant per-cell dof count where
-[`with_uniform_dof_stride`](@ref) found `cell_dofs_offset` affine in the cell
-id (`Int`), letting a positioning compute `dofbase` by arithmetic instead of
-reading that array — or `Nothing`, the array-read fallback every other
-subdomain shape takes. It is a TYPE parameter rather than a runtime branch, so
-the two `_reposition` methods below compile to two different kernels and
-neither pays for the other's check.
+[`device_assembly_iterator`](@ref)'s uniformity check found `cell_dofs_offset`
+affine in the cell id (`Int`), letting a positioning compute `dofbase` by
+arithmetic instead of reading that array — or `Nothing`, the array-read
+fallback every other subdomain shape takes. It is a TYPE parameter rather than
+a runtime branch, so the two [`position_iterator`](@ref) methods below compile
+to two different kernels and neither pays for the other's check.
 
 !!! warning "Experimental surface"
     Internal to the device sweep; it may change in a minor release.
@@ -125,47 +126,21 @@ Ferrite.reinit!(cv::Ferrite.AbstractCellValues, c::DeviceCellCursor) = Ferrite.r
     cv, Ferrite.reinit_needs_cell(cv) ? Ferrite.getcells(Ferrite.get_grid(c.sdh), c.cellid) : nothing,
     c.coords)
 
-# The scatter addresses the dof view directly: every assembler in this package
-# reads `celldofs` off the address it is handed, and the cursor's is already the
-# handler's own range.
-@inline FerriteOperators._scatter_address(::Nothing, c::DeviceCellCursor) = Ferrite.celldofs(c)
+# The dof window addresses the flat handler view directly, and it doubles as
+# the scatter address (`iterator_scatter_address`'s default forwards to this):
+# every assembler in this package reads `celldofs` off the address it is
+# handed, and the cursor's is already the handler's own range.
+FerriteOperators.iterator_dofs(c::DeviceCellCursor) = Ferrite.celldofs(c)
 
-@inline function FerriteOperators._position_cell(ws::AssemblyWorkspace, cell::DeviceCellCursor, item, kind)
-    positioned = _reposition(cell, item, item_update_flags(kind, ws.element))
-    FerriteOperators._refresh_dof_head!(ws.dofs, positioned)
-    return FerriteOperators._with_cell(ws, positioned)
-end
-
-@inline function _reposition(c::DeviceCellCursor{<:Any, <:Any, Int}, item, flags::Ferrite.UpdateFlags)
+@inline function FerriteOperators.position_iterator(c::DeviceCellCursor{<:Any, <:Any, Int}, item, flags::Ferrite.UpdateFlags)
     i = Int(item)
     flags.coords && Ferrite.getcoordinates!(c.coords, Ferrite.get_grid(c.sdh), i)
     return DeviceCellCursor(c.sdh, c.coords, i, (i - 1) * c.stride, c.stride)
 end
-@inline function _reposition(c::DeviceCellCursor{<:Any, <:Any, Nothing}, item, flags::Ferrite.UpdateFlags)
+@inline function FerriteOperators.position_iterator(c::DeviceCellCursor{<:Any, <:Any, Nothing}, item, flags::Ferrite.UpdateFlags)
     i = Int(item)
     flags.coords && Ferrite.getcoordinates!(c.coords, Ferrite.get_grid(c.sdh), i)
     return DeviceCellCursor(c.sdh, c.coords, i, Int(@inbounds c.sdh.cell_dofs_offset[i]) - 1, nothing)
-end
-
-"""
-    with_uniform_dof_stride(c::DeviceCellCursor, sdh::Ferrite.SubDofHandler)
-
-Where `sdh`'s flat `cell_dofs_offset` is affine in the cell id — every cell up
-to and including this subdomain's shares one dof count — carries that count on
-the cursor so `_reposition` computes `dofbase` by arithmetic. `nothing`
-otherwise (a grid mixing element types/orders before this subdomain's cells),
-which keeps the array-read `_reposition` method.
-"""
-FerriteOperators.with_uniform_dof_stride(c::DeviceCellCursor, sdh::Ferrite.SubDofHandler) =
-    DeviceCellCursor(c.sdh, c.coords, c.cellid, c.dofbase, _uniform_dof_stride(sdh))
-
-function _uniform_dof_stride(sdh::Ferrite.SubDofHandler)
-    stride = Ferrite.ndofs_per_cell(sdh)
-    offsets = sdh.dh.cell_dofs_offset
-    for cid in sdh.cellset
-        offsets[cid] == (cid - 1) * stride + 1 || return nothing
-    end
-    return stride
 end
 
 """
@@ -179,6 +154,33 @@ dominant cost of the sweep.
 FerriteOperators.assembly_iterator(::MatrixFreeActionKind, element_cache, sdh) = _action_iterator(sdh)
 _action_iterator(sdh::Ferrite.SubDofHandler) = Ferrite.CellCache(sdh)
 _action_iterator(sdh) = DeviceCellCursor(sdh, nothing, -1, 0, nothing)
+
+"""
+    device_assembly_iterator(::MatrixFreeActionKind, element_cache, sdh, device_sdh)
+
+The matrix-free action's DEVICE iterator, decorated with the HOST subdomain
+`sdh`'s uniform per-cell dof stride where one exists: `sdh`'s flat
+`cell_dofs_offset` affine in the cell id, i.e. every cell up to and including
+this subdomain's, in GLOBAL cell numbering, carries the same dof count. A
+cursor that carries the stride computes its dof-window offset by arithmetic
+instead of reading `cell_dofs_offset`. The check runs against the HOST `sdh`
+even though it decorates the DEVICE iterator, since the check itself has no
+device counterpart worth paying for.
+"""
+FerriteOperators.device_assembly_iterator(kind::MatrixFreeActionKind, element_cache, sdh, device_sdh) =
+    _with_uniform_dof_stride(assembly_iterator(kind, element_cache, device_sdh), sdh)
+
+_with_uniform_dof_stride(c::DeviceCellCursor, sdh::Ferrite.SubDofHandler) =
+    DeviceCellCursor(c.sdh, c.coords, c.cellid, c.dofbase, _uniform_dof_stride(sdh))
+
+function _uniform_dof_stride(sdh::Ferrite.SubDofHandler)
+    stride = Ferrite.ndofs_per_cell(sdh)
+    offsets = sdh.dh.cell_dofs_offset
+    for cid in sdh.cellset
+        offsets[cid] == (cid - 1) * stride + 1 || return nothing
+    end
+    return stride
+end
 
 # The coordinate slab is the cursor's only batched member; the handler behind it
 # is shared read-only, and the position is per item rather than per worker.

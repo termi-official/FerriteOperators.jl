@@ -460,13 +460,16 @@ end
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = _position_cell(ws, ws.cell, cellid, nothing)
 @inline position_item(ws::AssemblyWorkspace, item, kind) = _position_cell(ws, ws.cell, item, kind)
 
-# Position `ws`'s item iterator, dispatching on the ITERATOR: a cache positioned
-# in place (Ferrite's `CellCache`) leaves the workspace its own positioned value,
-# while one positioned by construction returns a workspace carrying the new one.
+# ONE generic body for every item iterator: `position_iterator` makes the
+# in-place-vs-by-construction distinction (a `CellCache` mutates and returns
+# itself; a device cursor returns a new value), so this never has to. `ws` is
+# immutable, so `_with_cell` with an unchanged `cell` rebuilds to a no-op for
+# the in-place case, and to the workspace a constructed iterator needs for the
+# other.
 @inline function _position_cell(ws::AssemblyWorkspace, cell, item, kind)
-    reinit!(cell, item)
-    _refresh_dof_head!(ws.dofs, cell)
-    return ws
+    positioned = position_iterator(cell, item, item_update_flags(kind, ws.element))
+    _refresh_dof_head!(ws.dofs, positioned)
+    return _with_cell(ws, positioned)
 end
 
 # `ws` with its item iterator replaced — what a positioning by construction
@@ -479,14 +482,14 @@ end
 
 # The tail as declared, recovered from the augmented vector so a per-worker
 # duplicate rebuilds the same layout without carrying the declaration along.
-_declared_global_dofs(ws::AssemblyWorkspace) = _declared_global_dofs(ws.dofs, ws.cell.dh)
+_declared_global_dofs(ws::AssemblyWorkspace) = _declared_global_dofs(ws.dofs, iterator_handler(ws.cell))
 _declared_global_dofs(::Nothing, sdh) = ()
 _declared_global_dofs(dofs, sdh) = @view dofs[(ndofs_per_cell(sdh) + 1):end]
 
 function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
     return create_assembly_workspace(
         duplicate_for_device(device, ws.element),
-        ws.cell.dh,
+        iterator_handler(ws.cell),
         duplicate_for_device(device, ws.ivh),
         keys(ws.slot_buffers);
         needs_sensitivity = ws.sensitivity !== nothing,

@@ -10,57 +10,75 @@
 """
     assembly_iterator(kind, element_cache, sdh)
 
-INTERNAL, EXPERIMENTAL. What a sweep of `kind` positions on one item of `sdh`,
-and what rides `args.cell` while the element kernels run. Resolved ONCE per
-(sweep kind, element cache, subdomain) at [`setup_operator`](@ref) and stored on
-the workspace; a sweep only calls [`position_item`](@ref) on it.
+EXPERIMENTAL. What a sweep of `kind` positions on one item of the HOST
+`SubDofHandler` `sdh`, and what rides `args.cell` while the element kernels
+run. Resolved ONCE per (sweep kind, element cache, subdomain) at
+[`setup_operator`](@ref) and stored on the workspace; a sweep only calls
+[`position_item`](@ref) on it.
 
 The default is Ferrite's `CellCache` over `sdh`: the node ids, the coordinates
 and the cell dofs staged into per-worker buffers, which covers every accessor a
-cell kernel may reach for. Overloads are what narrow that — the matrix-free
-action over a DEVICE handler resolves to a cursor that stages NOTHING it can
-address directly, the cell's dof range being a view into the handler's own flat
-`cell_dofs` at the item index the kernel already holds in a register.
+cell kernel may reach for.
 
-`sdh` is the subdomain's HOST `SubDofHandler` for the workspace the engine
-allocates, and its device-resident counterpart for the device layout built from
-it; one overload therefore answers for both, dispatching on the handler.
+**The three iterator shapes.** There are three distinct constructions, not one:
+
+| shape | who calls it | argument(s) |
+|---|---|---|
+| host | `create_assembly_workspace` | the HOST `sdh` |
+| device | `setup_subdomain_caches` (via [`device_assembly_iterator`](@ref)) | a device-resident handler |
+| host-side completion of a device iterator | [`device_assembly_iterator`](@ref)'s overloads | the device iterator's construction **and** the HOST `sdh` |
+
+The third shape exists because a device iterator sometimes needs a setup-time
+fact only the HOST handler can cheaply produce — see
+[`device_assembly_iterator`](@ref), whose overloads are where that decoration
+lives. This function answers only the first shape; overload it to narrow what a
+(sweep kind, element cache) pair positions on the HOST.
+
+**What the positioned value must answer.** Three accessors are REQUIRED by the
+framework and no more: `Ferrite.cellid(it)`, [`iterator_dofs`](@ref) and
+[`iterator_handler`](@ref). Everything else a shipped element kernel reaches
+for — `Ferrite.getcoordinates`, `Ferrite.getnodes`, `Ferrite.reinit!(cv, it)`,
+… — is CONVENTIONAL between the iterator and the elements written for it: the
+framework never calls them.
 
 Which of the positioned cache's members a given sweep REFRESHES is a separate,
 per-kind declaration — [`item_update_flags`](@ref), in Ferrite's `UpdateFlags`
 vocabulary — because one workspace serves every kind an operator sweeps (the
 matrix-free action and the quadrature-data fill share one), while what each
 reads differs.
-
-!!! warning "Experimental surface"
-    This seam is internal: it is not exported, and its spelling may change in a
-    minor release. The public element-extension protocol is a separate design
-    round.
 """
 assembly_iterator(kind, element_cache, sdh) = CellCache(sdh)
 
 """
-    with_uniform_dof_stride(iterator, sdh)
+    device_assembly_iterator(kind, element_cache, sdh, device_sdh)
 
-INTERNAL. Decorates a DEVICE item iterator with the HOST subdomain `sdh`'s
-constant per-cell dof stride, where one exists: `sdh`'s flat `cell_dofs_offset`
-affine in the cell id, i.e. every cell up to and including this subdomain's, in
-GLOBAL cell numbering, carries the same dof count. A cursor that carries the
-stride computes its dof-window offset by arithmetic instead of reading
-`cell_dofs_offset`. Resolved ONCE per subdomain at [`setup_operator`](@ref),
-from the HOST `sdh` even for a device iterator, since the check itself has no
-device counterpart worth paying for.
+EXPERIMENTAL. The DEVICE shape of [`assembly_iterator`](@ref): what a sweep of
+`kind` positions on one item of the device-resident `device_sdh`. Resolved ONCE
+per subdomain at [`setup_operator`](@ref), from BOTH the HOST `sdh` and its
+device counterpart, since a device iterator sometimes needs a setup-time fact
+only the HOST handler can cheaply produce (a device-resident `SubDofHandler`
+carries no cheap equivalent of e.g. a whole-cellset walk over
+`cell_dofs_offset`).
 
-The identity for every iterator that carries no such offset — Ferrite's
-`CellCache` (the CPU sweep; the HOST `sdh` branch of [`assembly_iterator`](@ref)
-never reaches this), and `nothing` (a CPU device's iterator slot).
+The default forwards to the host construction over the device handler, so a
+downstream iterator needing no host-only fact writes exactly one method — the
+host one ([`assembly_iterator`](@ref)) — and this default carries it onto the
+device unchanged. An iterator that DOES need a host fact overloads this
+function directly; the KA extension's matrix-free action is the shipped
+example, decorating its device cursor with the host subdomain's uniform
+per-cell dof stride where one exists.
+
+!!! warning "Experimental surface"
+    The device iterator layout is still moving; this seam's spelling may
+    change in a minor release.
 """
-with_uniform_dof_stride(iterator, sdh) = iterator
+device_assembly_iterator(kind, element_cache, sdh, device_sdh) =
+    assembly_iterator(kind, element_cache, device_sdh)
 
 """
     item_update_flags(kind, element_cache) -> Ferrite.UpdateFlags
 
-INTERNAL, EXPERIMENTAL. What a sweep of `kind` over `element_cache` READS off
+What a sweep of `kind` over `element_cache` READS off
 the cache [`assembly_iterator`](@ref) positions, in Ferrite's `UpdateFlags`
 vocabulary: the node ids, the coordinates, the cell dofs. Every flag is set by
 default, so an undeclared kind/cache pair is positioned exactly as before.
@@ -88,9 +106,74 @@ positioning is the construction of an immutable value (a device cursor) hands
 back a workspace carrying that value, and only the returned one is positioned.
 
 The default is `Ferrite.reinit!(ws, item)` for every workspace family, so a
-sweep adopting this seam positions exactly as it did before.
+sweep adopting this seam positions exactly as it did before. A workspace whose
+item iterator is positioned by construction rather than in place overloads
+this directly (`AssemblyWorkspace`'s does, dispatching to
+[`position_iterator`](@ref) for the iterator's own half).
 """
 @inline position_item(ws, item, kind) = (Ferrite.reinit!(ws, item); ws)
+
+"""
+    position_iterator(it, item, flags::Ferrite.UpdateFlags) -> it
+
+The ITERATOR's half of positioning a cell-family workspace on `item`: what
+[`position_item`](@ref) calls through for an [`AssemblyWorkspace`](@ref), after
+looking up `flags` from [`item_update_flags`](@ref). Returns the positioned
+iterator, which need not be the one passed in — the default mutates `it` in
+place and returns it (Ferrite's own `reinit!` contract); an iterator positioned
+by CONSTRUCTION (a device cursor) returns a new value instead, and only that
+returned value is positioned.
+
+`flags` are ADVISORY: an iterator that stages nothing ignores them, one that
+stages some of what it carries consults them to decide what a positioning
+refreshes. An iterator whose staged members are fixed at construction (Ferrite's
+`CellCache`) ignores `flags` entirely — that is the truth at every CPU sweep
+today, not a weakening of the contract.
+"""
+@inline position_iterator(it, item, flags) = (Ferrite.reinit!(it, item); it)
+
+"""
+    iterator_dofs(it) -> AbstractVector{<:Integer}
+
+REQUIRED accessor (one of three — see [`assembly_iterator`](@ref)): the global
+dof indices of the item `it` is positioned on. The default is
+`Ferrite.celldofs(it)`, which answers correctly for both `CellCache` and the
+device cursor (`Ferrite.celldofs` is what the two already resolve to). An
+iterator whose item has no single cell to key `celldofs` by overloads this
+directly.
+"""
+iterator_dofs(it) = Ferrite.celldofs(it)
+
+"""
+    iterator_handler(it) -> SubDofHandler-like
+
+REQUIRED accessor (one of three — see [`assembly_iterator`](@ref)): the
+`SubDofHandler` (or device counterpart) `it` was constructed over. The default
+reads the `dh` field Ferrite's own caches carry; it is what
+`duplicate_for_device(::AbstractCPUDevice, ::AssemblyWorkspace)` and the
+declared-global-dofs recovery read instead of the field directly, so an
+iterator answering this need not be named `dh` at all.
+"""
+iterator_handler(it) = it.dh
+
+"""
+    iterator_scatter_address(it)
+
+What a scatter of the current item addresses, absent a family-level global-dof
+declaration ([`global_dofs`](@ref)) — see [`scatter_address`](@ref), which reads
+this. The default is [`iterator_dofs`](@ref): every assembler this package
+ships reads `celldofs` off the address it is handed, and the dof vector already
+answers that.
+
+Left untyped so the ONE legitimate override — a rectangular transfer item
+answering with a two-index `(rowdofs, coldofs)` pair rather than one vector —
+needs no change to this signature to be admissible. That shape is
+EXPERIMENTAL and has no consumer in `scatter_local!` today: the transfer
+family keeps its own driver and its own two-argument `assemble!` entry
+(`operators/transfer.jl`), so a two-index answer here is a seam left open for a
+future cell-family driver, not a route this round wires up.
+"""
+iterator_scatter_address(it) = iterator_dofs(it)
 
 ####################################
 ## SameGridCellCache      ##

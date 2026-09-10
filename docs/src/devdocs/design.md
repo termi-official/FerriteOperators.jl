@@ -260,6 +260,53 @@ A device that cannot serve an item family says so at setup through
 `assert_device_supported` rather than failing inside the first sweep; the GPU
 method there is the list of what the device kernel covers today.
 
+**New item iterators** — [`assembly_iterator`](@ref)`(kind, element_cache,
+sdh)` decides what a sweep of `kind` positions on one item of the HOST
+`SubDofHandler` `sdh`, and what rides `args.cell` while the element kernels
+run; the default is Ferrite's `CellCache`. Three accessors are REQUIRED by the
+framework and no more:
+
+```julia
+struct MyIterator
+    # ...
+end
+Ferrite.reinit!(it::MyIterator, item) = (# position in place; return it)
+
+Ferrite.cellid(it::MyIterator)                    = ...  # a representative cell id
+FerriteOperators.iterator_dofs(it::MyIterator)    = ...  # the item's global dof indices
+FerriteOperators.iterator_handler(it::MyIterator) = ...  # the SubDofHandler it was built over
+
+FerriteOperators.assembly_iterator(kind, ::MyCache, sdh) = MyIterator(sdh)
+```
+
+Everything else a shipped element kernel reaches for through `args.cell` —
+`Ferrite.getcoordinates`, `Ferrite.getnodes`, `Ferrite.reinit!(cv, it)`, … — is
+CONVENTIONAL between the iterator and the elements written for it: the
+framework never calls them, so an iterator author picks whichever subset its
+own elements need.
+
+An iterator positioned by CONSTRUCTION (an immutable value, as the device
+cursor is) rather than in place overloads
+[`position_iterator`](@ref)`(it, item, flags)` instead of `Ferrite.reinit!`,
+returning the new value; [`position_item`](@ref) — the only thing a sweep
+calls — carries whichever value came back into the workspace, so both
+positioning styles compose with the rest of the engine unchanged.
+[`item_update_flags`](@ref)`(kind, element_cache)` lets an iterator that stages
+some of what it carries answer, per `(kind, cache)` pair, which members a
+positioning refreshes; an iterator that stages nothing ignores it, and an
+under-declaring pair reads a stale buffer rather than erroring, the same
+contract Ferrite's own `UpdateFlags` carries.
+
+The DEVICE shape is a fourth hook,
+[`device_assembly_iterator`](@ref)`(kind, element_cache, sdh, device_sdh)`,
+whose default forwards to `assembly_iterator` over the device handler — a
+downstream iterator needing no host-only setup fact writes only the host
+method; one that does (the matrix-free action's uniform-dof-stride check is the
+shipped example) overloads this instead. `reinit_values!`'s setup-time
+admissibility probe is validated against the subdomain's RESOLVED iterator
+type, so a cache author who annotates it against a custom iterator (rather than
+leaving the argument unannotated) still passes.
+
 **New assembly levels** — a form member decides what `setup_operator` returns
 and, through [`operator_specification`](@ref), whether the global-storage walls
 apply to it at all. [`MatrixFreeAction`](@ref) is the second member: it

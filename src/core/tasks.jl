@@ -500,30 +500,31 @@ end
 """
     item_dofs(ws) -> AbstractVector{Int}
 
-The global dof indices of the current item's local system: `celldofs(cell)`
+The global dof indices of the current item's local system: [`iterator_dofs`](@ref)
 where the item's family declares no global dofs ([`global_dofs`](@ref) for
 cells, [`facet_item_global_dofs`](@ref) for facet items), and the augmented
-`[celldofs(cell); global dofs]` vector the workspace carries otherwise. Every
+`[iterator_dofs(cell); global dofs]` vector the workspace carries otherwise. Every
 gather of a sweep addresses through this, so the augmented tail reaches the
 slot buffers and the adjoint payloads. On an [`AlgebraicWorkspace`](@ref) it is
 the item's own dof vector, that family having no cell dofs to start from.
 """
 @inline item_dofs(ws) = _item_dofs(ws.dofs, ws.cell)
-@inline _item_dofs(::Nothing, cell) = celldofs(cell)
+@inline _item_dofs(::Nothing, cell) = iterator_dofs(cell)
 @inline _item_dofs(dofs, cell) = dofs
 
 """
     scatter_address(ws)
 
 What a scatter of the current item addresses. Without a global-dof declaration
-for the item's family it is the geometry cache, which every assembler in the
-package takes and reads `celldofs` from. With them the local system spans dofs
-no cell owns, so the augmented dof vector is the only address that describes
-it. An algebraic item is addressed by its dof vector, there being no cell to
-name it by.
+for the item's family it is [`iterator_scatter_address`](@ref)'s answer for the
+item's iterator, which every assembler in the package takes and reads
+`celldofs` from by default. With them the local system spans dofs no cell owns,
+so the augmented dof vector is the only address that describes it. An
+algebraic item is addressed by its dof vector, there being no cell to name it
+by.
 """
 @inline scatter_address(ws) = _scatter_address(ws.dofs, ws.cell)
-@inline _scatter_address(::Nothing, cell) = cell
+@inline _scatter_address(::Nothing, cell) = iterator_scatter_address(cell)
 @inline _scatter_address(dofs, cell) = dofs
 
 # Gather every task slot into the workspace's slot buffers, returning the

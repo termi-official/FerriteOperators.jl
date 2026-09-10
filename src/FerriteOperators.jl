@@ -205,6 +205,9 @@ export cooperative_load!, cooperative_stage!, cooperative_store!
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling
 export StandardOperatorSpecification, BlockedOperatorSpecification
 
+export assembly_iterator, device_assembly_iterator, position_item, position_iterator
+export item_update_flags, iterator_dofs, iterator_handler, iterator_scatter_address
+
 # Transfer operator infrastructure
 export SameGridCellCache, SameGridCellIterator
 export NestedGridCellCache, NestedGridCellIterator
