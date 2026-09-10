@@ -205,12 +205,12 @@ trait ↔ kernel validation.
 
 Thirteen provided bodies exist, across the four workspace types:
 
-| item family | workspace | provided bodies |
-|---|---|---|
-| cells | `AssemblyWorkspace` | [`primal_cell_sweep!`](@ref) (buffer zeroing, values reinit, slot gather, cell kernel, scatter — no write-back: [`condense_internal!`](@ref) is the only writer of `q`); [`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to `sensitivity_kernel!`); [`functional_cell_sweep`](@ref) (slot gather, no write-back, RETURN what the kernel hook gives); [`condensation_cell_sweep!`](@ref) (slot gather, dispatch to [`condense_cell!`](@ref), RETURN the [`CondensationReport`](@ref) AND write the trial `q` back — the one combination the others don't have); [`internal_jacobian_cell_sweep!`](@ref) (the rectangular ∂F/∂q block) |
-| facet items | `FacetItemWorkspace` | [`primal_facet_item_sweep!`](@ref); [`sensitivity_facet_item_sweep!`](@ref); [`functional_facet_item_sweep`](@ref) (slot gather, no write-back, fold what the facet hook gives over the item's declared facets). Condensation, `JacobianKind{:q}` and quadrature evaluation are explicit `nothing` methods — the family has no body for them |
-| algebraic items | `AlgebraicWorkspace` | [`primal_algebraic_sweep!`](@ref); [`sensitivity_algebraic_sweep!`](@ref); [`functional_algebraic_sweep`](@ref); [`condensation_algebraic_sweep!`](@ref); [`internal_jacobian_algebraic_sweep!`](@ref) |
-| patches | `PatchAssemblyWorkspace` | the `PatchCallbackKind` body, reached through [`foreach_patch`](@ref) rather than the operator entry points; the per-patch assembly itself is [`assemble_patch_target!`](@ref), called by the callback |
+| item family | registration | workspace | provided bodies |
+|---|---|---|---|
+| cells | [`CellFamily`](@ref) | `AssemblyWorkspace` | [`primal_cell_sweep!`](@ref) (buffer zeroing, values reinit, slot gather, cell kernel, scatter — no write-back: [`condense_internal!`](@ref) is the only writer of `q`); [`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to `sensitivity_kernel!`); [`functional_cell_sweep`](@ref) (slot gather, no write-back, RETURN what the kernel hook gives); [`condensation_cell_sweep!`](@ref) (slot gather, dispatch to [`condense_cell!`](@ref), RETURN the [`CondensationReport`](@ref) AND write the trial `q` back — the one combination the others don't have); [`internal_jacobian_cell_sweep!`](@ref) (the rectangular ∂F/∂q block) |
+| facet items | [`FacetItemFamily`](@ref) | `FacetItemWorkspace` | [`primal_facet_item_sweep!`](@ref); [`sensitivity_facet_item_sweep!`](@ref); [`functional_facet_item_sweep`](@ref) (slot gather, no write-back, fold what the facet hook gives over the item's declared facets). Condensation, `JacobianKind{:q}` and quadrature evaluation are explicit `nothing` methods — the family has no body for them |
+| algebraic items | [`AlgebraicItemFamily`](@ref) | `AlgebraicWorkspace` | [`primal_algebraic_sweep!`](@ref); [`sensitivity_algebraic_sweep!`](@ref); [`functional_algebraic_sweep`](@ref); [`condensation_algebraic_sweep!`](@ref); [`internal_jacobian_algebraic_sweep!`](@ref) |
+| patches | — (see [`setup_family_caches`](@ref)) | `PatchAssemblyWorkspace` | the `PatchCallbackKind` body, reached through [`foreach_patch`](@ref) rather than the operator entry points; the per-patch assembly itself is [`assemble_patch_target!`](@ref), called by the callback |
 
 A kind riding `primal_cell_sweep!` without its own `cell_kernel!` method gets
 the plain analytic route.
@@ -345,7 +345,16 @@ FerriteOperators.duplicate_for_device(::AbstractCPUDevice, it::MyIterator) = MyI
 plus the three required accessors above. Overloading one seam and forgetting the
 other is not an error and not a `MethodError`: the other answers with its
 default, and an interface iterator left with `CellItems` is positioned on CELL
-ids. Assert the item COUNT a sweep visits; no framework check can see this.
+ids.
+
+Half of that hazard is checked and half is not, and the split is worth knowing.
+A method written against a signature the engine does not call — the wrong sweep
+kind, the wrong handler type, the wrong arity — is rejected at setup by
+[`assert_iteration_signatures`](@ref), which takes the ELEMENT CACHE as its
+subject: a hook with any method narrowing that argument to a type this
+subdomain's cache conforms to must have one the engine's own call resolves to.
+A method that is simply ABSENT has no drift to detect and stays invisible.
+Assert the item COUNT a sweep visits; no framework check can see that one.
 
 A provider carries its family's whole partition safety argument. The wording the
 package uses, and means: a partition is **safe given a valid partition**, never
@@ -370,6 +379,72 @@ structural rather than incidental:
   specification's `sparsity_entries`
   ([`StandardOperatorSpecification`](@ref)) — the same doctrine
   [`global_dofs`](@ref) states for its tail.
+
+**New item FAMILIES** — the two seams above narrow what the CELL family
+positions on and enumerates, which is all a family riding the cell route needs.
+Registering a family of its OWN is the third seam, and it is what an operator
+carrying more than one traversal at a time needs:
+[`item_families`](@ref)`(integrator, dh)` names the families the engine carries,
+in TRAVERSAL order, and [`setup_family_caches`](@ref)`(family, strategy,
+integrator, dh, shared)` builds one family's `SubdomainCache`s.
+
+```julia
+struct MyFamily end
+
+FerriteOperators.item_families(::MyIntegrator, dh) = (CellFamily(), MyFamily())
+
+FerriteOperators.setup_family_caches(::MyFamily, strategy, integrator, dh, shared) =
+    # one SubdomainCache per subdomain this family serves; `()` declines
+```
+
+The tuple REPLACES the default, which derives `CellFamily()` always,
+[`FacetItemFamily`](@ref) where a subdomain declares [`facet_items`](@ref) and
+[`AlgebraicItemFamily`](@ref) where the handler declares
+[`algebraic_items`](@ref). So an integrator returning only its own marker
+carries only its own family — the cells are not swept — and one returning
+`(CellFamily(), MyFamily())` carries both, cells first. That order is the order
+of `engine.subdomain_caches`, which the reduction determinism contract rests on.
+
+`shared` carries what `setup_engine` resolved before any family ran — the
+declared slots, `needs_sensitivity`, the [`InternalVariableHandler`](@ref), the
+AD backend, the declared request kinds, the resolved cell element caches, the
+two validated global-dof declarations and the resolved algebraic domain. Every
+field is available to every family; [`setup_family_caches`](@ref) tabulates
+them.
+
+**The dogfood guarantee, in the form that is true**: no ENGINE-REGISTERED family
+has a privileged setup path. The three shipped families are three
+`setup_family_caches` methods and nothing else — the cell one in
+`operators/setup.jl`, the facet-item one in `core/facet-task.jl`, the algebraic
+one in `core/algebraic-task.jl` — reached by the same dispatch a downstream
+marker reaches, and `setup_engine` iterates `item_families` rather than calling
+any of them by name.
+
+**Two families deliberately do not register**, and both reasons are properties
+of those families rather than of this seam. [`foreach_patch`](@ref) is
+sequential-CPU-only because the callback's collectors are the CALLER's, so this
+package cannot duplicate them per worker, and `PatchAssemblyWorkspace` positions
+through a `Ref` resolved against its provider — a CPU-scoped positioning
+mechanism. [`setup_transfer_operator`](@ref) restricts to sequential full
+assembly by design and assembles a RECTANGULAR matrix through a driver of its
+own. Both adopt the iteration seams above and keep their own entry points;
+folding either into the registration seam would be a re-architecture of a
+family, not a registration change.
+
+Two scope limits, stated rather than left to be discovered. The composite and
+multi-domain wrappers forward [`facet_items`](@ref) and
+[`algebraic_items`](@ref), so a wrapped sub-integrator's BUILT-IN families are
+carried through the default above — but they do not forward
+[`item_families`](@ref): a wrapper's own answer is the operator's, and a
+sub-integrator's registration is not seen. And a family whose subdomain caches
+are not cell-shaped builds them from names this package does not export; the
+shipped delegation pattern (answer with the [`CellFamily`](@ref) method) is what
+a downstream family with cell-shaped caches writes instead.
+
+!!! warning "Experimental surface"
+    `item_families`, `setup_family_caches` and the three family markers are
+    experimental and may change in a minor release, as the whole iteration
+    protocol's registration half.
 
 **New assembly levels** — a form member decides what `setup_operator` returns
 and, through [`operator_specification`](@ref), whether the global-storage walls

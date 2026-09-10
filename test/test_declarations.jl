@@ -165,10 +165,11 @@ end
 ## Declaration-hook signature drift
 ####################################
 # `global_dofs`, `facet_items`, `facet_item_global_dofs` and `algebraic_items`
-# all default to an EMPTY declaration, so a method written against a signature
-# the engine does not call is never reached and the operator assembles a silent
-# subset. `DriftProbe{hook}` wears one drifted method for `hook`; `:none` wears
-# none, `:correct` wears all four at the engine's own signature.
+# all default to an EMPTY declaration, and `item_families` to the families those
+# imply, so a method written against a signature the engine does not call is
+# never reached and the operator assembles a silent subset. `DriftProbe{hook}`
+# wears one drifted method for `hook`; `:none` wears none, `:correct` wears all
+# five at the engine's own signature.
 
 struct DriftProbe{hook} <: AbstractNonlinearIntegrator
     qrc::QuadratureRuleCollection
@@ -183,6 +184,7 @@ FerriteOperators.global_dofs(::DriftProbe{:global_dofs}, ::DofHandler) = (1,)
 FerriteOperators.facet_items(::DriftProbe{:facet_items}, ::DofHandler) = (FacetIndex(1, 1),)
 FerriteOperators.facet_item_global_dofs(::DriftProbe{:facet_item_global_dofs}, ::DofHandler) = (1,)
 FerriteOperators.algebraic_items(::DriftProbe{:algebraic_items}, ::SubDofHandler) = ([1],)
+FerriteOperators.item_families(::DriftProbe{:item_families}, ::SubDofHandler) = (CellFamily(),)
 # A drifted ARITY misses the call the same way a drifted argument type does.
 FerriteOperators.global_dofs(::DriftProbe{:arity}, ::SubDofHandler, ::Int) = (1,)
 
@@ -191,6 +193,7 @@ FerriteOperators.global_dofs(::DriftProbe{:correct}, ::SubDofHandler) = ()
 FerriteOperators.facet_items(::DriftProbe{:correct}, ::SubDofHandler) = ()
 FerriteOperators.facet_item_global_dofs(::DriftProbe{:correct}, ::SubDofHandler) = ()
 FerriteOperators.algebraic_items(::DriftProbe{:correct}, ::DofHandler) = ()
+FerriteOperators.item_families(::DriftProbe{:correct}, ::DofHandler) = (CellFamily(),)
 
 @testset "Declaration-hook signature drift" begin
     (; dh, qrc, strategy) = scalar_quad_testbed((3, 2))
@@ -201,7 +204,8 @@ FerriteOperators.algebraic_items(::DriftProbe{:correct}, ::DofHandler) = ()
         for (hook, expected, drifted) in ((:global_dofs, "SubDofHandler", "DofHandler"),
                                           (:facet_items, "SubDofHandler", "DofHandler"),
                                           (:facet_item_global_dofs, "SubDofHandler", "DofHandler"),
-                                          (:algebraic_items, "DofHandler", "SubDofHandler"))
+                                          (:algebraic_items, "DofHandler", "SubDofHandler"),
+                                          (:item_families, "DofHandler", "SubDofHandler"))
             err = @test_throws ArgumentError check(probe(hook))
             @test occursin("expected: $hook(::DriftProbe, ::$expected)", err.value.msg)
             @test occursin("DriftProbe{:$hook}, ::Ferrite.$drifted)", err.value.msg)
@@ -245,6 +249,139 @@ FerriteOperators.algebraic_items(::DriftProbe{:correct}, ::DofHandler) = ()
         @test check(NonlinearCompositeIntegrator(plain, correct)) === nothing
         @test check(routed(plain, correct)) === nothing
         @test check(routed(NonlinearCompositeIntegrator(plain, correct))) === nothing
+    end
+end
+
+####################################
+## Item-family registration
+####################################
+# `item_families` decides WHICH families an engine carries and in what ORDER;
+# `setup_family_caches` is the one dispatch that builds any of them, shipped or
+# downstream. `FamilyProbe` declares all three at once with no-op kernels
+# throughout — the subject here is registration and traversal order, not what
+# the families assemble. `registration` selects what the integrator declares:
+# `:default` leaves the derived tuple alone, `:nocells` drops the cell family,
+# `:reordered` puts the algebraic family first.
+
+struct NoopAlgebraicItemCache end
+FerriteOperators.assemble_algebraic!(::AbstractAssemblyRequest, ::NoopAlgebraicItemCache, args) = nothing
+FerriteOperators.duplicate_for_device(device, c::NoopAlgebraicItemCache) = c
+
+struct FamilyProbe{registration} <: AbstractBilinearIntegrator
+    facetset::Set{FacetIndex}
+    items::Vector{Vector{Int}}
+end
+FerriteOperators.setup_element_cache(::FamilyProbe, ::SubDofHandler) =
+    FerriteOperators.EmptyVolumetricElementCache()
+FerriteOperators.facet_items(m::FamilyProbe, ::SubDofHandler) = m.facetset
+FerriteOperators.setup_facet_item_cache(::FamilyProbe, ::SubDofHandler) =
+    FerriteOperators.EmptySurfaceElementCache()
+FerriteOperators.algebraic_items(m::FamilyProbe, ::DofHandler) = m.items
+FerriteOperators.setup_algebraic_cache(::FamilyProbe, ::DofHandler) = NoopAlgebraicItemCache()
+
+# The registration itself, written exactly as a downstream integrator writes it.
+FerriteOperators.item_families(::FamilyProbe{:nocells}, dh) = (FacetItemFamily(), AlgebraicItemFamily())
+FerriteOperators.item_families(::FamilyProbe{:reordered}, dh) =
+    (AlgebraicItemFamily(), FacetItemFamily(), CellFamily())
+
+# The ITERATION seams are keyed on the element CACHE and not on the integrator,
+# so their drift check has its own subject and runs once the caches exist.
+struct IterationDriftCache{hook} <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.assemble_cell!(::AbstractAssemblyRequest, ::IterationDriftCache, args) = nothing
+FerriteOperators.reinit_values!(::IterationDriftCache, cell) = nothing
+
+# The right name on the right cache, against a KIND the engine does not pass for
+# a `FullAssembly` operator — so the default answers and the sweep silently
+# walks cells.
+FerriteOperators.assembly_iterator(::MatrixFreeActionKind, ::IterationDriftCache{:assembly_iterator}, sdh) =
+    Ferrite.CellCache(sdh)
+# A drifted ARITY misses the call the same way.
+FerriteOperators.item_provider(kind, ::IterationDriftCache{:item_provider}, sdh, ::Int) = CellItems(sdh)
+# The engine's own signature: resolved, therefore no drift.
+FerriteOperators.assembly_iterator(kind, ::IterationDriftCache{:correct}, sdh) = Ferrite.CellCache(sdh)
+FerriteOperators.item_provider(kind, ::IterationDriftCache{:correct}, sdh) = CellItems(sdh)
+
+struct IterationDriftIntegrator{hook} <: AbstractBilinearIntegrator end
+FerriteOperators.setup_element_cache(::IterationDriftIntegrator{hook}, ::SubDofHandler) where {hook} =
+    IterationDriftCache{hook}()
+
+@testset "Item-family registration" begin
+    (; dh, grid, qrc, strategy) = scalar_quad_testbed((3, 2))
+    facetset = getfacetset(grid, "left")
+    items    = [[1, 2], [3, 4]]
+    probe(reg) = FamilyProbe{reg}(Set(facetset), items)
+    domains(op) = [typeof(sc.domain).name.wrapper for sc in op.engine.subdomain_caches]
+
+    @testset "the default declaration is what the other hooks imply" begin
+        # A cells-only integrator registers the cell family alone, which is
+        # what keeps its `subdomain_caches` element type concrete.
+        plain = DeclaredDiffusionIntegrator(qrc, :u)
+        @test item_families(plain, dh) === (CellFamily(),)
+        @test isconcretetype(eltype(
+            setup_operator(strategy, plain, dh; slots = (:u, :du)).engine.subdomain_caches))
+        # Declaring facet items adds the second marker, algebraic items the third.
+        @test item_families(probe(:default), dh) ===
+            (CellFamily(), FacetItemFamily(), AlgebraicItemFamily())
+        @test item_families(FamilyProbe{:default}(Set(facetset), Vector{Int}[]), dh) ===
+            (CellFamily(), FacetItemFamily())
+        @test item_families(FamilyProbe{:default}(Set{FacetIndex}(), items), dh) ===
+            (CellFamily(), AlgebraicItemFamily())
+    end
+
+    @testset "all three families at once, in declaration order" begin
+        op = setup_operator(strategy, probe(:default), dh)
+        # Cells (one per subdomain), then the facet items, then the algebraic
+        # items — the order a reduction's determinism rests on.
+        @test domains(op) == vcat(
+            fill(FerriteOperators.AssemblyDomain, length(dh.subdofhandlers)),
+            [FerriteOperators.FacetItemDomain, FerriteOperators.AlgebraicDomain])
+        update_operator!(op, nothing)   # the traversal runs, all three families
+    end
+
+    @testset "the traversal is the declaration's, with no privileged path" begin
+        # Dropping the cell family really drops it: were the cell setup still
+        # hand-appended, this operator would carry cell caches nobody registered.
+        nocells = setup_operator(strategy, probe(:nocells), dh)
+        @test domains(nocells) == [FerriteOperators.FacetItemDomain, FerriteOperators.AlgebraicDomain]
+        # And the order is the tuple's, not a rule inside the engine.
+        reordered = setup_operator(strategy, probe(:reordered), dh)
+        @test domains(reordered) == vcat(
+            [FerriteOperators.AlgebraicDomain, FerriteOperators.FacetItemDomain],
+            fill(FerriteOperators.AssemblyDomain, length(dh.subdofhandlers)))
+    end
+
+    @testset "the shipped families answer the same dispatch as a downstream one" begin
+        for family in (CellFamily(), FacetItemFamily(), AlgebraicItemFamily())
+            @test hasmethod(setup_family_caches, Tuple{typeof(family), Any, Any, Any, Any})
+        end
+        # …and nothing else builds subdomain caches: the three names the engine
+        # used to call one by one are gone.
+        for gone in (:setup_subdomain_caches, :setup_facet_item_caches, :setup_algebraic_caches)
+            @test !isdefined(FerriteOperators, gone)
+        end
+    end
+
+    @testset "a drifted iteration seam is rejected at setup" begin
+        check(cache) = FerriteOperators.assert_iteration_signatures(nothing, [cache], dh)
+        for (hook, expected, drifted) in (
+                (:assembly_iterator, "assembly_iterator(::Nothing, ::IterationDriftCache, ::SubDofHandler)",
+                 "MatrixFreeActionKind"),
+                (:item_provider, "item_provider(::Nothing, ::IterationDriftCache, ::SubDofHandler)",
+                 "::Int64"))
+            err = @test_throws ArgumentError check(IterationDriftCache{hook}())
+            @test occursin("expected: $expected", err.value.msg)
+            @test occursin(drifted, err.value.msg)
+            @test occursin("iteration seam `$hook`", err.value.msg)
+        end
+        # A declaration the engine's call resolves to passes, and so does a
+        # cache that declares neither seam.
+        @test check(IterationDriftCache{:correct}()) === nothing
+        @test check(IterationDriftCache{:none}()) === nothing
+        @test check(FerriteOperators.EmptyVolumetricElementCache()) === nothing
+        # The rejection is a setup error, not a call-time one.
+        @test_throws ArgumentError setup_operator(strategy, IterationDriftIntegrator{:item_provider}(), dh)
+        @test setup_operator(strategy, IterationDriftIntegrator{:correct}(), dh) isa
+            FerriteOperators.BilinearFerriteOperator
     end
 end
 

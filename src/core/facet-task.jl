@@ -390,31 +390,30 @@ function _assert_facet_analytic(D::Type, kind)
         "operator's declared requests."))
 end
 
-"""
-    setup_facet_item_caches(strategy, integrator, dh, declared_kinds, ivh; slots, needs_sensitivity, facet_item_global_dof_sets)
-
-The `SubdomainCache`s of the facet item family, one per subdomain that
-declares [`facet_items`](@ref): resolve and validate the declaration, build the
-cache [`setup_facet_item_cache`](@ref) names, derive the partition, and build
-the shared [`FacetItemWorkspace`](@ref).
-
-Unlike the algebraic family, nothing has to be resolved before the
-[`InternalVariableHandler`](@ref): a facet item owns no condensed internal state
-(its owning cell's `q` belongs to the cell family's item for that cell), so the
-declaration cannot change the `[ū | q_cells | q_items]` layout.
-"""
-function setup_facet_item_caches(strategy, integrator, dh, declared_kinds, ivh;
-        slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, facet_item_global_dof_sets)
+# The FACET ITEM family's [`setup_family_caches`](@ref) method: one
+# `SubdomainCache` per subdomain that declares [`facet_items`](@ref) — resolve
+# and validate the declaration, build the cache [`setup_facet_item_cache`](@ref)
+# names, derive the partition, and build the shared
+# [`FacetItemWorkspace`](@ref). A subdomain declaring nothing contributes no
+# cache, which is how this family declines an operator that has no boundary
+# term.
+#
+# Unlike the algebraic family, nothing has to be resolved before the
+# `InternalVariableHandler`: a facet item owns no condensed internal state (its
+# owning cell's `q` belongs to the cell family's item for that cell), so the
+# declaration cannot change the `[ū | q_cells | q_items]` layout.
+function setup_family_caches(::FacetItemFamily, strategy, integrator, dh, shared)
     device = strategy.device
     caches = SubdomainCache[]
-    for (index, (sdh, gdofs)) in enumerate(zip(dh.subdofhandlers, facet_item_global_dof_sets))
+    for (index, (sdh, gdofs)) in enumerate(zip(dh.subdofhandlers, shared.facet_item_global_dof_sets))
         declared = facet_items(integrator, sdh)
         isempty(declared) && continue
         items = resolve_facet_items(index, sdh, declared)
         cache = setup_facet_item_cache(integrator, sdh)
-        validate_facet_item_cache(cache, declared_kinds)
+        validate_facet_item_cache(cache, shared.declared_kinds)
         partition = compute_partition(strategy, FacetItems(sdh, items))
-        ws = create_facet_item_workspace(cache, items, sdh, ivh, slots; needs_sensitivity, global_dofs = gdofs)
+        ws = create_facet_item_workspace(cache, items, sdh, shared.ivh, shared.slots;
+                                         needs_sensitivity = shared.needs_sensitivity, global_dofs = gdofs)
         dc = setup_device_instances(device, ws, n_workers(device, partition))
         push!(caches, SubdomainCache(FacetItemDomain(sdh, cache, items), dc, partition))
     end

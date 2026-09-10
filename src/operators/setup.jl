@@ -188,9 +188,15 @@ runs rides the same iterator (which is why what each sweep REFRESHES is
 iteration_kind(form) = nothing
 iteration_kind(::MatrixFreeAction) = MatrixFreeActionKind()
 
-function setup_subdomain_caches(strategy, element_caches, ivh, dh;
-        slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, global_dof_sets)
+# The CELL family's [`setup_family_caches`](@ref) method: one `SubdomainCache`
+# per subdomain, over the iterator and the provider the (kind, element cache,
+# subdomain) triple resolves to. The only shipped family that needs a
+# device-resident handler.
+function setup_family_caches(::CellFamily, strategy, integrator, dh, shared)
     device = strategy.device
+    ivh    = shared.ivh
+    slots  = shared.slots
+    needs_sensitivity = shared.needs_sensitivity
     kind = iteration_kind(strategy.form)
     # One device-resident handler for the whole operator, split per subdomain
     # below: it is what a device item iterator must be built from, and
@@ -208,7 +214,7 @@ function setup_subdomain_caches(strategy, element_caches, ivh, dh;
             _device_iterator(kind, element_cache, sdh, device_subdomain_handler(device_dh, index)))
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
     end for (index, (sdh, element_cache, gdofs)) in
-        enumerate(zip(dh.subdofhandlers, element_caches, global_dof_sets))]
+        enumerate(zip(dh.subdofhandlers, shared.element_caches, shared.global_dof_sets))]
 end
 
 # A CPU device has no device handler and therefore no device iterator; the
@@ -421,9 +427,11 @@ end
 Reject a declaration hook whose method was written against a signature the
 engine does not call. [`global_dofs`](@ref), [`facet_items`](@ref),
 [`facet_item_global_dofs`](@ref) and [`algebraic_items`](@ref) all default to an
-EMPTY declaration, so a drifted signature never surfaces as a `MethodError`: the
-default answers instead, and the operator assembles a subset — a missing
-local-system tail, an unvisited boundary, absent algebraic rows — without a word.
+EMPTY declaration and [`item_families`](@ref) to the families those three imply,
+so a drifted signature never surfaces as a `MethodError`: the default answers
+instead, and the operator assembles a subset — a missing local-system tail, an
+unvisited boundary, absent algebraic rows, an unregistered family — without a
+word.
 
 The check is type-level and runs once per [`setup_engine`](@ref). For every
 integrator that answers these hooks — the outer one and, through the wrappers
@@ -431,11 +439,16 @@ that forward them, their sub-integrators — a hook with ANY method specialized 
 that integrator's type must have one the engine's own call resolves to. An
 integrator declaring nothing has no specialized method and passes; a correct
 declarer's method is what the call resolves to and passes.
+
+The iteration seams are keyed on the ELEMENT CACHE rather than the integrator,
+so they are checked separately and later, once the caches exist —
+[`assert_iteration_signatures`](@ref).
 """
 function assert_declaration_signatures(integrator, dh::AbstractDofHandler)
     subjects = _declaration_subjects!(Any[], integrator)
     for subject in subjects
         _assert_hook_signature(algebraic_items, subject, typeof(dh))
+        _assert_hook_signature(item_families, subject, typeof(dh))
     end
     isempty(dh.subdofhandlers) && return nothing
     # Type-level, and every subdomain of one DofHandler shares `typeof(sdh)`, so
@@ -451,25 +464,86 @@ end
 
 function _assert_hook_signature(hook, subject, argtype::Type)
     IT = typeof(subject)
-    _is_empty_declaration_default(which(hook, Tuple{IT, argtype})) || return nothing
+    _is_open_declaration_default(which(hook, Tuple{IT, argtype})) || return nothing
     drifted = [m for m in methods(hook, Tuple{IT, Vararg{Any}})
-               if !_is_empty_declaration_default(m)]
+               if !_is_open_declaration_default(m)]
     isempty(drifted) && return nothing
     expected = "$(nameof(hook))(::$(nameof(IT)), ::$(nameof(argtype)))"
     throw(ArgumentError(
         "$(IT) has a method for the declaration hook `$(nameof(hook))`, but the engine's call " *
-        "`$expected` resolves to the empty default, so this integrator declares nothing at " *
-        "all. The declaration hooks default to an empty declaration rather than erroring, so " *
-        "a drifted signature assembles a silent subset instead of failing.\n" *
+        "`$expected` resolves to the hook's DEFAULT, so this integrator's declaration is never " *
+        "reached. These hooks default rather than erroring — to an empty declaration, or, for " *
+        "`item_families`, to the families the other declarations imply — so a drifted signature " *
+        "assembles a silent subset instead of failing.\n" *
         "found:    " * join(drifted, "\n          ") * "\n" *
         "expected: " * expected))
 end
 
-# The empty default of a declaration hook is its one method left open in the
-# integrator slot; every other method is some integrator type's declaration.
-function _is_empty_declaration_default(m::Method)
+# A declaration hook's default is its one method left open in the integrator
+# slot; every other method is some integrator type's declaration.
+function _is_open_declaration_default(m::Method)
     params = Base.unwrap_unionall(m.sig).parameters
     return length(params) ≥ 2 && params[2] === Any
+end
+
+"""
+    assert_iteration_signatures(kind, element_caches, dh)
+
+Reject an ITERATION-seam declaration whose method was written against a
+signature the engine does not call. [`assembly_iterator`](@ref) and
+[`item_provider`](@ref) are keyed on the `(kind, element cache, subdomain)`
+triple — not on the integrator — so they are checked here rather than in
+[`assert_declaration_signatures`](@ref), once the caches exist and the sweep
+kind is resolved.
+
+Both default to the cell answer (`CellCache`, [`CellItems`](@ref)), so a drifted
+method is never reached and never a `MethodError`: the default answers, and the
+sweep positions on CELL ids and visits CELLS. That is a silently wrong operator,
+which is why the drift is worth a setup-time rejection.
+
+The subject is the ELEMENT CACHE, the argument the seams are keyed on: a hook
+with ANY method narrowing that argument to a type this subdomain's cache
+conforms to must have one the engine's own call resolves to. A method narrowing
+only the KIND is not a declaration about a cache — the matrix-free action's
+device iterator is the shipped one — and is not treated as drift.
+
+What no check can see, and the docs say so instead: a method that is simply
+ABSENT. An author who overloads [`assembly_iterator`](@ref) and forgets
+[`item_provider`](@ref) gets the default provider with no drift to detect, and
+only the item COUNT a sweep visits reveals it.
+"""
+function assert_iteration_signatures(kind, element_caches, dh::AbstractDofHandler)
+    for (cache, sdh) in zip(element_caches, dh.subdofhandlers)
+        _assert_iteration_hook_signature(assembly_iterator, kind, cache, sdh)
+        _assert_iteration_hook_signature(item_provider, kind, cache, sdh)
+    end
+    return nothing
+end
+
+# A type no declaration can name, used to tell "narrows the cache argument"
+# apart from "leaves it open": a method that also accepts THIS is not a
+# declaration about any particular cache.
+struct _UnrelatedElementCache end
+
+_accepts_element_cache(m::Method, C::Type) =
+    typeintersect(m.sig, Tuple{Any, Any, C, Vararg{Any}}) !== Union{}
+
+_declares_for_element_cache(m::Method, C::Type) =
+    _accepts_element_cache(m, C) && !_accepts_element_cache(m, _UnrelatedElementCache)
+
+function _assert_iteration_hook_signature(hook, kind, cache, sdh)
+    CT = typeof(cache)
+    _declares_for_element_cache(which(hook, Tuple{typeof(kind), CT, typeof(sdh)}), CT) && return nothing
+    drifted = [m for m in methods(hook) if _declares_for_element_cache(m, CT)]
+    isempty(drifted) && return nothing
+    expected = "$(nameof(hook))(::$(nameof(typeof(kind))), ::$(nameof(CT)), ::$(nameof(typeof(sdh))))"
+    throw(ArgumentError(
+        "$(CT) has a method for the iteration seam `$(nameof(hook))`, but the engine's call " *
+        "`$expected` resolves to the default instead, so this cache's declaration is never " *
+        "reached. Both iteration seams default to the CELL answer rather than erroring, so a " *
+        "drifted signature sweeps the cells silently instead of failing.\n" *
+        "found:    " * join(drifted, "\n          ") * "\n" *
+        "expected: " * expected))
 end
 
 # Kind types or instances normalize to their UnionAll base, so a declaration
@@ -499,19 +573,24 @@ The declaration hooks are signature-checked first
 ([`assert_declaration_signatures`](@ref)), since each defaults to an empty
 declaration and a drifted method would otherwise assemble a silent subset.
 
-Each subdomain's [`validate_element_cache`](@ref) call probes `reinit_values!`
+Once the caches exist the ITERATION seams are signature-checked against them
+([`assert_iteration_signatures`](@ref)), which is where they belong: they are
+keyed on the element cache, and they too default rather than erroring. Each
+subdomain's [`validate_element_cache`](@ref) call then probes `reinit_values!`
 against that subdomain's RESOLVED host [`assembly_iterator`](@ref) type rather
 than against `CellCache` unconditionally, so an author-annotated
 `reinit_values!(c, ::MyIterator)` method is validated on the type it was
 written against.
 
-Facet item ([`facet_items`](@ref)) and then algebraic item
-([`algebraic_items`](@ref)) caches are appended after the cell subdomains, so
-traversal order follows the declarations rather than which families are
-present. The algebraic domain is resolved BEFORE the
-[`InternalVariableHandler`](@ref) is built, since a condensed algebraic cache's
-item block sizes itself from the resolved items and cache, and decorated
-afterwards alongside the cell caches.
+The subdomain caches are then the concatenation of what each REGISTERED item
+family builds, in the order [`item_families`](@ref) returns them — cells, then
+facet items ([`facet_items`](@ref)), then algebraic items
+([`algebraic_items`](@ref)) for the default declaration. Every family, shipped
+or downstream, is built by the same [`setup_family_caches`](@ref) dispatch;
+there is no privileged path beside it. The algebraic domain is resolved BEFORE
+the [`InternalVariableHandler`](@ref) is built, since a condensed algebraic
+cache's item block sizes itself from the resolved items and cache, and
+decorated afterwards alongside the cell caches.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler;
         slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD())
@@ -523,6 +602,7 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     facet_item_sets   = resolve_facet_item_global_dof_sets(strategy, integrator, dh)
     element_caches    = setup_elements(integrator, dh, strategy.form, ad_backend, map(length, global_dof_sets))
     kind              = iteration_kind(strategy.form)
+    assert_iteration_signatures(kind, element_caches, dh)
     foreach(element_caches, dh.subdofhandlers) do cache, sdh
         validate_element_cache(cache, declared_kinds; iterator_type = typeof(assembly_iterator(kind, cache, sdh)))
     end
@@ -530,20 +610,11 @@ function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::Abstra
     ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
     needs_sensitivity = needs_ad_decoration(integrator)
     assert_device_internal_state_supported(strategy.device, ivh)
-    cell_caches       = setup_subdomain_caches(strategy, element_caches, ivh, dh;
-                                               slots = declared_slots,
-                                               needs_sensitivity,
-                                               global_dof_sets)
-    facet_caches      = setup_facet_item_caches(strategy, integrator, dh, declared_kinds, ivh;
-                                                slots = declared_slots,
-                                                needs_sensitivity,
-                                                facet_item_global_dof_sets = facet_item_sets)
-    algebraic_caches  = setup_algebraic_caches(strategy, algebraic_domain, declared_slots, ad_backend,
-                                               needs_sensitivity, ivh)
-    # The families carry different domain types; widening only where something
-    # is declared keeps a cells-only operator's element type concrete.
-    subdomain_caches  = (isempty(facet_caches) && isempty(algebraic_caches)) ? cell_caches :
-        vcat(Vector{SubdomainCache}(cell_caches), facet_caches, algebraic_caches)
+    shared            = (; slots = declared_slots, needs_sensitivity, ivh, ad_backend, declared_kinds,
+                           element_caches, global_dof_sets,
+                           facet_item_global_dof_sets = facet_item_sets, algebraic_domain)
+    subdomain_caches  = _family_subdomain_caches(
+        item_families(integrator, dh), strategy, integrator, dh, shared)
     return AssemblyEngine(strategy, subdomain_caches, dh, ivh, declared_slots)
 end
 

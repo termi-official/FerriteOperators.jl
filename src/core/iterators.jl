@@ -25,7 +25,7 @@ cell kernel may reach for.
 | shape | who calls it | argument(s) |
 |---|---|---|
 | host | `create_assembly_workspace` | the HOST `sdh` |
-| device | `setup_subdomain_caches` (via [`device_assembly_iterator`](@ref)) | a device-resident handler |
+| device | the [`CellFamily`](@ref) setup (via [`device_assembly_iterator`](@ref)) | a device-resident handler |
 | host-side completion of a device iterator | [`device_assembly_iterator`](@ref)'s overloads | the device iterator's construction **and** the HOST `sdh` |
 
 The third shape exists because a device iterator sometimes needs a setup-time

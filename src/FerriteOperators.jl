@@ -36,6 +36,7 @@ include("core/requests.jl")           # Assembly requests: the element kernel co
 include("core/element_interface.jl")  # Cache supertypes + the empty caches
 include("core/tasks.jl")              # Assembly kinds and the task system
 include("core/iterators.jl")          # Two-DofHandler cell iterators
+include("core/families.jl")           # Item-family registration: item_families/setup_family_caches
 
 include("core/utils.jl")
 include("core/qvector.jl")           # Flat per-cell quadrature data storage
@@ -210,6 +211,8 @@ export StandardOperatorSpecification, BlockedOperatorSpecification
 export assembly_iterator, device_assembly_iterator, position_item, position_iterator
 export item_update_flags, iterator_dofs, iterator_handler, iterator_scatter_address
 export item_provider, compute_partition, CellItems
+export item_families, setup_family_caches
+export CellFamily, FacetItemFamily, AlgebraicItemFamily
 export allocate_element_matrix, allocate_element_unknown_vector, allocate_element_residual_vector
 
 # Transfer operator infrastructure

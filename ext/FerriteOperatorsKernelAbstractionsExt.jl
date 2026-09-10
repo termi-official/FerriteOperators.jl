@@ -263,7 +263,7 @@ function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevic
     iterator === nothing && throw(ArgumentError(
         "$(nameof(typeof(device))) needs the subdomain's device item iterator to build a device " *
         "workspace. Workspaces reach it through the four-argument `setup_device_instances`, " *
-        "which `setup_subdomain_caches` calls."))
+        "which the cell family's `setup_family_caches` method calls."))
     backend = device.backend
     ndofs_local = size(ws.Ke, 1)
     return AssemblyWorkspace(

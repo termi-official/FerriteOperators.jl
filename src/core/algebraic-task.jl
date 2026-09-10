@@ -374,8 +374,9 @@ The [`algebraic_items`](@ref) declaration resolved and validated once, before
 the integrator declares no items, otherwise the raw cache
 [`setup_algebraic_cache`](@ref) built and the resolved item dof vectors — what
 [`setup_internal_variable_handler`](@ref) needs to size a condensed algebraic
-cache's item block, and what [`setup_algebraic_caches`](@ref) needs to finish
-the domain.
+cache's item block, and what the [`AlgebraicItemFamily`](@ref)'s
+[`setup_family_caches`](@ref) method needs to finish the domain. It rides
+`shared.algebraic_domain` from there.
 """
 function resolve_algebraic_domain(integrator, dh, declared_kinds)
     declared = algebraic_items(integrator, dh)
@@ -386,19 +387,18 @@ function resolve_algebraic_domain(integrator, dh, declared_kinds)
     return (cache, items)
 end
 
-"""
-    setup_algebraic_caches(strategy, algebraic_domain, slots, ad_backend, needs_sensitivity, ivh)
-
-The `SubdomainCache`s of the algebraic family, finishing what
-[`resolve_algebraic_domain`](@ref) resolved: decorate the cache, derive the
-partition, and build the shared [`AlgebraicWorkspace`](@ref) against `ivh`.
-`algebraic_domain === nothing` (nothing declared) returns no caches.
-[`setup_engine`](@ref) appends the result after the cell subdomains, so a
-sweep's traversal order stays deterministic.
-"""
-function setup_algebraic_caches(strategy, algebraic_domain, slots::NTuple{<:Any, Symbol}, ad_backend, needs_sensitivity::Bool, ivh)
+# The ALGEBRAIC ITEM family's [`setup_family_caches`](@ref) method, finishing
+# what [`resolve_algebraic_domain`](@ref) resolved before the
+# `InternalVariableHandler` was built: decorate the cache, derive the partition,
+# and build the shared [`AlgebraicWorkspace`](@ref). This family serves the
+# whole handler with ONE cache rather than one per subdomain, and
+# `shared.algebraic_domain === nothing` (nothing declared) is how it declines.
+function setup_family_caches(::AlgebraicItemFamily, strategy, integrator, dh, shared)
+    algebraic_domain = shared.algebraic_domain
     algebraic_domain === nothing && return SubdomainCache[]
     cache, items = algebraic_domain
+    slots, ad_backend, ivh = shared.slots, shared.ad_backend, shared.ivh
+    needs_sensitivity = shared.needs_sensitivity
     device = strategy.device
     # An algebraic item has no values object to elect from, so the cache's own
     # [`element_value_type`](@ref) — `Float64` unless it declares otherwise —

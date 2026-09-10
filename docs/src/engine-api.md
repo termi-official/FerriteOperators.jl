@@ -8,6 +8,7 @@ CurrentModule = FerriteOperators
 Modules = [FerriteOperators]
 Pages = [
     "core/tasks.jl",
+    "core/families.jl",
     "core/facet-task.jl",
     "core/algebraic-task.jl",
     "core/strategy.jl",

@@ -19,8 +19,16 @@
 #   1 duplication method — `duplicate_for_device`, for the threaded CPU route
 #   1 declaration        — `sparsity_entries`, the entries a two-sided item
 #                          couples and the cell pattern does not carry
+#   1 family marker      — `JumpPairFamily`, the type the registration dispatches on
+#   2 registration methods — `item_families`, `setup_family_caches`
 # everything else in the file is the ELEMENT axis (already open before this
 # round) and the assertions.
+#
+# The last three are what REGISTRATION costs, and they are optional: a family
+# whose items ride the cell route needs only the nine above, because the default
+# `item_families` already registers `CellFamily()` and the two protocol seams
+# narrow what that family positions on and enumerates. They are written here
+# because registering is what proves the seam — see the registration testset.
 #
 # THE DEVICE HALF (optional; `KernelAbstractionsDevice(KA.CPU())`). A separate,
 # device-resident iterator (`DevicePairCursor`) plus 4 more methods —
@@ -47,7 +55,7 @@ import KernelAbstractions as KA
 import FerriteOperators: assembly_iterator, item_provider, iterator_dofs, iterator_handler,
     compute_partition, duplicate_for_device, setup_element_cache, reinit_values!,
     allocate_element_matrix, allocate_element_unknown_vector, allocate_element_residual_vector,
-    provides_analytic, assemble_cell!,
+    provides_analytic, assemble_cell!, item_families, setup_family_caches,
     device_assembly_iterator, position_iterator, setup_device_instances, device_worker_view
 
 ####################################
@@ -277,6 +285,33 @@ end
 assembly_iterator(kind, c::JumpPenaltyCache, sdh) = PairCache(sdh, c.pairs)
 item_provider(kind, c::JumpPenaltyCache, sdh)     = PairItems(sdh, c.pairs)
 
+####################################
+## THE REGISTRATION: the family those two belong to
+####################################
+# A family marker plus one `setup_family_caches` method is what puts this
+# traversal on the engine's family list. The declaration REPLACES the derived
+# default `(CellFamily(),)`, so the operator below carries the pair family and
+# no cell family at all — an engine that still hand-appended a cell setup would
+# assemble the cells too, and every count below would be 12 rather than 9.
+#
+# The method delegates to the CELL family's own body: the subdomain caches this
+# family needs are cell-shaped (one per subdomain, over the iterator and the
+# provider the two seams above resolve to), and reaching the shipped body from
+# test code IS the dogfood claim — no engine-registered family has a privileged
+# setup path.
+
+struct JumpPairFamily end
+
+# How many times the engine reached THIS family's setup. One per `setup_operator`.
+const FAMILY_SETUPS = Ref(0)
+
+item_families(::JumpPenaltyIntegrator, dh) = (JumpPairFamily(),)
+
+function setup_family_caches(::JumpPairFamily, strategy, integrator, dh, shared)
+    FAMILY_SETUPS[] += 1
+    return setup_family_caches(CellFamily(), strategy, integrator, dh, shared)
+end
+
 # Annotated on the ITERATOR type, which is the natural spelling and the one
 # setup validation must accept (it probes the RESOLVED iterator type). This
 # family stages nothing per sweep, so it is a no-op.
@@ -446,7 +481,28 @@ sweep!(op) = (Threads.atomic_xchg!(VISITED, 0); update_operator!(op, nothing); o
         @test pc.coords_right == getcoordinates(tb.grid, r)
     end
 
-    @testset "the default provider is unchanged for every other family" begin
+    @testset "the registration seam: a family declared entirely from test code" begin
+        # Every operator above was built through THIS file's
+        # `setup_family_caches` method — the engine reached it by dispatch on
+        # the declared marker, and by nothing else.
+        before = FAMILY_SETUPS[]
+        fresh  = setup_operator(strategy_for(tb.spec, SequentialCPUDevice()), tb.integrator, tb.dh)
+        @test FAMILY_SETUPS[] == before + 1
+        @test item_families(tb.integrator, tb.dh) === (JumpPairFamily(),)
+        # The cell family is NOT registered, so nothing swept the 12 cells: the
+        # 9 pair items are the whole traversal.
+        @test length(get_subdomain_caches(fresh)) == length(tb.dh.subdofhandlers)
+        @test length(first(get_subdomain_caches(fresh)).partition[1]) == 9
+        @test Matrix(sweep!(fresh)) ≈ reference_matrix(tb.dh, tb.prs, n) rtol = 1.0e-12
+        # The three shipped families answer the SAME generic function this one
+        # does — that is the whole of the dogfood claim, from outside `src/`.
+        for family in (CellFamily(), FacetItemFamily(), AlgebraicItemFamily(), JumpPairFamily())
+            @test hasmethod(setup_family_caches, Tuple{typeof(family), Any, Any, Any, Any})
+        end
+    end
+
+    @testset "the defaults are unchanged for every other family" begin
         @test item_provider(nothing, nothing, sdh) isa CellItems
+        @test item_families(nothing, tb.dh) === (CellFamily(),)
     end
 end
