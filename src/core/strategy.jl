@@ -1,9 +1,9 @@
 """
     StandardOperatorSpecification(; algebraic_couplings = (), constraint_handler = nothing,
-                                    matrix_type = nothing)
+                                    matrix_type = nothing, sparsity_entries = nothing)
 
 The operator's global matrix as a monolithic sparse matrix over the pattern
-[`create_system_matrix`](@ref) builds from two declarations
+[`create_system_matrix`](@ref) builds from three declarations
 [`BlockedOperatorSpecification`](@ref) shares (the zero-argument form is
 [`FullAssembly`](@ref)'s default):
 
@@ -16,6 +16,23 @@ The operator's global matrix as a monolithic sparse matrix over the pattern
 - `constraint_handler` — sparsity room for the constraint entries
   (`add_constraint_entries!`). Applying the constraints stays the caller's,
   through Ferrite's `apply!`/`apply_assemble!`.
+- `sparsity_entries` — a callable `f(sp, dh)` run on the freshly built pattern
+  after the entries above, for the coupling an ITEM FAMILY introduces and the
+  `DofHandler`'s cell pattern does not carry: an item spanning two cells (an
+  interface/DG traversal, [`item_provider`](@ref)) scatters a block indexed by
+  the dofs of BOTH, and no declaration on the handler implies those entries.
+  `nothing` (the default) adds none. The framework never infers them — which
+  dofs an item couples is the provider's own adjacency — so this is the same
+  doctrine [`global_dofs`](@ref) states for its tail, with the entries spelled
+  through Ferrite's own pattern API rather than mirrored here:
+
+      sparsity_entries = (sp, dh) -> Ferrite.add_interface_entries!(
+          sp, dh, nothing; topology = ExclusiveTopology(get_grid(dh)))
+
+  It is re-run for every matrix allocated under this specification (the
+  operator's own, and the ones [`allocate_components`](@ref) and
+  [`StageBlockOperator`](@ref) build beside it), so it must be a pure
+  entry-adding function and not a pre-built pattern to hand out.
 - `matrix_type` — the concrete matrix type to allocate, `nothing` (the default)
   meaning `SparseMatrixCSC{value_type(device), index_type(device)}`. Naming one
   is what a DEVICE matrix takes: this package depends on no GPU vendor package,
@@ -26,20 +43,22 @@ The operator's global matrix as a monolithic sparse matrix over the pattern
   hold. Its element type must be the device's `value_type`, and Ferrite must
   have a `start_assemble` method for it — both checked at setup.
 """
-struct StandardOperatorSpecification{C, CH, MT}
+struct StandardOperatorSpecification{C, CH, MT, SE}
     algebraic_couplings::C
     constraint_handler::CH
     matrix_type::MT
+    sparsity_entries::SE
 end
 StandardOperatorSpecification(; algebraic_couplings = (), constraint_handler = nothing,
-        matrix_type = nothing) =
-    StandardOperatorSpecification(algebraic_couplings, constraint_handler, matrix_type)
+        matrix_type = nothing, sparsity_entries = nothing) =
+    StandardOperatorSpecification(algebraic_couplings, constraint_handler, matrix_type, sparsity_entries)
 
 """
-    BlockedOperatorSpecification(block_sizes, matrix_type; algebraic_couplings = (), constraint_handler = nothing)
+    BlockedOperatorSpecification(block_sizes, matrix_type; algebraic_couplings = (),
+                                 constraint_handler = nothing, sparsity_entries = nothing)
 
 The operator's global matrix as a `BlockMatrix` over the row/column split
-`block_sizes`, allocated from a `BlockSparsityPattern` and the same two
+`block_sizes`, allocated from a `BlockSparsityPattern` and the same three
 declarations as [`StandardOperatorSpecification`](@ref). `matrix_type` is
 REQUIRED: this package depends on neither BlockArrays nor SparseMatricesCSR, so
 the user loads them and names the type
@@ -49,15 +68,17 @@ The residual stays a plain `Vector` — Ferrite's `BlockAssembler` takes a
 non-blocked `f`. A LINEAR operator holds no matrix, so a blocked specification
 on one is rejected at setup.
 """
-struct BlockedOperatorSpecification{B, MT, C, CH}
+struct BlockedOperatorSpecification{B, MT, C, CH, SE}
     block_sizes::B
     matrix_type::MT
     algebraic_couplings::C
     constraint_handler::CH
+    sparsity_entries::SE
 end
 BlockedOperatorSpecification(block_sizes, matrix_type::Type;
-        algebraic_couplings = (), constraint_handler = nothing) =
-    BlockedOperatorSpecification(block_sizes, matrix_type, algebraic_couplings, constraint_handler)
+        algebraic_couplings = (), constraint_handler = nothing, sparsity_entries = nothing) =
+    BlockedOperatorSpecification(block_sizes, matrix_type, algebraic_couplings, constraint_handler,
+                                 sparsity_entries)
 
 """
     AbstractAssemblyStrategy
@@ -580,18 +601,71 @@ end
 
 The default work-item provider: the cells of one `SubDofHandler`. Item
 providers are what `compute_partition` consumes — every other item family
-brings its own provider type ([`AlgebraicItems`](@ref), [`PatchItems`](@ref)).
+brings its own provider type ([`FacetItems`](@ref), [`AlgebraicItems`](@ref),
+[`PatchItems`](@ref)).
 """
 struct CellItems{SDH <: SubDofHandler}
     sdh::SDH
 end
 
 """
-    compute_partition(strategy, provider)
+    item_provider(kind, element_cache, sdh) -> provider
 
-The work partition for a strategy and item provider: an iterable of iterables,
-the outer level synchronization barriers (e.g. colors), the inner level work
-items that may run in parallel (cell ids).
+WHAT the items of a sweep of `kind` over `element_cache` on subdomain `sdh`
+ARE. The second half of the iteration seam, beside
+[`assembly_iterator`](@ref), which says how to POSITION on one of them.
+Resolved ONCE per (sweep kind, element cache, subdomain) at
+[`setup_operator`](@ref); its answer is what [`compute_partition`](@ref)
+consumes, and the partition is what a sweep walks.
+
+The default is [`CellItems`](@ref)`(sdh)` — the cells of the subdomain.
+
+**Why two seams and not one.** The iterator and the item set vary
+INDEPENDENTLY, and both shipped families prove it: the facet family runs a
+custom provider ([`FacetItems`](@ref)) over the STOCK cell iterator, while the
+matrix-free action runs a custom iterator (the device cursor) over the STOCK
+provider. One seam would force a new type for every combination.
+
+**The hazard, stated.** Overloading one seam and not the other is not an error:
+the other answers with its default. An interface iterator left with the default
+provider is positioned on CELL ids — `Ferrite.reinit!` on an item index that
+happens to be in range succeeds and assembles the wrong operator. No framework
+check can see this; the item COUNT a sweep visits is what catches it.
+
+A provider carries its family's whole partition safety argument — see
+[`compute_partition`](@ref).
+"""
+item_provider(kind, element_cache, sdh) = CellItems(sdh)
+
+"""
+    compute_partition(strategy, provider)
+    compute_partition(scheduling, provider)
+
+The work partition for a scheduling policy and an item provider
+([`item_provider`](@ref)): an iterable of iterables, the outer level
+synchronization barriers (e.g. colors), the inner level work items that may run
+concurrently (cell ids for [`CellItems`](@ref), item indices for every other
+family).
+
+**Partition obligations.** A partition is SAFE GIVEN A VALID PARTITION, never
+*thread-safe*. What makes a parallel sweep race-free is a promise about the
+provider's own item adjacency, and that adjacency is the provider's knowledge —
+the framework cannot check it.
+
+- Under [`ColoredScheduling`](@ref) the provider promises that **no two items of
+  one inner chunk share a scatter dof**. That promise is exactly what lets the
+  scatter run without atomics (`dof_scatter_needs_atomic`), so a chunk that
+  breaks it is a silent race, not an error.
+- Under [`SequentialScheduling`](@ref) the provider promises nothing: the atomic
+  scatter resolves the collisions. The outer level is still synchronization
+  barriers and the inner level still items that may run concurrently.
+
+The three shipped providers are the worked examples, each arguing the promise in
+its own terms: [`FacetItems`](@ref) colors the OWNING CELLS, since items of one
+color share no dofs precisely because their owning cells do not;
+[`AlgebraicItems`](@ref) has an unknown sharing pattern and therefore puts one
+item per barrier; [`PatchItems`](@ref) REFUSES to color, because a patch
+provider does not carry the item adjacency the promise would rest on.
 """
 compute_partition(strategy::AssemblyStrategy, sdh::SubDofHandler) = compute_partition(strategy.scheduling, CellItems(sdh))
 compute_partition(strategy::AssemblyStrategy, provider) = compute_partition(strategy.scheduling, provider)

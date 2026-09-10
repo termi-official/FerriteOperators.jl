@@ -207,6 +207,8 @@ export StandardOperatorSpecification, BlockedOperatorSpecification
 
 export assembly_iterator, device_assembly_iterator, position_item, position_iterator
 export item_update_flags, iterator_dofs, iterator_handler, iterator_scatter_address
+export item_provider, compute_partition, CellItems
+export allocate_element_matrix, allocate_element_unknown_vector, allocate_element_residual_vector
 
 # Transfer operator infrastructure
 export SameGridCellCache, SameGridCellIterator

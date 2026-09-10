@@ -307,6 +307,57 @@ admissibility probe is validated against the subdomain's RESOLVED iterator
 type, so a cache author who annotates it against a custom iterator (rather than
 leaving the argument unannotated) still passes.
 
+**New item SETS** — an iterator says how to POSITION on an item; it does not say
+what the items ARE. That is the second seam,
+[`item_provider`](@ref)`(kind, element_cache, sdh)`, whose answer
+[`compute_partition`](@ref) turns into the barriers and chunks a sweep walks.
+The default is [`CellItems`](@ref)`(sdh)`.
+
+The two vary independently, which is why they are two seams: the facet family
+runs a custom provider over the stock cell iterator, and the matrix-free action
+runs a custom iterator over the stock provider. A family that is BOTH — a
+two-sided interface traversal, say, whose item is a pair of cells and whose
+local system is indexed by both cells' dofs — is these five methods and nothing
+else:
+
+```julia
+FerriteOperators.assembly_iterator(kind, ::MyCache, sdh) = MyIterator(sdh, …)
+FerriteOperators.item_provider(kind, ::MyCache, sdh)     = MyItems(sdh, …)
+
+FerriteOperators.compute_partition(::SequentialScheduling, p::MyItems) = (collect(eachindex(…)),)
+FerriteOperators.compute_partition(::ColoredScheduling,    p::MyItems) = …  # see below
+FerriteOperators.duplicate_for_device(::AbstractCPUDevice, it::MyIterator) = MyIterator(…)
+```
+
+plus the three required accessors above. Overloading one seam and forgetting the
+other is not an error and not a `MethodError`: the other answers with its
+default, and an interface iterator left with `CellItems` is positioned on CELL
+ids. Assert the item COUNT a sweep visits; no framework check can see this.
+
+A provider carries its family's whole partition safety argument. The wording the
+package uses, and means: a partition is **safe given a valid partition**, never
+*thread-safe*. Under [`ColoredScheduling`](@ref) the provider promises that no
+two items of one inner chunk share a SCATTER DOF — that promise, and nothing
+else, is what makes the scatter race-free without atomics. Under
+[`SequentialScheduling`](@ref) it promises nothing and the atomic scatter
+resolves the collisions. The three shipped providers each argue it in their own
+terms ([`FacetItems`](@ref) colors the owning cells, [`AlgebraicItems`](@ref)
+puts one item per barrier, [`PatchItems`](@ref) refuses to color at all).
+
+Two consequences of the local system spanning more than one cell, both
+structural rather than incidental:
+
+- The dof window [`iterator_dofs`](@ref) returns is the scatter's address, and
+  Ferrite's assembler requires it to be DUPLICATE FREE. Two cells of a
+  continuous space share the dofs on their common facet, so a two-sided item
+  over one repeats them; the family's space is discontinuous, or the item's
+  sides do not touch.
+- The entries that window addresses are not in the `DofHandler`'s cell pattern,
+  and the framework never infers them. Declare them through the operator
+  specification's `sparsity_entries`
+  ([`StandardOperatorSpecification`](@ref)) — the same doctrine
+  [`global_dofs`](@ref) states for its tail.
+
 **New assembly levels** — a form member decides what `setup_operator` returns
 and, through [`operator_specification`](@ref), whether the global-storage walls
 apply to it at all. [`MatrixFreeAction`](@ref) is the second member: it

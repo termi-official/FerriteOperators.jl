@@ -6,7 +6,9 @@ operator specification declares ([`StandardOperatorSpecification`](@ref) →
 `SparsityPattern`, [`BlockedOperatorSpecification`](@ref) →
 `BlockSparsityPattern`), with entries added by Ferrite's
 `add_sparsity_entries!` from the specification's `algebraic_couplings` and
-`constraint_handler`, allocated as `matrix_type(strategy)`.
+`constraint_handler`, then by the specification's `sparsity_entries` callable —
+the coupling an item family introduces and the handler's cell pattern does not
+carry — allocated as `matrix_type(strategy)`.
 
 The constraint handler contributes SPARSITY ENTRIES only; applying the
 constraints to the assembled system stays the caller's, through Ferrite's
@@ -25,8 +27,14 @@ function _create_system_matrix(strategy, spec, dh)
     else
         add_sparsity_entries!(sp, dh, spec.constraint_handler; algebraic_couplings = couplings)
     end
+    _add_declared_entries!(spec.sparsity_entries, sp, dh)
     return allocate_operator_matrix(strategy.device, matrix_type(strategy), sp)
 end
+
+# The item families' own coupling, added last so it unions with the cell pattern
+# rather than replacing it. `nothing` is the whole cost of the undeclared case.
+_add_declared_entries!(::Nothing, sp, dh) = sp
+_add_declared_entries!(f, sp, dh) = (f(sp, dh); sp)
 
 """
     allocate_operator_matrix(device, matrix_type, sp)
@@ -168,8 +176,9 @@ end
 """
     iteration_kind(form) -> kind
 
-The sweep kind an operator of `form` resolves its item iterator for
-([`assembly_iterator`](@ref)). `nothing` for a form whose sweeps are the primal
+The sweep kind an operator of `form` resolves its item iterator
+([`assembly_iterator`](@ref)) and its item set ([`item_provider`](@ref)) for.
+`nothing` for a form whose sweeps are the primal
 family — every one of them positions on the full geometry cache, so there is no
 kind to narrow by. A [`MatrixFreeAction`](@ref) operator answers with its ACTION
 kind: that is the sweep run per `mul!`, and the quadrature-data fill it also
@@ -189,7 +198,8 @@ function setup_subdomain_caches(strategy, element_caches, ivh, dh;
     # subdomain again.
     device_dh = setup_device_handler(device, dh)
     return [begin
-        partition = adapt_partition(device, compute_partition(strategy, sdh))
+        partition = adapt_partition(device, compute_partition(
+            strategy, item_provider(kind, element_cache, sdh)))
         n = n_workers(device, partition)
         ws = create_assembly_workspace(element_cache, sdh, ivh, slots;
                                        needs_sensitivity, global_dofs = gdofs,
