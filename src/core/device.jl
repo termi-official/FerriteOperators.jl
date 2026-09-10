@@ -354,6 +354,45 @@ element serves it only where it implements the cooperative kernel entries
 struct CooperativeElement <: AbstractElementMapping end
 
 """
+    LanesPerElement(; lanes = nothing)
+
+One element's OUTPUT ROWS split across a block of lanes: lane `l` of a block of
+`nlanes` owns rows `l:nlanes:ndofs_per_cell` of `yₑ`, reads all of `uₑ` through
+the item's dof window, keeps its row's accumulator in a REGISTER and scatters
+that row itself. The lanes of one element exchange no value, so this mapping
+needs neither group-local memory nor a barrier — it is a grid-stride kernel over
+`(element, lane)` pairs — and it is a [`KernelAbstractionsDevice`](@ref) mapping
+only, a CPU device sweeping one item per worker from gather to scatter.
+
+`lanes` is a LAUNCH POLICY, not element math: `nothing` takes the block from the
+element's own extent ([`element_local_length`](@ref)) capped by the device's
+`max_workgroup_size`, and an explicit count overrides that. A block shorter than
+the row count gives each lane several rows, which is the same kernel. The
+workgroup hosts `max_workgroup_size ÷ nlanes` ELEMENTS, so a small element
+leaves no lane of a group idle.
+
+It serves the [`ElementAssembly`](@ref) storage level alone, through
+[`element_action_row`](@ref): the two per-quadrature-point levels re-derive an
+element's values objects per cell into per-worker state that the lanes of one
+element would race on. Its scatter addresses one dof per owned row, so an item
+family whose scatter address is not a dof vector is outside it. Both are setup
+errors naming the alternative.
+
+The contrast with [`CooperativeElement`](@ref) is what makes it a separate
+mapping: that one exists to split an element's LATTICE and needs the barriers
+that go with it, while this one splits the element's dense product's ROWS, which
+are independent by construction.
+
+!!! warning "Experimental surface"
+    This mapping and the element entry it calls may change in a minor release.
+"""
+struct LanesPerElement <: AbstractElementMapping
+    lanes::Union{Int, Nothing}
+end
+LanesPerElement(; lanes::Union{Integer, Nothing} = nothing) =
+    LanesPerElement(lanes === nothing ? nothing : Int(lanes))
+
+"""
     with_element_mapping(device, mapping) -> device
 
 The device that executes `mapping` ([`AbstractElementMapping`](@ref)), which a
@@ -383,6 +422,11 @@ with_element_mapping(device::AbstractDevice, mapping::AbstractElementMapping) = 
     "onto a cooperating group of workers needs group-local memory and barriers, which only a " *
     "KernelAbstractions backend exposes. Use `element_mapping = WorkerPerElement()`, or a " *
     "`KernelAbstractionsDevice`."))
+with_element_mapping(device::AbstractDevice, ::LanesPerElement) = throw(ArgumentError(
+    "$(nameof(typeof(device))) cannot execute LanesPerElement: splitting one element's output " *
+    "rows across a block of lanes is a KernelAbstractions LAUNCH GEOMETRY, and a CPU device " *
+    "sweeps one item per worker from gather to scatter. Use " *
+    "`element_mapping = WorkerPerElement()`, or a `KernelAbstractionsDevice`."))
 
 """
     KernelAbstractionsDevice(backend; value_type = Float64, index_type = Int,
@@ -438,10 +482,25 @@ KernelAbstractionsDevice(backend; value_type::Type = Float64, index_type::Type =
 
 element_mapping(device::KernelAbstractionsDevice) = device.element_mapping
 
-for Mapping in (:WorkerPerElement, :CooperativeElement)
+for Mapping in (:WorkerPerElement, :CooperativeElement, :LanesPerElement)
     @eval with_element_mapping(device::KernelAbstractionsDevice{B, V, I}, mapping::$Mapping) where {B, V, I} =
         KernelAbstractionsDevice{B, V, I, $Mapping}(
-            device.backend, device.items_per_worker, device.max_workgroup_size, mapping)
+            device.backend, device.items_per_worker, device.max_workgroup_size,
+            _validated_mapping(device, mapping))
+end
+
+# The one mapping carrying a launch policy of its own: a lane block wider than
+# the group it has to fit in cannot be launched, and saying so here is saying it
+# at setup.
+_validated_mapping(::KernelAbstractionsDevice, mapping::AbstractElementMapping) = mapping
+function _validated_mapping(device::KernelAbstractionsDevice, mapping::LanesPerElement)
+    mapping.lanes === nothing && return mapping
+    1 ≤ mapping.lanes ≤ device.max_workgroup_size || throw(ArgumentError(
+        "`LanesPerElement(; lanes = $(mapping.lanes))` does not fit this device's launch policy: " *
+        "the lanes of one element are a block WITHIN a workgroup, so the count is between 1 and " *
+        "the device's `max_workgroup_size` ($(device.max_workgroup_size)). Raise " *
+        "`max_workgroup_size`, or drop `lanes` and let the element's own extent set it."))
+    return mapping
 end
 
 """
@@ -458,4 +517,26 @@ function launch_geometry(device::KernelAbstractionsDevice, n_items::Integer)
     n_effective = cld(n_items, per_worker)
     workgroup   = min(device.max_workgroup_size, n_effective)
     return workgroup, cld(n_items, per_worker * workgroup)
+end
+
+"""
+    lane_launch_geometry(device, nlanes, n_items) -> (workgroup_size, n_workgroups, n_slots)
+
+The launch geometry of one barrier under [`LanesPerElement`](@ref): `n_slots`
+ELEMENT slots, each a block of `nlanes` consecutive lanes, packed
+`max_workgroup_size ÷ nlanes` blocks to a workgroup so a short block leaves no
+lane of a group idle.
+
+`n_slots` is [`launch_geometry`](@ref)'s own worker count for the same barrier —
+the lane block stages nothing per lane, so the per-worker caches this mapping
+needs are the grid-stride mapping's and [`n_workers`](@ref) sizes them
+unchanged. Whole blocks are what a workgroup holds, so the last group may carry
+slots beyond `n_slots`; the kernel drops those rather than the geometry rounding
+the cache size up.
+"""
+function lane_launch_geometry(device::KernelAbstractionsDevice, nlanes::Integer, n_items::Integer)
+    n_slots = prod(launch_geometry(device, n_items))
+    n_slots ≤ 0 && return (Int(nlanes), 0, 0)
+    per_group = clamp(device.max_workgroup_size ÷ nlanes, 1, n_slots)
+    return Int(nlanes) * per_group, cld(n_slots, per_group), n_slots
 end

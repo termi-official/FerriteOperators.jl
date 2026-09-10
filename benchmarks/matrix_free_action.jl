@@ -2,16 +2,21 @@
 #
 #     julia --project=benchmarks -t auto benchmarks/matrix_free_action.jl [target_dofs]
 #
-# One bilinear diffusion form on distorted hexahedra, evaluated five ways: the
-# matrix-free action under both element mappings on CUDA and on two CPU devices,
+# One bilinear diffusion form on distorted hexahedra, evaluated many ways: the
+# matrix-free action under every element mapping on CUDA and on two CPU devices,
 # and `mul!` on the assembled CuSparse matrix of the same form. Each matrix-free
-# arm runs under all three `storage` elections — `Recompute()` (MFEM NONE:
-# re-derive the geometry per action), `Stored()` (PARTIAL: precomputed
-# per-quadrature-point factors) and `ElementAssembly()` (ELEMENT: the dense
-# element matrices, worker-per-element only). The headline is the polynomial
-# order at which the action beats the SpMV, whether either stored level moves
-# that crossover, and whether one workgroup per element beats one worker per
-# element.
+# arm runs under the `storage` elections its mapping serves — `Recompute()`
+# (MFEM NONE: re-derive the geometry per action), `Stored()` (PARTIAL:
+# precomputed per-quadrature-point factors) and `ElementAssembly()` (ELEMENT: the
+# dense element matrices, worker-per-element or lanes-per-element). The headline
+# is the polynomial order at which the action beats the SpMV, whether either
+# stored level moves that crossover, and whether splitting one element across a
+# workgroup or across a block of lanes beats one worker per element.
+#
+# Every ELEMENT-level arm is quoted against a PURE-STREAM CEILING of its own
+# access pattern (`_stream_worker!`/`_stream_lane!`, dense and packed): the same
+# loads with the product and the scatter removed, so "x% of optimal" is a
+# measured distance rather than a CUSPARSE-relative claim.
 #
 # The diffusion form's D is isotropic, hence symmetric, so
 # `SumFactorizedDiffusionIntegrator`'s `[EA]` arm runs the PACKED layout
@@ -41,7 +46,7 @@ using SparseArrays
 using Polyester
 import KernelAbstractions as KA
 import KernelAbstractions: @kernel, @index, @Const
-import FerriteOperators: Atomix
+import FerriteOperators: Atomix, _packed_index, lane_launch_geometry
 
 const CUDA_AVAILABLE = try
     @eval using CUDA
@@ -199,6 +204,82 @@ end
     end
 end
 
+# The pure-stream CEILING of the ELEMENT level: the LOADS one action issues — every
+# entry of each cell's `Kₑ` in the layout it is stored in, plus the cell's dof
+# window — with the product and the scatter removed. It pins what the hardware can
+# move for that access pattern, so an arm's distance from optimal is measured
+# rather than quoted against CUSPARSE.
+#
+# WHAT IT IS NOT, measured on an RTX 2080 (448 GB/s): the best of these arms
+# reaches 333 GB/s and most sit near half of that, so none of them is bandwidth-
+# saturated and a "ceiling" here is the rate of an ACCESS PATTERN, not a wall.
+# A pattern's rate can therefore sit BELOW a kernel that reads the same bytes and
+# does more with them — `[lanes, dense]` at p = 3 reads 0.754 ms against its own
+# action's 0.504 ms, reproducibly, because the action's arithmetic hides the
+# latency this arm exposes. Read a ratio against these as distance from the
+# pattern's measured rate, and not at all where the arm is above its action.
+#
+# The only arithmetic is the reduction that keeps the loads from being
+# dead-code-eliminated, and it carries the real kernel's dependency structure: one
+# accumulator chain per ROW, exactly as `_element_matrix_action!` has, never one
+# chain over the whole cell. The dof stream folds into an INTEGER accumulator and
+# is converted once per thread: an action uses a dof to index with, never to
+# compute in, and an `Int64`-to-`Float32` conversion per entry made an earlier
+# revision of this arm SLOWER than the kernel it is supposed to bound.
+@inline _stream_entry(K, cell, i, j, ::Val{ND}, ::Val{false}) where {ND} = @inbounds K[cell, i, j]
+@inline _stream_entry(K, cell, i, j, ::Val{ND}, ::Val{true}) where {ND} =
+    @inbounds K[cell, _packed_index(i, j, Val(ND))]
+
+@kernel function _stream_worker!(sink, @Const(K), @Const(cell_dofs),
+        ::Val{ND}, ::Val{PACKED}, ncells) where {ND, PACKED}
+    worker = @index(Global, Linear)
+    stride = prod(KA.@ndrange())
+    acc = zero(eltype(K))
+    idx = zero(eltype(cell_dofs))
+    for cell in worker:stride:ncells
+        base = (cell - 1) * ND
+        for i in 1:ND
+            row = zero(eltype(K))
+            for j in 1:ND
+                row += _stream_entry(K, cell, i, j, Val(ND), Val(PACKED))
+            end
+            acc += row
+        end
+        for j in 1:ND
+            @inbounds idx += cell_dofs[base + j]
+        end
+    end
+    @inbounds sink[worker] = acc + eltype(K)(idx % 2)
+end
+
+# The same bytes under the LANE launch: one element slot per grid-stride step,
+# lane `l` reading rows `l:nlanes:ND` and the whole dof window per row — which is
+# the mapping's own cost, `uₑ` not being staged. The thread → (slot, lane) map is
+# `_lane_position`'s, so this arm streams what the mapping's kernel streams.
+@kernel function _stream_lane!(sink, @Const(K), @Const(cell_dofs), ::Val{ND}, ::Val{PACKED},
+        ::Val{NLANES}, ::Val{PER}, n_slots, ncells) where {ND, PACKED, NLANES, PER}
+    thread = @index(Global, Linear)
+    group, local_index = divrem(Int(thread) - 1, NLANES * PER)
+    lane, block = divrem(local_index, PER)
+    slot = group * PER + block + 1
+    acc = zero(eltype(K))
+    idx = zero(eltype(cell_dofs))
+    if slot ≤ n_slots
+        for cell in slot:n_slots:ncells
+            base = (cell - 1) * ND
+            for i in (lane + 1):NLANES:ND
+                row = zero(eltype(K))
+                for j in 1:ND
+                    row += _stream_entry(K, cell, i, j, Val(ND), Val(PACKED))
+                    @inbounds idx += cell_dofs[base + j]
+                end
+                acc += row
+            end
+        end
+    end
+    @inbounds sink[thread] = acc + eltype(K)(idx % 2)
+end
+
 element_floor_times(args...) = ()
 
 if CUDA_AVAILABLE
@@ -215,6 +296,12 @@ if CUDA_AVAILABLE
         op = setup_operator(AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
                                              SequentialScheduling(), device), floor_integrator, dh)
         K = op.engine.subdomain_caches[1].device_cache.element.K
+        # The PACKED store of the same form, for the stream ceilings: `integrator`
+        # declares `element_matrix_symmetry` for an isotropic D (S5), so its own
+        # ElementAssembly() store is the `(slot, t)` layout.
+        packed_op = setup_operator(AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
+                                                    SequentialScheduling(), device), integrator, dh)
+        Kp = packed_op.engine.subdomain_caches[1].device_cache.element.K
         cell_dofs = CuVector(dh.cell_dofs)
         workgroup, blocks = FerriteOperators.launch_geometry(device, ncells)
         ndrange = workgroup * blocks
@@ -223,21 +310,48 @@ if CUDA_AVAILABLE
         re = CUDA.zeros(Tv, ndrange, nd)
         sample(kernel, args...) =
             first(measure(() -> (kernel(args...; ndrange); KA.synchronize(backend))))
-        times = ("CUDA ELEMENT math floor (registers)" =>
-                     sample(_floor_action!(backend, workgroup), yd, ud, K, cell_dofs, Val(nd), ncells),
-                 "CUDA ELEMENT math floor (ws.re slab)" =>
-                     sample(_floor_action_re!(backend, workgroup), yd, ud, K, cell_dofs, re, Val(nd), ncells),
-                 "CUDA gather+scatter floor (registers)" =>
-                     sample(_floor_move!(backend, workgroup), yd, ud, cell_dofs, Val(nd), ncells),
-                 "CUDA gather+scatter floor (ws.re slab)" =>
-                     sample(_floor_move_re!(backend, workgroup), yd, ud, cell_dofs, re, Val(nd), ncells))
+        floors = ("CUDA ELEMENT math floor (registers)" =>
+                      sample(_floor_action!(backend, workgroup), yd, ud, K, cell_dofs, Val(nd), ncells),
+                  "CUDA ELEMENT math floor (ws.re slab)" =>
+                      sample(_floor_action_re!(backend, workgroup), yd, ud, K, cell_dofs, re, Val(nd), ncells),
+                  "CUDA gather+scatter floor (registers)" =>
+                      sample(_floor_move!(backend, workgroup), yd, ud, cell_dofs, Val(nd), ncells),
+                  "CUDA gather+scatter floor (ws.re slab)" =>
+                      sample(_floor_move_re!(backend, workgroup), yd, ud, cell_dofs, re, Val(nd), ncells))
+
+        # The stream ceilings, one per (mapping, layout): the same loads, no
+        # product and no scatter. The lane arms launch the geometry the mapping
+        # itself launches.
+        sink_worker = CUDA.zeros(Tv, ndrange)
+        nlanes = min(nd, device.max_workgroup_size)
+        lane_wg, lane_blocks, n_slots = lane_launch_geometry(device, nlanes, ncells)
+        lane_range = lane_wg * lane_blocks
+        sink_lane = CUDA.zeros(Tv, lane_range)
+        stream_worker(store, packed) = first(measure(() -> (
+            _stream_worker!(backend, workgroup)(sink_worker, store, cell_dofs, Val(nd), Val(packed),
+                                                ncells; ndrange);
+            KA.synchronize(backend))))
+        stream_lane(store, packed) = first(measure(() -> (
+            _stream_lane!(backend, lane_wg)(sink_lane, store, cell_dofs, Val(nd), Val(packed),
+                                            Val(nlanes), Val(lane_wg ÷ nlanes), n_slots, ncells;
+                                            ndrange = lane_range);
+            KA.synchronize(backend))))
+        ceilings = ("CUDA stream ceiling [worker, dense]"  => stream_worker(K, false),
+                    "CUDA stream ceiling [worker, packed]" => stream_worker(Kp, true),
+                    "CUDA stream ceiling [lanes, dense]"   => stream_lane(K, false),
+                    "CUDA stream ceiling [lanes, packed]"  => stream_lane(Kp, true))
+
         op = nothing
+        packed_op = nothing
         K = nothing
+        Kp = nothing
         cell_dofs = nothing
         re = nothing
+        sink_worker = nothing
+        sink_lane = nothing
         GC.gc()
         CUDA.reclaim()
-        return times
+        return (floors..., ceilings...)
     end
 end
 
@@ -245,6 +359,8 @@ const STORAGE = (("Stored", Stored()), ("Recompute", Recompute()), ("EA", Elemen
 # The ELEMENT level maps one worker onto one dense product; it has no lattice
 # for a workgroup to split.
 const COOPERATIVE_STORAGE = (("Stored", Stored()), ("Recompute", Recompute()))
+# The lane mapping splits a stored `Kₑ`'s ROWS, which only the ELEMENT level has.
+const LANE_STORAGE = (("EA", ElementAssembly()),)
 
 function run_order(order)
     n = max(2, round(Int, (TARGET_DOFS^(1 / 3) - 1) / order))
@@ -335,6 +451,7 @@ function run_order(order)
 
         for (name, mapping, levels) in (
                 ("CUDA worker-per-element action", WorkerPerElement(), STORAGE),
+                ("CUDA lanes-per-element action", LanesPerElement(), LANE_STORAGE),
                 ("CUDA cooperative action", CooperativeElement(), COOPERATIVE_STORAGE)),
             (label, storage) in levels
 
@@ -355,16 +472,20 @@ function run_order(order)
         # the standard analytic-Jacobian diffusion cache never declares the
         # election, so its ElementAssembly() store stays dense. Both fill through
         # an action-derived or analytic Kₑ that is numerically the same form.
-        general_time, general_fill = device_arm!() do
-            device = KernelAbstractionsDevice(CUDABackend(); value_type = Tv, index_type = Ti,
-                                              items_per_worker = 2, max_workgroup_size = 256)
-            setup_operator(AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
-                                            SequentialScheduling(), device),
-                          SimpleBilinearDiffusionIntegrator(2.5f0, qrc, :u), dh)
+        for (name, mapping) in (("CUDA worker-per-element action", WorkerPerElement()),
+                                ("CUDA lanes-per-element action", LanesPerElement()))
+            general_time, general_fill = device_arm!() do
+                device = KernelAbstractionsDevice(CUDABackend(); value_type = Tv, index_type = Ti,
+                                                  items_per_worker = 2, max_workgroup_size = 256)
+                setup_operator(AssemblyStrategy(MatrixFreeAction(; element_mapping = mapping,
+                                                                storage = ElementAssembly()),
+                                                SequentialScheduling(), device),
+                              SimpleBilinearDiffusionIntegrator(2.5f0, qrc, :u), dh)
+            end
+            push!(results, "$name [EA general]" => general_time)
+            clockstamps["$name [EA general]"] = clocks()
+            push!(fills, "$name [EA general]" => general_fill)
         end
-        push!(results, "CUDA worker-per-element action [EA general]" => general_time)
-        clockstamps["CUDA worker-per-element action [EA general]"] = clocks()
-        push!(fills, "CUDA worker-per-element action [EA general]" => general_fill)
 
         # The MATH FLOOR of the ELEMENT level: the same dense `Kₑ·uₑ` per cell,
         # written as one hand-rolled kernel that reads the dof range straight out

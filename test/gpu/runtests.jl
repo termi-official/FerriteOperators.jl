@@ -263,6 +263,67 @@ end
         end
     end
 
+    # The lane mapping on the device it exists for: lane `l` owns rows
+    # `l:nlanes:ND` of `yₑ` and scatters each atomically, so a row assignment or
+    # a row read that is wrong for one of the two `Kₑ` layouts shows up as a
+    # wrong operator. Pinned twice — against the assembled CPU matrix and
+    # against `WorkerPerElement` over the SAME store — on a distorted mesh, both
+    # precisions, `:sumfact` packed and `:assembled` dense.
+    @testset "ELEMENT level, LanesPerElement ($T, p = $p, $integrator)" for
+            T in (Float32, Float64), p in 1:3, integrator in (:sumfact, :assembled)
+
+        dh  = distorted_hex_testbed(p, (4, 4, 4); coordinate_type = T)
+        qrc = QuadratureRuleCollection(T, p + 1)
+        cpu = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, Int}()),
+                             SimpleBilinearDiffusionIntegrator(T(2.5), qrc, :u), dh)
+        update_operator!(cpu, nothing)
+        u = T[sin(T(0.7) * 7 * i + T(0.3) * 7) for i in 1:ndofs(dh)]
+        rtol = T === Float32 ? 1.0f-3 : 1.0e-8
+
+        term = integrator === :sumfact ? SumFactorizedDiffusionIntegrator(T(2.5), qrc, :u) :
+                                         SimpleBilinearDiffusionIntegrator(T(2.5), qrc, :u)
+        device = KernelAbstractionsDevice(CUDABackend(); value_type = T, index_type = Ti,
+                                          items_per_worker = 2, max_workgroup_size = 256)
+        y_worker, y_lanes = map((WorkerPerElement(), LanesPerElement())) do mapping
+            op = setup_operator(AssemblyStrategy(
+                    MatrixFreeAction(; element_mapping = mapping, storage = ElementAssembly()),
+                    SequentialScheduling(), device), term, dh)
+            yd = CUDA.zeros(T, ndofs(dh))
+            mul!(yd, op, CuVector(u))
+            # The fill has no rows to split and takes the grid-stride mapping;
+            # refilling and re-acting is what checks the lane device runs both.
+            update_operator!(op, nothing)
+            mul!(yd, op, CuVector(u))
+            Array(yd)
+        end
+        @test y_lanes ≈ cpu.A * u rtol = rtol
+        @test y_lanes ≈ y_worker rtol = rtol
+    end
+
+    # `nlanes` is a launch policy: a count that matches the element's extent,
+    # divides it, or overshoots it (leaving lanes with no row) is the same
+    # action. `lanes = 5` at `ND = 27` additionally gives each lane SEVERAL
+    # rows, which the default policy never does at these orders.
+    @testset "the lane count is a launch policy alone (lanes = $lanes)" for
+            lanes in (nothing, 1, 5, 27, 64)
+
+        dh  = distorted_hex_testbed(2, (4, 4, 4))
+        qrc = QuadratureRuleCollection(Tv, 3)
+        cpu = setup_operator(sequential_strategy(),
+                             SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(cpu, nothing)
+        u = probe(ndofs(dh), 7)
+
+        op = setup_operator(AssemblyStrategy(
+                MatrixFreeAction(; element_mapping = LanesPerElement(; lanes),
+                                 storage = ElementAssembly()),
+                SequentialScheduling(), cuda_device()),
+            SumFactorizedDiffusionIntegrator(Tv(2.5), qrc, :u), dh)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ cpu.A * u rtol = 1.0f-3
+    end
+
     # The device action positions its items on a cursor that stages no dof row
     # and, at the two stored levels, no coordinates either. These pin the whole
     # ladder against the assembled CPU reference on a distorted mesh, where a

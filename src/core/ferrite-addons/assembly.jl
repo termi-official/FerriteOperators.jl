@@ -61,6 +61,14 @@ Ferrite.assemble!(assembler::VectorAssembler, cell::CellCache, fe::AbstractVecto
     end
     return
 end
+# ONE entry of the local vector, at the dof that owns it: what a
+# [`LanesPerElement`](@ref) lane scatters, the local vector it would otherwise
+# be a slice of never existing. Same accumulation, same atomicity election.
+@inline function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic},
+        dof::Integer, value::Number) where {atomic}
+    @inbounds _accum!(Val(atomic), assembler.f, value, dof)
+    return
+end
 # Sensitivity scatter targets. Deliberately not Ferrite.AbstractAssembler:
 # their column/entry layout is the parameter space, not the dof space, so the
 # celldofs-scatter methods above must never match them.

@@ -7,10 +7,13 @@ import KernelAbstractions as KA
 import KernelAbstractions: @kernel, @index, @Const, @localmem, @synchronize, @uniform, @groupsize
 
 import FerriteOperators: KernelAbstractionsDevice, AssemblyWorkspace, AssemblyTask, VectorAssembler
-import FerriteOperators: CooperativeElement, WorkerPerElement, QVector, MatrixFreeActionKind
-import FerriteOperators: device_worker_view, launch_geometry, n_workers, value_type
+import FerriteOperators: CooperativeElement, WorkerPerElement, LanesPerElement, QVector,
+    MatrixFreeActionKind
+import FerriteOperators: device_worker_view, launch_geometry, lane_launch_geometry, n_workers,
+    value_type
 import FerriteOperators: cooperative_group_size, cooperative_scratch_shape,
     cooperative_load!, cooperative_stage!, cooperative_store!
+import FerriteOperators: element_action_row, element_local_length, ElementUnknownWindow
 import FerriteOperators: element_value_type, item_dofs, query_cell_parameters
 import FerriteOperators: assembly_iterator, device_assembly_iterator, item_update_flags, position_item
 import FerriteOperators: position_iterator, iterator_dofs
@@ -376,6 +379,132 @@ function _grid_stride_sweep!(task, device::KernelAbstractionsDevice, workspaces,
     end
     return nothing
 end
+
+####################################
+## Lane execution: one block of lanes per element
+####################################
+
+# Where a thread sits in the launch: which ELEMENT SLOT it serves and which lane
+# of that slot's block it is.
+#
+# Consecutive threads are consecutive SLOTS at the same lane, not the lanes of
+# one element. Both orderings carry the same threads and the same bytes, and the
+# choice is which of the two reads coalesces. Measured (pure-stream ceiling,
+# RTX 2080, `Float32`, ndrange as this mapping launches it):
+#
+# |   | p = 1 dense | p = 2 dense | p = 3 dense | p = 2 packed | p = 3 packed |
+# |---|---|---|---|---|---|
+# | lanes consecutive | 0.122 | 0.439 | 0.620 | 0.169 | 0.581 |
+# | **slots consecutive** | **0.122** | **0.171** | **0.531** | **0.107** | **0.351** |
+#
+# The reason is the element-matrix layout: `K`'s SLOT index is stride-1, so a
+# warp of consecutive slots at one `(i, j)` reads adjacent addresses — the
+# property `ElementAssemblyCache`'s layout note already argues for, and the one
+# `WorkerPerElement` gets for free. Putting a block's lanes on consecutive
+# threads instead would make `uₑ` a same-address broadcast within the warp and
+# scatter `K` across `nlanes` segments, and at p = 2 that costs 2.6x.
+@inline function _lane_position(thread::Int, ::Val{NLANES}, ::Val{PER}) where {NLANES, PER}
+    group, local_index = divrem(thread - 1, NLANES * PER)
+    lane, block = divrem(local_index, PER)
+    return group * PER + block + 1, lane + 1
+end
+
+# One element slot per grid-stride step and one ROW BLOCK per lane: `uₑ` is read
+# through the item's dof window rather than staged, the row accumulator is the
+# lane's own register, and the scatter is one atomic per owned row. No barrier
+# and no group-local memory, so this is an ordinary grid-stride kernel that the
+# CPU backend runs as written.
+@kernel function _lane_sweep_kernel!(task, workspaces, @Const(items),
+        ::Val{NLANES}, ::Val{PER}, ::Val{ND}, n_slots) where {NLANES, PER, ND}
+    # `@index` is taken at the top of the body and passed on: on the CPU backend
+    # it expands against a loop variable the kernel transform injects there, and
+    # inside a call argument there is none.
+    thread = @index(Global, Linear)
+    slot, lane = _lane_position(Int(thread), Val(NLANES), Val(PER))
+    # Whole blocks are what a workgroup carries, so the last group may hold slots
+    # the caches were not sized for (`lane_launch_geometry`).
+    if slot ≤ n_slots
+        local_task = AssemblyTask(task.kind, _worker_assembler(task.inner_assembler, slot),
+                                  task.states, task.p, task.ctx)
+        base = device_worker_view(workspaces, slot)
+        n_items = length(items)
+        for i in slot:n_slots:n_items
+            ws = position_item(base, @inbounds(items[i]), local_task.kind)
+            _lane_action!(local_task, ws, lane, Val(NLANES), Val(ND))
+        end
+    end
+end
+
+# The lanes of one element share the slot's positioned workspace READ-ONLY, which
+# is what makes the mapping's ELEMENT-level restriction load-bearing rather than
+# conservative: the level's `item_update_flags` stage neither coordinates nor a
+# dof row, so positioning is the construction of a cursor and every lane
+# constructs the same one, and `reinit_values!` is a no-op there — the two
+# per-quadrature-point levels would instead have every lane reinitialize the
+# slot's shared values objects.
+@inline function _lane_action!(task, ws, lane::Int, ::Val{NLANES}, ::Val{ND}) where {NLANES, ND}
+    dofs = item_dofs(ws)
+    uₑ = ElementUnknownWindow{eltype(ws.re)}(task.states.u, dofs)
+    args = CellArgs((u = uₑ,), ws.cell, query_cell_parameters(ws.element, ws.cell, task.p), task.ctx)
+    for i in lane:NLANES:ND
+        yᵢ = element_action_row(ws.element, uₑ, args, i)
+        Ferrite.assemble!(task.inner_assembler, (@inbounds dofs[i]), yᵢ)
+    end
+    return nothing
+end
+
+"""
+    execute_on_device!(task, device::KernelAbstractionsDevice{…, LanesPerElement}, workspaces, items)
+
+The row mapping: one element onto a BLOCK OF LANES, lane `l` owning rows
+`l:nlanes:ndofs_per_cell` of `yₑ` and scattering each itself
+([`element_action_row`](@ref)).
+
+`nlanes` is a launch policy — the element's own extent capped by the device's
+`max_workgroup_size`, or the mapping's explicit `lanes` — and the workgroup
+carries `max_workgroup_size ÷ nlanes` such blocks
+([`lane_launch_geometry`](@ref)). It changes no element math: a block shorter
+than the row count gives each lane several rows.
+
+The kernel holds no group-local memory and no barrier, the lanes of one element
+having nothing to exchange, so it is a grid-stride kernel like the
+worker-per-element one rather than a pipeline like the cooperative one.
+
+The ELEMENT-level fill ([`QuadratureDataKind`](@ref)) has no rows to split — one
+cell fills its own matrix — and takes the grid-stride mapping instead.
+"""
+function FerriteOperators.execute_on_device!(task,
+        device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, LanesPerElement}, workspaces, items)
+    task.kind isa FerriteOperators.QuadratureDataKind &&
+        return _grid_stride_sweep!(task, device, workspaces, items)
+    task.kind isa FerriteOperators.MatrixFreeActionKind || throw(ArgumentError(
+        "`LanesPerElement` executes the matrix-free action and nothing else (got " *
+        "$(nameof(typeof(task.kind)))): its kernel gives one lane one row of the element's " *
+        "action, which is not a shape the generic per-item driver has. Elect " *
+        "`element_mapping = WorkerPerElement()` for every other sweep."))
+    backend = device.backend
+    nd = element_local_length(workspaces.element)
+    nlanes = _lane_count(device.element_mapping, nd, device.max_workgroup_size)
+    device_task = adapt(backend, AssemblyTask(
+        task.kind, _worker_assemblers(backend, task.inner_assembler, n_workers(device, items)),
+        task.states, task.p, task.ctx))
+
+    for chunk in items
+        isempty(chunk) && continue
+        workgroup, blocks, n_slots = lane_launch_geometry(device, nlanes, length(chunk))
+        _lane_sweep_kernel!(backend, workgroup)(
+            device_task, workspaces, chunk, Val(nlanes), Val(workgroup ÷ nlanes), nd, n_slots;
+            ndrange = workgroup * blocks)
+        KA.synchronize(backend)
+    end
+    return nothing
+end
+
+# The element's extent is what a lane block covers by default; an explicit
+# `lanes` is the caller's launch policy and `with_element_mapping` already
+# checked it against the group size.
+_lane_count(mapping::LanesPerElement, ::Val{ND}, max_workgroup_size::Int) where {ND} =
+    mapping.lanes === nothing ? min(ND, max_workgroup_size) : mapping.lanes
 
 ####################################
 ## Cooperative execution: one workgroup per element

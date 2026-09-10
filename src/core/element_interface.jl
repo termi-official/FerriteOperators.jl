@@ -81,6 +81,59 @@ Return a literal `Val`: the gather's shape folds out of it.
 """
 element_local_length(element_cache) = nothing
 
+"""
+    element_action_row(element_cache, uₑ, args::CellArgs, i::Int) -> yᵢ
+
+ONE row of the matrix-free element kernel: `yᵢ = (Kₑ·uₑ)[i]` for the current
+cell, returned BY VALUE. It is [`apply_element_action!`](@ref)'s row-scoped
+counterpart and exists for [`LanesPerElement`](@ref), where the row is what one
+lane owns: an accumulator returned by value is a register the lane keeps and
+scatters itself, and no two lanes write the same place.
+
+`uₑ` is the cell's local unknown vector in `celldofs` order, indexable but not
+necessarily stored — under the lane mapping it is a WINDOW onto the global
+vector, so an implementation may read `uₑ[j]` and nothing else.
+
+Declaring it is the element's promise that a row costs `O(ndofs_per_cell)`, not
+a whole element action per row. `setup_operator` checks for the method rather
+than letting a missing one surface as a per-item `MethodError`; a cache that
+cannot answer a single row serves [`WorkerPerElement`](@ref) instead.
+
+!!! warning "Experimental surface"
+    Internal to the matrix-free action; it may change in a minor release.
+"""
+function element_action_row end
+
+"""
+    ElementUnknownWindow{T}(u, dofs)
+
+The element-local unknown vector `uₑ` as a WINDOW onto the global vector — three
+registers, no storage and no gather — which is what a [`LanesPerElement`](@ref)
+lane reads instead of staging `ndofs_per_cell` values to use one row of. That
+staging is what a lane cannot afford: `ndofs_per_cell` live values per lane is
+`nlanes` times the residency the whole-element gather needs, and the register
+file is what the mapping exists to relieve.
+
+The lanes of one element therefore read the SAME `uₑ[j]` at the same step —
+`nlanes` reads of one address, which the launch keeps inside one workgroup, in
+place of one gather per element.
+
+`T` is the element's own precision, converted on read exactly as the staged
+gather converts.
+
+!!! warning "Experimental surface"
+    Internal to the matrix-free action; it may change in a minor release.
+"""
+struct ElementUnknownWindow{T, U, D} <: AbstractVector{T}
+    u::U
+    dofs::D
+end
+ElementUnknownWindow{T}(u::U, dofs::D) where {T, U, D} = ElementUnknownWindow{T, U, D}(u, dofs)
+Base.size(w::ElementUnknownWindow) = (length(w.dofs),)
+Base.IndexStyle(::Type{<:ElementUnknownWindow}) = IndexLinear()
+Base.@propagate_inbounds Base.getindex(w::ElementUnknownWindow{T}, j::Int) where {T} =
+    convert(T, w.u[w.dofs[j]])
+
 # The padding itself: `similar` keeps whatever array type the element chose.
 function pad_element_matrix(Ke, n::Int)
     n == 0 && return Ke

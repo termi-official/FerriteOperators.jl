@@ -114,6 +114,29 @@ end
         @test issorted(counts)
         @test FerriteOperators.n_workers(device, [collect(1:40), collect(1:7)]) == prod(FerriteOperators.launch_geometry(device, 40))
     end
+
+    @testset "lane launch geometry" begin
+        device = ka_device()   # items_per_worker = 2, max_workgroup_size = 8
+        # 40 items -> 24 element slots, and a block of 8 lanes fills the group by
+        # itself: one element per group, 24 groups.
+        @test FerriteOperators.lane_launch_geometry(device, 8, 40) == (8, 24, 24)
+        # A block of 3 leaves room for one more in the same 8-wide group, which
+        # is the multi-element geometry a small element runs: 2 blocks of 3
+        # lanes per group, 12 groups for the 24 slots.
+        @test FerriteOperators.lane_launch_geometry(device, 3, 40) == (6, 12, 24)
+        # The slot count is the grid-stride mapping's worker count, unchanged —
+        # which is why this mapping needs no `n_workers` method of its own.
+        for n in (1, 7, 40, 400)
+            for nlanes in (1, 3, 8)
+                workgroup, blocks, n_slots = FerriteOperators.lane_launch_geometry(device, nlanes, n)
+                @test n_slots == prod(FerriteOperators.launch_geometry(device, n))
+                @test workgroup % nlanes == 0
+                @test workgroup ≤ max(device.max_workgroup_size, nlanes)
+                @test workgroup * blocks ≥ nlanes * n_slots
+            end
+        end
+        @test FerriteOperators.lane_launch_geometry(device, 8, 0) == (8, 0, 0)
+    end
 end
 
 ####################################

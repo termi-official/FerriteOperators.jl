@@ -234,6 +234,12 @@ end
         # Interleaved cell ids: neither subdomain's chunk is contiguous, so
         # `compute_partition` keeps the `Vector` fallback rather than a `UnitRange`.
         @test all(sc -> all(chunk -> chunk isa Vector{Int}, sc.partition), get_subdomain_caches(op))
+
+        lanes = setup_operator(matrix_free_ka(Float64, LanesPerElement(); storage = ElementAssembly()),
+                               integrator, dh)
+        fill!(y, 0.0)
+        mul!(y, lanes, u)
+        @test y ≈ reference rtol = 1.0e-11
     end
 
     @testset "the action matches the assembled operator over a mixed-order subdomain" begin
@@ -259,6 +265,14 @@ end
         op = setup_operator(matrix_free_ka(Float64, WorkerPerElement(); storage = ElementAssembly()), integrator, dh)
         y = zeros(ndofs(dh))
         mul!(y, op, u)
+        @test y ≈ reference rtol = 1.0e-11
+
+        # The two subdomains carry different extents, so the lane mapping
+        # launches a different lane count for each.
+        lanes = setup_operator(matrix_free_ka(Float64, LanesPerElement(); storage = ElementAssembly()),
+                               integrator, dh)
+        fill!(y, 0.0)
+        mul!(y, lanes, u)
         @test y ≈ reference rtol = 1.0e-11
     end
 
@@ -363,7 +377,8 @@ end
                 ("sequential", AssemblyStrategy(SequentialCPUDevice{T, Int}(); form = ea)),
                 ("polyester",  AssemblyStrategy(PolyesterDevice{T, Int}(4); form = ea,
                                                 scheduling = ColoredScheduling())),
-                ("KA worker-per-element", matrix_free_ka(T, WorkerPerElement(); storage = ElementAssembly())))
+                ("KA worker-per-element", matrix_free_ka(T, WorkerPerElement(); storage = ElementAssembly())),
+                ("KA lanes-per-element",  matrix_free_ka(T, LanesPerElement(); storage = ElementAssembly())))
             op = setup_operator(strategy, integrator, dh)
             y = zeros(T, ndofs(dh))
             mul!(y, op, u)
@@ -413,6 +428,69 @@ end
         @test packed_cache.route isa FerriteOperators.MatrixKernelFill
 
         @test y_packed ≈ y_dense rtol = rtol
+    end
+
+    # The lane mapping reads a ROW of the stored matrix, and the two layouts put
+    # a row in different places: dense walks `K[slot, i, :]`, packed walks the
+    # triangle through `_packed_index`. Both are checked against the assembled
+    # matrix AND against `WorkerPerElement` on the same store, so a layout the
+    # row reader gets wrong cannot hide behind a matching reference.
+    @testset "the lane mapping serves both element-matrix layouts ($T, p = $p)" for
+            T in (Float64, Float32), p in 1:3
+
+        dh   = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), T, (3, 2, 2), p)
+        qrc  = QuadratureRuleCollection(T, p + 1)
+        rtol = T === Float32 ? 1.0f-3 : 1.0e-11
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, Int}()),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(T, ndofs(dh), 7)
+        reference = assembled.A * u
+
+        @testset "$layout" for (layout, integrator, symmetry) in (
+                ("packed", SumFactorizedDiffusionIntegrator(T(2.5), qrc, :u), SymmetricElementMatrix),
+                ("dense",  SimpleBilinearDiffusionIntegrator(2.5, qrc, :u),   GeneralElementMatrix))
+
+            worker = setup_operator(matrix_free_ka(T, WorkerPerElement(); storage = ElementAssembly()),
+                                    integrator, dh)
+            y_worker = zeros(T, ndofs(dh))
+            mul!(y_worker, worker, u)
+            @test get_subdomain_caches(worker)[1].domain.element.symmetry isa symmetry
+
+            lanes = setup_operator(matrix_free_ka(T, LanesPerElement(); storage = ElementAssembly()),
+                                   integrator, dh)
+            y_lanes = zeros(T, ndofs(dh))
+            mul!(y_lanes, lanes, u)
+            @test y_lanes ≈ reference rtol = rtol
+            @test y_lanes ≈ y_worker rtol = rtol
+        end
+    end
+
+    # `nlanes` is a launch policy, not element math: every count gives the same
+    # action, whether it matches the element's extent, divides it, or exceeds it
+    # (leaving lanes with no row at all). The wide group additionally puts
+    # SEVERAL elements in one workgroup, which is the geometry a small element
+    # runs — the narrow one leaves a single block per group.
+    @testset "the lane count is a launch policy alone (lanes = $lanes, group = $max_group)" for
+            (lanes, max_group) in ((nothing, 8), (nothing, 64), (1, 8), (5, 8),
+                                   (5, 64), (27, 64), (64, 64))
+
+        dh  = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
+        qrc = QuadratureRuleCollection(3)
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice()),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(Float64, ndofs(dh), 7)
+
+        device = KernelAbstractionsDevice(KA.CPU(); value_type = Float64, index_type = Int,
+                                          items_per_worker = 2, max_workgroup_size = max_group)
+        op = setup_operator(AssemblyStrategy(
+                MatrixFreeAction(; element_mapping = LanesPerElement(; lanes), storage = ElementAssembly()),
+                SequentialScheduling(), device),
+            SumFactorizedDiffusionIntegrator(2.5, qrc, :u), dh)
+        y = zeros(ndofs(dh))
+        mul!(y, op, u)
+        @test y ≈ assembled.A * u rtol = 1.0e-11
     end
 
     # The hazard `element_matrix_symmetry`'s docstring warns about: a
@@ -494,10 +572,15 @@ end
         u = probe(Float64, ndofs(dh), 11)
         integrator = SumFactorizedDiffusionIntegrator(2.5, qrc, :u)
         # The vector scatter is atomic under `SequentialScheduling` and plain
-        # under `ColoredScheduling`; both are race-free and must agree.
-        for mapping in (WorkerPerElement(), CooperativeElement())
-            op = setup_operator(matrix_free_ka(Float64, mapping; scheduling = ColoredScheduling()),
-                                integrator, dh)
+        # under `ColoredScheduling`; both are race-free and must agree. The lane
+        # mapping is race-free under a colouring for the same reason plus one:
+        # the lanes of ONE element scatter to different rows of the local system,
+        # which are different dofs.
+        for (mapping, storage) in ((WorkerPerElement(), Stored()),
+                                   (CooperativeElement(), Stored()),
+                                   (LanesPerElement(), ElementAssembly()))
+            op = setup_operator(matrix_free_ka(Float64, mapping; storage,
+                                               scheduling = ColoredScheduling()), integrator, dh)
             y = zeros(ndofs(dh))
             mul!(y, op, u)
             @test y ≈ assembled.A * u rtol = 1.0e-11
@@ -630,10 +713,66 @@ struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
         # `setup_operator` reports the action entry first; the cooperative half
         # of the check is what the direct call below exercises.
         @test occursin("apply_element_action!", err.value.msg)
-        cache_type = typeof(setup_element_cache(assembled_form, dh.subdofhandlers[1]))
-        err = @test_throws ArgumentError FerriteOperators._assert_cooperative_element(
-            CooperativeElement(), Stored(), cache_type)
+        cache = setup_element_cache(assembled_form, dh.subdofhandlers[1])
+        err = @test_throws ArgumentError FerriteOperators._assert_mapping_capability(
+            CooperativeElement(), Stored(), cache)
         @test occursin("cooperative_lattice_dim", err.value.msg)
+        @test occursin("WorkerPerElement", err.value.msg)
+    end
+
+    @testset "the lane mapping needs a KernelAbstractions device" begin
+        for device in (SequentialCPUDevice(), PolyesterDevice())
+            strategy = AssemblyStrategy(device;
+                form = MatrixFreeAction(; element_mapping = LanesPerElement(),
+                                        storage = ElementAssembly()),
+                scheduling = ColoredScheduling())
+            err = @test_throws ArgumentError setup_operator(strategy, sum_factorized, dh)
+            @test occursin("LanesPerElement", err.value.msg)
+            @test occursin("KernelAbstractionsDevice", err.value.msg)
+        end
+    end
+
+    @testset "the lane mapping is the ELEMENT level's only ($(nameof(typeof(storage))))" for
+            storage in (Stored(), Recompute())
+
+        err = @test_throws ArgumentError setup_operator(
+            matrix_free_ka(Float64, LanesPerElement(); storage), sum_factorized, dh)
+        @test occursin("LanesPerElement", err.value.msg)
+        @test occursin("ElementAssembly", err.value.msg)
+    end
+
+    # A cache reaching the lane mapping at the ELEMENT level without the row
+    # entry: the decorator implements it, so the refusal is exercised directly
+    # on the cache the decorator wraps.
+    @testset "a cache without the row entry is refused" begin
+        cache = setup_element_cache(assembled_form, dh.subdofhandlers[1])
+        err = @test_throws ArgumentError FerriteOperators._assert_mapping_capability(
+            LanesPerElement(), ElementAssembly(), cache)
+        @test occursin("element_action_row", err.value.msg)
+        @test occursin("WorkerPerElement", err.value.msg)
+    end
+
+    @testset "a lane count wider than the workgroup is refused" begin
+        err = @test_throws ArgumentError FerriteOperators.with_element_mapping(
+            KernelAbstractionsDevice(KA.CPU(); max_workgroup_size = 16), LanesPerElement(; lanes = 64))
+        @test occursin("max_workgroup_size", err.value.msg)
+    end
+
+    @testset "the lane kernel serves the action kind only" begin
+        device = FerriteOperators.with_element_mapping(
+            KernelAbstractionsDevice(KA.CPU()), LanesPerElement())
+        task = FerriteOperators.AssemblyTask(FerriteOperators.BilinearKind(), nothing, (;), nothing, nothing)
+        err = @test_throws ArgumentError FerriteOperators.execute_on_device!(
+            task, device, nothing, ())
+        @test occursin("BilinearKind", err.value.msg)
+    end
+
+    @testset "an assembling form on a LanesPerElement device is refused at setup" begin
+        device = FerriteOperators.with_element_mapping(
+            KernelAbstractionsDevice(KA.CPU()), LanesPerElement())
+        strategy = AssemblyStrategy(device; scheduling = ColoredScheduling())
+        err = @test_throws ArgumentError setup_operator(strategy, assembled_form, dh)
+        @test occursin("LanesPerElement", err.value.msg)
         @test occursin("WorkerPerElement", err.value.msg)
     end
 
@@ -665,11 +804,12 @@ struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
         @test occursin("ElementAssembly()", err.value.msg)
     end
 
-    @testset "the ELEMENT level is worker-per-element only" begin
+    @testset "the ELEMENT level refuses the cooperative mapping" begin
         err = @test_throws ArgumentError setup_operator(
             matrix_free_ka(Float64, CooperativeElement(); storage = ElementAssembly()), sum_factorized, dh)
         @test occursin("ElementAssembly", err.value.msg)
         @test occursin("WorkerPerElement", err.value.msg)
+        @test occursin("LanesPerElement", err.value.msg)
     end
 
     @testset "a cache serving neither fill route is refused" begin

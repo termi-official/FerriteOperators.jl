@@ -163,6 +163,11 @@ workers ([`AbstractElementMapping`](@ref)):
   intermediate in group-local memory. A [`KernelAbstractionsDevice`](@ref)
   mapping only, and served by caches that implement the cooperative pipeline
   ([`cooperative_stage!`](@ref)).
+- [`LanesPerElement`](@ref) — one BLOCK OF LANES owns one element, each lane
+  owning rows of `yₑ` in registers and scattering them itself
+  ([`element_action_row`](@ref)). No group-local memory and no barrier. A
+  [`KernelAbstractionsDevice`](@ref) mapping only, and the
+  [`ElementAssembly`](@ref) storage level only.
 
 ```julia
 form = MatrixFreeAction(; element_mapping = CooperativeElement())
@@ -191,7 +196,8 @@ form = MatrixFreeAction(; storage = ElementAssembly())   # `Stored()` is the def
 - [`ElementAssembly`](@ref) is ELEMENT: the dense element matrices are kept and
   every action is a gather, a dense `yₑ = Kₑ·uₑ` and a scatter. It costs
   `ndofs_per_cell²` scalars per cell, so it is the LOW-order election, and it
-  runs [`WorkerPerElement`](@ref) only.
+  runs [`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref) — the two
+  mappings of a dense product, whole or by rows.
 
 Measured bytes/cell against the same form's assembled matrix (`Float32`,
 tensor-product hexahedra):

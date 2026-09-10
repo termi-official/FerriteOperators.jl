@@ -162,8 +162,9 @@ neither is refused at setup.
 It costs `ndofs_per_cell²` scalars per cell, which grows far faster with the
 polynomial order than the per-quadrature-point store; it is the election for
 LOW order, where that square is small and the dense product is the fastest
-thing a device can do. [`WorkerPerElement`](@ref) only — one lane owning one
-dense product has no lattice to split.
+thing a device can do. [`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref) —
+the whole product on one worker, or a row of it on each lane of a block — but
+never [`CooperativeElement`](@ref), a dense product having no lattice to split.
 
 Measured against the same form's assembled global matrix, on a tensor-product
 hexahedral mesh with one `Float32` scalar field (bytes/cell, `p` = polynomial
@@ -286,7 +287,7 @@ spans:
 - [`ElementAssembly`](@ref) is ELEMENT. The dense element matrices are kept and
   every action is a gather, a dense product and a scatter — no quadrature point
   is visited. `ndofs_per_cell²` scalars per cell, so it is the LOW-order
-  election, and [`WorkerPerElement`](@ref) only.
+  election, and [`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref).
 
 The first two are the element's own storage and reach its cache through
 [`with_action_storage`](@ref); a cache that keeps nothing serves both
@@ -758,6 +759,10 @@ launches at most that geometry and the kernel indexes the per-worker caches
 unchecked. Under [`CooperativeElement`](@ref) the worker IS the workgroup and
 the group's barriers forbid a grid-stride loop over items, so every item of a
 barrier gets its own group — and the count is the largest barrier itself.
+[`LanesPerElement`](@ref) launches `nlanes` threads per element slot but stages
+nothing per LANE — the row accumulator is a register and `uₑ` is read through
+the item's dof window — so its per-worker caches are the grid-stride mapping's
+and this method serves it unchanged ([`lane_launch_geometry`](@ref)).
 """
 n_workers(::SequentialCPUDevice, partition) = 1
 function n_workers(device::PolyesterDevice, partition)

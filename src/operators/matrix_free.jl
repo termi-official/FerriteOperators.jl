@@ -169,8 +169,7 @@ function assert_matrix_free_supported(form::MatrixFreeAction, engine::AssemblyEn
             "`MatrixFreeAction` covers the CELL item family only; this operator carries a " *
             "$(nameof(typeof(sc.domain))). Assemble the operator under `FullAssembly`."))
         _assert_action_capability(form.storage, typeof(unwrap(sc.domain.element)))
-        _assert_cooperative_element(form.element_mapping, form.storage,
-                                    typeof(unwrap(sc.domain.element)))
+        _assert_mapping_capability(form.element_mapping, form.storage, sc.domain.element)
     end
     return nothing
 end
@@ -191,20 +190,65 @@ function _assert_element_action(::Type{C}) where {C}
     return nothing
 end
 
-_assert_cooperative_element(::WorkerPerElement, ::StorageElection, ::Type) = nothing
+"""
+    _assert_mapping_capability(mapping, storage, cache)
+
+Reject at setup an element cache that cannot serve the elected
+[`AbstractElementMapping`](@ref) at the elected storage level, naming the entry
+it does not implement and the mapping that would take it.
+
+[`WorkerPerElement`](@ref) is what every cache serving the level already serves.
+The other two members are each admissible at ONE end of the storage ladder and
+say so here: the cooperative mapping splits an element's lattice, which the
+ELEMENT level does not have, and the lane mapping splits an ELEMENT-level dense
+product's rows, which the per-quadrature-point levels do not have.
+"""
+_assert_mapping_capability(::WorkerPerElement, ::StorageElection, cache) = nothing
 
 # One workgroup per element splits the element's LATTICE; a dense `Kₑ·uₑ` has no
 # lattice, and the store the group would read is one matrix per cell rather than
 # per-lane slabs. The rejection is the storage level's, not the cache's — the
 # wrapped element may well implement the cooperative pipeline.
-_assert_cooperative_element(::CooperativeElement, ::ElementAssembly, ::Type) = throw(ArgumentError(
+_assert_mapping_capability(::CooperativeElement, ::ElementAssembly, cache) = throw(ArgumentError(
     "`CooperativeElement` cannot execute the `ElementAssembly` storage level: one workgroup per " *
     "element exists to split the element's lattice between lanes, and the ELEMENT level replaces " *
     "that lattice with one dense `Kₑ·uₑ` per cell. Elect `element_mapping = WorkerPerElement()` " *
-    "for `storage = ElementAssembly()`, or keep the cooperative mapping with " *
+    "or `element_mapping = LanesPerElement()` for `storage = ElementAssembly()`, or keep the " *
+    "cooperative mapping with `storage = Stored()`/`Recompute()`."))
+
+# The lane mapping is the ELEMENT level's, and only that level's: a lane owns one
+# ROW of a dense product, while the two per-quadrature-point levels reinitialize
+# the element's values objects per cell into per-worker state that the lanes of
+# one element would race on.
+_assert_mapping_capability(::LanesPerElement, storage::StorageElection, cache) = throw(ArgumentError(
+    "`LanesPerElement` cannot execute the `$(nameof(typeof(storage)))` storage level: a lane owns " *
+    "one ROW of a stored `Kₑ`, and a level that visits quadrature points instead re-derives one " *
+    "element's values objects per cell — per-worker state the lanes of one element would race " *
+    "on. Elect `storage = ElementAssembly()` for the lane mapping, or " *
+    "`element_mapping = WorkerPerElement()`/`CooperativeElement()` for " *
     "`storage = Stored()`/`Recompute()`."))
 
-function _assert_cooperative_element(::CooperativeElement, ::StorageElection, ::Type{C}) where {C}
+function _assert_mapping_capability(::LanesPerElement, ::ElementAssembly, cache)
+    C = typeof(cache)
+    hasmethod(element_action_row, Tuple{C, Any, CellArgs, Int}) || throw(ArgumentError(
+        "$(C) implements no `element_action_row(::$(nameof(C)), uₑ, ::CellArgs, i::Int)` method, " *
+        "so it cannot serve `LanesPerElement`: the mapping gives one lane one ROW of the " *
+        "element's action, which no generic route can derive from the whole-element kernel. " *
+        "Elect `element_mapping = WorkerPerElement()`, which this cache does serve."))
+    element_local_length(cache) isa Val || throw(ArgumentError(
+        "$(C) names no compile-time `element_local_length`, so it cannot serve " *
+        "`LanesPerElement`: the lane count is a launch geometry derived from the element's " *
+        "extent, and a `Val` is what makes it a constant of the kernel rather than a runtime " *
+        "trip count. Elect `element_mapping = WorkerPerElement()`."))
+    return nothing
+end
+
+function _assert_mapping_capability(::CooperativeElement, ::StorageElection, cache)
+    C = typeof(unwrap(cache))
+    return _assert_cooperative_entries(C)
+end
+
+function _assert_cooperative_entries(::Type{C}) where {C}
     entries = ((cooperative_lattice_dim,   Tuple{C},                          "(::$(nameof(C)))"),
                (cooperative_group_size,    Tuple{C},                          "(::$(nameof(C)))"),
                (cooperative_scratch_shape, Tuple{C},                          "(::$(nameof(C)))"),

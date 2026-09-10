@@ -215,6 +215,38 @@ end
 end
 
 """
+    element_action_row(cache::ElementAssemblyCache, uₑ, args, i)
+
+The ELEMENT level's row: the dot product of row `i` of this cell's stored matrix
+with `uₑ`, accumulated in ONE register and returned by value — what a
+[`LanesPerElement`](@ref) lane owns.
+
+The two layouts differ only in where the row's entries live. Dense reads
+`K[slot, i, j]` along `j`; packed reads `K[slot, t(i, j)]`, whose `j`-walk
+crosses the packed triangle's rows below the diagonal and runs along it above.
+Neither reads the lower triangle.
+"""
+@inline element_action_row(cache::ElementAssemblyCache, uₑ, args::CellArgs, i::Int) =
+    _element_matrix_action_row(cache.symmetry, cache.K, (@inbounds cache.slots[cellid(args.cell)]),
+                               uₑ, i, cache.local_size)
+
+@inline function _element_matrix_action_row(::GeneralElementMatrix, K, slot, uₑ, i::Int, ::Val{ND}) where {ND}
+    acc = zero(eltype(K))
+    for j in 1:ND
+        @inbounds acc += K[slot, i, j] * uₑ[j]
+    end
+    return acc
+end
+
+@inline function _element_matrix_action_row(::SymmetricElementMatrix, K, slot, uₑ, i::Int, ::Val{ND}) where {ND}
+    acc = zero(eltype(K))
+    for j in 1:ND
+        @inbounds acc += K[slot, _packed_index(i, j, Val(ND))] * uₑ[j]
+    end
+    return acc
+end
+
+"""
     _packed_index(i, j, ::Val{ND}) -> t
 
 The 1-based linear index of `(i, j)` in a row-major packed upper triangle

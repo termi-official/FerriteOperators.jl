@@ -322,7 +322,8 @@ function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblySt
             "$dev carries `$(nameof(typeof(element_mapping(device))))`, which executes the " *
             "matrix-free action only. An assembling form is `WorkerPerElement`; build the device " *
             "without `with_element_mapping`, or set the operator up with `form = MatrixFreeAction(; " *
-            "element_mapping = CooperativeElement())`, which resolves the mapping itself."))
+            "element_mapping = $(nameof(typeof(element_mapping(device))))())`, which resolves the " *
+            "mapping itself."))
     _assert_device_specification(device, operator_specification(strategy.form), integrator)
 
     needs_ad_decoration(integrator) && throw(ArgumentError(
