@@ -141,6 +141,13 @@ dof indices of the item `it` is positioned on. The default is
 device cursor (`Ferrite.celldofs` is what the two already resolve to). An
 iterator whose item has no single cell to key `celldofs` by overloads this
 directly.
+
+This window doubles as the scatter address by default
+([`iterator_scatter_address`](@ref)), and Ferrite's assembler requires it to be
+DUPLICATE FREE. An item spanning more than one cell repeats a dof wherever the
+cells share it — two face-neighbours of a CONTINUOUS space share the dofs on
+their common facet — so such a family needs a discontinuous space, or item
+sides that do not touch a shared facet.
 """
 iterator_dofs(it) = Ferrite.celldofs(it)
 

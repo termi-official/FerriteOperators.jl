@@ -307,6 +307,19 @@ admissibility probe is validated against the subdomain's RESOLVED iterator
 type, so a cache author who annotates it against a custom iterator (rather than
 leaving the argument unannotated) still passes.
 
+Once constructed, a device iterator reaches the workspace through a FIFTH hook:
+the batching [`setup_device_instances`](@ref)`(device, it, n)` moves whatever it
+STAGES onto the device, and [`device_worker_view`](@ref)`(it, worker)` is the
+in-kernel slice, the inverse of that batching. The workspace's iterator slot
+routes through these via a private, `ext`-level dispatch
+(`_batch_iterator(device, it, n)`), and it answers with a GENERIC default —
+`setup_device_instances(device, it, n)` itself — so a downstream device
+iterator writes only the 3-arg `setup_device_instances` any other batched cache
+would and needs no `ext`-private method to be reached at all; `Ferrite.CellCache`
+and the KA extension's `DeviceCellCursor` are the two shipped iterators with a
+more specific answer, for Ferrite's own struct-of-arrays batching and the
+cooperative mapping's positioned-by-construction fork respectively.
+
 **New item SETS** — an iterator says how to POSITION on an item; it does not say
 what the items ARE. That is the second seam,
 [`item_provider`](@ref)`(kind, element_cache, sdh)`, whose answer

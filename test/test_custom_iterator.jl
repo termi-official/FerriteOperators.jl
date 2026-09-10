@@ -21,17 +21,34 @@
 #                          couples and the cell pattern does not carry
 # everything else in the file is the ELEMENT axis (already open before this
 # round) and the assertions.
+#
+# THE DEVICE HALF (optional; `KernelAbstractionsDevice(KA.CPU())`). A separate,
+# device-resident iterator (`DevicePairCursor`) plus 4 more methods —
+# `device_assembly_iterator`, `setup_device_instances` × 2 (the iterator and
+# the element cache), `device_worker_view` × 2 — and one `reinit_values!`
+# overload for the device iterator type. Not counted against the CPU-only tally
+# above: the family opens on the host with the two protocol methods alone, and
+# a downstream author who never targets `KernelAbstractionsDevice` writes none
+# of this.
 
 using FerriteOperators
 using Test
 using SparseArrays
 using LinearAlgebra
 using Polyester
+# FerriteKAExt — the device handler, `distribute_to_workers` and every `Adapt`
+# rule the device kernel builds on — is triggered by these four together, not
+# by KernelAbstractions alone (matches `test/test_ka_device.jl`,
+# `test/test_matrix_free.jl`). No CUDA: the device arm below targets
+# `KernelAbstractionsDevice(KA.CPU())` only.
+import Adapt, GPUArrays, GPUArraysCore
+import KernelAbstractions as KA
 
 import FerriteOperators: assembly_iterator, item_provider, iterator_dofs, iterator_handler,
     compute_partition, duplicate_for_device, setup_element_cache, reinit_values!,
     allocate_element_matrix, allocate_element_unknown_vector, allocate_element_residual_vector,
-    provides_analytic, assemble_cell!
+    provides_analytic, assemble_cell!,
+    device_assembly_iterator, position_iterator, setup_device_instances, device_worker_view
 
 ####################################
 ## The physics, chosen so the reference is closed form
@@ -77,6 +94,13 @@ end
 
 # Read-only between workers: sharing it is what a per-worker copy would produce.
 duplicate_for_device(device, c::JumpPenaltyCache) = c
+
+# The KA device's own pair — `g` is read by every worker, so it moves once;
+# `pairs` is a HOST list the device kernel never touches (it exists only to
+# build the iterators), so it rides along unadapted.
+setup_device_instances(device::KernelAbstractionsDevice, c::JumpPenaltyCache, n) =
+    JumpPenaltyCache(c.η, c.n, Adapt.adapt(device.backend, c.g), c.pairs)
+device_worker_view(c::JumpPenaltyCache, worker) = c
 
 # The local system spans TWO cells, so every element-local buffer is 2n.
 allocate_element_matrix(c::JumpPenaltyCache, sdh)          = zeros(2c.n, 2c.n)
@@ -152,6 +176,67 @@ iterator_handler(pc::PairCache) = pc.sdh
 # An independent copy per threaded worker; reached through `iterator_handler`,
 # never through a `.dh` field this iterator does not have.
 duplicate_for_device(::AbstractCPUDevice, pc::PairCache) = PairCache(pc.sdh, pc.pairs)
+
+####################################
+## The DEVICE iterator: A7, landed (was blocked on the missing `_batch_iterator`
+## fallback — S2's gate report §3; S3 adds it and this is the reproduction).
+####################################
+
+# The dof window over the device handler's flat `cell_dofs`, positioned by
+# construction — `DeviceCellCursor`'s `DeviceCellDofs` for a single cell,
+# concatenated over two.
+struct PairDofs{I <: Integer, V <: AbstractVector{I}} <: AbstractVector{I}
+    cell_dofs::V
+    lbase::Int
+    rbase::Int
+    n::Int
+end
+Base.size(d::PairDofs) = (2d.n,)
+Base.IndexStyle(::Type{<:PairDofs}) = IndexLinear()
+Base.@propagate_inbounds Base.getindex(d::PairDofs, i::Int) =
+    i <= d.n ? d.cell_dofs[d.lbase + i] : d.cell_dofs[d.rbase + (i - d.n)]
+
+# Positioned by CONSTRUCTION, like `DeviceCellCursor`: `lefts`/`rights` are the
+# pair list moved to the device ONCE (shared, read-only — every worker reads
+# the same array), and `left`/`right` are this item's own cell ids, looked up
+# by pair index at `position_iterator` time.
+struct DevicePairCursor{SDH, V <: AbstractVector{Int}}
+    sdh::SDH
+    lefts::V
+    rights::V
+    left::Int
+    right::Int
+    n::Int
+end
+
+Ferrite.cellid(c::DevicePairCursor)   = c.left
+iterator_dofs(c::DevicePairCursor)    = PairDofs(c.sdh.cell_dofs,
+    Int(@inbounds c.sdh.cell_dofs_offset[c.left]) - 1,
+    Int(@inbounds c.sdh.cell_dofs_offset[c.right]) - 1, c.n)
+iterator_handler(c::DevicePairCursor) = c.sdh
+
+position_iterator(c::DevicePairCursor, item, flags) =
+    DevicePairCursor(c.sdh, c.lefts, c.rights,
+        @inbounds(c.lefts[Int(item)]), @inbounds(c.rights[Int(item)]), c.n)
+
+# `lefts`/`rights` are shared, not per-worker, so there is nothing to slice.
+device_worker_view(c::DevicePairCursor, worker) = c
+
+# The HOST `sdh` builds the pair list once; `setup_device_instances` below is
+# what actually moves `lefts`/`rights` onto the device — this constructs the
+# SHAPE only, mirroring `DeviceCellCursor`'s `coords = nothing` placeholder.
+device_assembly_iterator(kind, c::JumpPenaltyCache, sdh, device_sdh) =
+    DevicePairCursor(device_sdh, first.(c.pairs), last.(c.pairs), -1, -1, ndofs_per_cell(sdh))
+
+setup_device_instances(device::KernelAbstractionsDevice, c::DevicePairCursor, n) =
+    DevicePairCursor(c.sdh, Adapt.adapt(device.backend, c.lefts),
+        Adapt.adapt(device.backend, c.rights), c.left, c.right, c.n)
+
+# Annotated on the DEVICE iterator type too — the same no-op as the host one,
+# but a SEPARATE method: `reinit_values!(cache, cell, kind)`'s generic fallback
+# dispatches on whichever iterator positioned `args.cell`, and the device sweep
+# positions a `DevicePairCursor`, never a `PairCache`.
+reinit_values!(::JumpPenaltyCache, ::DevicePairCursor) = nothing
 
 ####################################
 ## The provider: what the ITEMS are
@@ -313,6 +398,25 @@ sweep!(op) = (Threads.atomic_xchg!(VISITED, 0); update_operator!(op, nothing); o
         # cross-device comparison above is `≈` because the summation order
         # differs, not because anything is approximate.
         @test sweep!(colored) == par
+    end
+
+    @testset "A7 — the device half, landed: KernelAbstractionsDevice(KA.CPU())" begin
+        seq = copy(sweep!(op))
+        device_op = setup_operator(
+            strategy_for(tb.spec, KernelAbstractionsDevice(KA.CPU(); items_per_worker = 1),
+                ColoredScheduling()),
+            tb.integrator, tb.dh)
+        # A low `items_per_worker` for the same reason A5's Polyester arm lowers
+        # `min_items_per_worker`: a 9-item set at the default (2) would still
+        # engage several workers, but this makes it explicit rather than
+        # incidental.
+        @test size(first(get_subdomain_caches(device_op)).device_cache.Ke, 1) > 1
+        dev = copy(sweep!(device_op))
+        @test VISITED[] == 9
+        # Host-vs-device exactness, not a tolerance: the device sweep's dof
+        # windows and element math are the same `Int`/`Float64` arithmetic as
+        # the host's, only the traversal moved.
+        @test maximum(abs, Matrix(dev) .- Matrix(seq)) == 0.0
     end
 
     @testset "A6 — the colouring promise the provider makes, asserted directly" begin

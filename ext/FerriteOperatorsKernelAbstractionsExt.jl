@@ -278,14 +278,30 @@ function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevic
     )
 end
 
-# Ferrite's own geometry cache batches through its struct-of-arrays route; a
-# cursor batches only what it stages.
+"""
+    _batch_iterator(device, it, n)
+
+The workspace's iterator-slot batching, called from `setup_device_instances`'s
+4-arg `AssemblyWorkspace` method. The GENERIC default forwards to
+[`setup_device_instances`](@ref)`(device, it, n)` — the same hook every other
+batched workspace member answers — so a downstream device iterator needs no
+`ext`-private method to reach the device: it implements the 3-arg
+`setup_device_instances` like any other batched cache and this default carries
+it onto the workspace unchanged.
+"""
+_batch_iterator(device, it, n) = FerriteOperators.setup_device_instances(device, it, n)
+
+# Ferrite's own geometry cache batches through its struct-of-arrays route, which
+# has no generic `setup_device_instances` method of its own — this override is
+# still needed where the default above would throw.
 _batch_iterator(device, cc::CellCache, n) = Ferrite.distribute_to_workers(device.backend, cc, n)
-_batch_iterator(device, c::DeviceCellCursor, n) = FerriteOperators.setup_device_instances(device, c, n)
+
 # A cooperative sweep positions its item in ONE segment of a barrier-split kernel
 # and reads it in the next, so its geometry cache has to be the MUTABLE one every
 # segment recovers for itself — a cursor is positioned by construction, and the
-# value would not survive the barrier.
+# value would not survive the barrier. (`DeviceCellCursor`'s plain batching is
+# otherwise exactly the generic default above, so it carries no override of its
+# own.)
 _batch_iterator(device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, CooperativeElement},
         c::DeviceCellCursor, n) = Ferrite.distribute_to_workers(device.backend, CellCache(c.sdh), n)
 
@@ -432,8 +448,23 @@ end
     return nothing
 end
 
-@kernel function _cooperative_sweep_2d!(task, workspaces, @Const(items),
-        ::Val{T}, ::Val{LEN}, ::Val{NBOX}) where {T, LEN, NBOX}
+# ONE loop-expressed body for every lattice dimension: the pipeline length
+# `2·DIM − 1` is a `Val` type parameter rather than a choice between hand-written
+# kernels. Verified lexically legal on both backends — a `@synchronize` inside a
+# `for` loop whose trip count is a `Val` — by `scratchpad/ka-sync-mwe/`
+# (variant B, both KA.CPU and CUDABackend; the negative control there confirms
+# the barriers are real synchronization, not a no-op the loop already provided).
+#
+# `group`/`lane` are re-derived at the top of the loop body: the CPU backend
+# lexically splits a kernel at every `@synchronize`, and a `for` loop containing
+# one is transformed as its OWN independent split, starting over from a fresh
+# per-segment state. `nlanes` needs no such re-derivation — verified separately
+# (`scratchpad/uniform-in-loop-mwe.jl`, this round): a `@uniform` computed once
+# OUTSIDE the loop, before any barrier, is an ordinary Julia closure variable by
+# the time it reaches a later segment, and reads correctly inside every
+# iteration without being reassigned.
+@kernel function _cooperative_sweep!(task, workspaces, @Const(items),
+        ::Val{T}, ::Val{LEN}, ::Val{NBOX}, ::Val{DIM}) where {T, LEN, NBOX, DIM}
     group = @index(Group, Linear)
     lane  = @index(Local, Linear)
     @uniform nlanes = prod(@groupsize())
@@ -444,39 +475,12 @@ end
     @synchronize
     _coop_load!(workspaces, group, lane, nlanes, scratch)
     @synchronize
-    _coop_stage!(task, workspaces, group, lane, nlanes, scratch, 1)
-    @synchronize
-    _coop_stage!(task, workspaces, group, lane, nlanes, scratch, 2)
-    @synchronize
-    _coop_stage!(task, workspaces, group, lane, nlanes, scratch, 3)
-    @synchronize
-    _coop_store!(workspaces, group, lane, nlanes, scratch)
-    @synchronize
-    _coop_scatter!(task, workspaces, group, lane, nlanes)
-end
-
-@kernel function _cooperative_sweep_3d!(task, workspaces, @Const(items),
-        ::Val{T}, ::Val{LEN}, ::Val{NBOX}) where {T, LEN, NBOX}
-    group = @index(Group, Linear)
-    lane  = @index(Local, Linear)
-    @uniform nlanes = prod(@groupsize())
-    scratch = @localmem T (LEN, NBOX)
-    _coop_prepare!(workspaces, items, group, lane, nlanes)
-    @synchronize
-    _coop_gather!(task, workspaces, group, lane, nlanes)
-    @synchronize
-    _coop_load!(workspaces, group, lane, nlanes, scratch)
-    @synchronize
-    _coop_stage!(task, workspaces, group, lane, nlanes, scratch, 1)
-    @synchronize
-    _coop_stage!(task, workspaces, group, lane, nlanes, scratch, 2)
-    @synchronize
-    _coop_stage!(task, workspaces, group, lane, nlanes, scratch, 3)
-    @synchronize
-    _coop_stage!(task, workspaces, group, lane, nlanes, scratch, 4)
-    @synchronize
-    _coop_stage!(task, workspaces, group, lane, nlanes, scratch, 5)
-    @synchronize
+    for stage in 1:(2DIM - 1)
+        group = @index(Group, Linear)
+        lane  = @index(Local, Linear)
+        _coop_stage!(task, workspaces, group, lane, nlanes, scratch, stage)
+        @synchronize
+    end
     _coop_store!(workspaces, group, lane, nlanes, scratch)
     @synchronize
     _coop_scatter!(task, workspaces, group, lane, nlanes)
@@ -512,10 +516,6 @@ function FerriteOperators.execute_on_device!(task,
     backend = device.backend
     cache = workspaces.element
     dim = FerriteOperators.cooperative_lattice_dim(cache)
-    dim in (2, 3) || throw(ArgumentError(
-        "The cooperative kernel is written for 2D and 3D lattices; $(nameof(typeof(cache))) " *
-        "declares `cooperative_lattice_dim` $dim. The pipeline length is `2·dim - 1` and every " *
-        "barrier is a statement in the kernel body, so a new lattice dimension is a new kernel."))
     workgroup = cooperative_group_size(cache)
     boxes, columns = cooperative_scratch_shape(cache)
     T = Val(element_value_type(cache))
@@ -526,11 +526,7 @@ function FerriteOperators.execute_on_device!(task,
     for chunk in items
         isempty(chunk) && continue
         ndrange = workgroup * length(chunk)
-        if dim == 3
-            _cooperative_sweep_3d!(backend, workgroup)(device_task, workspaces, chunk, T, boxes, columns; ndrange)
-        else
-            _cooperative_sweep_2d!(backend, workgroup)(device_task, workspaces, chunk, T, boxes, columns; ndrange)
-        end
+        _cooperative_sweep!(backend, workgroup)(device_task, workspaces, chunk, T, boxes, columns, Val(dim); ndrange)
         KA.synchronize(backend)
     end
     return nothing
