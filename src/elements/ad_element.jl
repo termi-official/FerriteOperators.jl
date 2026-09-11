@@ -12,7 +12,9 @@ here — including the AUTHOR-DECLARATION seams about the wrapped element itself
 ([`assembly_iterator`](@ref), [`device_assembly_iterator`](@ref),
 [`item_provider`](@ref), [`item_update_flags`](@ref),
 [`element_local_length`](@ref), [`element_matrix_symmetry`](@ref),
-[`element_action_row`](@ref)): decoration does not change what the ELEMENT is,
+[`element_action_row`](@ref)) and the element's own matrix-free storage
+([`with_action_storage`](@ref), [`fill_quadrature_data!`](@ref)), which passes
+through and back via [`rewrap`](@ref): decoration does not change what the ELEMENT is,
 so a decorator inherits the inner's declaration of it wholesale, and one with
 its own explicit method for a seam (`ElementAssemblyCache`'s extent/row-action)
 wins by ordinary dispatch — it is strictly more specific than the blanket
@@ -47,6 +49,19 @@ unwrap(cache) = cache
 unwrap(d::AbstractElementCacheDecorator) = unwrap(d.inner)
 unwrap(::Type{<:AbstractElementCacheDecorator{Inner}}) where {Inner} = unwrap(Inner)
 
+"""
+    rewrap(d::AbstractElementCacheDecorator, inner) -> decorator
+
+`d` around a REPLACEMENT `inner` — the inverse of reading `d.inner`, and what a
+seam that transforms the wrapped cache rather than merely delegating to it needs
+([`with_action_storage`](@ref), whose storage election answers with a different
+cache than it was given). The default calls the decorator type's own
+constructor with the new inner, which is the whole of a one-field decorator; a
+decorator carrying state beside `inner` ([`ADElementCache`](@ref)'s buffers)
+overloads this to carry it across.
+"""
+rewrap(d::D, inner) where {D <: AbstractElementCacheDecorator} = Base.typename(D).wrapper(inner)
+
 query_cell_parameters(d::AbstractElementCacheDecorator, cell, p) = query_cell_parameters(d.inner, cell, p)
 query_facet_parameters(d::AbstractElementCacheDecorator, cell, local_facet_index, p) =
     query_facet_parameters(d.inner, cell, local_facet_index, p)
@@ -68,6 +83,19 @@ device_assembly_iterator(kind, d::AbstractElementCacheDecorator, sdh, device_sdh
     device_assembly_iterator(kind, d.inner, sdh, device_sdh)
 item_provider(kind, d::AbstractElementCacheDecorator, sdh) = item_provider(kind, d.inner, sdh)
 item_update_flags(kind, d::AbstractElementCacheDecorator) = item_update_flags(kind, d.inner)
+# The matrix-free storage election and the store it fills are the WRAPPED
+# element's, so both pass through. The election is a transformation rather than a
+# delegation — it answers with a different cache — hence `rewrap`, which puts the
+# decorator back around the elected inner. Only the two PER-QUADRATURE-POINT
+# levels are forwarded: `ElementAssembly()` is the FRAMEWORK's own election and
+# wraps the decorated cache whole (`with_action_storage(cache, ::ElementAssembly,
+# ::SubDofHandler)`), which is what it must do — the matrices it keeps are the
+# decorated element's. The two storage arguments are disjoint types, so the two
+# methods never tie.
+with_action_storage(d::AbstractElementCacheDecorator, storage::Union{Stored, Recompute}, sdh) =
+    rewrap(d, with_action_storage(d.inner, storage, sdh))
+fill_quadrature_data!(d::AbstractElementCacheDecorator, args::CellArgs) =
+    fill_quadrature_data!(d.inner, args)
 element_local_length(d::AbstractElementCacheDecorator) = element_local_length(d.inner)
 element_action_row(d::AbstractElementCacheDecorator, uₑ, args::CellArgs, i::Int) =
     element_action_row(d.inner, uₑ, args, i)
@@ -307,6 +335,10 @@ end
 
 duplicate_for_device(device, ad::ADElementCache) =
     ADElementCache(duplicate_for_device(device, ad.inner), ad.backend, duplicate_for_device(device, ad.buffers))
+
+# The buffers are sized from the inner's `allocate_element_*` shapes, which a
+# storage election does not change, so they carry across unchanged.
+rewrap(ad::ADElementCache, inner) = ADElementCache(inner, ad.backend, ad.buffers)
 
 """
     condensed_corrector(cache, args) -> AbstractMatrix

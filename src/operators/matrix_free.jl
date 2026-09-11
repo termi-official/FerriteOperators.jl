@@ -16,6 +16,20 @@ Surface: `mul!(y, op, u)` and the five-argument form, [`evaluate!`](@ref)
 `get_matrix` and no [`operator_payload`](@ref): an operator that stores nothing
 has neither, and asking for them says so.
 
+`y` and `u` must NOT alias. Both `mul!` forms sweep items in an arbitrary order,
+writing `y` as they go while still reading `u`, so `mul!(y, op, y)` returns a
+partly-updated mix rather than `A·y` — silently, there being nothing to detect
+it with. Pass a separate destination.
+
+NOT BITWISE REPRODUCIBLE where the scatter is atomic. Under
+[`SequentialScheduling`](@ref) the items of one chunk accumulate into `y`
+concurrently and in whatever order the hardware runs them, so two evaluations of
+the same action can differ in the last bits. The sequential CPU device (one
+worker) and [`ColoredScheduling`](@ref) (no atomics) do repeat bit for bit. A
+Krylov method over this operator therefore sees an operator that is not a
+function of `u` to the last bit; treat run-to-run iteration counts accordingly,
+or elect a colouring.
+
 !!! warning "Experimental surface"
     This operator, its entry points and the element hooks it calls may change
     in a minor release.
@@ -228,9 +242,19 @@ _assert_mapping_capability(::LanesPerElement, storage::StorageElection, cache) =
     "`element_mapping = WorkerPerElement()`/`CooperativeElement()` for " *
     "`storage = Stored()`/`Recompute()`."))
 
+# The row entry's subject, walked down the decorator chain: `hasmethod` on a
+# decorated cache answers `true` for every inner, the blanket forward
+# (ad_element.jl) being a method too — so the question passes through a forwarding
+# decorator to what it wraps. `ElementAssemblyCache` is the exception and answers
+# for itself: the row it serves is the STORED matrix's, not the wrapped element's.
+_declares_element_action_row(d::AbstractElementCacheDecorator) = _declares_element_action_row(d.inner)
+_declares_element_action_row(::ElementAssemblyCache) = true
+_declares_element_action_row(cache) =
+    hasmethod(element_action_row, Tuple{typeof(cache), Any, CellArgs, Int})
+
 function _assert_mapping_capability(::LanesPerElement, ::ElementAssembly, cache)
     C = typeof(cache)
-    hasmethod(element_action_row, Tuple{C, Any, CellArgs, Int}) || throw(ArgumentError(
+    _declares_element_action_row(cache) || throw(ArgumentError(
         "$(C) implements no `element_action_row(::$(nameof(C)), uₑ, ::CellArgs, i::Int)` method, " *
         "so it cannot serve `LanesPerElement`: the mapping gives one lane one ROW of the " *
         "element's action, which no generic route can derive from the whole-element kernel. " *

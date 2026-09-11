@@ -85,8 +85,15 @@ item_update_flags(::MatrixFreeActionKind, c::SumFactorizedDiffusionElementCache)
 # the byte win is unconditional and ElementAssembly's own election is
 # documented as a p = 1–2 concern; the p ≥ 2 action-time cost is a real,
 # measured trade-off for the maintainer to weigh, not a hidden one.
+#
+# `rtol = 0` is the whole conservatism: a bare `isapprox` admits `D` asymmetric
+# by up to `sqrt(eps(T))` — 3.4e-4 in `Float32` — and the packed store then DROPS
+# the lower triangle it was told it did not need. Exact equality is what both
+# admissible `D`s carry (a scalar's off-diagonals are exactly zero; a
+# `SymmetricTensor` reads the same storage for `[i,j]` and `[j,i]`), so nothing
+# is lost by demanding it.
 element_matrix_symmetry(c::SumFactorizedDiffusionElementCache) =
-    c.D ≈ c.D' ? SymmetricElementMatrix() : GeneralElementMatrix()
+    isapprox(c.D, c.D'; rtol = 0) ? SymmetricElementMatrix() : GeneralElementMatrix()
 
 ####################################
 ## Setup

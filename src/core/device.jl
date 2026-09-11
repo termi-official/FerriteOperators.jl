@@ -374,9 +374,16 @@ leaves no lane of a group idle.
 It serves the [`ElementAssembly`](@ref) storage level alone, through
 [`element_action_row`](@ref): the two per-quadrature-point levels re-derive an
 element's values objects per cell into per-worker state that the lanes of one
-element would race on. Its scatter addresses one dof per owned row, so an item
-family whose scatter address is not a dof vector is outside it. Both are setup
-errors naming the alternative.
+element would race on. That restriction, and a cache serving neither
+`element_action_row` nor a compile-time [`element_local_length`](@ref), are
+setup errors naming the alternative.
+
+Its scatter addresses one dof per owned row, read off the item's dof window
+([`iterator_dofs`](@ref)) directly — [`iterator_scatter_address`](@ref) is not
+consulted, so an item family whose scatter address differs from that window is
+outside this mapping. That one is NOT checked at setup: the two seams agree for
+every item family this package ships, and the mapping serves the ELEMENT level
+only, which already needs a static extent.
 
 The contrast with [`CooperativeElement`](@ref) is what makes it a separate
 mapping: that one exists to split an element's LATTICE and needs the barriers

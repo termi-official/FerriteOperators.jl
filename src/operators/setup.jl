@@ -512,8 +512,11 @@ to catch. The argument the seams are keyed on: a hook with ANY method narrowing
 that argument to a type this subdomain's UNWRAPPED cache conforms to must have
 one the engine's own call — which runs on the decorated cache and forwards down
 to the same inner — resolves to. A method narrowing only the KIND is not a
-declaration about a cache — the matrix-free action's device iterator is the
-shipped one — and is not treated as drift.
+declaration about a cache and is not treated as drift; it is also the one
+spelling a declaration must not take, since it ties with the decorator forwards
+(see [`assembly_iterator`](@ref)). A kind-level DEFAULT belongs on
+[`default_assembly_iterator`](@ref), below the cache declarations, which is
+where the matrix-free action's device cursor sits.
 
 What no check can see, and the docs say so instead: a method that is simply
 ABSENT. An author who overloads [`assembly_iterator`](@ref) and forgets

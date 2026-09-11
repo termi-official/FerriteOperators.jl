@@ -179,9 +179,9 @@ order); the `packed` column is [`SymmetricElementMatrix`](@ref)'s election
 
 `ndofs_per_cell²` overtakes the assembled matrix's per-cell share between
 `p = 1` and `p = 2` and keeps widening — this election is the cheaper
-MATRIX-FREE storage at `p = 1`–`2` on the measured card and the one worth
-electing there; [`Stored`](@ref)/[`Recompute`](@ref) are the per-quadrature-
-point elections above that. The fill itself (`ndofs_per_cell` element actions,
+MATRIX-FREE storage at `p = 1`–`2` and the one worth electing there;
+[`Stored`](@ref)/[`Recompute`](@ref) are the per-quadrature-point elections
+above that. The table counts bytes and is card-independent. The fill itself (`ndofs_per_cell` element actions,
 or one analytic kernel call, per cell) is paid once at [`setup_operator`](@ref)
 and again on every [`update_operator!`](@ref) — never on a bare `mul!`.
 

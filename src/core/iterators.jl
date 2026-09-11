@@ -46,8 +46,38 @@ per-kind declaration — [`item_update_flags`](@ref), in Ferrite's `UpdateFlags`
 vocabulary — because one workspace serves every kind an operator sweeps (the
 matrix-free action and the quadrature-data fill share one), while what each
 reads differs.
+
+**HOW TO SPELL A DECLARATION.** A downstream method narrows the CACHE argument,
+and may narrow the kind on top of it; it must never narrow ONLY the kind. That
+is a rule, not a style: [`AbstractElementCacheDecorator`](@ref) forwards this
+seam with a method narrowing the cache and leaving the kind open, so a
+kind-narrow/cache-open method collides with that forward over every decorated
+cache and neither dominates. The same rule governs [`item_provider`](@ref),
+[`item_update_flags`](@ref) and [`reinit_values!`](@ref). A default that belongs
+to a KIND rather than to any cache — the matrix-free action's device cursor —
+goes on [`default_assembly_iterator`](@ref) instead, which sits BELOW every
+cache declaration rather than beside it.
 """
-assembly_iterator(kind, element_cache, sdh) = CellCache(sdh)
+assembly_iterator(kind, element_cache, sdh) = default_assembly_iterator(kind, sdh)
+
+"""
+    default_assembly_iterator(kind, sdh)
+
+What a sweep of `kind` positions on where the element cache declares nothing —
+[`assembly_iterator`](@ref)'s default body, keyed on the kind and the handler
+alone. The default is Ferrite's `CellCache` over `sdh`; the KA extension answers
+the matrix-free action with its device cursor.
+
+It is a separate function rather than a cache-open method on
+[`assembly_iterator`](@ref) so that a kind-level default cannot tie with a
+downstream cache-level declaration: a method here is reached only through
+`assembly_iterator`'s own default, so any cache declaration — the documented
+`assembly_iterator(kind, ::MyCache, sdh)` spelling included — wins outright.
+
+!!! warning "Experimental surface"
+    Internal to the iteration seam; it may change in a minor release.
+"""
+default_assembly_iterator(kind, sdh) = CellCache(sdh)
 
 """
     device_assembly_iterator(kind, element_cache, sdh, device_sdh)
@@ -63,17 +93,41 @@ carries no cheap equivalent of e.g. a whole-cellset walk over
 The default forwards to the host construction over the device handler, so a
 downstream iterator needing no host-only fact writes exactly one method — the
 host one ([`assembly_iterator`](@ref)) — and this default carries it onto the
-device unchanged. An iterator that DOES need a host fact overloads this
-function directly; the KA extension's matrix-free action is the shipped
-example, decorating its device cursor with the host subdomain's uniform
-per-cell dof stride where one exists.
+device unchanged. An iterator that DOES need a host fact either overloads this
+function directly (narrowing the CACHE, per [`assembly_iterator`](@ref)'s
+spelling rule) or answers [`decorate_device_iterator`](@ref) on its own iterator
+type, which is what the KA extension's device cursor does for the host
+subdomain's uniform per-cell dof stride.
 
 !!! warning "Experimental surface"
     The device iterator layout is still moving; this seam's spelling may
-    change in a minor release.
+    change in a minor release. A device-resident iterator also indexes fields
+    of Ferrite's own `DeviceSubDofHandler` (`cell_dofs`, `cell_dofs_offset`) to
+    answer [`iterator_dofs`](@ref) — the shipped `DeviceCellCursor` and the
+    downstream demo in `test/test_custom_iterator.jl` both do. Those fields are
+    UNEXPORTED Ferrite internals: this seam is only as stable as they are.
 """
 device_assembly_iterator(kind, element_cache, sdh, device_sdh) =
-    assembly_iterator(kind, element_cache, device_sdh)
+    decorate_device_iterator(assembly_iterator(kind, element_cache, device_sdh), sdh)
+
+"""
+    decorate_device_iterator(it, sdh) -> it
+
+The setup-time fact only the HOST `SubDofHandler` `sdh` can cheaply produce,
+folded into the device iterator `it` — [`device_assembly_iterator`](@ref)'s
+default body, keyed on the ITERATOR's type rather than on the sweep kind or the
+element cache. The default returns `it` unchanged; the KA extension answers for
+its device cursor with the subdomain's uniform per-cell dof stride where one
+exists.
+
+Keyed on the iterator because that is whose layout the fact belongs to: an
+iterator reusing the shipped cursor inherits the decoration, and one with a
+layout of its own passes through untouched without naming this function at all.
+
+!!! warning "Experimental surface"
+    Internal to the device iteration seam; it may change in a minor release.
+"""
+decorate_device_iterator(it, sdh) = it
 
 """
     item_update_flags(kind, element_cache) -> Ferrite.UpdateFlags
@@ -179,6 +233,16 @@ EXPERIMENTAL and has no consumer in `scatter_local!` today: the transfer
 family keeps its own driver and its own two-argument `assemble!` entry
 (`operators/transfer.jl`), so a two-index answer here is a seam left open for a
 future cell-family driver, not a route this round wires up.
+
+**WHERE IT IS NOT CONSULTED.** The matrix-free action bypasses this seam
+wherever the element names a compile-time [`element_local_length`](@ref): both
+[`matrix_free_cell_sweep!`](@ref) (which scatters through the static dof window
+it already gathered, so the window is read off the item once rather than once
+per gather and once per scatter) and the [`LanesPerElement`](@ref) kernel (whose
+lane scatters row `i` to `iterator_dofs(it)[i]`) address through
+[`iterator_dofs`](@ref) directly. An item family whose scatter address DIFFERS
+from its dof window therefore serves the assembling forms and the fallback
+matrix-free gather, and must not name a compile-time extent.
 """
 iterator_scatter_address(it) = iterator_dofs(it)
 

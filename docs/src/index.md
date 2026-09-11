@@ -208,14 +208,20 @@ tensor-product hexahedra):
 | 2 | 2916 | 1512 | 4157 |
 | 3 | 16384 | 8320 | 27318 |
 
-`ElementAssembly` is the cheapest matrix-free storage at `p = 1`–`2` on the
-measured card; `ndofs_per_cell²` overtakes the assembled matrix's per-cell
-share above that, which is where [`Stored`](@ref)/[`Recompute`](@ref) take
-over. An element whose form is symmetric may additionally elect
+`ElementAssembly` is the cheapest matrix-free storage at `p = 1`–`2`;
+`ndofs_per_cell²` overtakes the assembled matrix's per-cell share above that,
+which is where [`Stored`](@ref)/[`Recompute`](@ref) take over. The table is
+bytes and nothing else — a count, not a card measurement.
+
+An element whose form is symmetric may additionally elect
 [`SymmetricElementMatrix`](@ref) ([`element_matrix_symmetry`](@ref)), the
 `packed` column above — below the assembled matrix's own per-cell share at
-every measured order. See [`ElementAssembly`](@ref)'s own docstring for the
-fill cost.
+every measured order. Bytes are not the whole election: under
+[`WorkerPerElement`](@ref) the packed read costs ACTION time above `p = 1`
+(measured on an RTX 2080: −20% at `p = 1`, +96% at `p = 2`, +43% at `p = 3`,
+because the packed index map folds to literals at `ndofs_per_cell = 8` and not
+above), so the byte win is unconditional while the time win is not. See
+[`ElementAssembly`](@ref)'s own docstring for the fill cost.
 
 Both stored levels are filled at setup and refilled by
 [`update_operator!`](@ref), whose freshness contract is the one an assembled

@@ -8,14 +8,15 @@ import KernelAbstractions: @kernel, @index, @Const, @localmem, @synchronize, @un
 
 import FerriteOperators: KernelAbstractionsDevice, AssemblyWorkspace, AssemblyTask, VectorAssembler
 import FerriteOperators: CooperativeElement, WorkerPerElement, LanesPerElement, QVector,
-    MatrixFreeActionKind, AbstractElementCacheDecorator
+    MatrixFreeActionKind
 import FerriteOperators: device_worker_view, launch_geometry, lane_launch_geometry, n_workers,
     value_type
 import FerriteOperators: cooperative_group_size, cooperative_scratch_shape,
     cooperative_load!, cooperative_stage!, cooperative_store!
 import FerriteOperators: element_action_row, element_local_length, ElementUnknownWindow
 import FerriteOperators: element_value_type, item_dofs, query_cell_parameters
-import FerriteOperators: assembly_iterator, device_assembly_iterator, item_update_flags, position_item
+import FerriteOperators: default_assembly_iterator, decorate_device_iterator,
+    item_update_flags, position_item
 import FerriteOperators: position_iterator, iterator_dofs
 
 # Ferrite's own KA extension supplies `distribute_to_workers`, the device
@@ -99,7 +100,7 @@ quadrature-data fill forms it once. The node ids are answered from the grid
 instead of staged, there being no sweep that reads them per point.
 
 `stride` is the subdomain's constant per-cell dof count where
-[`device_assembly_iterator`](@ref)'s uniformity check found `cell_dofs_offset`
+[`decorate_device_iterator`](@ref)'s uniformity check found `cell_dofs_offset`
 affine in the cell id (`Int`), letting a positioning compute `dofbase` by
 arithmetic instead of reading that array — or `Nothing`, the array-read
 fallback every other subdomain shape takes. It is a TYPE parameter rather than
@@ -147,47 +148,40 @@ end
 end
 
 """
-    assembly_iterator(::MatrixFreeActionKind, element_cache, sdh)
+    default_assembly_iterator(::MatrixFreeActionKind, sdh)
 
-The matrix-free action's iterator: Ferrite's `CellCache` over a HOST
-`SubDofHandler` — the CPU sweeps are unchanged — and a [`DeviceCellCursor`](@ref)
-over a device handler, which is where staging a dof row per item is the
-dominant cost of the sweep.
+The matrix-free action's iterator where the element cache declares none:
+Ferrite's `CellCache` over a HOST `SubDofHandler` — the CPU sweeps are
+unchanged — and a [`DeviceCellCursor`](@ref) over a device handler, which is
+where staging a dof row per item is the dominant cost of the sweep.
+
+It answers the kind-keyed DEFAULT ([`default_assembly_iterator`](@ref)) rather
+than a cache-open method on [`assembly_iterator`](@ref) itself: the latter would
+narrow only the kind, tying with every cache-narrow declaration — the decorator
+forwards and the documented `assembly_iterator(kind, ::MyCache, sdh)` recipe
+alike — since neither dominates. Below the cache declarations there is no tie,
+and a cache that names its own iterator keeps it under this kind too.
 """
-FerriteOperators.assembly_iterator(::MatrixFreeActionKind, element_cache, sdh) = _action_iterator(sdh)
+FerriteOperators.default_assembly_iterator(::MatrixFreeActionKind, sdh) = _action_iterator(sdh)
 _action_iterator(sdh::Ferrite.SubDofHandler) = Ferrite.CellCache(sdh)
 _action_iterator(sdh) = DeviceCellCursor(sdh, nothing, -1, 0, nothing)
 
 """
-    device_assembly_iterator(::MatrixFreeActionKind, element_cache, sdh, device_sdh)
+    decorate_device_iterator(c::DeviceCellCursor, sdh)
 
-The matrix-free action's DEVICE iterator, decorated with the HOST subdomain
-`sdh`'s uniform per-cell dof stride where one exists: `sdh`'s flat
-`cell_dofs_offset` affine in the cell id, i.e. every cell up to and including
-this subdomain's, in GLOBAL cell numbering, carries the same dof count. A
-cursor that carries the stride computes its dof-window offset by arithmetic
-instead of reading `cell_dofs_offset`. The check runs against the HOST `sdh`
-even though it decorates the DEVICE iterator, since the check itself has no
-device counterpart worth paying for.
+The device cursor, carrying the HOST subdomain `sdh`'s uniform per-cell dof
+stride where one exists: `sdh`'s flat `cell_dofs_offset` affine in the cell id,
+i.e. every cell up to and including this subdomain's, in GLOBAL cell numbering,
+carries the same dof count. A cursor that carries the stride computes its
+dof-window offset by arithmetic instead of reading `cell_dofs_offset`. The check
+runs against the HOST `sdh` even though it decorates the DEVICE iterator, since
+the check itself has no device counterpart worth paying for.
+
+Keyed on the CURSOR's type, not on the sweep kind: the stride is a property of
+this layout, so a downstream iterator of another shape reaches
+[`device_assembly_iterator`](@ref)'s default and passes through undecorated.
 """
-FerriteOperators.device_assembly_iterator(kind::MatrixFreeActionKind, element_cache, sdh, device_sdh) =
-    _with_uniform_dof_stride(assembly_iterator(kind, element_cache, device_sdh), sdh)
-
-# Both methods above narrow only the KIND, leaving the cache argument open —
-# which is exactly as specific as `AbstractElementCacheDecorator`'s own
-# open-kind forwarding narrows only the CACHE. Neither dominates the other, so
-# Julia calls it ambiguous over a decorated cache under `MatrixFreeActionKind`
-# unless the (kind, decorator) corner is named explicitly, same as any other
-# dispatch diamond. The body is the ordinary one-level forward: an inner that
-# is itself decorated recurses through its own such method (or this one again),
-# and an inner with its own `MatrixFreeActionKind`-specific declaration is
-# strictly more specific than both diamond arms and still wins there.
-FerriteOperators.assembly_iterator(kind::MatrixFreeActionKind, d::AbstractElementCacheDecorator, sdh) =
-    assembly_iterator(kind, d.inner, sdh)
-FerriteOperators.device_assembly_iterator(kind::MatrixFreeActionKind, d::AbstractElementCacheDecorator, sdh, device_sdh) =
-    device_assembly_iterator(kind, d.inner, sdh, device_sdh)
-
-_with_uniform_dof_stride(c::DeviceCellCursor, sdh::Ferrite.SubDofHandler) =
+FerriteOperators.decorate_device_iterator(c::DeviceCellCursor, sdh::Ferrite.SubDofHandler) =
     DeviceCellCursor(c.sdh, c.coords, c.cellid, c.dofbase, _uniform_dof_stride(sdh))
 
 function _uniform_dof_stride(sdh::Ferrite.SubDofHandler)
@@ -456,6 +450,12 @@ end
 # constructs the same one, and `reinit_values!` is a no-op there — the two
 # per-quadrature-point levels would instead have every lane reinitialize the
 # slot's shared values objects.
+#
+# `query_cell_parameters` below runs once PER LANE on that same shared cache, so
+# read-only is a requirement of it too: a parameter query that GATHERS into the
+# cache (rather than returning a value) would have the lanes of one element
+# racing on the destination. No shipped cache does; a downstream one that wants
+# to must serve `WorkerPerElement()` instead.
 @inline function _lane_action!(task, ws, lane::Int, ::Val{NLANES}, ::Val{ND}) where {NLANES, ND}
     dofs = item_dofs(ws)
     uₑ = ElementUnknownWindow{eltype(ws.re)}(task.states.u, dofs)

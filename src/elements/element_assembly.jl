@@ -66,8 +66,12 @@ keeps the store the size of the SUBDOMAIN rather than of the grid.
 `local_size` is `Val(ndofs_per_cell)`, so the dense product's extents are a
 compile-time constant rather than the store's runtime dimensions
 ([`element_local_length`](@ref)): a device kernel whose trip counts are known
-keeps the element vectors in registers, which on an RTX 2080 is the difference
-between 0.69 ms and 0.27 ms for one action over 132k trilinear hexahedra.
+keeps the element vectors in registers instead of walking the store's
+dimensions, which is the reason the extent is a type parameter at all. The gap
+it closed was measured at 0.69 ms against 0.27 ms for one action over 132k
+trilinear hexahedra on an RTX 2080 — before the packed layout and the mapping
+family landed, so read it as the ORDER of the effect and not as a current
+number. `benchmarks/matrix_free_action.jl` reports what this level costs today.
 
 The matrices are shared read-only by the action and written per cell by the
 fill, so `K`/`slots` are not per worker and the device layout batches neither:

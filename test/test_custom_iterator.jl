@@ -30,6 +30,13 @@
 # narrow what that family positions on and enumerates. They are written here
 # because registering is what proves the seam — see the registration testset.
 #
+# THE MATRIX-FREE ARM (optional). The same two protocol methods carry the family
+# under `MatrixFreeAction` as well — that form is the one sweep kind the package
+# declares an iterator default for, and the default sits below the cache
+# declarations, so this family keeps its own iterator there. The arm costs ONE
+# more ELEMENT-axis method (`apply_element_action!`) and no protocol method at
+# all, which is what the testset near the end asserts.
+#
 # THE DEVICE HALF (optional; `KernelAbstractionsDevice(KA.CPU())`). A separate,
 # device-resident iterator (`DevicePairCursor`) plus 4 more methods —
 # `device_assembly_iterator`, `setup_device_instances` × 2 (the iterator and
@@ -55,7 +62,7 @@ import KernelAbstractions as KA
 import FerriteOperators: assembly_iterator, item_provider, iterator_dofs, iterator_handler,
     compute_partition, duplicate_for_device, setup_element_cache, reinit_values!,
     allocate_element_matrix, allocate_element_unknown_vector, allocate_element_residual_vector,
-    provides_analytic, assemble_cell!, item_families, setup_family_caches,
+    provides_analytic, assemble_cell!, apply_element_action!, item_families, setup_family_caches,
     device_assembly_iterator, position_iterator, setup_device_instances, device_worker_view
 
 ####################################
@@ -135,6 +142,18 @@ function assemble_cell!(req::ResidualRequest, c::JumpPenaltyCache, args::CellArg
     s = c.η * dot(g, args.states.u)
     for i in eachindex(g)
         req.r[i] += s * g[i]
+    end
+    return nothing
+end
+
+# The matrix-free action of the same rank-one block, `yₑ += η g (g·uₑ)` — the
+# ELEMENT axis, not the iteration protocol, and the only method the
+# `MatrixFreeAction` arm below adds over the assembling ones.
+function apply_element_action!(yₑ, c::JumpPenaltyCache, uₑ, args::CellArgs)
+    g = c.g
+    s = c.η * dot(g, uₑ)
+    for i in eachindex(g)
+        yₑ[i] += s * g[i]
     end
     return nothing
 end
@@ -452,6 +471,43 @@ sweep!(op) = (Threads.atomic_xchg!(VISITED, 0); update_operator!(op, nothing); o
         # windows and element math are the same `Int`/`Float64` arithmetic as
         # the host's, only the traversal moved.
         @test maximum(abs, Matrix(dev) .- Matrix(seq)) == 0.0
+    end
+
+    @testset "the recipe spelling resolves under MatrixFreeAction too" begin
+        # THE regression for the recipe diamond. Both protocol methods above are
+        # spelled the way `devdocs/design.md` prescribes — kind OPEN, cache
+        # narrow — and `MatrixFreeActionKind` is the one sweep kind the package
+        # itself declares a default iterator for. That default lives BELOW the
+        # cache declarations (`default_assembly_iterator`), so this family keeps
+        # its own `PairCache`/`DevicePairCursor` under the action; a
+        # kind-narrow/cache-open default beside them would tie instead, and
+        # `setup_operator`'s drift probe would report the call ambiguous.
+        reference = reference_matrix(tb.dh, tb.prs, n)
+        u = Float64[sin(3.1 * i) + 0.2cos(i) for i in 1:ndofs(tb.dh)]
+        expected = reference * u
+        sdh = first(tb.dh.subdofhandlers)
+
+        for (label, device) in ("sequential CPU" => SequentialCPUDevice(),
+                                "KA.CPU device" => KernelAbstractionsDevice(KA.CPU(); items_per_worker = 1))
+            for storage in (Stored(), Recompute())
+                op = setup_operator(
+                    AssemblyStrategy(MatrixFreeAction(; storage), SequentialScheduling(), device),
+                    tb.integrator, tb.dh)
+                element = first(get_subdomain_caches(op)).domain.element
+                # The declaration wins over the action's own default on BOTH
+                # shapes of the seam: the host iterator and the device one.
+                @test assembly_iterator(MatrixFreeActionKind(), element, sdh) isa PairCache
+                @test device_assembly_iterator(MatrixFreeActionKind(), element, sdh, sdh) isa DevicePairCursor
+                y = zeros(ndofs(tb.dh))
+                Threads.atomic_xchg!(VISITED, 0)
+                mul!(y, op, u)
+                @test y ≈ expected rtol = 1.0e-12
+                # The action swept the 9 PAIR items, not the 12 cells — the same
+                # count assertion the assembling arms make.
+                @test VISITED[] == 0        # the action kernel, not the matrix kernel
+                @test length(first(get_subdomain_caches(op)).partition[1]) == 9
+            end
+        end
     end
 
     @testset "A6 — the colouring promise the provider makes, asserted directly" begin

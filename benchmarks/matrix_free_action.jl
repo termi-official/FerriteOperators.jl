@@ -280,6 +280,35 @@ end
     @inbounds sink[thread] = acc + eltype(K)(idx % 2)
 end
 
+# EVERY floor arm is checked against a reference before it is timed. These are
+# hand-rolled kernels carrying `@inbounds` over indices the engine derives
+# differently, and they publish the differential the ELEMENT level is judged
+# against — a miscompiled or mis-indexed floor would publish a fast WRONG number
+# with nothing to notice it. The reference is the host's own arithmetic over the
+# same `K`/`cell_dofs`/`u`, sharing no code with the kernel under test.
+#
+# The stream CEILINGS get no such check and cannot: they compute no action, only
+# a reduction whose sole purpose is to keep the loads from being eliminated. What
+# is asserted there is that the reduction ran and is finite — total elimination
+# would show, partial would not.
+function _check_floor!(label, yd, run!, reference; rtol = 1.0f-4)
+    fill!(yd, 0)
+    run!()
+    y = Array(yd)
+    δ = maximum(abs, y .- reference) / max(maximum(abs, reference), eps(Tv))
+    δ ≤ rtol || error("benchmark floor `$label` disagrees with the reference by $δ (rtol $rtol); " *
+                      "the published number for this arm would be meaningless.")
+    return nothing
+end
+
+function _check_ceiling(label, sink)
+    s = Array(sink)
+    (all(isfinite, s) && any(!iszero, s)) || error(
+        "benchmark stream ceiling `$label` reduced to $(all(isfinite, s) ? "all zeros" : "a non-finite value"); " *
+        "its loads were eliminated, so the number it would publish is not the access pattern's rate.")
+    return nothing
+end
+
 element_floor_times(args...) = ()
 
 if CUDA_AVAILABLE
@@ -308,16 +337,42 @@ if CUDA_AVAILABLE
         # The engine's residual slab at the size and layout the engine gives it:
         # `n_workers(device, partition)` rows, which is this launch geometry.
         re = CUDA.zeros(Tv, ndrange, nd)
-        sample(kernel, args...) =
-            first(measure(() -> (kernel(args...; ndrange); KA.synchronize(backend))))
+        # The host references, from the SAME stores the kernels read: the dense
+        # `Kₑ·uₑ` scattered over each cell's dof window, and the same window's
+        # gather-then-scatter with `Kₑ` removed.
+        Kh, dofs_h, uh = Array(K), Array(cell_dofs), Array(ud)
+        action_reference = zeros(Tv, length(uh))
+        move_reference   = zeros(Tv, length(uh))
+        for cell in 1:ncells
+            base = (cell - 1) * nd
+            window = @view dofs_h[(base + 1):(base + nd)]
+            for a in 1:nd
+                acc = zero(Tv)
+                for b in 1:nd
+                    acc += Kh[cell, a, b] * uh[window[b]]
+                end
+                action_reference[window[a]] += acc
+                move_reference[window[a]]   += uh[window[a]]
+            end
+        end
+
+        function sample(label, kernel, reference, args...)
+            run!() = (kernel(args...; ndrange); KA.synchronize(backend))
+            _check_floor!(label, yd, run!, reference)
+            return first(measure(run!))
+        end
         floors = ("CUDA ELEMENT math floor (registers)" =>
-                      sample(_floor_action!(backend, workgroup), yd, ud, K, cell_dofs, Val(nd), ncells),
+                      sample("CUDA ELEMENT math floor (registers)", _floor_action!(backend, workgroup),
+                             action_reference, yd, ud, K, cell_dofs, Val(nd), ncells),
                   "CUDA ELEMENT math floor (ws.re slab)" =>
-                      sample(_floor_action_re!(backend, workgroup), yd, ud, K, cell_dofs, re, Val(nd), ncells),
+                      sample("CUDA ELEMENT math floor (ws.re slab)", _floor_action_re!(backend, workgroup),
+                             action_reference, yd, ud, K, cell_dofs, re, Val(nd), ncells),
                   "CUDA gather+scatter floor (registers)" =>
-                      sample(_floor_move!(backend, workgroup), yd, ud, cell_dofs, Val(nd), ncells),
+                      sample("CUDA gather+scatter floor (registers)", _floor_move!(backend, workgroup),
+                             move_reference, yd, ud, cell_dofs, Val(nd), ncells),
                   "CUDA gather+scatter floor (ws.re slab)" =>
-                      sample(_floor_move_re!(backend, workgroup), yd, ud, cell_dofs, re, Val(nd), ncells))
+                      sample("CUDA gather+scatter floor (ws.re slab)", _floor_move_re!(backend, workgroup),
+                             move_reference, yd, ud, cell_dofs, re, Val(nd), ncells))
 
         # The stream ceilings, one per (mapping, layout): the same loads, no
         # product and no scatter. The lane arms launch the geometry the mapping
@@ -327,19 +382,25 @@ if CUDA_AVAILABLE
         lane_wg, lane_blocks, n_slots = lane_launch_geometry(device, nlanes, ncells)
         lane_range = lane_wg * lane_blocks
         sink_lane = CUDA.zeros(Tv, lane_range)
-        stream_worker(store, packed) = first(measure(() -> (
-            _stream_worker!(backend, workgroup)(sink_worker, store, cell_dofs, Val(nd), Val(packed),
-                                                ncells; ndrange);
-            KA.synchronize(backend))))
-        stream_lane(store, packed) = first(measure(() -> (
-            _stream_lane!(backend, lane_wg)(sink_lane, store, cell_dofs, Val(nd), Val(packed),
-                                            Val(nlanes), Val(lane_wg ÷ nlanes), n_slots, ncells;
-                                            ndrange = lane_range);
-            KA.synchronize(backend))))
-        ceilings = ("CUDA stream ceiling [worker, dense]"  => stream_worker(K, false),
-                    "CUDA stream ceiling [worker, packed]" => stream_worker(Kp, true),
-                    "CUDA stream ceiling [lanes, dense]"   => stream_lane(K, false),
-                    "CUDA stream ceiling [lanes, packed]"  => stream_lane(Kp, true))
+        function stream_worker(label, store, packed)
+            run!() = (_stream_worker!(backend, workgroup)(sink_worker, store, cell_dofs, Val(nd),
+                                                          Val(packed), ncells; ndrange);
+                      KA.synchronize(backend))
+            fill!(sink_worker, 0); run!(); _check_ceiling(label, sink_worker)
+            return first(measure(run!))
+        end
+        function stream_lane(label, store, packed)
+            run!() = (_stream_lane!(backend, lane_wg)(sink_lane, store, cell_dofs, Val(nd), Val(packed),
+                                                      Val(nlanes), Val(lane_wg ÷ nlanes), n_slots, ncells;
+                                                      ndrange = lane_range);
+                      KA.synchronize(backend))
+            fill!(sink_lane, 0); run!(); _check_ceiling(label, sink_lane)
+            return first(measure(run!))
+        end
+        ceilings = ("CUDA stream ceiling [worker, dense]"  => stream_worker("CUDA stream ceiling [worker, dense]", K, false),
+                    "CUDA stream ceiling [worker, packed]" => stream_worker("CUDA stream ceiling [worker, packed]", Kp, true),
+                    "CUDA stream ceiling [lanes, dense]"   => stream_lane("CUDA stream ceiling [lanes, dense]", K, false),
+                    "CUDA stream ceiling [lanes, packed]"  => stream_lane("CUDA stream ceiling [lanes, packed]", Kp, true))
 
         op = nothing
         packed_op = nothing
@@ -353,6 +414,29 @@ if CUDA_AVAILABLE
         CUDA.reclaim()
         return (floors..., ceilings...)
     end
+end
+
+# The action arm each stream ceiling is supposed to bound: same mapping, same
+# element-matrix layout.
+const CEILING_ARMS = Dict(
+    "CUDA stream ceiling [worker, dense]"  => "CUDA worker-per-element action [EA general]",
+    "CUDA stream ceiling [worker, packed]" => "CUDA worker-per-element action [EA]",
+    "CUDA stream ceiling [lanes, dense]"   => "CUDA lanes-per-element action [EA general]",
+    "CUDA stream ceiling [lanes, packed]"  => "CUDA lanes-per-element action [EA]",
+)
+
+# A ceiling is the rate of an ACCESS PATTERN, not a hardware wall, so it can sit
+# BELOW the kernel that reads the same bytes and hides the latency behind
+# arithmetic. Where it does, the number bounds nothing and the row says so
+# instead of leaving the caveat in a source comment.
+function _ceiling_note(name, time, results)
+    arm = get(CEILING_ARMS, name, nothing)
+    arm === nothing && return ""
+    index = findfirst(r -> first(r) == arm, results)
+    index === nothing && return ""
+    action = results[index].second[1]
+    return time > action ?
+        @sprintf("  <- NOT BOUNDING: above its action (%.3f ms)", 1.0e3 * action) : ""
 end
 
 const STORAGE = (("Stored", Stored()), ("Recompute", Recompute()), ("EA", ElementAssembly()))
@@ -508,8 +592,9 @@ function run_order(order)
     baseline = reference === nothing ? results[1].second[1] : results[reference].second[1]
     @printf("  %-46s %12s %10s %14s\n", "arm", "min time", "vs base", "host allocs")
     for (name, (time, allocations)) in results
-        @printf("  %-46s %10.3f ms %9.2fx %12d B%s\n", name, 1.0e3 * time, baseline / time,
-                allocations, _clock_note(get(clockstamps, name, nothing)))
+        @printf("  %-46s %10.3f ms %9.2fx %12d B%s%s\n", name, 1.0e3 * time, baseline / time,
+                allocations, _clock_note(get(clockstamps, name, nothing)),
+                _ceiling_note(name, time, results))
     end
     isempty(fills) || println("  storage fill (update_operator!, min of 5):")
     for (name, time) in fills

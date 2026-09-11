@@ -301,8 +301,10 @@ The DEVICE shape is a fourth hook,
 [`device_assembly_iterator`](@ref)`(kind, element_cache, sdh, device_sdh)`,
 whose default forwards to `assembly_iterator` over the device handler — a
 downstream iterator needing no host-only setup fact writes only the host
-method; one that does (the matrix-free action's uniform-dof-stride check is the
-shipped example) overloads this instead. `reinit_values!`'s setup-time
+method; one that does either overloads this instead (narrowing the CACHE, per
+the rule below) or answers [`decorate_device_iterator`](@ref) on its own
+iterator type, which is where the matrix-free action's uniform-dof-stride check
+lives. `reinit_values!`'s setup-time
 admissibility probe is validated against the subdomain's RESOLVED iterator
 type, so a cache author who annotates it against a custom iterator (rather than
 leaving the argument unannotated) still passes.
@@ -330,22 +332,39 @@ The two vary independently, which is why they are two seams: the facet family
 runs a custom provider over the stock cell iterator, and the matrix-free action
 runs a custom iterator over the stock provider. A family that is BOTH — a
 two-sided interface traversal, say, whose item is a pair of cells and whose
-local system is indexed by both cells' dofs — is these five methods and nothing
+local system is indexed by both cells' dofs — is these six methods and nothing
 else:
 
 ```julia
 FerriteOperators.assembly_iterator(kind, ::MyCache, sdh) = MyIterator(sdh, …)
 FerriteOperators.item_provider(kind, ::MyCache, sdh)     = MyItems(sdh, …)
 
+Ferrite.reinit!(it::MyIterator, item::Int) = …   # position it; `position_iterator`'s default calls this
 FerriteOperators.compute_partition(::SequentialScheduling, p::MyItems) = (collect(eachindex(…)),)
 FerriteOperators.compute_partition(::ColoredScheduling,    p::MyItems) = …  # see below
 FerriteOperators.duplicate_for_device(::AbstractCPUDevice, it::MyIterator) = MyIterator(…)
 ```
 
-plus the three required accessors above. Overloading one seam and forgetting the
-other is not an error and not a `MethodError`: the other answers with its
-default, and an interface iterator left with `CellItems` is positioned on CELL
-ids.
+plus the three required accessors above. `Ferrite.reinit!` is what positions the
+iterator on an item — [`position_iterator`](@ref)'s default is exactly that call,
+and an iterator positioned by CONSTRUCTION instead (a device cursor) overloads
+`position_iterator` and writes no `reinit!` at all.
+
+**Both seams narrow the CACHE argument, and that is a rule.** A declaration may
+narrow the sweep kind on top of it; it must never narrow ONLY the kind. The
+decorators forward these seams with methods that narrow the cache and leave the
+kind open ([`AbstractElementCacheDecorator`](@ref)), so a kind-narrow/cache-open
+method ties with those forwards over every decorated cache and Julia reports the
+call ambiguous. The rule covers [`item_update_flags`](@ref) and
+[`reinit_values!`](@ref) for the same reason. Where the package itself wants a
+KIND-level default — the matrix-free action's device cursor — it goes on
+[`default_assembly_iterator`](@ref), which sits BELOW every cache declaration
+rather than beside it, so a cache that names its own iterator keeps it under
+every kind.
+
+Overloading one seam and forgetting the other is not an error and not a
+`MethodError`: the other answers with its default, and an interface iterator left
+with `CellItems` is positioned on CELL ids.
 
 Half of that hazard is checked and half is not, and the split is worth knowing.
 A method written against a signature the engine does not call — the wrong sweep

@@ -93,6 +93,71 @@ function FerriteOperators.setup_element_cache(m::SymmetricAnalyticDiffusionInteg
     return SymmetricAnalyticDiffusionCache(m.D, CellValues(T, qr, ip, ip_geo))
 end
 
+####################################
+## A downstream decorator over a matrix-free element
+####################################
+#
+# Written entirely outside `src/`: it forwards what a decorator OWNS (the
+# kernels it serves, and its claims about them) and declares nothing about the
+# wrapped ELEMENT, which is `AbstractElementCacheDecorator`'s blanket-forward
+# half — the storage election and the store's fill included.
+struct PassthroughDecorator{I} <: FerriteOperators.AbstractElementCacheDecorator{I}
+    inner::I
+end
+FerriteOperators.assemble_cell!(req, d::PassthroughDecorator, args) =
+    FerriteOperators.assemble_cell!(req, d.inner, args)
+FerriteOperators.provides_analytic(::Type{<:PassthroughDecorator{I}}, kind) where {I} =
+    FerriteOperators.provides_analytic(I, kind)
+FerriteOperators.serves_kind(::Type{<:PassthroughDecorator{I}}, kind) where {I} =
+    FerriteOperators.serves_kind(I, kind)
+FerriteOperators.apply_element_action!(y, d::PassthroughDecorator, u, args::CellArgs) =
+    FerriteOperators.apply_element_action!(y, d.inner, u, args)
+
+struct DecoratedIntegrator{I} <: AbstractBilinearIntegrator
+    inner::I
+end
+FerriteOperators.setup_element_cache(m::DecoratedIntegrator, sdh::SubDofHandler) =
+    PassthroughDecorator(FerriteOperators.setup_element_cache(m.inner, sdh))
+
+####################################
+## An element whose store is allocated EAGERLY and filled only by the fill sweep
+####################################
+#
+# `with_action_storage` cannot mask an unforwarded `fill_quadrature_data!` here:
+# the store exists whatever the election says, starts at zero, and the action
+# reads it. A fill that does not reach the element gives `y == 0` — no error and
+# no `MethodError`, which is why this is a test and not a capability wall. The
+# action is `Kₑ = f·I` over the cell's own dofs, so the reference is closed form.
+struct EagerStoreCache{S} <: FerriteOperators.AbstractVolumetricElementCache
+    factor::Float64
+    store::S          # one scalar per cell, written by `fill_quadrature_data!`
+end
+FerriteOperators.reinit_values!(::EagerStoreCache, cell) = nothing
+FerriteOperators.assemble_cell!(::ResidualRequest, ::EagerStoreCache, ::CellArgs) = nothing
+FerriteOperators.fill_quadrature_data!(c::EagerStoreCache, args::CellArgs) =
+    (c.store[cellid(args.cell)] = c.factor; nothing)
+function FerriteOperators.apply_element_action!(yₑ, c::EagerStoreCache, uₑ, args::CellArgs)
+    f = @inbounds c.store[cellid(args.cell)]
+    for i in eachindex(yₑ)
+        yₑ[i] += f * uₑ[i]
+    end
+    return nothing
+end
+
+struct EagerStoreIntegrator <: AbstractBilinearIntegrator
+    factor::Float64
+end
+FerriteOperators.setup_element_cache(m::EagerStoreIntegrator, sdh::SubDofHandler) =
+    EagerStoreCache(m.factor, zeros(getncells(Ferrite.get_grid(sdh.dh))))
+
+# `@allocated` is measured from INSIDE a function: at testset scope the
+# surrounding block's own boxing lands in the count.
+function action_allocations(op, y, u)
+    mul!(y, op, u)
+    mul!(y, op, u)
+    return @allocated mul!(y, op, u)
+end
+
 @testset "MatrixFreeAction" begin
     # ONE element definition under every execution mapping the strategy axis
     # offers, against the assembled matrix of the same bilinear form.
@@ -599,6 +664,103 @@ end
         # agree bit for bit.
         @test y == z
         @test (@allocated mul!(y, op, u)) == 0
+    end
+
+    @testset "every ELEMENT-level arm's per-mul! host allocations stay O(1)" begin
+        # The gate the `Stored()` arm above carries, extended to the arms the
+        # ELEMENT level adds. What it protects is not a byte budget but the
+        # INVARIANT: an action allocates per CALL and never per item, so the
+        # count must not follow the cell count.
+        packed(o) = SumFactorizedDiffusionIntegrator(2.5, QuadratureRuleCollection(o + 1), :u)
+        dense(o) = SimpleBilinearDiffusionIntegrator(2.5, QuadratureRuleCollection(o + 1), :u)
+        ea = MatrixFreeAction(; storage = ElementAssembly())
+
+        # Both element-matrix layouts, sequentially: nothing at all.
+        for (layout, build) in ("packed" => packed, "dense" => dense)
+            @testset "sequential, $layout" begin
+                dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (4, 4, 4), 2)
+                op = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = ea), build(2), dh)
+                @test action_allocations(op, zeros(ndofs(dh)), probe(Float64, ndofs(dh), 23)) == 0
+            end
+        end
+
+        # The device arms track one workgroup object per launch, which is a
+        # per-CALL constant. Gated for the PACKED layout on both mappings, where
+        # that holds on every supported Julia. The DENSE arms are NOT gated: on
+        # Julia 1.10 their per-worker views of the analytic cache allocate —
+        # between a 27-cell and a 216-cell mesh the count grows by 96 kB
+        # (worker) and 774 kB (lanes) — while Julia 1.12 keeps both flat at
+        # ~3 kB. A single bound cannot describe both, and which one is right is
+        # a question about the per-worker view, not about this arm.
+        for mapping in (WorkerPerElement(), LanesPerElement())
+            @testset "KA $(nameof(typeof(mapping))), packed" begin
+                counts = map(((3, 3, 3), (6, 6, 6))) do dims
+                    dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, dims, 2)
+                    op = setup_operator(matrix_free_ka(Float64, mapping; storage = ElementAssembly()),
+                                        packed(2), dh)
+                    action_allocations(op, zeros(ndofs(dh)), probe(Float64, ndofs(dh), 23))
+                end
+                @test all(<(16_384), counts)
+                # 8x the cells; the count must not follow.
+                @test counts[2] - counts[1] < 1024
+            end
+        end
+    end
+
+    @testset "a downstream decorator inherits the wrapped element's storage election" begin
+        dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
+        qrc = QuadratureRuleCollection(3)
+        assembled = setup_operator(AssemblyStrategy(SequentialCPUDevice()),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(Float64, ndofs(dh), 17)
+        inner = SumFactorizedDiffusionIntegrator(2.5, qrc, :u)
+
+        for storage in (Stored(), Recompute(), ElementAssembly())
+            op = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction(; storage)),
+                                DecoratedIntegrator(inner), dh)
+            y = zeros(ndofs(dh))
+            mul!(y, op, u)
+            @test y ≈ assembled.A * u rtol = 1.0e-11
+        end
+
+        # `Stored()` is the PARTIAL level, and the store it elects is the WRAPPED
+        # element's. An unforwarded election is not an error: the cache comes
+        # back untouched, nothing is ever allocated and the action silently runs
+        # the `Recompute()` code path — the same number for THIS element and a
+        # different one for an element whose factors are not re-derivable.
+        stored = MatrixFreeAction(; storage = Stored())
+        bare = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = stored), inner, dh)
+        decorated = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = stored),
+                                   DecoratedIntegrator(inner), dh)
+        element = first(get_subdomain_caches(decorated)).domain.element
+        @test element isa PassthroughDecorator
+        @test element.inner.qdata !== nothing
+        @test typeof(element.inner.qdata) ===
+            typeof(first(get_subdomain_caches(bare)).domain.element.qdata)
+    end
+
+    @testset "a downstream decorator forwards the quadrature-data fill" begin
+        dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 1)
+        u = probe(Float64, ndofs(dh), 19)
+        integrator = EagerStoreIntegrator(1.5)
+        # `Kₑ = 1.5·I` over each cell's dofs, so a dof carries 1.5 per cell it
+        # belongs to — computed from the DofHandler, sharing no code with the engine.
+        multiplicity = zeros(ndofs(dh))
+        for cell in 1:getncells(Ferrite.get_grid(dh)), d in celldofs(dh, cell)
+            multiplicity[d] += 1.5
+        end
+        expected = multiplicity .* u
+
+        for (label, integ) in ("bare" => integrator, "decorated" => DecoratedIntegrator(integrator))
+            op = setup_operator(
+                AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction(; storage = Stored())),
+                integ, dh)
+            y = zeros(ndofs(dh))
+            mul!(y, op, u)
+            @test y ≈ expected rtol = 1.0e-12
+            @test !iszero(y)                      # the fill reached the element at all
+        end
     end
 
     @testset "an anisotropic tensor gives a symmetric operator" begin
