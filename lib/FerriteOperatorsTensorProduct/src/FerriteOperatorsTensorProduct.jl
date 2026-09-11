@@ -6,10 +6,10 @@ the contraction pipeline, and the two reference elements written against it —
 [`SumFactorizedDiffusionIntegrator`](@ref) and
 [`SumFactorizedMassIntegrator`](@ref).
 
-An element in this family is [`AbstractTensorProductElementCache`](@ref) plus
-a POINTWISE MAP ([`tensor_product_pointwise`](@ref)); everything else — the
-`B`/`G` blocks of the MFEM/libCEED decomposition and both execution mappings
-([`WorkerPerElement`](@ref FerriteOperators.WorkerPerElement)/[`CooperativeElement`](@ref)) — is this package's.
+An element in this family is [`AbstractTensorProductElementCache`](@ref) plus a
+POINTWISE MAP ([`tensor_product_pointwise`](@ref)); the `B`/`G` blocks of the
+MFEM/libCEED decomposition and both execution mappings
+([`WorkerPerElement`](@ref FerriteOperators.WorkerPerElement)/[`CooperativeElement`](@ref)) are this package's.
 
 Scope: tensor-product Lagrange on `RefQuadrilateral`/`RefHexahedron`, the
 shapes Ferrite ships such a basis for.

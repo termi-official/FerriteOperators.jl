@@ -256,12 +256,12 @@ end
 ## Item-family registration
 ####################################
 # `item_families` decides WHICH families an engine carries and in what ORDER;
-# `setup_family_caches` is the one dispatch that builds any of them, shipped or
-# downstream. `FamilyProbe` declares all three at once with no-op kernels
-# throughout — the subject here is registration and traversal order, not what
-# the families assemble. `registration` selects what the integrator declares:
-# `:default` leaves the derived tuple alone, `:nocells` drops the cell family,
-# `:reordered` puts the algebraic family first.
+# `setup_family_caches` is the one dispatch that builds any of them. The subject
+# here is registration and traversal order, not what the families assemble, so
+# `FamilyProbe` declares all three with no-op kernels throughout.
+# `registration` selects what the integrator declares: `:default` leaves the
+# derived tuple alone, `:nocells` drops the cell family, `:reordered` puts the
+# algebraic family first.
 
 struct NoopAlgebraicItemCache end
 FerriteOperators.assemble_algebraic!(::AbstractAssemblyRequest, ::NoopAlgebraicItemCache, args) = nothing
@@ -391,9 +391,9 @@ end
 # `AbstractElementCacheDecorator` forwards the seams that declare what the
 # ELEMENT itself is/does — `assembly_iterator`, `device_assembly_iterator`,
 # `item_provider`, `item_update_flags`, `element_local_length`,
-# `element_action_row` (`element_matrix_symmetry` already forwarded, S5) — so a
-# cache wrapped in `ADElementCache`/`ElementAssemblyCache` keeps its own
-# declarations instead of silently losing them to the cell default.
+# `element_action_row`, `element_matrix_symmetry` — so a cache wrapped in
+# `ADElementCache`/`ElementAssemblyCache` keeps its own declarations instead of
+# silently losing them to the cell default.
 # `assert_iteration_signatures`'s drift probe runs on the `unwrap` fixpoint for
 # the same reason `_assert_trait_backed` does — see `IterationDriftCache` above.
 
@@ -423,9 +423,8 @@ FerriteOperators.compute_partition(s::FerriteOperators.AssemblyStrategy, p::Tagg
 struct DeviceSentinel end
 
 # The declaring inner: residual-only, so `setup_operator` auto-wraps it in
-# `ADElementCache` exactly as `WrapDiffusionCache` in test_ad_element.jl is,
-# plus every newly forwarded seam, each answering something the cell default
-# never would.
+# `ADElementCache`, plus every forwarded seam, each answering something the cell
+# default never would.
 struct DeclaringIntegrator <: AbstractNonlinearIntegrator
     qrc::QuadratureRuleCollection
     field_name::Symbol
@@ -475,10 +474,10 @@ FerriteOperators.element_action_row(::DeclaringCache, uₑ, args::CellArgs, i::I
 
         # Reached through SETUP itself: `setup_family_caches` partitions over
         # `item_provider(kind, wrapped, sdh)` and positions the workspace on
-        # `assembly_iterator(kind, wrapped, sdh)`, and `validate_element_cache`
-        # then probes `reinit_values!` against that resolved iterator type —
-        # `DeclaringCache` implements that only for `TaggedCellCache`, so a
-        # broken forward would have thrown before `setup_operator` returned.
+        # `assembly_iterator(kind, wrapped, sdh)`, then `validate_element_cache`
+        # probes `reinit_values!` against that resolved iterator type —
+        # `DeclaringCache` implements it only for `TaggedCellCache`, so a broken
+        # forward would have thrown before `setup_operator` returned.
         @test assembly_iterator(nothing, wrapped, sdh) isa TaggedCellCache
         @test item_provider(nothing, wrapped, sdh) isa TaggedItems
         @test device_assembly_iterator(nothing, wrapped, sdh, sdh) isa DeviceSentinel
@@ -497,10 +496,9 @@ FerriteOperators.element_action_row(::DeclaringCache, uₑ, args::CellArgs, i::I
         eac      = with_action_storage(bilinear, ElementAssembly(), sdh)
         @test eac isa ElementAssemblyCache
 
-        # `SimpleBilinearDiffusionElementCache` declares neither iteration
-        # seam, so both still resolve to the plain cell default THROUGH the
-        # decorator — the new forwarding changes nothing for a cache that
-        # declares nothing.
+        # `SimpleBilinearDiffusionElementCache` declares neither iteration seam,
+        # so both still resolve to the plain cell default THROUGH the decorator:
+        # the forwarding changes nothing for a cache that declares nothing.
         @test assembly_iterator(nothing, eac, sdh) isa Ferrite.CellCache
         @test item_provider(nothing, eac, sdh) isa CellItems
 

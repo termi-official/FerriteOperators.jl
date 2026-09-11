@@ -25,9 +25,9 @@ Pages = [
 ## The tensor-product sum-factorization core
 
 The sum-factorization core a matrix-free tensor-product element is written
-against — the 1D reference operators, the lattice permutations, the
-contraction pipeline, and the two mapping pipelines — plus its two reference
-consumers, ships as its own lib subpackage,
+against — the 1D reference operators, the lattice permutations and the two
+mapping pipelines — plus its two reference consumers ships as its own lib
+subpackage,
 [FerriteOperatorsTensorProduct](https://github.com/termi-official/FerriteOperators.jl/tree/main/lib/FerriteOperatorsTensorProduct).
 
 ```@meta

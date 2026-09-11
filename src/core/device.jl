@@ -36,11 +36,9 @@ index_type(::AbstractDevice{<:Any, IndexType}) where IndexType = IndexType
 per-worker scratch, the same object shared read-only where sharing is safe, or
 (GPU) a device-resident layout.
 
-The generic fallback shares an `isbits` `x` — there is nothing mutable to alias
-— and throws a `MethodError` for anything else. So a cache or workspace type
-reachable from a [`setup_operator`](@ref) call that owns mutable state needs a
-method, and a missing one surfaces at setup rather than as an aliasing bug at
-assembly time.
+The generic fallback shares an `isbits` `x` and throws a `MethodError` for
+anything else, so a type owning mutable state needs a method and a missing one
+surfaces at setup rather than as an aliasing bug at assembly time.
 """
 function duplicate_for_device end
 
@@ -63,11 +61,10 @@ end
     reduce_on_device(task, device, workspaces, items) -> value
 
 The VALUE-RETURNING counterpart of [`execute_on_device!`](@ref), for tasks
-whose per-item kernel returns its contribution instead of scattering it —
-nothing is written into the workspaces, so this is the shape a scalar or tensor
-evaluation runs in. Values fold per worker in item order through
-[`fold_items`](@ref) and the partials reduce in worker order, so the result is
-deterministic for a fixed worker count. `nothing` means nothing contributed.
+whose per-item kernel returns its contribution instead of scattering it.
+Values fold per worker in item order through [`fold_items`](@ref) and the
+partials reduce in worker order, so the result is deterministic for a fixed
+worker count. `nothing` means nothing contributed.
 """
 function reduce_on_device(task, device::AbstractDevice, workspaces, items)
     throw(ArgumentError(
@@ -76,16 +73,8 @@ function reduce_on_device(task, device::AbstractDevice, workspaces, items)
     ))
 end
 
-"""
-    initial_partial(kind) -> zero(T) or `nothing`
-
-The seed of a worker's fold: `zero(T)` for a kind declaring
-[`functional_value_type`](@ref) `T`, `nothing` for one that does not, whose
-accumulator type the first contributing item fixes instead. The additive
-identity doubles as "has seen nothing yet" — a worker whose items all return
-`nothing` hands back `zero(T)`, a no-op in the host reduction. Every consumer
-relies on that, so a non-additive combiner would need its own neutral element.
-"""
+# The seed of a worker's fold. The additive identity doubles as "has seen
+# nothing yet", so a non-additive combiner would need its own neutral element.
 initial_partial(kind) = _initial_partial(functional_value_type(kind))
 _initial_partial(::Type{Nothing}) = nothing
 _initial_partial(::Type{T}) where {T} = zero(T)
@@ -93,19 +82,15 @@ _initial_partial(::Type{T}) where {T} = zero(T)
 """
     fold_items(task, ws, items, acc = initial_partial(task.kind)) -> value
 
-One worker's partial: run `task` over `items` in order on the workspace `ws`
-and sum what the per-item kernels return into `acc`, a `nothing` return
-contributing nothing. Pass the previous partial back in to continue the fold
-over the next barrier of the worker's partition.
+One worker's partial: run `task` over `items` in order on `ws` and sum what the
+per-item kernels return into `acc`, a `nothing` return contributing nothing.
+Pass the previous partial back in to continue the fold over the next barrier.
 
 With a declared [`functional_value_type`](@ref) the fold returns `T`; without
-one it returns `Union{Nothing, T}`, the first non-`nothing` value fixing the
-accumulator's type through the function barrier below — which keeps the loop
-doing the work concretely typed and dispatch-free either way.
+one, `Union{Nothing, T}`.
 """
 fold_items(task, ws, items) = fold_items(task, ws, items, initial_partial(task.kind))
 
-# Declared value type: `acc` arrives typed, so there is nothing to scan for.
 fold_items(task, ws, items, acc::T) where {T} =
     _fold_items_from(task, ws, items, firstindex(items) - 1, acc, T)
 
@@ -128,10 +113,8 @@ function _fold_items_from(task, ws, items, start, acc, ::Type{T}) where {T}
     return acc
 end
 
-# The declared value type is a contract with the kernels: unchecked, a
-# disagreeing kernel would either widen the reduction silently or fail deep
-# inside the accumulation. `Nothing` marks undeclared, and both branches fold
-# away against a concrete `val`.
+# Unchecked, a disagreeing kernel would silently widen the reduction. `Nothing`
+# marks undeclared; both branches fold away against a concrete `val`.
 @inline _checked_contribution(kind, ::Type{Nothing}, val) = val
 @inline function _checked_contribution(kind, ::Type{T}, val) where {T}
     val isa T && return val
@@ -153,17 +136,14 @@ _reduce_partials(a, b) = a + b
 
 Device scratch: `object` duplicated for `n_instances` parallel workers.
 [`SequentialCPUDevice`](@ref) returns the 1-element tuple `(object,)`, a
-threaded CPU device a `Vector` of `n_instances` independent
-`duplicate_for_device` copies, and a GPU device a struct-of-arrays variant
-whose per-worker slice is [`device_worker_view`](@ref).
+threaded CPU device a `Vector` of independent `duplicate_for_device` copies, and
+a GPU device a struct-of-arrays variant whose per-worker slice is
+[`device_worker_view`](@ref).
 
-The 4-argument form is what the engine calls on a subdomain's WORKSPACE, and
-`iterator` is that subdomain's DEVICE-resident item iterator
-([`assembly_iterator`](@ref) over the device handler
-[`setup_device_handler`](@ref) resolved) — the workspace the host allocated
-carries a host geometry cache, which `adapt` returns unchanged and no error
-reports. It defaults to the 3-argument form, which every nested call (element
-caches, values objects) uses.
+The 4-argument form is what the engine calls on a subdomain's WORKSPACE.
+`iterator` must be that subdomain's DEVICE-resident item iterator: the workspace
+the host allocated carries a HOST geometry cache, which `adapt` returns unchanged
+and no error reports. It defaults to the 3-argument form.
 """
 function setup_device_instances(device::AbstractDevice, obj, n_instances)
     throw(ArgumentError(
@@ -179,9 +159,8 @@ end
 setup_device_instances(device::AbstractDevice, obj, n_instances, iterator) =
     setup_device_instances(device, obj, n_instances)
 
-# The author-facing half of the contract: what is missing on a GPU device is
-# almost always the CACHE's pair of methods, not the device's, so the error says
-# which object has no layout instead of blaming the device.
+# What is missing on a GPU device is almost always the CACHE's pair of methods,
+# not the device's, so the error names the object that has no layout.
 function setup_device_instances(device::AbstractGPUDevice, obj, n_instances)
     throw(ArgumentError(
         "$(nameof(typeof(obj))) has no struct-of-arrays layout for $(nameof(typeof(device))). " *
@@ -196,26 +175,22 @@ end
     device_worker_view(batched, worker)
 
 Worker `worker`'s slice of a struct-of-arrays object
-[`setup_device_instances`](@ref) built — the counterpart of indexing a CPU
-device's per-worker `Vector`, and called INSIDE the assembly kernel.
+[`setup_device_instances`](@ref) built, called INSIDE the assembly kernel.
 
-There is deliberately no generic fallback. A cache author writes one method per
-batched cache, slicing the fields that were batched and passing the shared ones
-through unchanged:
+There is deliberately NO generic fallback, so a forgotten field surfaces as a
+`MethodError` rather than as silently aliased scratch. A cache author writes one
+method per batched cache:
 
     setup_device_instances(dev::AbstractGPUDevice, c::MyCache, n) =
         MyCache(c.D, setup_device_instances(dev, c.cellvalues, n))
     device_worker_view(c::MyCache, w) = MyCache(c.D, device_worker_view(c.cellvalues, w))
-
-so a field that was forgotten surfaces as a `MethodError` rather than as
-silently aliased scratch.
 """
 function device_worker_view end
 
 # The two shapes `setup_device_instances` returns for a GPU device: a batched
-# array whose LEADING index is the worker (stride-1, so consecutive workers
-# touch adjacent addresses), and Ferrite's struct-of-arrays container. A field
-# an iterator does not stage is batched as nothing and sliced as nothing.
+# array whose LEADING index is the worker (stride-1), and Ferrite's
+# struct-of-arrays container. A field an iterator does not stage is `nothing`
+# on both sides.
 device_worker_view(a::AbstractArray, worker) = Ferrite.view_from_shared(a, worker)
 device_worker_view(c::Ferrite.SoAContainer, worker) = c[worker]
 device_worker_view(::Nothing, worker) = nothing
@@ -242,12 +217,11 @@ device_subdomain_handler(device_handler, index) = device_handler.subdofhandlers[
 """
     adapt_shared(device, x) -> x
 
-Read-only data every worker reads UNCHANGED, as the device's kernels consume
-it: the identity on a CPU device, moved into device memory once at setup on a
-GPU one. The counterpart of [`setup_device_instances`](@ref) for what is not per
-worker — an element cache's quadrature-data store, a coefficient table — so a
-cache's device layout says which of its fields are batched and which are shared
-without naming a backend.
+Read-only data every worker reads UNCHANGED: the identity on a CPU device,
+moved into device memory once at setup on a GPU one. The counterpart of
+[`setup_device_instances`](@ref) for what is not per worker — an element
+cache's quadrature-data store, a coefficient table — so a cache's device layout
+names no backend.
 
 !!! warning "Experimental surface"
     This hook may change in a minor release.
@@ -325,8 +299,7 @@ through [`with_element_mapping`](@ref), because the seams that change shape with
 it — [`n_workers`](@ref), [`setup_device_instances`](@ref),
 [`execute_on_device!`](@ref) — all read the device.
 
-[`WorkerPerElement`](@ref) is what every device does today; assembling forms
-know no other.
+[`WorkerPerElement`](@ref) is the only one an assembling form takes.
 
 !!! warning "Experimental surface"
     This mapping family may change in a minor release.
@@ -359,10 +332,12 @@ struct CooperativeElement <: AbstractElementMapping end
 One element's OUTPUT ROWS split across a block of lanes: lane `l` of a block of
 `nlanes` owns rows `l:nlanes:ndofs_per_cell` of `yₑ`, reads all of `uₑ` through
 the item's dof window, keeps its row's accumulator in a REGISTER and scatters
-that row itself. The lanes of one element exchange no value, so this mapping
+that row itself. The rows are independent by construction, so this mapping
 needs neither group-local memory nor a barrier — it is a grid-stride kernel over
-`(element, lane)` pairs — and it is a [`KernelAbstractionsDevice`](@ref) mapping
-only, a CPU device sweeping one item per worker from gather to scatter.
+`(element, lane)` pairs, where [`CooperativeElement`](@ref) splits an element's
+LATTICE and needs the barriers that go with it. A
+[`KernelAbstractionsDevice`](@ref) mapping only; a CPU device sweeps one item
+per worker from gather to scatter.
 
 `lanes` is a LAUNCH POLICY, not element math: `nothing` takes the block from the
 element's own extent ([`element_local_length`](@ref)) capped by the device's
@@ -382,13 +357,7 @@ Its scatter addresses one dof per owned row, read off the item's dof window
 ([`iterator_dofs`](@ref)) directly — [`iterator_scatter_address`](@ref) is not
 consulted, so an item family whose scatter address differs from that window is
 outside this mapping. That one is NOT checked at setup: the two seams agree for
-every item family this package ships, and the mapping serves the ELEMENT level
-only, which already needs a static extent.
-
-The contrast with [`CooperativeElement`](@ref) is what makes it a separate
-mapping: that one exists to split an element's LATTICE and needs the barriers
-that go with it, while this one splits the element's dense product's ROWS, which
-are independent by construction.
+every item family this package ships.
 
 !!! warning "Experimental surface"
     This mapping and the element entry it calls may change in a minor release.
@@ -403,10 +372,7 @@ LanesPerElement(; lanes::Union{Integer, Nothing} = nothing) =
     with_element_mapping(device, mapping) -> device
 
 The device that executes `mapping` ([`AbstractElementMapping`](@ref)), which a
-matrix-free operator resolves once at [`setup_operator`](@ref): the mapping is
-elected on the FORM, and the two setup seams that must change shape with it —
-[`n_workers`](@ref) and [`setup_device_instances`](@ref) — read the device and
-nothing else.
+matrix-free operator resolves once at [`setup_operator`](@ref).
 
 [`WorkerPerElement`](@ref) is every device's own execution and returns it
 unchanged. A mapping a device has no kernel for is rejected here, at setup,
@@ -414,15 +380,9 @@ rather than as a missing method inside the first sweep.
 """
 with_element_mapping(device::AbstractDevice, ::WorkerPerElement) = device
 
-"""
-    element_mapping(device) -> AbstractElementMapping
-
-The mapping `device` executes, [`WorkerPerElement`](@ref) unless
-[`with_element_mapping`](@ref) put another one there. This is how a CACHE
-answers the mapping at setup — its per-worker scratch is not needed under
-[`CooperativeElement`](@ref), whose kernel stages the same buffers in
-group-local memory instead.
-"""
+# A CACHE reads this at setup to size its per-worker scratch, which
+# `CooperativeElement` does not need — that kernel stages the same buffers in
+# group-local memory.
 element_mapping(::AbstractDevice) = WorkerPerElement()
 with_element_mapping(device::AbstractDevice, mapping::AbstractElementMapping) = throw(ArgumentError(
     "$(nameof(typeof(device))) cannot execute $(nameof(typeof(mapping))): mapping one element " *
@@ -454,11 +414,10 @@ collection ([`element_value_type`](@ref)), and the two are free to differ.
 [`n_workers`](@ref) derives the per-worker cache size from them, so a sweep
 launches exactly the geometry setup allocated for. A barrier of `n` items runs
 `ceil(n / items_per_worker)` workers in groups of at most `max_workgroup_size`,
-so a SMALLER group size means MORE groups over the same workers — which is what
-spreads a colour across the device's multiprocessors, and what the default
-favours. `items_per_worker` trades the per-worker scratch (element buffers,
-geometry cache and values objects, all sized by the worker count) against that
-parallelism.
+so a SMALLER group size means MORE groups over the same workers, spreading a
+colour across the device's multiprocessors. `items_per_worker` trades the
+per-worker scratch (element buffers, geometry cache and values objects, all
+sized by the worker count) against that parallelism.
 
 `element_mapping` is resolved from the operator's form
 ([`with_element_mapping`](@ref)) and is not a constructor argument: a
@@ -535,11 +494,9 @@ ELEMENT slots, each a block of `nlanes` consecutive lanes, packed
 lane of a group idle.
 
 `n_slots` is [`launch_geometry`](@ref)'s own worker count for the same barrier —
-the lane block stages nothing per lane, so the per-worker caches this mapping
-needs are the grid-stride mapping's and [`n_workers`](@ref) sizes them
+the lane block stages nothing per lane, so [`n_workers`](@ref) sizes the caches
 unchanged. Whole blocks are what a workgroup holds, so the last group may carry
-slots beyond `n_slots`; the kernel drops those rather than the geometry rounding
-the cache size up.
+slots beyond `n_slots`; the kernel drops those.
 """
 function lane_launch_geometry(device::KernelAbstractionsDevice, nlanes::Integer, n_items::Integer)
     n_slots = prod(launch_geometry(device, n_items))

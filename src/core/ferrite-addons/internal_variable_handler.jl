@@ -80,9 +80,9 @@ duplicate_for_device(device, ivh::InternalVariableHandler) = ivh
 
 The device-side stand-in for an [`InternalVariableHandler`](@ref) that lays out
 NO condensed block. `InternalVariableHandler` is mutable and so never `isbits`,
-which is what keeps it out of a GPU kernel; this singleton is, and answers the
-one question a sweep asks — every cell's and item's internal range is empty,
-which is exactly what the placeholder handler answers on the host.
+which keeps it out of a GPU kernel; this singleton is, and answers the one
+question a sweep asks — every cell's and item's internal range is empty, exactly
+as the placeholder handler answers on the host.
 
 A handler that DOES lay out a block has no device counterpart: condensation is
 rejected at setup for a GPU device.

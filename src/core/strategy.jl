@@ -20,11 +20,9 @@ The operator's global matrix as a monolithic sparse matrix over the pattern
   after the entries above, for the coupling an ITEM FAMILY introduces and the
   `DofHandler`'s cell pattern does not carry: an item spanning two cells (an
   interface/DG traversal, [`item_provider`](@ref)) scatters a block indexed by
-  the dofs of BOTH, and no declaration on the handler implies those entries.
-  `nothing` (the default) adds none. The framework never infers them — which
-  dofs an item couples is the provider's own adjacency — so this is the same
-  doctrine [`global_dofs`](@ref) states for its tail, with the entries spelled
-  through Ferrite's own pattern API rather than mirrored here:
+  the dofs of BOTH. `nothing` (the default) adds none. The framework never
+  infers them — which dofs an item couples is the provider's own adjacency — the
+  same doctrine [`global_dofs`](@ref) states for its tail:
 
       sparsity_entries = (sp, dh) -> Ferrite.add_interface_entries!(
           sp, dh, nothing; topology = ExclusiveTopology(get_grid(dh)))
@@ -39,9 +37,9 @@ The operator's global matrix as a monolithic sparse matrix over the pattern
   so the user loads it and names the type
   (`StandardOperatorSpecification(; matrix_type = CuSparseMatrixCSC{Float32, Int32})`),
   exactly as [`BlockedOperatorSpecification`](@ref) does for its block storage.
-  The pattern stays this package's, so the coupling declarations above still
-  hold. Its element type must be the device's `value_type`, and Ferrite must
-  have a `start_assemble` method for it — both checked at setup.
+  The pattern stays this package's. Its element type must be the device's
+  `value_type`, and Ferrite must have a `start_assemble` method for it — both
+  checked at setup.
 """
 struct StandardOperatorSpecification{C, CH, MT, SE}
     algebraic_couplings::C
@@ -102,22 +100,18 @@ abstract type AbstractAssemblyStrategy end
     Recompute <: StorageElection
     ElementAssembly <: StorageElection
 
-WHAT a sweep keeps between evaluations, and thereby what it re-derives — a
-construction-time election trading memory against flops, spelled the same way
-wherever the framework offers one. Two consumers today: the `storage` field of
-[`MatrixFreeAction`](@ref), where the three members are MFEM's PARTIAL, NONE
-and ELEMENT assembly levels, and [`corrector_election`](@ref), where a
-condensed element's Jacobian correction is stored or re-derived.
+WHAT a sweep keeps between evaluations — a construction-time election trading
+memory against flops. Two consumers: the `storage` field of
+[`MatrixFreeAction`](@ref), where the three members are MFEM's PARTIAL, NONE and
+ELEMENT assembly levels, and [`corrector_election`](@ref).
 
 - [`Recompute`](@ref) — keep nothing.
-- [`Stored`](@ref) — keep the per-quadrature-point quantity (a matrix-free
-  element's geometric factors; a condensed element's corrector).
+- [`Stored`](@ref) — keep the per-quadrature-point quantity.
 - [`ElementAssembly`](@ref) — keep the dense element MATRICES. A
-  matrix-free-action election only; no other consumer implements it, and one
-  that does not says so ([`corrector_election_error`](@ref)).
+  matrix-free-action election only; a consumer that does not implement it says
+  so ([`corrector_election_error`](@ref)).
 
-`CorrectorElection` is the former name of this supertype and remains as an
-alias.
+`CorrectorElection` is an alias for this supertype.
 
 !!! warning "Experimental surface"
     This election family may change in a minor release.
@@ -139,36 +133,30 @@ struct Stored <: StorageElection end
 Keep nothing and re-derive at every point of use: a matrix-free element's
 geometry at the quadrature point that consumes it (MFEM's NONE level), or a
 condensed element's corrector from the item's current `(u, q)`
-([`corrector_election`](@ref)). Recomputation is EXACT, not approximate — the
-same quantity the store would have held, at the same point.
+([`corrector_election`](@ref)). Recomputation is EXACT, not approximate.
 """
 struct Recompute <: StorageElection end
 
 """
     ElementAssembly()
 
-Keep the dense element MATRICES — MFEM's ELEMENT level, and the third member of
-[`MatrixFreeAction`](@ref)'s `storage` ladder. Every `mul!` is then a gather, a
-dense `yₑ = Kₑ·uₑ` and the same scatter the other two levels use; nothing is
-contracted and no quadrature point is visited.
+Keep the dense element MATRICES — MFEM's ELEMENT level, the third member of
+[`MatrixFreeAction`](@ref)'s `storage` ladder. Every `mul!` is a gather, a dense
+`yₑ = Kₑ·uₑ` and a scatter; no quadrature point is visited.
 
-The matrices are formed once at [`setup_operator`](@ref) and refilled by
+The matrices are formed at [`setup_operator`](@ref) and refilled by
 [`update_operator!`](@ref), through the element's own element-matrix kernel
 where it declares one ([`provides_analytic`](@ref) for `JacobianKind{:u}`) and
 through `ndofs_per_cell` applications of [`apply_element_action!`](@ref) to the
-unit vectors otherwise — a setup-time cost either way. An element serving
-neither is refused at setup.
+unit vectors otherwise. An element serving neither is refused at setup.
 
-It costs `ndofs_per_cell²` scalars per cell, which grows far faster with the
-polynomial order than the per-quadrature-point store; it is the election for
-LOW order, where that square is small and the dense product is the fastest
-thing a device can do. [`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref) —
-the whole product on one worker, or a row of it on each lane of a block — but
-never [`CooperativeElement`](@ref), a dense product having no lattice to split.
+It costs `ndofs_per_cell²` scalars per cell, so it is the LOW-order election.
+[`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref), but never
+[`CooperativeElement`](@ref), a dense product having no lattice to split.
 
-Measured against the same form's assembled global matrix, on a tensor-product
-hexahedral mesh with one `Float32` scalar field (bytes/cell, `p` = polynomial
-order); the `packed` column is [`SymmetricElementMatrix`](@ref)'s election
+Bytes/cell against the same form's assembled matrix, on a tensor-product
+hexahedral mesh with one `Float32` scalar field (`p` = polynomial order); the
+`packed` column is [`SymmetricElementMatrix`](@ref)'s election
 ([`element_matrix_symmetry`](@ref)):
 
 | `p` | `ElementAssembly` (`ndofs_per_cell² · 4`) | packed (`ndofs_per_cell·(ndofs_per_cell+1)/2 · 4`) | assembled (global CSR, amortized) |
@@ -178,18 +166,15 @@ order); the `packed` column is [`SymmetricElementMatrix`](@ref)'s election
 | 3 | 16384 | **8320** | 27318 |
 
 `ndofs_per_cell²` overtakes the assembled matrix's per-cell share between
-`p = 1` and `p = 2` and keeps widening — this election is the cheaper
-MATRIX-FREE storage at `p = 1`–`2` and the one worth electing there;
-[`Stored`](@ref)/[`Recompute`](@ref) are the per-quadrature-point elections
-above that. The table counts bytes and is card-independent. The fill itself (`ndofs_per_cell` element actions,
-or one analytic kernel call, per cell) is paid once at [`setup_operator`](@ref)
-and again on every [`update_operator!`](@ref) — never on a bare `mul!`.
+`p = 1` and `p = 2` and keeps widening, so this is the cheapest MATRIX-FREE
+storage at `p = 1`–`2` and [`Stored`](@ref)/[`Recompute`](@ref) take over above
+that. The fill is paid at [`setup_operator`](@ref) and on every
+[`update_operator!`](@ref), never on a bare `mul!`.
 
 An element whose bilinear form is symmetric may additionally elect
-[`SymmetricElementMatrix`](@ref) ([`element_matrix_symmetry`](@ref)), which
-packs `Kₑ`'s upper triangle only — the `packed` column above — at the price of
-a per-worker `ndofs_per_cell²` scratch buffer at FILL time only (never on the
-action).
+[`SymmetricElementMatrix`](@ref) ([`element_matrix_symmetry`](@ref)) — the
+`packed` column — at the price of a per-worker `ndofs_per_cell²` scratch buffer
+at FILL time only.
 """
 struct ElementAssembly <: StorageElection end
 
@@ -203,22 +188,17 @@ struct ElementAssembly <: StorageElection end
     element_matrix_symmetry(cache) -> GeneralElementMatrix()
                                     -> SymmetricElementMatrix()
 
-Whether `cache`'s bilinear form is symmetric — an ELEMENT CAPABILITY election,
-since only the element knows the property of the form it evaluates. Consumed
-by [`ElementAssemblyCache`](@ref) ONLY, read once off the wrapped cache at
-construction and carried as a field beside `route`
-([`element_matrix_fill_route`](@ref)), so the action has no runtime branch.
+Whether `cache`'s bilinear form is symmetric. Consumed by
+[`ElementAssemblyCache`](@ref) ONLY, read once off the wrapped cache at
+construction, so the action has no runtime branch.
 
-`GeneralElementMatrix()` (the default) makes no claim, and `Kₑ` is stored
-dense. [`SymmetricElementMatrix`](@ref) is a declaration
-[`ElementAssemblyCache`](@ref) TRUSTS UNCHECKED, exactly as
-[`provides_analytic`](@ref) is: a wrong declaration silently reads only the
-upper triangle the fill happened to see, which SYMMETRIZES the assembled
-operator rather than erroring. Declare it only where the FORM is provably
-symmetric for every value the cache's coefficients can take — a runtime check
-against the coefficient at construction (as the `FerriteOperatorsTensorProduct`
-diffusion cache makes) is the conservative shape where the coefficient is not
-symmetric BY TYPE.
+`GeneralElementMatrix()` (the default) makes no claim and `Kₑ` is stored dense.
+[`SymmetricElementMatrix`](@ref) is TRUSTED UNCHECKED: a wrong declaration
+silently reads only the upper triangle, SYMMETRIZING the assembled operator
+rather than erroring. Declare it only where the FORM is provably symmetric for
+every value the cache's coefficients can take; where the coefficient is not
+symmetric BY TYPE, check its value at construction (as the
+`FerriteOperatorsTensorProduct` diffusion cache does).
 
 !!! warning "Experimental surface"
     This election and the two singletons below may change in a minor release.
@@ -268,7 +248,7 @@ storage level.
 
 `element_mapping` selects how one element's action maps onto the device's
 workers ([`AbstractElementMapping`](@ref)) — the same element definition under
-either. It is resolved onto the device at setup
+each. It is resolved onto the device at setup
 ([`with_element_mapping`](@ref)), so a mapping the device has no kernel for, or
 a cache that does not serve it, is a setup error.
 
@@ -292,7 +272,7 @@ spans:
 The first two are the element's own storage and reach its cache through
 [`with_action_storage`](@ref); a cache that keeps nothing serves both
 identically. The third is the framework's ([`ElementAssemblyCache`](@ref)) and
-serves any bilinear cache. Both routes are filled at setup and refilled by
+serves any bilinear cache. Both are filled at setup and refilled by
 [`update_operator!`](@ref).
 
 !!! warning "Experimental surface"
@@ -318,7 +298,7 @@ end
 The global-storage declaration a form carries, `nothing` for a form that
 allocates no global array ([`MatrixFreeAction`](@ref)). The setup-time device
 walls read the specification through this, so a storage-free form skips the
-checks that describe storage instead of naming a field it does not have.
+storage checks instead of naming a field it does not have.
 """
 operator_specification(form::FullAssembly) = form.operator_specification
 operator_specification(::MatrixFreeAction) = nothing
@@ -532,20 +512,14 @@ end
 Ferrite.reinit!(ws::AssemblyWorkspace, cellid) = _position_cell(ws, ws.cell, cellid, nothing)
 @inline position_item(ws::AssemblyWorkspace, item, kind) = _position_cell(ws, ws.cell, item, kind)
 
-# ONE generic body for every item iterator: `position_iterator` makes the
-# in-place-vs-by-construction distinction (a `CellCache` mutates and returns
-# itself; a device cursor returns a new value), so this never has to. `ws` is
-# immutable, so `_with_cell` with an unchanged `cell` rebuilds to a no-op for
-# the in-place case, and to the workspace a constructed iterator needs for the
-# other.
+# `position_iterator` makes the in-place-vs-by-construction distinction, so this
+# never has to. `ws` is immutable, hence the rebuild.
 @inline function _position_cell(ws::AssemblyWorkspace, cell, item, kind)
     positioned = position_iterator(cell, item, item_update_flags(kind, ws.element))
     _refresh_dof_head!(ws.dofs, positioned)
     return _with_cell(ws, positioned)
 end
 
-# `ws` with its item iterator replaced — what a positioning by construction
-# returns, the workspace being immutable.
 @inline _with_cell(ws::AssemblyWorkspace, cell) = AssemblyWorkspace(
     ws.Ke, ws.slot_buffers, ws.re, cell, ws.ivh, ws.element, ws.sensitivity, ws.dofs)
 
@@ -571,7 +545,7 @@ function duplicate_for_device(device::AbstractCPUDevice, ws::AssemblyWorkspace)
 end
 
 # A worker's own geometry cache, over the same handler and refreshing the same
-# members — a per-worker copy is what makes the staging private.
+# members, so its staging is private.
 duplicate_for_device(::AbstractCPUDevice, cc::CellCache) = CellCache(cc.dh, cc.flags)
 
 """
@@ -594,8 +568,8 @@ augmented dof vector the sweep's gathers and scatters address.
 `iterator` is what positions the workspace on an item and what rides
 `args.cell`, [`assembly_iterator`](@ref)'s answer for this subdomain.
 
-The buffers carry whatever scalar the `allocate_element_*` hooks return, which
-is the ELEMENT's precision ([`element_value_type`](@ref)) and need not be the
+The buffers carry whatever scalar the `allocate_element_*` hooks return — the
+ELEMENT's precision ([`element_value_type`](@ref)), which need not be the
 device's.
 """
 function create_assembly_workspace(element, sdh, ivh, slots::NTuple{N, Symbol} = (:u,);
@@ -619,9 +593,8 @@ end
     device_worker_view(ws::AssemblyWorkspace, worker)
 
 Worker `worker`'s slice of the batched workspace a GPU device's
-[`setup_device_instances`](@ref) built: the element buffers become worker rows
-of the shared batches, the geometry cache and the element cache their own
-per-worker views, and the internal-variable handler is shared read-only.
+[`setup_device_instances`](@ref) built. The internal-variable handler is shared
+read-only; everything else slices.
 """
 device_worker_view(ws::AssemblyWorkspace, worker) = AssemblyWorkspace(
     device_worker_view(ws.Ke, worker),
@@ -671,17 +644,15 @@ consumes, and the partition is what a sweep walks.
 
 The default is [`CellItems`](@ref)`(sdh)` — the cells of the subdomain.
 
-**Why two seams and not one.** The iterator and the item set vary
-INDEPENDENTLY, and both shipped families prove it: the facet family runs a
-custom provider ([`FacetItems`](@ref)) over the STOCK cell iterator, while the
-matrix-free action runs a custom iterator (the device cursor) over the STOCK
-provider. One seam would force a new type for every combination.
+Two seams and not one because the iterator and the item set vary
+INDEPENDENTLY: the facet family runs a custom provider ([`FacetItems`](@ref))
+over the STOCK cell iterator, the matrix-free action a custom iterator over the
+STOCK provider.
 
-**The hazard, stated.** Overloading one seam and not the other is not an error:
-the other answers with its default. An interface iterator left with the default
-provider is positioned on CELL ids — `Ferrite.reinit!` on an item index that
-happens to be in range succeeds and assembles the wrong operator. No framework
-check can see this; the item COUNT a sweep visits is what catches it.
+**The hazard.** Overloading one seam and not the other is not an error: the
+other answers with its default, and an interface iterator left with the default
+provider is positioned on CELL ids — succeeding, and assembling the wrong
+operator. No framework check sees this; the item COUNT a sweep visits does.
 
 A provider carries its family's whole partition safety argument — see
 [`compute_partition`](@ref).
@@ -700,35 +671,29 @@ family).
 
 **Partition obligations.** A partition is SAFE GIVEN A VALID PARTITION, never
 *thread-safe*. What makes a parallel sweep race-free is a promise about the
-provider's own item adjacency, and that adjacency is the provider's knowledge —
-the framework cannot check it.
+provider's own item adjacency, which the framework cannot check.
 
 - Under [`ColoredScheduling`](@ref) the provider promises that **no two items of
-  one inner chunk share a scatter dof**. That promise is exactly what lets the
-  scatter run without atomics (`dof_scatter_needs_atomic`), so a chunk that
-  breaks it is a silent race, not an error.
+  one inner chunk share a scatter dof**. That promise is what lets the scatter
+  run without atomics (`dof_scatter_needs_atomic`), so a chunk that breaks it is
+  a silent race, not an error.
 - Under [`SequentialScheduling`](@ref) the provider promises nothing: the atomic
-  scatter resolves the collisions. The outer level is still synchronization
-  barriers and the inner level still items that may run concurrently.
+  scatter resolves the collisions.
 
-The three shipped providers are the worked examples, each arguing the promise in
-its own terms: [`FacetItems`](@ref) colors the OWNING CELLS, since items of one
-color share no dofs precisely because their owning cells do not;
-[`AlgebraicItems`](@ref) has an unknown sharing pattern and therefore puts one
-item per barrier; [`PatchItems`](@ref) REFUSES to color, because a patch
-provider does not carry the item adjacency the promise would rest on.
+The three shipped providers each argue the promise in their own terms:
+[`FacetItems`](@ref) colors the OWNING CELLS; [`AlgebraicItems`](@ref) has an
+unknown sharing pattern and puts one item per barrier; [`PatchItems`](@ref)
+REFUSES to color, not carrying the adjacency the promise would rest on.
 """
 compute_partition(strategy::AssemblyStrategy, sdh::SubDofHandler) = compute_partition(strategy.scheduling, CellItems(sdh))
 compute_partition(strategy::AssemblyStrategy, provider) = compute_partition(strategy.scheduling, provider)
 compute_partition(::SequentialScheduling, provider::CellItems) = (_cell_chunk(provider.sdh.cellset),)
 
 # The one chunk `SequentialScheduling` hands out, as a `UnitRange` where the
-# cellset is contiguous — the very common single-subdomain-over-the-whole-grid
-# case — so a device kernel's item id is `first(chunk) + i - 1`, arithmetic
-# instead of an indexed load, and `adapt_partition` (the KernelAbstractions
-# extension) skips moving it into device memory at all. Checked once here at
-# setup; a non-contiguous cellset keeps the `Vector` and the loop that walks it
-# unchanged.
+# cellset is contiguous — the common single-subdomain-over-the-whole-grid case —
+# so a device kernel's item id is arithmetic rather than an indexed load, and
+# `adapt_partition` moves nothing into device memory. Checked once at setup; a
+# non-contiguous cellset keeps the `Vector`.
 function _cell_chunk(cellset)
     cells = collect(cellset)
     if !isempty(cells) && issorted(cells) && cells[end] - cells[1] == length(cells) - 1
@@ -754,15 +719,11 @@ largest barrier of `partition` holds. Workspaces are therefore per WORKER, not
 per share: a worker walks the items it was given with the one workspace it owns.
 
 A [`KernelAbstractionsDevice`](@ref) sizes them from its launch policy
-([`launch_geometry`](@ref)) over the largest barrier, since every barrier
-launches at most that geometry and the kernel indexes the per-worker caches
-unchecked. Under [`CooperativeElement`](@ref) the worker IS the workgroup and
-the group's barriers forbid a grid-stride loop over items, so every item of a
-barrier gets its own group — and the count is the largest barrier itself.
-[`LanesPerElement`](@ref) launches `nlanes` threads per element slot but stages
-nothing per LANE — the row accumulator is a register and `uₑ` is read through
-the item's dof window — so its per-worker caches are the grid-stride mapping's
-and this method serves it unchanged ([`lane_launch_geometry`](@ref)).
+([`launch_geometry`](@ref)) over the largest barrier, the kernel indexing the
+per-worker caches unchecked. Under [`CooperativeElement`](@ref) the worker IS
+the workgroup and the count is the largest barrier itself.
+[`LanesPerElement`](@ref) stages nothing per LANE, so this method serves it
+unchanged.
 """
 n_workers(::SequentialCPUDevice, partition) = 1
 function n_workers(device::PolyesterDevice, partition)

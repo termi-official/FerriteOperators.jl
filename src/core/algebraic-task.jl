@@ -390,9 +390,9 @@ end
 # The ALGEBRAIC ITEM family's [`setup_family_caches`](@ref) method, finishing
 # what [`resolve_algebraic_domain`](@ref) resolved before the
 # `InternalVariableHandler` was built: decorate the cache, derive the partition,
-# and build the shared [`AlgebraicWorkspace`](@ref). This family serves the
-# whole handler with ONE cache rather than one per subdomain, and
-# `shared.algebraic_domain === nothing` (nothing declared) is how it declines.
+# build the shared [`AlgebraicWorkspace`](@ref). It serves the whole handler
+# with ONE cache rather than one per subdomain, and
+# `shared.algebraic_domain === nothing` is how it declines.
 function setup_family_caches(::AlgebraicItemFamily, strategy, integrator, dh, shared)
     algebraic_domain = shared.algebraic_domain
     algebraic_domain === nothing && return SubdomainCache[]

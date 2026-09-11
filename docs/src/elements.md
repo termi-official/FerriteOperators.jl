@@ -206,9 +206,8 @@ Spelling `T` into the values object is REQUIRED: Ferrite's
 element that elects a precision writes `CellValues(T, qr, ip, ip_geo)`.
 
 **Element-local buffers follow the element.** The `allocate_element_*` defaults
-size themselves in [`element_value_type`](@ref) of the CACHE, which is
-`Float64` unless the cache declares otherwise — one line, read off the values
-object it already holds:
+size themselves in [`element_value_type`](@ref) of the CACHE, `Float64` unless
+the cache declares otherwise:
 
 ```julia
 FerriteOperators.element_value_type(c::MyCache) = element_value_type(c.cv)
@@ -219,14 +218,13 @@ nothing else: [`value_type`](@ref)`(device)` and the specification's
 `matrix_type` are the scalar of the system matrix and vector the operator
 assembles into (see [GPU assembly](index.md#GPU-assembly)).
 
-The two sides are independent, which is what makes MIXED PRECISION expressible:
+The two sides being independent is what makes MIXED PRECISION expressible:
 
 - Terms of one operator may evaluate at different precisions — each integrator
   carries its own collection — and a composite's local system takes their
   promotion.
-- The local precision need not be the global one. A `Float32` element
-  assembling into a `Float64` system, or the reverse, converts entry-wise on
-  scatter.
+- The local precision need not be the global one; the scatter converts
+  entry-wise either way.
 - `Float32` values with `Float64` accumulation is an element-level choice:
   declare the values object in `Float32` and override the `allocate_element_*`
   hooks to return `Float64` buffers.

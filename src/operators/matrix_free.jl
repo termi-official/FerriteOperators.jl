@@ -3,32 +3,28 @@
 
 The operator [`setup_operator`](@ref) returns for an
 [`AbstractBilinearIntegrator`](@ref) under [`MatrixFreeAction`](@ref): the
-[`AssemblyEngine`](@ref) and integrator alone. There is no global matrix and no
-stored element matrix — every `mul!` re-evaluates the action from the element
-kernels ([`apply_element_action!`](@ref)) and scatters it, which is what the
-MFEM ELEMENT/PARTIAL/NONE assembly levels mean. Which of the three the operator
-runs at is the form's `storage` election: nothing kept, the element's own
-per-quadrature-point factors, or its dense element matrices
-([`ElementAssemblyCache`](@ref)) — never a global matrix.
+[`AssemblyEngine`](@ref) and integrator alone. There is no global matrix —
+every `mul!` re-evaluates the action from the element kernels
+([`apply_element_action!`](@ref)) and scatters it. Which of the MFEM
+ELEMENT/PARTIAL/NONE levels it runs at is the form's `storage` election.
 
 Surface: `mul!(y, op, u)` and the five-argument form, [`evaluate!`](@ref)
 (the same action with parameters and a context), `size`, `eltype`. There is no
 `get_matrix` and no [`operator_payload`](@ref): an operator that stores nothing
-has neither, and asking for them says so.
+has neither.
 
 `y` and `u` must NOT alias. Both `mul!` forms sweep items in an arbitrary order,
-writing `y` as they go while still reading `u`, so `mul!(y, op, y)` returns a
-partly-updated mix rather than `A·y` — silently, there being nothing to detect
-it with. Pass a separate destination.
+writing `y` as they go while still reading `u`, so `mul!(y, op, y)` silently
+returns a partly-updated mix rather than `A·y`. Pass a separate destination.
 
 NOT BITWISE REPRODUCIBLE where the scatter is atomic. Under
-[`SequentialScheduling`](@ref) the items of one chunk accumulate into `y`
-concurrently and in whatever order the hardware runs them, so two evaluations of
-the same action can differ in the last bits. The sequential CPU device (one
-worker) and [`ColoredScheduling`](@ref) (no atomics) do repeat bit for bit. A
-Krylov method over this operator therefore sees an operator that is not a
-function of `u` to the last bit; treat run-to-run iteration counts accordingly,
-or elect a colouring.
+[`SequentialScheduling`](@ref) the items of one chunk accumulate into `y` in
+whatever order the hardware runs them, so two evaluations of the same action can
+differ in the last bits. The sequential CPU device (one worker) and
+[`ColoredScheduling`](@ref) (no atomics) do repeat bit for bit. A Krylov method
+over this operator therefore sees an operator that is not a function of `u` to
+the last bit; treat run-to-run iteration counts accordingly, or elect a
+colouring.
 
 !!! warning "Experimental surface"
     This operator, its entry points and the element hooks it calls may change
@@ -48,10 +44,8 @@ Base.eltype(op::MatrixFreeFerriteOperator) = value_type(op.engine.strategy.devic
     evaluate!(op::MatrixFreeFerriteOperator, y, states, p, ctx)
     evaluate!(op::MatrixFreeFerriteOperator, y, u::AbstractVector, p)
 
-The operator's action `y = A·u`, evaluated from the element action kernels and
-scattered through this package's own `VectorAssembler` — the entry point that
-carries the parameters and the sweep context an element kernel may read. `y` is
-zeroed first, so this OVERWRITES rather than accumulates.
+The operator's action `y = A·u`, carrying the parameters and the sweep context
+an element kernel may read. `y` is zeroed first, so this OVERWRITES.
 """
 evaluate!(op::MatrixFreeFerriteOperator, y::AbstractVector, states::NamedTuple, p, ctx) =
     assemble_into!(MatrixFreeActionKind(), (y,), op, states, p, ctx)
@@ -61,12 +55,11 @@ evaluate!(op::MatrixFreeFerriteOperator, y::AbstractVector, u::AbstractVector, p
 mul!(y::AbstractVector, op::MatrixFreeFerriteOperator, u::AbstractVector) =
     evaluate!(op, y, (u = u,), nothing, nothing)
 
-# The action is linear in `u`, so `α` rides the accumulator instead of the
-# element kernels: scale the incoming `y` by `β/α`, accumulate the unscaled
-# action into it, and scale the sum by `α`. No temporary, and the common
-# solver spellings (α = ±1) are exact. `β = 0` ASSIGNS rather than scales
-# (`rmul!(y, 0)` would propagate a NaN/Inf already in `y`), matching the
-# LinearAlgebra 5-arg `mul!` convention.
+# The action is linear in `u`, so `α` rides the accumulator: scale the incoming
+# `y` by `β/α`, accumulate the unscaled action into it, and scale the sum by
+# `α`. No temporary, and the common solver spellings (α = ±1) are exact.
+# `β = 0` ASSIGNS rather than scales (`rmul!(y, 0)` would propagate a NaN/Inf
+# already in `y`), matching the LinearAlgebra 5-arg `mul!` convention.
 function mul!(y::AbstractVector, op::MatrixFreeFerriteOperator, u::AbstractVector, α, β)
     if iszero(β)
         fill!(y, zero(eltype(y)))
@@ -91,10 +84,9 @@ with one [`QuadratureDataKind`](@ref) sweep carrying `p` and `ctx` to
 this does nothing.
 
 FRESHNESS IS THE CALLER'S, exactly as for an assembled operator: the store holds
-what the last such call put there, `setup_operator` makes that call with
-`p = nothing`, and an action evaluated after `p` or the context time changed
-reads stale factors until this is called again. An element whose factors depend
-on neither is fresh from setup on.
+what the last such call put there (`setup_operator` makes one with
+`p = nothing`), and an action evaluated after `p` or the context time changed
+reads stale factors until this is called again.
 """
 function update_operator!(op::MatrixFreeFerriteOperator, p, ctx = nothing)
     _keeps_storage(op.engine.strategy.form.storage) || return nothing
@@ -102,12 +94,9 @@ function update_operator!(op::MatrixFreeFerriteOperator, p, ctx = nothing)
     return nothing
 end
 
-# `Recompute()` is the one member with nothing to refill.
 _keeps_storage(::Recompute) = false
 _keeps_storage(::StorageElection) = true
 
-# The three-argument form is `update_operator!` and inherited; this one carries
-# `p` into the action instead of dropping it.
 update_linearization!(op::MatrixFreeFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
     evaluate!(op, residual, (u = u,), p, nothing)
 
@@ -119,18 +108,12 @@ update_linearization!(op::MatrixFreeFerriteOperator, residual::AbstractVector, u
     setup_operator(strategy::AssemblyStrategy{<:MatrixFreeAction}, integrator, dh; …)
 
 Build the [`MatrixFreeFerriteOperator`](@ref) for a bilinear `integrator`: the
-same [`AssemblyEngine`](@ref) every other form builds, with no global matrix
-allocated.
+same [`AssemblyEngine`](@ref) every other form builds, with no global matrix.
 
 The form's [`AbstractElementMapping`](@ref) is resolved onto the device here
-([`with_element_mapping`](@ref)) — the engine's strategy therefore carries the
-mapping on BOTH axes, the form's election and the device's realization of it,
-and the per-worker scratch the engine allocates is the one that mapping needs.
-Its `storage` election reaches the element caches through
-[`with_assembly_form`](@ref) inside [`setup_engine`](@ref), and what it elects
-to keep is FILLED here, with `p = nothing`: an operator is usable the moment it
-is set up, whichever election it carries, and a `p`-dependent factor is
-refreshed by [`update_operator!`](@ref).
+([`with_element_mapping`](@ref)); the `storage` election reaches the element
+caches through [`with_assembly_form`](@ref), and what it keeps is FILLED here
+with `p = nothing`, so an operator is usable the moment it is set up.
 
 Only the bilinear family takes this form: a nonlinear residual is not the
 action of a stored operator, and a linear form has no `u` to act on.
@@ -162,20 +145,6 @@ setup_operator(::AssemblyStrategy{<:MatrixFreeAction}, integrator::AbstractLinea
     "$(nameof(typeof(integrator)))). A linear form has no argument to act on; assemble its " *
     "vector under `FullAssembly`."))
 
-"""
-    assert_matrix_free_supported(form, engine)
-
-Reject at setup an element cache that cannot serve the elected mapping and
-storage level, naming the method it does not implement — the
-[`provides_analytic`](@ref)/[`serves_kind`](@ref) rule applied to the
-matrix-free entry points, which have no fallback to degrade to.
-
-Which capability is required is the STORAGE election's: the two
-per-quadrature-point levels reach [`apply_element_action!`](@ref) on every
-action, while [`ElementAssembly`](@ref) reaches it (or the element-matrix
-kernel) only at fill time and has already resolved that route when the cache was
-built ([`element_matrix_fill_route`](@ref)).
-"""
 function assert_matrix_free_supported(form::MatrixFreeAction, engine::AssemblyEngine)
     for sc in engine.subdomain_caches
         sc.contributes || continue
@@ -188,9 +157,8 @@ function assert_matrix_free_supported(form::MatrixFreeAction, engine::AssemblyEn
     return nothing
 end
 
-# The ELEMENT level consumes the element's kernels once per fill and its own
-# store thereafter, so the action entry point is not what it needs;
-# `element_matrix_fill_route` already refused a cache serving neither route.
+# The ELEMENT level needs no action entry point: `element_matrix_fill_route`
+# already refused a cache serving neither fill route.
 _assert_action_capability(::ElementAssembly, ::Type) = nothing
 _assert_action_capability(::StorageElection, ::Type{C}) where {C} = _assert_element_action(C)
 
@@ -204,25 +172,10 @@ function _assert_element_action(::Type{C}) where {C}
     return nothing
 end
 
-"""
-    _assert_mapping_capability(mapping, storage, cache)
-
-Reject at setup an element cache that cannot serve the elected
-[`AbstractElementMapping`](@ref) at the elected storage level, naming the entry
-it does not implement and the mapping that would take it.
-
-[`WorkerPerElement`](@ref) is what every cache serving the level already serves.
-The other two members are each admissible at ONE end of the storage ladder and
-say so here: the cooperative mapping splits an element's lattice, which the
-ELEMENT level does not have, and the lane mapping splits an ELEMENT-level dense
-product's rows, which the per-quadrature-point levels do not have.
-"""
 _assert_mapping_capability(::WorkerPerElement, ::StorageElection, cache) = nothing
 
-# One workgroup per element splits the element's LATTICE; a dense `Kₑ·uₑ` has no
-# lattice, and the store the group would read is one matrix per cell rather than
-# per-lane slabs. The rejection is the storage level's, not the cache's — the
-# wrapped element may well implement the cooperative pipeline.
+# The rejection is the storage level's, not the cache's — the wrapped element
+# may well implement the cooperative pipeline.
 _assert_mapping_capability(::CooperativeElement, ::ElementAssembly, cache) = throw(ArgumentError(
     "`CooperativeElement` cannot execute the `ElementAssembly` storage level: one workgroup per " *
     "element exists to split the element's lattice between lanes, and the ELEMENT level replaces " *
@@ -230,10 +183,6 @@ _assert_mapping_capability(::CooperativeElement, ::ElementAssembly, cache) = thr
     "or `element_mapping = LanesPerElement()` for `storage = ElementAssembly()`, or keep the " *
     "cooperative mapping with `storage = Stored()`/`Recompute()`."))
 
-# The lane mapping is the ELEMENT level's, and only that level's: a lane owns one
-# ROW of a dense product, while the two per-quadrature-point levels reinitialize
-# the element's values objects per cell into per-worker state that the lanes of
-# one element would race on.
 _assert_mapping_capability(::LanesPerElement, storage::StorageElection, cache) = throw(ArgumentError(
     "`LanesPerElement` cannot execute the `$(nameof(typeof(storage)))` storage level: a lane owns " *
     "one ROW of a stored `Kₑ`, and a level that visits quadrature points instead re-derives one " *
@@ -242,11 +191,9 @@ _assert_mapping_capability(::LanesPerElement, storage::StorageElection, cache) =
     "`element_mapping = WorkerPerElement()`/`CooperativeElement()` for " *
     "`storage = Stored()`/`Recompute()`."))
 
-# The row entry's subject, walked down the decorator chain: `hasmethod` on a
-# decorated cache answers `true` for every inner, the blanket forward
-# (ad_element.jl) being a method too — so the question passes through a forwarding
-# decorator to what it wraps. `ElementAssemblyCache` is the exception and answers
-# for itself: the row it serves is the STORED matrix's, not the wrapped element's.
+# Walked down the decorator chain: the blanket forward (ad_element.jl) is a
+# method too, so `hasmethod` on a decorated cache would answer `true` for every
+# inner. `ElementAssemblyCache` answers for itself.
 _declares_element_action_row(d::AbstractElementCacheDecorator) = _declares_element_action_row(d.inner)
 _declares_element_action_row(::ElementAssemblyCache) = true
 _declares_element_action_row(cache) =

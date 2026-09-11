@@ -551,8 +551,7 @@ quadrature point. [`Recompute`](@ref) keeps none and re-derives it from the
 item's current `(u, q)` wherever a `Consistent`-mode kernel needs one, trading
 the store's memory for one extra evaluation of the element's local slopes per
 Jacobian-shaped sweep — the right election for a memory-bound ASSEMBLED sweep
-at scale, the wrong one for a Krylov `mul!`/JVP sequence at a fixed state,
-which would re-derive the same corrector every time.
+at scale, the wrong one for a Krylov `mul!`/JVP sequence at a fixed state.
 [`ElementAssembly`](@ref) is not a corrector election and no condensed element
 implements it.
 

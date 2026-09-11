@@ -2,12 +2,6 @@
 ## The tensor-product sum-factorization core
 ####################################
 #
-# The element-agnostic half of a matrix-free tensor-product element: the 1D
-# reference operators, the lattice permutations, the contraction loop, and the
-# pipeline both element mappings run over them. What an ELEMENT adds is its
-# POINTWISE MAP at the quadrature point — the `D` block of the MFEM/libCEED
-# decomposition — and the storage that map reads.
-#
 # Every extent reaches a `Val` through a method's own type parameters rather
 # than through a value computed from one, so the lattice arithmetic stays
 # constant-folded inside a device kernel.
@@ -19,9 +13,9 @@ The values object of a tensor-product element: the 1D operators evaluated at
 the 1D quadrature points, and the two lattice permutations that turn Ferrite's
 local orderings into the lexicographic lattice sum factorization contracts over.
 
-Everything is `isbits` and every extent is a type parameter, which is what lets
-the whole object cross a device boundary unchanged and lets a cooperative
-kernel take its group-local memory sizes from the element's type:
+Everything is `isbits` and every extent a type parameter, so the object crosses
+a device boundary unchanged and a cooperative kernel takes its group-local
+memory sizes from the element's type:
 
 - `B`, `dB` — `φₐ(ξ_q)` and `φ'ₐ(ξ_q)` of the 1D Lagrange basis, `Nq × Nb`
 - `Bg`, `dBg` — the same for the 1D geometric basis, `Nq × Nn`
@@ -32,8 +26,8 @@ kernel take its group-local memory sizes from the element's type:
 Scope: tensor-product Lagrange on `RefQuadrilateral` and `RefHexahedron` (Ferrite
 ships orders 1–3 there), a tensor-product Gauss rule through `qrc` — whose
 `order` is its POINT COUNT per direction — and a tensor-product Lagrange
-geometry. Anything else is rejected here, and rejecting a basis whose nodes are
-not that lattice is also what certifies that it factorizes into the 1D basis.
+geometry. Anything else is rejected here; rejecting a basis whose nodes are not
+that lattice is also what certifies that it factorizes into the 1D basis.
 
 The per-cell storage lives on the element CACHE
 ([`AbstractTensorProductElementCache`](@ref)) rather than here: a mutable field
@@ -62,8 +56,7 @@ _tensor_product_order(::Lagrange{<:Any, order}) where {order} = order
 _tensor_product_order(ip) = throw(ArgumentError(
     "sum factorization needs a tensor-product Lagrange basis, got $(typeof(ip))."))
 
-# The 1D nodal basis and its derivative at `ξ`, on the equispaced nodes Ferrite's
-# Lagrange interpolations place their dofs at.
+# On the equispaced nodes Ferrite's Lagrange interpolations place their dofs at.
 function _tensor_product_lagrange_1d(::Type{T}, p::Int, ξ::AbstractVector) where {T}
     nodes = collect(T, range(-one(T), one(T); length = p + 1))
     nb, nq = p + 1, length(ξ)
@@ -145,7 +138,7 @@ components the element's pointwise map ([`tensor_product_pointwise`](@ref))
 receives: the single interpolated VALUE, or the `dim` components of the
 REFERENCE GRADIENT. It also fixes the 1D operator each component is contracted
 with along each lattice axis — `B` everywhere for a value, `dB` along the
-component's own axis for a gradient — and thereby the scratch width.
+component's own axis for a gradient — and with it the scratch width.
 """
 abstract type AbstractQuadratureQuantity end
 @doc (@doc AbstractQuadratureQuantity) struct QuadratureValue <: AbstractQuadratureQuantity end
@@ -163,11 +156,8 @@ abstract type AbstractQuadratureQuantity end
 ####################################
 
 # The scratch lattice is a `max(Nb, Nq)^dim` box, so ONE index arithmetic serves
-# every stage whatever the current extent along an axis is. Slots outside the
-# current extent are computed and discarded; a valid slot never reads one.
-
-# Box index (1-based) → index into an `n^dim` lattice, or `0` where the box slot
-# lies outside it.
+# every stage. Slots outside the current extent are computed and discarded; a
+# valid slot never reads one. Returns `0` for such a slot.
 @inline function _lattice_index(i::Int, ::Val{n}, ::Val{M}, ::Val{dim}) where {n, M, dim}
     r, index, stride = i - 1, 0, 1
     for _ in 1:dim
@@ -185,8 +175,7 @@ end
 
 The per-axis 1D quadrature indices of the `qp`-th quadrature point, the inverse
 of the lexicographic (dimension 1 fastest) numbering the contraction lattice
-uses. That numbering is what a per-quadrature-point store is laid out in, so a
-sweep filling one and a kernel reading it agree by construction.
+uses — and the numbering a per-quadrature-point store is laid out in.
 """
 @inline quadrature_lattice_index(::TensorProductValues{dim, Nb, Nq}, qp::Int) where {dim, Nb, Nq} =
     ntuple(c -> ((qp - 1) ÷ Nq^(c - 1)) % Nq + 1, Val(dim))
@@ -195,11 +184,8 @@ sweep filling one and a kernel reading it agree by construction.
     tensor_product_contract!(scratch, dcol, scol, Op, k, nout, nin, Val(M), Val(dim), lane, nlanes)
 
 One contraction, `dst[…, iₖ, …] = Σₐ Op[iₖ, a] · src[…, a, …]` along axis `k` of
-the scratch box, over the spectator slabs `lane` owns.
-
-This is the ONE loop both element mappings run: `lane = nlanes = 1` walks every
-slab, and a workgroup of `nlanes` splits them. `dcol`/`scol` are scratch
-columns, never the same one.
+the scratch box, over the spectator slabs `lane` owns. `lane = nlanes = 1` walks
+every slab; a workgroup of `nlanes` splits them. `dcol`/`scol` must differ.
 """
 @inline function tensor_product_contract!(scratch, dcol::Int, scol::Int, Op, k::Int, nout::Int, nin::Int,
         ::Val{M}, ::Val{dim}, lane::Int, nlanes::Int) where {M, dim}
@@ -219,8 +205,7 @@ end
 
 # Scratch columns: the element state, then a working pair per contracted
 # component. Successive contractions ping-pong between the pair, so the stage
-# index alone decides which column holds what, and the LATTICE dimension (the
-# number of forward contractions) decides where the pointwise map finds them.
+# index alone decides which column holds what.
 @inline _tp_col_a(nc::Int, d::Int) = 1 + d
 @inline _tp_col_b(nc::Int, d::Int) = 1 + nc + d
 @inline _tp_col_head(dim::Int, nc::Int, d::Int) = isodd(dim) ? _tp_col_a(nc, d) : _tp_col_b(nc, d)
@@ -235,9 +220,7 @@ end
 
 The Jacobian `∂x/∂ξ` of the isoparametric map at the quadrature point `q` names
 (the per-axis 1D indices [`quadrature_lattice_index`](@ref) returns), formed from
-`coordinates` — the cell's node coordinates in Ferrite's own order.
-
-Distorted cells are covered: nothing here assumes an affine map.
+the cell's node coordinates in Ferrite's own order. No affine map is assumed.
 """
 @inline function tensor_product_jacobian(values::TensorProductValues{dim, Nb, Nq, Nn, T},
         coordinates, q::NTuple{dim, Int}) where {dim, Nb, Nq, Nn, T}
@@ -276,10 +259,8 @@ pointwise map scales by.
 An element evaluating its operator's ACTION by Deville–Fischer–Mund sum
 factorization over a tensor-product lattice, in `O(p^{d+1})` per cell instead of
 forming `Kₑ`. The core supplies the contractions, the lattice bookkeeping and
-BOTH matrix-free entries — [`apply_element_action!`](@ref) for
-[`WorkerPerElement`](@ref FerriteOperators.WorkerPerElement) and the
-[`cooperative_stage!`](@ref) pipeline for [`CooperativeElement`](@ref) — over
-one definition of the element math.
+BOTH matrix-free entries — [`apply_element_action!`](@ref) and the
+[`cooperative_stage!`](@ref) pipeline — over one definition of the element math.
 
 What a concrete cache brings:
 
@@ -295,7 +276,7 @@ What a concrete cache brings:
 - the device struct-of-arrays trio ([`setup_device_instances`](@ref),
   [`device_worker_view`](@ref), [`duplicate_for_device`](@ref)), which names the
   concrete type and is therefore not derivable here; `scratch` is the one
-  per-worker field and everything else is shared read-only
+  per-worker field, everything else shared read-only
 
 The cache has NO element-matrix kernel: assembling it under
 [`FullAssembly`](@ref FerriteOperators.FullAssembly) is refused where the
@@ -327,8 +308,7 @@ tensor_product_values(cache::AbstractTensorProductElementCache) = cache.values
 THE POINTWISE MAP: the element's `D` block, applied to what the forward
 contraction produced at one quadrature point and returning what the backward
 contraction takes back to the dofs. `v` carries the components
-[`tensor_product_quantity`](@ref) names — the reference gradient, or the
-interpolated value.
+[`tensor_product_quantity`](@ref) names.
 
 `q` is the point's per-axis 1D index, which the geometry helpers
 [`tensor_product_jacobian`](@ref)/[`tensor_product_weight`](@ref) take; `qp` is
@@ -347,12 +327,8 @@ function tensor_product_pointwise end
 
 The per-cell contraction box both element mappings work in: `1 + 2·nc` lattice
 boxes of `max(Nb, Nq)^dim` entries, `nc` being the component count `quantity`
-names — the element state, and a working pair per component.
-[`WorkerPerElement`](@ref FerriteOperators.WorkerPerElement) gives every
-worker its own, batched with the worker as the leading index on a device;
-[`CooperativeElement`](@ref) stages the same boxes in group-local memory
-instead
-([`tensor_product_scratch_prototype`](@ref)).
+names. [`CooperativeElement`](@ref) stages the same boxes in group-local memory
+instead ([`tensor_product_scratch_prototype`](@ref)).
 """
 function allocate_tensor_product_scratch(values::TensorProductValues{dim, Nb, Nq, Nn, T},
         quantity::AbstractQuadratureQuantity) where {dim, Nb, Nq, Nn, T}
@@ -365,35 +341,30 @@ end
 
 The scratch a cache's [`setup_device_instances`](@ref) hands the device to
 batch: the scratch itself, or an EMPTY one under [`CooperativeElement`](@ref),
-whose kernel stages the boxes in group-local memory and never touches the batch.
-A cache's device layout passes its scratch through this instead of testing the
-mapping itself.
+whose kernel stages the boxes in group-local memory. A cache's device layout
+passes its scratch through this instead of testing the mapping itself.
 """
 tensor_product_scratch_prototype(device, scratch) =
     element_mapping(device) isa CooperativeElement ? similar(scratch, 0, 0) : scratch
 
-# The lattice pipeline addresses the cell's dofs and, where the pointwise map
-# re-derives its geometry, the cell's coordinates; node ids take no part in it.
-# A cache whose map reads STORED factors instead narrows the coordinates away in
-# its own `item_update_flags`.
+# A cache whose map reads STORED factors narrows the coordinates away in its own
+# `item_update_flags`.
 item_update_flags(::MatrixFreeActionKind, ::AbstractTensorProductElementCache) =
     Ferrite.UpdateFlags(nodes = false, coords = true, dofs = true)
 
 # `element_local_length` is deliberately NOT declared here even though the dof
-# count is a type parameter: the pipeline addresses `uₑ` through the dof lattice,
-# so a static gather would have to be indexed dynamically anyway. Measured on an
-# RTX 2080 it moved the Stored action by -3% at p = 1 and +10% at p = 3, and grew
-# the kernel's local depot; the worker slab is the better fallback here.
+# count is a type parameter: the pipeline addresses `uₑ` through the dof
+# lattice, so a static gather would have to be indexed dynamically anyway. The
+# per-worker slab is the better fallback, and a tensor-product cache therefore
+# does not serve `LanesPerElement`.
 
 element_value_type(cache::AbstractTensorProductElementCache) =
     element_value_type(tensor_product_values(cache))
 Ferrite.getnquadpoints(cache::AbstractTensorProductElementCache) =
     getnquadpoints(tensor_product_values(cache))
-# The values object holds no per-cell state, so there is nothing to position.
+# The values object holds no per-cell state.
 reinit_values!(::AbstractTensorProductElementCache, cell) = nothing
-# A matrix-free element forms no element matrix, so the engine's per-worker `Ke`
-# stays empty instead of costing `ndofs_per_cell^2` per worker — which is the
-# difference between a few megabytes and a few hundred on a device.
+# No element matrix is formed, so the engine's per-worker `Ke` stays empty.
 allocate_element_matrix(cache::AbstractTensorProductElementCache, sdh) =
     zeros(element_value_type(cache), 0, 0)
 
@@ -420,8 +391,7 @@ _tp_scratch_shape(values::TensorProductValues{dim, Nb, Nq}, quantity) where {dim
     M = max(Nb, Nq)
     nc = _val_int(quadrature_components(quantity, Val(dim)))
     lattice = values.dof_lattice
-    # A lane zeroes the same lattice slots it then fills, so the two loops need
-    # no barrier between them.
+    # A lane zeroes the same slots it then fills, so no barrier separates them.
     for column in 1:(1 + 2nc), i in lane:nlanes:(M^dim)
         @inbounds scratch[i, column] = zero(T)
     end
@@ -442,8 +412,7 @@ end
         stage::Int, lane::Int, nlanes::Int) where {dim}
     if stage ≤ dim
         _tp_forward_stage!(scratch, values, quantity, stage, lane, nlanes)
-        # The map runs on the slab the contraction above just wrote, so no
-        # barrier separates them.
+        # The map runs on the slab the contraction just wrote; no barrier.
         stage == dim && _tp_pointwise_stage!(scratch, cache, values, args,
                                              quadrature_components(quantity, Val(dim)), lane, nlanes)
     else
@@ -452,8 +421,6 @@ end
     return nothing
 end
 
-# Forward stage `k`: contract axis `k` of every component with the 1D operator
-# the quantity names for that (component, axis) pair.
 @inline function _tp_forward_stage!(scratch, values::TensorProductValues{dim, Nb, Nq}, quantity,
         k::Int, lane::Int, nlanes::Int) where {dim, Nb, Nq}
     nc = _val_int(quadrature_components(quantity, Val(dim)))
@@ -466,8 +433,6 @@ end
     return nothing
 end
 
-# Backward stage `j`: the transposed contraction of axis `j`, back from the
-# quadrature lattice towards the dof lattice.
 @inline function _tp_backward_stage!(scratch, values::TensorProductValues{dim, Nb, Nq}, quantity,
         j::Int, lane::Int, nlanes::Int) where {dim, Nb, Nq}
     nc = _val_int(quadrature_components(quantity, Val(dim)))
@@ -481,17 +446,10 @@ end
     return nothing
 end
 
-# The element's pointwise map, applied in place to what the forward contractions
-# produced. The lane that produced a quadrature point is the one that maps it.
-#
 # The two scratch accesses around the callback are deliberately BOUNDS-CHECKED
-# while every other access in this file is not. The indices are the lattice's own
-# and in range by construction, but asserting that ACROSS the element callback
-# changes what the NVPTX backend computes: a one-component quantity with the
-# geometry inlined (the mass action at Nq = 3) came out wrong by O(1) under
-# `@inbounds` and is correct without it, on the same code that the CPU backends
-# and the cooperative kernel evaluate correctly either way. The check costs one
-# comparison per component per quadrature point, beside a Jacobian evaluation.
+# while every other access in this file is not: asserting the (in-range) indices
+# ACROSS the element callback changes what the NVPTX backend computes — the mass
+# action at Nq = 3 came out wrong by O(1) under `@inbounds`.
 @inline function _tp_pointwise_stage!(scratch, cache, values::TensorProductValues{dim, Nb, Nq, Nn, T},
         args, ::Val{NC}, lane::Int, nlanes::Int) where {dim, Nb, Nq, Nn, T, NC}
     M = max(Nb, Nq)
@@ -515,9 +473,7 @@ end
 @inline cooperative_store!(yₑ, scratch, cache::AbstractTensorProductElementCache, lane::Int, nlanes::Int) =
     _tp_store!(yₑ, scratch, tensor_product_values(cache), tensor_product_quantity(cache), lane, nlanes)
 
-# The last backward contraction, summed over the components and accumulated into
-# the element vector through the dof permutation. Lanes own disjoint dofs, so
-# nothing accumulates across lanes.
+# Lanes own disjoint dofs, so nothing accumulates across lanes.
 @inline function _tp_store!(yₑ, scratch, values::TensorProductValues{dim, Nb, Nq, Nn, T}, quantity,
         lane::Int, nlanes::Int) where {dim, Nb, Nq, Nn, T}
     M = max(Nb, Nq)
@@ -546,9 +502,7 @@ end
     apply_element_action!(yₑ, cache::AbstractTensorProductElementCache, uₑ, args)
 
 The worker-per-element action: the cooperative pipeline run by a single lane
-over the worker's own scratch. One element definition, two execution mappings —
-the stage bodies are shared verbatim, and only the slab range a worker walks
-differs.
+over the worker's own scratch.
 """
 @inline apply_element_action!(yₑ, cache::AbstractTensorProductElementCache, uₑ, args::CellArgs) =
     _tp_apply!(yₑ, cache, tensor_product_values(cache), uₑ, args)
@@ -563,14 +517,13 @@ differs.
     return nothing
 end
 
-# The bilinear form's residual IS the action, and the residual kernel is
-# mandatory for every element cache.
+# The bilinear form's residual IS the action.
 assemble_cell!(req::ResidualRequest, cache::AbstractTensorProductElementCache, args::CellArgs) =
     apply_element_action!(req.r, cache, args.states.u, args)
 
 # `provides_analytic` stays `false` for the Jacobian kinds: this cache has no
 # element matrix to declare. The method exists so a `FullAssembly` sweep says
-# what is wrong instead of reporting a `MethodError` or an empty buffer.
+# what is wrong instead of reporting a `MethodError` or filling nothing.
 assemble_cell!(::Union{JacobianRequest, JacobianResidualRequest},
         cache::AbstractTensorProductElementCache, ::CellArgs) = throw(ArgumentError(
     "$(nameof(typeof(cache))) forms no element matrix — it evaluates the operator's ACTION by " *

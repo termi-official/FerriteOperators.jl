@@ -64,7 +64,7 @@ end
 Build a [`QVector`](@ref) carrying `npoints_per_cell` points on every cell of
 `sdh` and none on any other cell of the grid — the layout a PER-SUBDOMAIN store
 needs (a matrix-free element's partial-assembly quadrature data), where the
-`(dh, qrc)` form above would size the data for every subdomain's cells at once.
+`(dh, qrc)` form above sizes the data for every subdomain at once.
 """
 function setup_qvector(::Type{T}, sdh::SubDofHandler, npoints_per_cell::Integer) where {T}
     npoints = zeros(Int, getncells(get_grid(sdh.dh)))

@@ -19,11 +19,8 @@ import FerriteOperators: default_assembly_iterator, decorate_device_iterator,
     item_update_flags, position_item
 import FerriteOperators: position_iterator, iterator_dofs
 
-# Ferrite's own KA extension supplies `distribute_to_workers`, the device
-# `CellCache` and every `Adapt` rule this one builds on, and it needs four
-# packages loaded, not one. Without it `adapt(backend, dh)` silently returns the
-# HOST handler (Adapt's fallback is the identity), which is the difference
-# between a loud setup error and a kernel reading host memory.
+# Without FerriteKAExt, `adapt(backend, dh)` silently returns the HOST handler
+# (Adapt's fallback is the identity) and the kernel reads host memory.
 function _assert_ferrite_ka_loaded()
     Base.get_extension(Ferrite, :FerriteKAExt) === nothing && throw(ArgumentError(
         "FerriteKAExt is not loaded, so Ferrite has no device handler, geometry cache or " *
@@ -39,8 +36,6 @@ end
 
 Adapt.@adapt_structure AssemblyWorkspace
 Adapt.@adapt_structure AssemblyTask
-# The flat per-cell quadrature store: its `data` is what moves, the offset layout
-# being an isbits range wherever the point count is uniform.
 Adapt.@adapt_structure QVector
 
 # The `atomic` parameter is a compile-time constant, not a field, so the
@@ -50,11 +45,8 @@ Adapt.adapt_structure(to, a::VectorAssembler{<:Any, <:Any, atomic}) where {atomi
 _adapt_vector_assembler(f::VT, ::Val{atomic}) where {VT, atomic} =
     VectorAssembler{eltype(VT), VT, atomic}(f)
 
-# Field-wise adaptation for element caches, so a cache author writes the
-# batching (`setup_device_instances`) and the slicing (`device_worker_view`) and
-# no third rule: the fields crossing the kernel boundary are the batched ones,
-# and each already carries its own. A cache whose type parameters are not
-# determined by its fields needs its own `Adapt.adapt_structure` method.
+# Field-wise, so a cache author writes only the batching/slicing pair. A cache
+# whose type parameters are not determined by its fields needs its own method.
 Adapt.adapt_structure(to, cache::FerriteOperators.AbstractVolumetricElementCache) =
     _adapt_fields(to, cache)
 _adapt_fields(to, x::T) where {T} =
@@ -64,14 +56,8 @@ _adapt_fields(to, x::T) where {T} =
 ## Device item iteration
 ####################################
 
-"""
-    DeviceCellDofs(cell_dofs, base, n) <: AbstractVector{Int}
-
-One cell's dof range as a VIEW into the device handler's flat `cell_dofs`: three
-registers, no storage and no copy. It is what [`DeviceCellCursor`](@ref) answers
-`celldofs` with, and the reason a device action sweep neither stages a dof row
-nor reads one back.
-"""
+# One cell's dof range as a VIEW into the device handler's flat `cell_dofs`, so
+# a device action sweep never stages a dof row.
 struct DeviceCellDofs{I <: Integer, V <: AbstractVector{I}} <: AbstractVector{I}
     cell_dofs::V
     base::Int
@@ -84,28 +70,14 @@ Base.@propagate_inbounds Base.getindex(d::DeviceCellDofs, i::Int) = d.cell_dofs[
 """
     DeviceCellCursor
 
-The device counterpart of Ferrite's `CellCache` for a sweep positioned by
-CONSTRUCTION: an immutable value the kernel holds in registers, carrying the
-item's id and the offset of its dof range in the handler's own `cell_dofs`.
-Positioning it is one indexed read of `cell_dofs_offset` — the item index is
-already in a register — where a `CellCache` would copy the cell's dof row into a
-per-worker slab that the gather and the scatter then read back out of global
-memory.
+The device counterpart of Ferrite's `CellCache`, positioned by CONSTRUCTION: an
+immutable value the kernel holds in registers.
 
-`coords` is the per-worker coordinate slab, the one member a positioning may
-still stage, and only for a sweep whose [`item_update_flags`](@ref) ask for it:
-the two stored levels of the matrix-free action read the cell id alone, while
-`Recompute()` re-derives the geometry per quadrature point and the
-quadrature-data fill forms it once. The node ids are answered from the grid
-instead of staged, there being no sweep that reads them per point.
-
-`stride` is the subdomain's constant per-cell dof count where
-[`decorate_device_iterator`](@ref)'s uniformity check found `cell_dofs_offset`
-affine in the cell id (`Int`), letting a positioning compute `dofbase` by
-arithmetic instead of reading that array — or `Nothing`, the array-read
-fallback every other subdomain shape takes. It is a TYPE parameter rather than
-a runtime branch, so the two [`position_iterator`](@ref) methods below compile
-to two different kernels and neither pays for the other's check.
+`coords` is the only member a positioning may stage, and only where
+[`item_update_flags`](@ref) ask for it. `stride` is the subdomain's constant
+per-cell dof count, or `Nothing` for the array-read fallback; it is a TYPE
+parameter, so the two [`position_iterator`](@ref) methods below compile to two
+kernels and neither pays for the other's check.
 
 !!! warning "Experimental surface"
     Internal to the device sweep; it may change in a minor release.
@@ -130,10 +102,6 @@ Ferrite.reinit!(cv::Ferrite.AbstractCellValues, c::DeviceCellCursor) = Ferrite.r
     cv, Ferrite.reinit_needs_cell(cv) ? Ferrite.getcells(Ferrite.get_grid(c.sdh), c.cellid) : nothing,
     c.coords)
 
-# The dof window addresses the flat handler view directly, and it doubles as
-# the scatter address (`iterator_scatter_address`'s default forwards to this):
-# every assembler in this package reads `celldofs` off the address it is
-# handed, and the cursor's is already the handler's own range.
 FerriteOperators.iterator_dofs(c::DeviceCellCursor) = Ferrite.celldofs(c)
 
 @inline function FerriteOperators.position_iterator(c::DeviceCellCursor{<:Any, <:Any, Int}, item, flags::Ferrite.UpdateFlags)
@@ -147,40 +115,12 @@ end
     return DeviceCellCursor(c.sdh, c.coords, i, Int(@inbounds c.sdh.cell_dofs_offset[i]) - 1, nothing)
 end
 
-"""
-    default_assembly_iterator(::MatrixFreeActionKind, sdh)
-
-The matrix-free action's iterator where the element cache declares none:
-Ferrite's `CellCache` over a HOST `SubDofHandler` — the CPU sweeps are
-unchanged — and a [`DeviceCellCursor`](@ref) over a device handler, which is
-where staging a dof row per item is the dominant cost of the sweep.
-
-It answers the kind-keyed DEFAULT ([`default_assembly_iterator`](@ref)) rather
-than a cache-open method on [`assembly_iterator`](@ref) itself: the latter would
-narrow only the kind, tying with every cache-narrow declaration — the decorator
-forwards and the documented `assembly_iterator(kind, ::MyCache, sdh)` recipe
-alike — since neither dominates. Below the cache declarations there is no tie,
-and a cache that names its own iterator keeps it under this kind too.
-"""
 FerriteOperators.default_assembly_iterator(::MatrixFreeActionKind, sdh) = _action_iterator(sdh)
 _action_iterator(sdh::Ferrite.SubDofHandler) = Ferrite.CellCache(sdh)
 _action_iterator(sdh) = DeviceCellCursor(sdh, nothing, -1, 0, nothing)
 
-"""
-    decorate_device_iterator(c::DeviceCellCursor, sdh)
-
-The device cursor, carrying the HOST subdomain `sdh`'s uniform per-cell dof
-stride where one exists: `sdh`'s flat `cell_dofs_offset` affine in the cell id,
-i.e. every cell up to and including this subdomain's, in GLOBAL cell numbering,
-carries the same dof count. A cursor that carries the stride computes its
-dof-window offset by arithmetic instead of reading `cell_dofs_offset`. The check
-runs against the HOST `sdh` even though it decorates the DEVICE iterator, since
-the check itself has no device counterpart worth paying for.
-
-Keyed on the CURSOR's type, not on the sweep kind: the stride is a property of
-this layout, so a downstream iterator of another shape reaches
-[`device_assembly_iterator`](@ref)'s default and passes through undecorated.
-"""
+# The stride exists only where `cell_dofs_offset` is affine in the cell id over
+# GLOBAL cell numbering, which is what `_uniform_dof_stride` checks on the HOST.
 FerriteOperators.decorate_device_iterator(c::DeviceCellCursor, sdh::Ferrite.SubDofHandler) =
     DeviceCellCursor(c.sdh, c.coords, c.cellid, c.dofbase, _uniform_dof_stride(sdh))
 
@@ -193,8 +133,7 @@ function _uniform_dof_stride(sdh::Ferrite.SubDofHandler)
     return stride
 end
 
-# The coordinate slab is the cursor's only batched member; the handler behind it
-# is shared read-only, and the position is per item rather than per worker.
+# `coords` is the only batched member; the handler is shared read-only.
 FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice, c::DeviceCellCursor, n_instances::Int) =
     DeviceCellCursor(c.sdh,
         KA.zeros(device.backend, Ferrite.get_coordinate_type(Ferrite.get_grid(c.sdh)),
@@ -215,19 +154,10 @@ end
 
 FerriteOperators.adapt_partition(device::KernelAbstractionsDevice, partition) =
     [_adapt_chunk(device, color) for color in partition]
-# A `UnitRange` chunk (`compute_partition`'s contiguous-cellset case) needs no
-# device copy: it is already isbits, and the kernel indexes it by arithmetic.
+# A `UnitRange` chunk is already isbits and the kernel indexes it by arithmetic.
 _adapt_chunk(device::KernelAbstractionsDevice, color::AbstractUnitRange{Int}) = color
 _adapt_chunk(device::KernelAbstractionsDevice, color) = adapt(device.backend, collect(Int, color))
 
-"""
-    adapt_shared(device::KernelAbstractionsDevice, x)
-
-Shared read-only cache data, moved into device memory once at setup — a plain
-`adapt` onto the backend, which is what makes an element cache's
-quadrature-data store reach the kernel without the cache naming a backend
-itself.
-"""
 FerriteOperators.adapt_shared(device::KernelAbstractionsDevice, x) = adapt(device.backend, x)
 
 FerriteOperators.allocate_vector(device::KernelAbstractionsDevice, dh) =
@@ -236,36 +166,15 @@ FerriteOperators.allocate_vector(device::KernelAbstractionsDevice, dh) =
 FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice, cv::CellValues, n_instances::Int) =
     Ferrite.distribute_to_workers(device.backend, cv, n_instances)
 
-"""
-    setup_device_instances(device::KernelAbstractionsDevice, a::AbstractArray, n)
-
-A plain per-worker scratch buffer, batched with the WORKER as the leading
-(stride-1) index — the forward of [`device_worker_view`](@ref)'s existing
-`AbstractArray` method, so a cache whose scratch is an ordinary array reaches
-the device through the same pair every other cache uses. The batch is zeroed:
-scratch carries nothing between items.
-"""
+# The WORKER is the leading (stride-1) index, the inverse of
+# `device_worker_view`'s `AbstractArray` method.
 FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice, a::AbstractArray, n_instances::Int) =
     KA.zeros(device.backend, eltype(a), n_instances, size(a)...)
 
-"""
-    setup_device_instances(device::KernelAbstractionsDevice, ws::AssemblyWorkspace, n, iterator)
-
-The batched workspace `n` GPU workers share: the element buffers become one
-array each with the WORKER as the leading (stride-1) index, so consecutive
-workers touch adjacent addresses, and the item iterator and element cache
-recurse into their own struct-of-arrays layouts.
-[`device_worker_view`](@ref) is the inverse.
-
-Each batch carries the ELTYPE of the host buffer it replaces, so the element's
-own precision follows onto the device rather than the device's `value_type`
-overriding it.
-
-`iterator` is the subdomain's DEVICE item iterator
-([`assembly_iterator`](@ref) over the device handler) — the host
-`SubDofHandler` the workspace's own iterator carries would give a cache over the
-host grid, which `adapt` returns unchanged and no error reports.
-"""
+# Each batch carries the ELTYPE of the host buffer it replaces, so the element's
+# own precision follows onto the device. `iterator` must be the subdomain's
+# DEVICE iterator: the workspace's own carries the HOST handler, which `adapt`
+# returns unchanged and no error reports.
 function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevice,
         ws::AssemblyWorkspace, n_instances::Int, iterator)
     iterator === nothing && throw(ArgumentError(
@@ -276,9 +185,7 @@ function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevic
     ndofs_local = size(ws.Ke, 1)
     return AssemblyWorkspace(
         KA.zeros(backend, eltype(ws.Ke), n_instances, ndofs_local, ndofs_local),
-        # Batched for layout symmetry; a device sweep never gathers into them
-        # (`load_slots!` resizes, which a worker view cannot do — see
-        # `execute_on_device!`).
+        # Batched for layout symmetry; a device sweep never gathers into them.
         map(buffer -> KA.zeros(backend, eltype(buffer), n_instances, length(buffer)), ws.slot_buffers),
         KA.zeros(backend, eltype(ws.re), n_instances, length(ws.re)),
         _batch_iterator(device, iterator, n_instances),
@@ -289,30 +196,17 @@ function FerriteOperators.setup_device_instances(device::KernelAbstractionsDevic
     )
 end
 
-"""
-    _batch_iterator(device, it, n)
-
-The workspace's iterator-slot batching, called from `setup_device_instances`'s
-4-arg `AssemblyWorkspace` method. The GENERIC default forwards to
-[`setup_device_instances`](@ref)`(device, it, n)` — the same hook every other
-batched workspace member answers — so a downstream device iterator needs no
-`ext`-private method to reach the device: it implements the 3-arg
-`setup_device_instances` like any other batched cache and this default carries
-it onto the workspace unchanged.
-"""
+# The generic default is `setup_device_instances` itself, so a downstream device
+# iterator implements only that 3-arg hook and needs no method here.
 _batch_iterator(device, it, n) = FerriteOperators.setup_device_instances(device, it, n)
 
-# Ferrite's own geometry cache batches through its struct-of-arrays route, which
-# has no generic `setup_device_instances` method of its own — this override is
-# still needed where the default above would throw.
+# Ferrite's geometry cache has no generic `setup_device_instances` method.
 _batch_iterator(device, cc::CellCache, n) = Ferrite.distribute_to_workers(device.backend, cc, n)
 
-# A cooperative sweep positions its item in ONE segment of a barrier-split kernel
-# and reads it in the next, so its geometry cache has to be the MUTABLE one every
-# segment recovers for itself — a cursor is positioned by construction, and the
-# value would not survive the barrier. (`DeviceCellCursor`'s plain batching is
-# otherwise exactly the generic default above, so it carries no override of its
-# own.)
+# A cooperative sweep positions its item in ONE segment of a barrier-split
+# kernel and reads it in the next, so its geometry cache has to be the MUTABLE
+# one every segment recovers for itself: a cursor is positioned by construction
+# and the value would not survive the barrier.
 _batch_iterator(device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, CooperativeElement},
         c::DeviceCellCursor, n) = Ferrite.distribute_to_workers(device.backend, CellCache(c.sdh), n)
 
@@ -320,11 +214,8 @@ _batch_iterator(device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, Cooperativ
 ## Execution
 ####################################
 
-# One work item per grid-stride step, following Ferrite's GPU assembly how-to:
-# the per-worker scratch is sliced once, and the loop body is the same
-# `reinit!` + driver-body pair every device runs. It reaches the driver through
-# `execute_kind!` rather than `execute_single_task!`, whose `@timeit_debug`
-# frame GPUCompiler rejects.
+# Reaches the driver through `execute_kind!` rather than `execute_single_task!`,
+# whose `@timeit_debug` frame GPUCompiler rejects.
 @kernel function _cell_sweep_kernel!(task, workspaces, @Const(items))
     worker = @index(Global, Linear)
     stride = prod(KA.@ndrange())
@@ -333,22 +224,16 @@ _batch_iterator(device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, Cooperativ
     base = device_worker_view(workspaces, worker)
     n_items = length(items)
     for i in worker:stride:n_items
-        # `position_item` rather than `reinit!`: a device iterator positions by
-        # CONSTRUCTION, so only the workspace it returns is on the item, and it
-        # stages what this KIND reads and nothing else.
+        # A device iterator positions by CONSTRUCTION, so only the workspace
+        # `position_item` returns is on the item.
         ws = position_item(base, @inbounds(items[i]), local_task.kind)
         FerriteOperators.execute_kind!(local_task.kind, local_task, ws)
     end
 end
 
-# Ferrite's `distribute_to_workers` covers its own assemblers — a shared handle
-# on the GPU, a real per-worker copy on the CPU backend, whose CSC assembler
-# owns permutation buffers. This package's `VectorAssembler` owns none and is
-# shared, which is what the `get_substruct` method beside it says.
+# `VectorAssembler` owns no per-worker scratch and is shared across workers.
 _worker_assemblers(backend, assembler::VectorAssembler, n) = Ferrite.SoAContainer(assembler, n)
 _worker_assemblers(backend, assembler, n) = Ferrite.distribute_to_workers(backend, assembler, n)
-# A sweep that scatters nothing carries no assembler (`QuadratureDataKind` writes
-# into the element cache's own store), and a worker's share of none is none.
 _worker_assemblers(backend, ::Nothing, n) = nothing
 @inline _worker_assembler(assemblers, worker) = assemblers[worker]
 @inline _worker_assembler(::Nothing, worker) = nothing
@@ -356,21 +241,16 @@ _worker_assemblers(backend, ::Nothing, n) = nothing
 FerriteOperators.execute_on_device!(task, device::KernelAbstractionsDevice, workspaces, items) =
     _grid_stride_sweep!(task, device, workspaces, items)
 
-# One work item per grid-stride step, the mapping every device kind but the
-# cooperative one runs in.
 function _grid_stride_sweep!(task, device::KernelAbstractionsDevice, workspaces, items)
-    # The built-in primal driver gathers the global vectors into the per-worker
-    # slot buffers through `load_slots!`, and that gather RESIZES them — which a
-    # worker's view of a shared batch cannot do. A kind carrying its own driver
-    # answers for its own gather; `MatrixFreeActionKind`'s is fixed-width.
+    # `load_slots!` RESIZES the per-worker slot buffers, which a worker's view of
+    # a shared batch cannot do.
     (task.kind isa FerriteOperators.PrimalKind && FerriteOperators.depends_on_unknowns(task.kind)) && throw(ArgumentError(
         "$(nameof(typeof(device))) does not support $(nameof(typeof(task.kind))) sweeps: they " *
         "gather the state slots per item, and the gather resizes a per-worker buffer that is a " *
         "view into a shared device batch. Assemble state-dependent kinds on a CPU device."))
     backend = device.backend
-    # The same count `setup_device_instances` sized the caches for; the kernel
-    # indexes them unchecked, and `launch_geometry` is monotone in the item
-    # count, so no barrier launches more workers than there are caches.
+    # The kernel indexes the per-worker caches unchecked, and `launch_geometry`
+    # is monotone in the item count, so no barrier outruns this count.
     n = n_workers(device, items)
     device_task = adapt(backend, AssemblyTask(
         task.kind, _worker_assemblers(backend, task.inner_assembler, n),
@@ -381,8 +261,8 @@ function _grid_stride_sweep!(task, device::KernelAbstractionsDevice, workspaces,
         workgroup, blocks = launch_geometry(device, length(chunk))
         kernel = _cell_sweep_kernel!(backend, workgroup)
         kernel(device_task, workspaces, chunk; ndrange = workgroup * blocks)
-        # The barriers are what makes the colored scatter race-free: the next
-        # color must not start while workers of this one are still accumulating.
+        # What makes the colored scatter race-free: the next color must not start
+        # while workers of this one are still accumulating.
         KA.synchronize(backend)
     end
     return nothing
@@ -392,45 +272,26 @@ end
 ## Lane execution: one block of lanes per element
 ####################################
 
-# Where a thread sits in the launch: which ELEMENT SLOT it serves and which lane
-# of that slot's block it is.
-#
 # Consecutive threads are consecutive SLOTS at the same lane, not the lanes of
-# one element. Both orderings carry the same threads and the same bytes, and the
-# choice is which of the two reads coalesces. Measured (pure-stream ceiling,
-# RTX 2080, `Float32`, ndrange as this mapping launches it):
-#
-# |   | p = 1 dense | p = 2 dense | p = 3 dense | p = 2 packed | p = 3 packed |
-# |---|---|---|---|---|---|
-# | lanes consecutive | 0.122 | 0.439 | 0.620 | 0.169 | 0.581 |
-# | **slots consecutive** | **0.122** | **0.171** | **0.531** | **0.107** | **0.351** |
-#
-# The reason is the element-matrix layout: `K`'s SLOT index is stride-1, so a
-# warp of consecutive slots at one `(i, j)` reads adjacent addresses — the
-# property `ElementAssemblyCache`'s layout note already argues for, and the one
-# `WorkerPerElement` gets for free. Putting a block's lanes on consecutive
-# threads instead would make `uₑ` a same-address broadcast within the warp and
-# scatter `K` across `nlanes` segments, and at p = 2 that costs 2.6x.
+# one element: `K`'s SLOT index is stride-1, so a warp of consecutive slots at
+# one `(i, j)` reads adjacent addresses.
 @inline function _lane_position(thread::Int, ::Val{NLANES}, ::Val{PER}) where {NLANES, PER}
     group, local_index = divrem(thread - 1, NLANES * PER)
     lane, block = divrem(local_index, PER)
     return group * PER + block + 1, lane + 1
 end
 
-# One element slot per grid-stride step and one ROW BLOCK per lane: `uₑ` is read
-# through the item's dof window rather than staged, the row accumulator is the
-# lane's own register, and the scatter is one atomic per owned row. No barrier
-# and no group-local memory, so this is an ordinary grid-stride kernel that the
-# CPU backend runs as written.
+# One element slot per grid-stride step, one ROW BLOCK per lane. No barrier and
+# no group-local memory.
 @kernel function _lane_sweep_kernel!(task, workspaces, @Const(items),
         ::Val{NLANES}, ::Val{PER}, ::Val{ND}, n_slots) where {NLANES, PER, ND}
-    # `@index` is taken at the top of the body and passed on: on the CPU backend
-    # it expands against a loop variable the kernel transform injects there, and
-    # inside a call argument there is none.
+    # `@index` must sit at the top of the body: on the CPU backend it expands
+    # against a loop variable the kernel transform injects there, and inside a
+    # call argument there is none.
     thread = @index(Global, Linear)
     slot, lane = _lane_position(Int(thread), Val(NLANES), Val(PER))
-    # Whole blocks are what a workgroup carries, so the last group may hold slots
-    # the caches were not sized for (`lane_launch_geometry`).
+    # A workgroup carries whole blocks, so the last group may hold slots the
+    # caches were not sized for.
     if slot ≤ n_slots
         local_task = AssemblyTask(task.kind, _worker_assembler(task.inner_assembler, slot),
                                   task.states, task.p, task.ctx)
@@ -443,19 +304,11 @@ end
     end
 end
 
-# The lanes of one element share the slot's positioned workspace READ-ONLY, which
-# is what makes the mapping's ELEMENT-level restriction load-bearing rather than
-# conservative: the level's `item_update_flags` stage neither coordinates nor a
-# dof row, so positioning is the construction of a cursor and every lane
-# constructs the same one, and `reinit_values!` is a no-op there — the two
-# per-quadrature-point levels would instead have every lane reinitialize the
-# slot's shared values objects.
-#
-# `query_cell_parameters` below runs once PER LANE on that same shared cache, so
-# read-only is a requirement of it too: a parameter query that GATHERS into the
-# cache (rather than returning a value) would have the lanes of one element
-# racing on the destination. No shipped cache does; a downstream one that wants
-# to must serve `WorkerPerElement()` instead.
+# The lanes of one element share the slot's positioned workspace READ-ONLY,
+# which is why this mapping serves the ELEMENT level alone. `query_cell_parameters`
+# runs once PER LANE on that shared cache, so a parameter query that GATHERS into
+# the cache rather than returning a value would race; such a cache must serve
+# `WorkerPerElement()` instead.
 @inline function _lane_action!(task, ws, lane::Int, ::Val{NLANES}, ::Val{ND}) where {NLANES, ND}
     dofs = item_dofs(ws)
     uₑ = ElementUnknownWindow{eltype(ws.re)}(task.states.u, dofs)
@@ -467,26 +320,7 @@ end
     return nothing
 end
 
-"""
-    execute_on_device!(task, device::KernelAbstractionsDevice{…, LanesPerElement}, workspaces, items)
-
-The row mapping: one element onto a BLOCK OF LANES, lane `l` owning rows
-`l:nlanes:ndofs_per_cell` of `yₑ` and scattering each itself
-([`element_action_row`](@ref)).
-
-`nlanes` is a launch policy — the element's own extent capped by the device's
-`max_workgroup_size`, or the mapping's explicit `lanes` — and the workgroup
-carries `max_workgroup_size ÷ nlanes` such blocks
-([`lane_launch_geometry`](@ref)). It changes no element math: a block shorter
-than the row count gives each lane several rows.
-
-The kernel holds no group-local memory and no barrier, the lanes of one element
-having nothing to exchange, so it is a grid-stride kernel like the
-worker-per-element one rather than a pipeline like the cooperative one.
-
-The ELEMENT-level fill ([`QuadratureDataKind`](@ref)) has no rows to split — one
-cell fills its own matrix — and takes the grid-stride mapping instead.
-"""
+# The ELEMENT-level fill has no rows to split and takes the grid-stride mapping.
 function FerriteOperators.execute_on_device!(task,
         device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, LanesPerElement}, workspaces, items)
     task.kind isa FerriteOperators.QuadratureDataKind &&
@@ -514,9 +348,7 @@ function FerriteOperators.execute_on_device!(task,
     return nothing
 end
 
-# The element's extent is what a lane block covers by default; an explicit
-# `lanes` is the caller's launch policy and `with_element_mapping` already
-# checked it against the group size.
+# `with_element_mapping` already checked an explicit `lanes` against the group size.
 _lane_count(mapping::LanesPerElement, ::Val{ND}, max_workgroup_size::Int) where {ND} =
     mapping.lanes === nothing ? min(ND, max_workgroup_size) : mapping.lanes
 
@@ -525,19 +357,13 @@ _lane_count(mapping::LanesPerElement, ::Val{ND}, max_workgroup_size::Int) where 
 ####################################
 
 # Each pipeline step is its own function because a KernelAbstractions
-# `@synchronize` is a LEXICAL split of the kernel body: the statements between
-# two barriers become their own workitem loop on the CPU backend, so nothing
-# assigned in one segment survives into the next and every segment recovers its
-# worker view itself.
-#
-# A backend's index intrinsics are not all `Int` — CUDA's are `Int32` — so every
-# step normalizes them once and the element entries see the `Int` pair their
-# contract names.
+# `@synchronize` LEXICALLY splits the kernel body: nothing assigned in one
+# segment survives into the next, so every segment recovers its worker view
+# itself. Index intrinsics are not `Int` on every backend (CUDA's are `Int32`),
+# so each step normalizes them once.
 @inline function _coop_prepare!(workspaces, items, group, lane, nlanes)
     lane, nlanes = Int(lane), Int(nlanes)
     ws = device_worker_view(workspaces, group)
-    # One lane positions the group's geometry cache; the residual buffer needs
-    # no cell to be zeroed.
     lane == 1 && Ferrite.reinit!(ws, items[group])
     for i in lane:nlanes:length(ws.re)
         @inbounds ws.re[i] = zero(eltype(ws.re))
@@ -545,9 +371,8 @@ _lane_count(mapping::LanesPerElement, ::Val{ND}, max_workgroup_size::Int) where 
     return nothing
 end
 
-# The gather is its own barrier-separated step because the dofs it reads are
-# what `reinit!` above wrote, and the lattice load below reads slots other lanes
-# gathered.
+# Its own barrier-separated step: the dofs it reads are what `reinit!` above
+# wrote, and the lattice load below reads slots other lanes gathered.
 @inline function _coop_gather!(task, workspaces, group, lane, nlanes)
     lane, nlanes = Int(lane), Int(nlanes)
     ws = device_worker_view(workspaces, group)
@@ -591,21 +416,10 @@ end
     return nothing
 end
 
-# ONE loop-expressed body for every lattice dimension: the pipeline length
-# `2·DIM − 1` is a `Val` type parameter rather than a choice between hand-written
-# kernels. Verified lexically legal on both backends — a `@synchronize` inside a
-# `for` loop whose trip count is a `Val` — by `scratchpad/ka-sync-mwe/`
-# (variant B, both KA.CPU and CUDABackend; the negative control there confirms
-# the barriers are real synchronization, not a no-op the loop already provided).
-#
-# `group`/`lane` are re-derived at the top of the loop body: the CPU backend
-# lexically splits a kernel at every `@synchronize`, and a `for` loop containing
-# one is transformed as its OWN independent split, starting over from a fresh
-# per-segment state. `nlanes` needs no such re-derivation — verified separately
-# (`scratchpad/uniform-in-loop-mwe.jl`, this round): a `@uniform` computed once
-# OUTSIDE the loop, before any barrier, is an ordinary Julia closure variable by
-# the time it reaches a later segment, and reads correctly inside every
-# iteration without being reassigned.
+# `group`/`lane` MUST be re-derived at the top of the loop body: a `for` loop
+# containing a `@synchronize` is transformed as its own independent split,
+# starting from a fresh per-segment state. `nlanes` needs no re-derivation, a
+# `@uniform` computed before any barrier being an ordinary closure variable.
 @kernel function _cooperative_sweep!(task, workspaces, @Const(items),
         ::Val{T}, ::Val{LEN}, ::Val{NBOX}, ::Val{DIM}) where {T, LEN, NBOX, DIM}
     group = @index(Group, Linear)
@@ -629,24 +443,10 @@ end
     _coop_scatter!(task, workspaces, group, lane, nlanes)
 end
 
-"""
-    execute_on_device!(task, device::KernelAbstractionsDevice{…, CooperativeElement}, workspaces, items)
-
-The intra-element mapping: ONE WORKGROUP per item, sized by the element
-(`cooperative_group_size`), with the element state and every contraction
-intermediate in group-local memory and a barrier between pipeline steps.
-
-It consumes neither `execute_single_task!` nor the whole-element kernel — the
-element's cooperative entries are a different decomposition of the same math —
-and it launches one group per item rather than grid-striding, because a barrier
-cannot live inside a loop the CPU backend has to split. That is why
-[`n_workers`](@ref) is the largest barrier here: every item of it holds a
-workspace slice concurrently.
-
-The PARTIAL-assembly fill a cooperative operator also runs
-([`QuadratureDataKind`](@ref)) has no lattice pipeline — one cell fills its own
-per-quadrature-point slice — and takes the grid-stride mapping instead.
-"""
+# One group per item rather than a grid stride, because a barrier cannot live
+# inside a loop the CPU backend has to split — which is why `n_workers` is the
+# largest barrier here. The fill has no lattice pipeline and takes the
+# grid-stride mapping.
 function FerriteOperators.execute_on_device!(task,
         device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, CooperativeElement}, workspaces, items)
     task.kind isa FerriteOperators.QuadratureDataKind &&

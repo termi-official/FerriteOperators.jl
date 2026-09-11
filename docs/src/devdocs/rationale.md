@@ -526,16 +526,16 @@ the element knows it. The third is the framework's, because a dense `Kₑ` is no
 element's matrix kernel or, where there is none, from `ndofs_per_cell`
 applications of its action.
 
-The split is the one deviation from MFEM's flat level axis, and it is
-deliberate: FULL is a different OPERATOR (it holds a global matrix, answers
-`get_matrix`, and every global-storage wall applies to it), while ELEMENT,
-PARTIAL and NONE are the same operator keeping different amounts of the same
-evaluation. The form axis separates what an operator IS; the storage election
-separates what it KEEPS.
+Splitting the axis in two is the one deliberate deviation from MFEM's flat one:
+FULL is a different OPERATOR (it holds a global matrix, answers `get_matrix`,
+and every global-storage wall applies to it), while ELEMENT, PARTIAL and NONE
+are the same operator keeping different amounts of the same evaluation. The form
+axis separates what an operator IS; the storage election separates what it
+KEEPS.
 
-The matrix-free level is also where the SECOND mapping question appears, and
-the answer is a strategy-side one: [`AbstractElementMapping`](@ref) says whether
-one worker or one workgroup evaluates an element, the element implements both
+The matrix-free level is also where the SECOND mapping question appears, and the
+answer is strategy-side: [`AbstractElementMapping`](@ref) says whether one
+worker or one workgroup evaluates an element, the element implements both
 decompositions of the SAME math, and the term names neither.
 
 **The deliberate deviation from libCEED:** an element may own the whole `Bᵀ D B`

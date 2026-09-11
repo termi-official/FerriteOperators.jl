@@ -4,15 +4,11 @@
 # `src/` knows this family exists; it reaches the engine through the two
 # protocol seams and the three required accessors and nothing else.
 #
-# PUBLIC-SURFACE COUNT. Every FerriteOperators name this file reaches for is
-# EXPORTED — `using FerriteOperators` brings all of them into scope, and the
-# `import` below exists only because Julia requires it to ADD METHODS to a
-# function owned by another module. FerriteOperators names reachable only
-# through the module (i.e. unexported): 0. Two of Ferrite's own unexported
-# names are used (`Ferrite.get_grid`, `Ferrite.add_entry!`), neither of them
-# this package's surface.
+# PUBLIC-SURFACE COUNT. Unexported FerriteOperators names used: 0. The `import`
+# below exists only because Julia requires it to ADD METHODS. Two of Ferrite's
+# own unexported names are used (`Ferrite.get_grid`, `Ferrite.add_entry!`).
 #
-# What the family actually costs its author, measured on this file:
+# What the family costs its author, counted on this file:
 #   2 protocol methods   — `assembly_iterator`, `item_provider`
 #   3 required accessors — `Ferrite.cellid`, `iterator_dofs`, `iterator_handler`
 #   2 partition methods  — `compute_partition` for the two scheduling policies
@@ -21,30 +17,21 @@
 #                          couples and the cell pattern does not carry
 #   1 family marker      — `JumpPairFamily`, the type the registration dispatches on
 #   2 registration methods — `item_families`, `setup_family_caches`
-# everything else in the file is the ELEMENT axis (already open before this
-# round) and the assertions.
+# everything else here is the ELEMENT axis and the assertions.
 #
-# The last three are what REGISTRATION costs, and they are optional: a family
-# whose items ride the cell route needs only the nine above, because the default
-# `item_families` already registers `CellFamily()` and the two protocol seams
-# narrow what that family positions on and enumerates. They are written here
-# because registering is what proves the seam — see the registration testset.
+# REGISTRATION is the last three, and it is optional: a family whose items ride
+# the cell route needs only the nine above. It is written here because
+# registering is what proves the seam.
 #
-# THE MATRIX-FREE ARM (optional). The same two protocol methods carry the family
-# under `MatrixFreeAction` as well — that form is the one sweep kind the package
-# declares an iterator default for, and the default sits below the cache
-# declarations, so this family keeps its own iterator there. The arm costs ONE
-# more ELEMENT-axis method (`apply_element_action!`) and no protocol method at
-# all, which is what the testset near the end asserts.
+# THE MATRIX-FREE ARM (optional) costs ONE more ELEMENT-axis method
+# (`apply_element_action!`) and no protocol method: the action's own iterator
+# default sits below the cache declarations, so the two above still win.
 #
-# THE DEVICE HALF (optional; `KernelAbstractionsDevice(KA.CPU())`). A separate,
-# device-resident iterator (`DevicePairCursor`) plus 4 more methods —
-# `device_assembly_iterator`, `setup_device_instances` × 2 (the iterator and
-# the element cache), `device_worker_view` × 2 — and one `reinit_values!`
-# overload for the device iterator type. Not counted against the CPU-only tally
-# above: the family opens on the host with the two protocol methods alone, and
-# a downstream author who never targets `KernelAbstractionsDevice` writes none
-# of this.
+# THE DEVICE HALF (optional; `KernelAbstractionsDevice(KA.CPU())`) is a separate
+# device-resident iterator (`DevicePairCursor`) plus 4 methods —
+# `device_assembly_iterator`, `setup_device_instances` × 2, `device_worker_view`
+# × 2 — and one `reinit_values!` overload for it. Not counted above: an author
+# who never targets `KernelAbstractionsDevice` writes none of it.
 
 using FerriteOperators
 using Test
@@ -52,9 +39,8 @@ using SparseArrays
 using LinearAlgebra
 using Polyester
 # FerriteKAExt — the device handler, `distribute_to_workers` and every `Adapt`
-# rule the device kernel builds on — is triggered by these four together, not
-# by KernelAbstractions alone (matches `test/test_ka_device.jl`,
-# `test/test_matrix_free.jl`). No CUDA: the device arm below targets
+# rule the device kernel builds on — is triggered by these four together, not by
+# KernelAbstractions alone. No CUDA: the device arm below targets
 # `KernelAbstractionsDevice(KA.CPU())` only.
 import Adapt, GPUArrays, GPUArraysCore
 import KernelAbstractions as KA
@@ -77,10 +63,9 @@ import FerriteOperators: assembly_iterator, item_provider, iterator_dofs, iterat
 # `g = [+1/N … | −α/N …]`. There is no quadrature and no `InterfaceValues`: the
 # demo tests the ITERATION protocol, not Ferrite's DG machinery.
 #
-# `α ≠ 1` is load bearing. With α = 1 the block is invariant under swapping the
+# `α ≠ 1` is load bearing: with α = 1 the block is invariant under swapping the
 # two sides, so a traversal that mixed up left and right would still assemble
-# the right answer; α = 2 makes the block side-asymmetric and the assertion
-# below real.
+# the right answer.
 
 const JUMP_α = 2.0
 const JUMP_η = 3.5
@@ -91,9 +76,8 @@ struct JumpPenaltyIntegrator <: AbstractBilinearIntegrator
     pairs::Vector{Tuple{Int, Int}}
 end
 
-# The item set rides the ELEMENT CACHE, which is what both protocol seams are
-# keyed on — so the iterator and the provider read the same list without a
-# second channel through `setup_operator`.
+# The item set rides the ELEMENT CACHE, which both protocol seams are keyed on,
+# so the iterator and the provider read one list without a second channel.
 struct JumpPenaltyCache <: AbstractVolumetricElementCache
     η::Float64
     n::Int                       # dofs per cell; the local system is 2n
@@ -110,9 +94,8 @@ end
 # Read-only between workers: sharing it is what a per-worker copy would produce.
 duplicate_for_device(device, c::JumpPenaltyCache) = c
 
-# The KA device's own pair — `g` is read by every worker, so it moves once;
-# `pairs` is a HOST list the device kernel never touches (it exists only to
-# build the iterators), so it rides along unadapted.
+# The KA device's own pair: `g` is read by every worker, so it moves once;
+# `pairs` is a HOST list the device kernel never touches, so it rides unadapted.
 setup_device_instances(device::KernelAbstractionsDevice, c::JumpPenaltyCache, n) =
     JumpPenaltyCache(c.η, c.n, Adapt.adapt(device.backend, c.g), c.pairs)
 device_worker_view(c::JumpPenaltyCache, worker) = c
@@ -122,8 +105,8 @@ allocate_element_matrix(c::JumpPenaltyCache, sdh)          = zeros(2c.n, 2c.n)
 allocate_element_unknown_vector(c::JumpPenaltyCache, sdh)  = zeros(2c.n)
 allocate_element_residual_vector(c::JumpPenaltyCache, sdh) = zeros(2c.n)
 
-# How many items the sweep actually visited — the assertion that catches a
-# traversal silently falling back to the cell family (gate failure mode 1).
+# How many items the sweep actually visited — what catches a traversal silently
+# falling back to the cell family.
 const VISITED = Threads.Atomic{Int}(0)
 
 provides_analytic(::Type{<:JumpPenaltyCache}, ::JacobianKind{:u}) = true
@@ -146,9 +129,8 @@ function assemble_cell!(req::ResidualRequest, c::JumpPenaltyCache, args::CellArg
     return nothing
 end
 
-# The matrix-free action of the same rank-one block, `yₑ += η g (g·uₑ)` — the
-# ELEMENT axis, not the iteration protocol, and the only method the
-# `MatrixFreeAction` arm below adds over the assembling ones.
+# The matrix-free action of the same rank-one block, `yₑ += η g (g·uₑ)`: the
+# ELEMENT axis, and the only method the `MatrixFreeAction` arm below adds.
 function apply_element_action!(yₑ, c::JumpPenaltyCache, uₑ, args::CellArgs)
     g = c.g
     s = c.η * dot(g, uₑ)
@@ -164,8 +146,7 @@ end
 
 # Positioned in place on a pair index, staging both cells' geometry and the
 # concatenated dof window. `cellid` answers with the LEFT cell — the
-# representative this family names, as an iterator whose item is a set of cells
-# must.
+# representative an iterator whose item is a set of cells has to name.
 mutable struct PairCache{G, SDH, X}
     const grid::G
     const sdh::SDH
@@ -205,8 +186,7 @@ iterator_handler(pc::PairCache) = pc.sdh
 duplicate_for_device(::AbstractCPUDevice, pc::PairCache) = PairCache(pc.sdh, pc.pairs)
 
 ####################################
-## The DEVICE iterator: A7, landed (was blocked on the missing `_batch_iterator`
-## fallback — S2's gate report §3; S3 adds it and this is the reproduction).
+## The DEVICE iterator
 ####################################
 
 # The dof window over the device handler's flat `cell_dofs`, positioned by
@@ -224,9 +204,9 @@ Base.@propagate_inbounds Base.getindex(d::PairDofs, i::Int) =
     i <= d.n ? d.cell_dofs[d.lbase + i] : d.cell_dofs[d.rbase + (i - d.n)]
 
 # Positioned by CONSTRUCTION, like `DeviceCellCursor`: `lefts`/`rights` are the
-# pair list moved to the device ONCE (shared, read-only — every worker reads
-# the same array), and `left`/`right` are this item's own cell ids, looked up
-# by pair index at `position_iterator` time.
+# pair list moved to the device ONCE and shared read-only, and `left`/`right`
+# are this item's own cell ids, looked up by pair index at `position_iterator`
+# time.
 struct DevicePairCursor{SDH, V <: AbstractVector{Int}}
     sdh::SDH
     lefts::V
@@ -249,9 +229,8 @@ position_iterator(c::DevicePairCursor, item, flags) =
 # `lefts`/`rights` are shared, not per-worker, so there is nothing to slice.
 device_worker_view(c::DevicePairCursor, worker) = c
 
-# The HOST `sdh` builds the pair list once; `setup_device_instances` below is
-# what actually moves `lefts`/`rights` onto the device — this constructs the
-# SHAPE only, mirroring `DeviceCellCursor`'s `coords = nothing` placeholder.
+# The HOST `sdh` builds the pair list once. This constructs the SHAPE only;
+# `setup_device_instances` below moves `lefts`/`rights` onto the device.
 device_assembly_iterator(kind, c::JumpPenaltyCache, sdh, device_sdh) =
     DevicePairCursor(device_sdh, first.(c.pairs), last.(c.pairs), -1, -1, ndofs_per_cell(sdh))
 
@@ -259,10 +238,9 @@ setup_device_instances(device::KernelAbstractionsDevice, c::DevicePairCursor, n)
     DevicePairCursor(c.sdh, Adapt.adapt(device.backend, c.lefts),
         Adapt.adapt(device.backend, c.rights), c.left, c.right, c.n)
 
-# Annotated on the DEVICE iterator type too — the same no-op as the host one,
-# but a SEPARATE method: `reinit_values!(cache, cell, kind)`'s generic fallback
-# dispatches on whichever iterator positioned `args.cell`, and the device sweep
-# positions a `DevicePairCursor`, never a `PairCache`.
+# Annotated on the DEVICE iterator type too — the same no-op, but a SEPARATE
+# method: `reinit_values!` dispatches on whichever iterator positioned
+# `args.cell`, and the device sweep positions a `DevicePairCursor`.
 reinit_values!(::JumpPenaltyCache, ::DevicePairCursor) = nothing
 
 ####################################
@@ -277,11 +255,10 @@ end
 # One chunk; the atomic scatter resolves the cells consecutive pairs share.
 compute_partition(::SequentialScheduling, p::PairItems) = (collect(eachindex(p.pairs)),)
 
-# The provider's own promise, and the framework cannot check it: no two items of
+# The provider's own promise, which the framework cannot check: no two items of
 # one chunk share a SCATTER DOF. The colouring is derived from the dof windows
-# themselves rather than from cell-disjointness, because the promise is about
-# dofs — over a continuous space two cell-disjoint items still share the dofs of
-# a common facet, and only the dof windows would say so.
+# rather than from cell-disjointness, because the promise is about dofs — over a
+# continuous space two cell-disjoint items still share a common facet's dofs.
 function compute_partition(::ColoredScheduling, p::PairItems)
     colors = Vector{Int}[]
     claimed = Set{Int}[]
@@ -307,17 +284,15 @@ item_provider(kind, c::JumpPenaltyCache, sdh)     = PairItems(sdh, c.pairs)
 ####################################
 ## THE REGISTRATION: the family those two belong to
 ####################################
-# A family marker plus one `setup_family_caches` method is what puts this
-# traversal on the engine's family list. The declaration REPLACES the derived
-# default `(CellFamily(),)`, so the operator below carries the pair family and
-# no cell family at all — an engine that still hand-appended a cell setup would
-# assemble the cells too, and every count below would be 12 rather than 9.
+# A family marker plus one `setup_family_caches` method puts this traversal on
+# the engine's family list. The declaration REPLACES the derived default
+# `(CellFamily(),)`, so the operator below carries no cell family at all — an
+# engine that still hand-appended a cell setup would assemble the cells too, and
+# every count below would be 12 rather than 9.
 #
-# The method delegates to the CELL family's own body: the subdomain caches this
-# family needs are cell-shaped (one per subdomain, over the iterator and the
-# provider the two seams above resolve to), and reaching the shipped body from
-# test code IS the dogfood claim — no engine-registered family has a privileged
-# setup path.
+# The method delegates to the CELL family's own body, this family's subdomain
+# caches being cell-shaped. Reaching the shipped body from test code IS the
+# dogfood claim.
 
 struct JumpPairFamily end
 
@@ -331,19 +306,18 @@ function setup_family_caches(::JumpPairFamily, strategy, integrator, dh, shared)
     return setup_family_caches(CellFamily(), strategy, integrator, dh, shared)
 end
 
-# Annotated on the ITERATOR type, which is the natural spelling and the one
-# setup validation must accept (it probes the RESOLVED iterator type). This
-# family stages nothing per sweep, so it is a no-op.
+# Annotated on the ITERATOR type — the spelling setup validation must accept,
+# since it probes the RESOLVED iterator type. A no-op: this family stages
+# nothing per sweep.
 reinit_values!(::JumpPenaltyCache, ::PairCache) = nothing
 
 ####################################
 ## The testbed
 ####################################
 
-# Horizontal neighbours of a structured (nx, ny) quadrilateral grid, derived
-# arithmetically: cell `c` and `c+1` are neighbours unless `c` sits on the right
-# edge. For (4, 3): 9 items against 12 cells — the counts differ, which is what
-# the item-count assertion rests on.
+# Horizontal neighbours of a structured (nx, ny) quadrilateral grid: cell `c`
+# and `c+1` unless `c` sits on the right edge. For (4, 3): 9 items against 12
+# cells — the counts differ, which is what the item-count assertion rests on.
 horizontal_pairs(nx, ny) = [(c, c + 1) for c in 1:(nx * ny) if mod(c, nx) != 0]
 
 # The entries this item family couples and the DofHandler's cell pattern does
@@ -359,13 +333,11 @@ pair_sparsity(prs) = function (sp, dh)
     return nothing
 end
 
-# The space is DISCONTINUOUS, and that is structural rather than decorative:
-# the local system of a two-sided item is indexed by `[celldofs(L); celldofs(R)]`,
-# and Ferrite's assembler requires that window to be DUPLICATE FREE. Over a
-# continuous space two face-neighbours share the dofs on their common facet, the
-# window repeats them, and the scatter fails. A jump penalty across an interface
-# is a discontinuous-space term anyway, so the demo is the shape the family
-# really has.
+# The space is DISCONTINUOUS, and structurally so: a two-sided item's local
+# system is indexed by `[celldofs(L); celldofs(R)]`, which Ferrite's assembler
+# requires to be DUPLICATE FREE. Over a continuous space two face-neighbours
+# share the dofs on their common facet, the window repeats them, and the scatter
+# fails. A jump penalty across an interface is a discontinuous-space term anyway.
 function jump_testbed(dims = (4, 3))
     grid = generate_grid(Quadrilateral, dims)
     dh   = DofHandler(grid)
@@ -401,9 +373,9 @@ sweep!(op) = (Threads.atomic_xchg!(VISITED, 0); update_operator!(op, nothing); o
     tb = jump_testbed()
     n  = ndofs_per_cell(first(tb.dh.subdofhandlers))
 
-    # A8 / C4b — setup validation probes the RESOLVED iterator type. The cache
-    # annotates `reinit_values!` against `PairCache` and against nothing else,
-    # so a probe hard-wired to `CellCache` would reject it by name here.
+    # Setup validation probes the RESOLVED iterator type. The cache annotates
+    # `reinit_values!` against `PairCache` and nothing else, so a probe
+    # hard-wired to `CellCache` would reject it by name here.
     @test !hasmethod(reinit_values!, Tuple{JumpPenaltyCache, Ferrite.CellCache})
     op = setup_operator(strategy_for(tb.spec, SequentialCPUDevice()), tb.integrator, tb.dh)
     element = first(get_subdomain_caches(op)).domain.element
@@ -449,8 +421,8 @@ sweep!(op) = (Threads.atomic_xchg!(VISITED, 0); update_operator!(op, nothing); o
         @test VISITED[] == 9
         @test Matrix(par) ≈ Matrix(seq) rtol = 1.0e-12
         # A repeat of the same configuration reproduces itself exactly; the
-        # cross-device comparison above is `≈` because the summation order
-        # differs, not because anything is approximate.
+        # cross-device comparison above is `≈` only because the summation order
+        # differs.
         @test sweep!(colored) == par
     end
 
@@ -460,28 +432,24 @@ sweep!(op) = (Threads.atomic_xchg!(VISITED, 0); update_operator!(op, nothing); o
             strategy_for(tb.spec, KernelAbstractionsDevice(KA.CPU(); items_per_worker = 1),
                 ColoredScheduling()),
             tb.integrator, tb.dh)
-        # A low `items_per_worker` for the same reason A5's Polyester arm lowers
+        # A low `items_per_worker` for the same reason the Polyester arm lowers
         # `min_items_per_worker`: a 9-item set at the default (2) would still
-        # engage several workers, but this makes it explicit rather than
-        # incidental.
+        # engage several workers, but this makes it explicit.
         @test size(first(get_subdomain_caches(device_op)).device_cache.Ke, 1) > 1
         dev = copy(sweep!(device_op))
         @test VISITED[] == 9
         # Host-vs-device exactness, not a tolerance: the device sweep's dof
-        # windows and element math are the same `Int`/`Float64` arithmetic as
-        # the host's, only the traversal moved.
+        # windows and element math are the same arithmetic as the host's.
         @test maximum(abs, Matrix(dev) .- Matrix(seq)) == 0.0
     end
 
     @testset "the recipe spelling resolves under MatrixFreeAction too" begin
-        # THE regression for the recipe diamond. Both protocol methods above are
-        # spelled the way `devdocs/design.md` prescribes — kind OPEN, cache
-        # narrow — and `MatrixFreeActionKind` is the one sweep kind the package
-        # itself declares a default iterator for. That default lives BELOW the
-        # cache declarations (`default_assembly_iterator`), so this family keeps
-        # its own `PairCache`/`DevicePairCursor` under the action; a
-        # kind-narrow/cache-open default beside them would tie instead, and
-        # `setup_operator`'s drift probe would report the call ambiguous.
+        # Both protocol methods above are spelled the way `devdocs/design.md`
+        # prescribes — kind OPEN, cache narrow — and `MatrixFreeActionKind` is
+        # the one sweep kind the package declares a default iterator for. That
+        # default sits BELOW the cache declarations
+        # (`default_assembly_iterator`), so this family keeps its own iterators
+        # under the action; a kind-narrow/cache-open default would tie instead.
         reference = reference_matrix(tb.dh, tb.prs, n)
         u = Float64[sin(3.1 * i) + 0.2cos(i) for i in 1:ndofs(tb.dh)]
         expected = reference * u
@@ -539,8 +507,8 @@ sweep!(op) = (Threads.atomic_xchg!(VISITED, 0); update_operator!(op, nothing); o
 
     @testset "the registration seam: a family declared entirely from test code" begin
         # Every operator above was built through THIS file's
-        # `setup_family_caches` method — the engine reached it by dispatch on
-        # the declared marker, and by nothing else.
+        # `setup_family_caches` method, reached by dispatch on the declared
+        # marker and by nothing else.
         before = FAMILY_SETUPS[]
         fresh  = setup_operator(strategy_for(tb.spec, SequentialCPUDevice()), tb.integrator, tb.dh)
         @test FAMILY_SETUPS[] == before + 1
@@ -551,7 +519,7 @@ sweep!(op) = (Threads.atomic_xchg!(VISITED, 0); update_operator!(op, nothing); o
         @test length(first(get_subdomain_caches(fresh)).partition[1]) == 9
         @test Matrix(sweep!(fresh)) ≈ reference_matrix(tb.dh, tb.prs, n) rtol = 1.0e-12
         # The three shipped families answer the SAME generic function this one
-        # does — that is the whole of the dogfood claim, from outside `src/`.
+        # does — the dogfood claim, asserted from outside `src/`.
         for family in (CellFamily(), FacetItemFamily(), AlgebraicItemFamily(), JumpPairFamily())
             @test hasmethod(setup_family_caches, Tuple{typeof(family), Any, Any, Any, Any})
         end

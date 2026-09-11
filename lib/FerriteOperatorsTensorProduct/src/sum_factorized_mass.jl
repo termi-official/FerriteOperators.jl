@@ -9,9 +9,7 @@ cache evaluates the ACTION `yₑ = Mₑ·uₑ` by sum factorization, reusing
 The whole element is its pointwise map ``\rho \, w_q \det(J_q)`` — a SCALAR
 factor on the interpolated value, where
 [`SumFactorizedDiffusionIntegrator`](@ref) has a tensor on the reference
-gradient. Everything else — the 1D operators, the lattice, the contractions, the
-two element mappings, the two `storage` elections — is
-[`AbstractTensorProductElementCache`](@ref)'s.
+gradient. Everything else is [`AbstractTensorProductElementCache`](@ref)'s.
 
 Set the operator up with `form = MatrixFreeAction()`. The cache has no
 element-matrix kernel; assemble [`SimpleBilinearMassIntegrator`](@ref FerriteOperatorsExampleElements.SimpleBilinearMassIntegrator) for a
@@ -53,10 +51,9 @@ item_update_flags(::MatrixFreeActionKind, c::SumFactorizedMassElementCache) =
     Ferrite.UpdateFlags(nodes = false, coords = c.qdata === nothing, dofs = true)
 
 # `a(u, v) = ∫ v ρ u` is symmetric for every scalar `ρ` — `u` and `v` enter
-# through the same scalar multiplication, so the form commutes unconditionally
-# ([`element_matrix_symmetry`](@ref)). Same measured ACTION-time trade-off as
-# the diffusion cache (`sum_factorized_diffusion.jl`, same packed index-fold
-# question, order-independent of the physics): a p = 1 win, a p ≥ 2 cost.
+# through the same scalar multiplication ([`element_matrix_symmetry`](@ref)).
+# The packed layout's action-time trade-off is the diffusion cache's, being a
+# property of the packed index map rather than of the physics.
 element_matrix_symmetry(::SumFactorizedMassElementCache) = SymmetricElementMatrix()
 
 function setup_element_cache(model::SumFactorizedMassIntegrator, sdh::SubDofHandler)

@@ -6,12 +6,11 @@
 # matrix-free action under every element mapping on CUDA and on two CPU devices,
 # and `mul!` on the assembled CuSparse matrix of the same form. Each matrix-free
 # arm runs under the `storage` elections its mapping serves — `Recompute()`
-# (MFEM NONE: re-derive the geometry per action), `Stored()` (PARTIAL:
-# precomputed per-quadrature-point factors) and `ElementAssembly()` (ELEMENT: the
-# dense element matrices, worker-per-element or lanes-per-element). The headline
-# is the polynomial order at which the action beats the SpMV, whether either
-# stored level moves that crossover, and whether splitting one element across a
-# workgroup or across a block of lanes beats one worker per element.
+# (MFEM NONE), `Stored()` (PARTIAL) and `ElementAssembly()` (ELEMENT,
+# worker-per-element or lanes-per-element). The headline is the polynomial order
+# at which the action beats the SpMV, whether either stored level moves that
+# crossover, and whether splitting one element across a workgroup or a block of
+# lanes beats one worker per element.
 #
 # Every ELEMENT-level arm is quoted against a PURE-STREAM CEILING of its own
 # access pattern (`_stream_worker!`/`_stream_lane!`, dense and packed): the same
@@ -20,9 +19,8 @@
 #
 # The diffusion form's D is isotropic, hence symmetric, so
 # `SumFactorizedDiffusionIntegrator`'s `[EA]` arm runs the PACKED layout
-# (`element_matrix_symmetry` — S5); `[EA general]` is the same order/mesh under
-# the standard analytic-Jacobian cache, which never declares the election, for
-# a direct packed-vs-full comparison.
+# (`element_matrix_symmetry`); `[EA general]` is the same order/mesh under the
+# standard analytic-Jacobian cache, which never declares the election.
 #
 # The mesh is resized per order so every arm carries roughly `target_dofs`
 # unknowns; Ferrite ships `Lagrange{RefHexahedron, order}` for order ≤ 3.
@@ -31,14 +29,14 @@
 #
 # THE IDLE-CLOCK TRAP. A GPU at rest sits at its idle clocks (300 MHz SM /
 # 405 MHz memory on an RTX 2080) and takes on the order of a SECOND of sustained
-# load to ramp to its boost clocks — far longer than one action. A short warm-up
+# load to reach its boost clocks — far longer than one action. A short warm-up
 # therefore samples an arm mid-ramp, and min-of-N does not protect against it:
-# every sample of the window is slow. Measured on this benchmark's own arms,
-# back-to-back stock runs disagreed by up to 5x on the short ones (the assembled
-# SpMV read 0.105 ms hot and 1.667 ms cold). Every arm here is therefore preceded
-# by a SUSTAINED burn of that same arm (`WARMUP_SECONDS`) and repeated over
-# `PASSES` independent burn+sample rounds, and the SM/memory clocks are queried
-# around each arm so a cold measurement is visible rather than silent.
+# every sample of the window is slow. Back-to-back stock runs disagreed by up to
+# 5x on the short arms (the assembled SpMV read 0.105 ms hot and 1.667 ms cold).
+# So every arm is preceded by a SUSTAINED burn of that same arm
+# (`WARMUP_SECONDS`), repeated over `PASSES` independent burn+sample rounds, and
+# the SM/memory clocks are queried around each arm so a cold measurement is
+# visible rather than silent.
 using FerriteOperators, FerriteOperatorsExampleElements, FerriteOperatorsTensorProduct
 using LinearAlgebra
 using Printf
@@ -77,9 +75,6 @@ function distorted_testbed(order, n; distortion = 0.15f0)
     return dh
 end
 
-# The SM and memory clocks, as `nvidia-smi` reports them, or `nothing` where the
-# query is unavailable. Reported per arm so a number taken on a ramping device is
-# visible in the output instead of silently wrong (see the idle-clock trap above).
 function clocks()
     try
         sm, mem = split(strip(read(`nvidia-smi --query-gpu=clocks.sm,clocks.mem
@@ -94,12 +89,9 @@ _clock_note(::Nothing) = ""
 _clock_note((sm, mem)) = @sprintf(" [%d/%d MHz]", sm, mem)
 
 # Min-of-N wall time of one action over `PASSES` independent rounds, plus the
-# host allocations of one call.
-#
-# Each round BURNS the arm for `WARMUP_SECONDS` before sampling it, so no round
-# is sampled while the device clocks are ramping, and the reported time is the
-# minimum over rounds — a round that still caught a cold device is discarded by
-# the outer minimum rather than averaged into the result.
+# host allocations of one call. Each round BURNS the arm for `WARMUP_SECONDS`
+# before sampling it, and the outer minimum discards a round that still caught a
+# cold device rather than averaging it in.
 function measure(action!; samples = 20, passes = PASSES, warmup = WARMUP_SECONDS)
     best = Inf
     for _ in 1:passes
@@ -113,11 +105,9 @@ function measure(action!; samples = 20, passes = PASSES, warmup = WARMUP_SECONDS
     return best, (@allocated action!())
 end
 
-# The ELEMENT level with nothing around it: one worker per cell, the dof range
-# read straight from the flat `cell_dofs`, `uₑ` gathered into registers, each row
-# of `Kₑ·uₑ` accumulated in a register and scattered atomically. The dof array
-# carries the device handler's own `Int`, so the index traffic is the one the
-# engine pays.
+# The ELEMENT level with nothing around it: `uₑ` in registers, each row of
+# `Kₑ·uₑ` accumulated in a register and scattered atomically. The dof array
+# carries the device handler's own `Int`, so the index traffic is the engine's.
 @kernel function _floor_action!(y, @Const(u), @Const(K), @Const(cell_dofs),
         ::Val{ND}, ncells) where {ND}
     worker = @index(Global, Linear)
@@ -135,17 +125,13 @@ end
     end
 end
 
-# The SAME floor with `yₑ` moved out of the register and into one worker's row of
-# a global slab shaped exactly like the engine's `ws.re`
-# (`ext/FerriteOperatorsKernelAbstractionsExt.jl:272`: `n_workers` rows of `ND`,
-# worker index LEADING and therefore coalesced across a warp), put through the
-# engine's own choreography — zeroed, accumulated into, read back by the scatter.
-# Every other term is held fixed, so the delta against `_floor_action!` IS the
-# price of the round-trip design.md C10 proposes to remove.
+# The SAME floor with `yₑ` in a global slab shaped like the engine's `ws.re`,
+# put through the engine's choreography — zeroed, accumulated into, read back by
+# the scatter. Every other term is fixed, so the delta against `_floor_action!`
+# IS the price of that round-trip.
 #
-# The zero pass precedes the gather for the same reason the engine's `fill!` does:
-# the gather's loads may alias the slab, and that is what stops the zero stores
-# from being dead-store-eliminated against the accumulate pass's stores.
+# The zero pass precedes the gather so the gather's (possibly aliasing) loads
+# stop the zero stores from being dead-store-eliminated.
 @kernel function _floor_action_re!(y, @Const(u), @Const(K), @Const(cell_dofs), re,
         ::Val{ND}, ncells) where {ND}
     worker = @index(Global, Linear)
@@ -171,8 +157,8 @@ end
 
 # The same two residencies with the element matrix REMOVED: gather, move,
 # scatter. Stripping the O(ND^2) `Kₑ` stream takes away the traffic the
-# round-trip can hide behind, which is what separates "the round-trip is absorbed
-# by the memory system" from "the round-trip is negligible in absolute terms".
+# round-trip can hide behind, separating "absorbed by the memory system" from
+# "negligible in absolute terms".
 @kernel function _floor_move!(y, @Const(u), @Const(cell_dofs), ::Val{ND}, ncells) where {ND}
     worker = @index(Global, Linear)
     stride = prod(KA.@ndrange())
@@ -204,28 +190,20 @@ end
     end
 end
 
-# The pure-stream CEILING of the ELEMENT level: the LOADS one action issues — every
-# entry of each cell's `Kₑ` in the layout it is stored in, plus the cell's dof
-# window — with the product and the scatter removed. It pins what the hardware can
-# move for that access pattern, so an arm's distance from optimal is measured
-# rather than quoted against CUSPARSE.
+# The pure-stream CEILING of the ELEMENT level: the LOADS one action issues,
+# with the product and the scatter removed.
 #
-# WHAT IT IS NOT, measured on an RTX 2080 (448 GB/s): the best of these arms
-# reaches 333 GB/s and most sit near half of that, so none of them is bandwidth-
-# saturated and a "ceiling" here is the rate of an ACCESS PATTERN, not a wall.
-# A pattern's rate can therefore sit BELOW a kernel that reads the same bytes and
-# does more with them — `[lanes, dense]` at p = 3 reads 0.754 ms against its own
-# action's 0.504 ms, reproducibly, because the action's arithmetic hides the
-# latency this arm exposes. Read a ratio against these as distance from the
-# pattern's measured rate, and not at all where the arm is above its action.
+# WHAT IT IS NOT: a bandwidth wall. These arms reach at most 333 GB/s of an
+# RTX 2080's 448, so a "ceiling" here is the rate of an ACCESS PATTERN and can
+# sit BELOW a kernel that reads the same bytes and hides the latency behind
+# arithmetic. Read a ratio against these as distance from the pattern's measured
+# rate, and not at all where the arm is above its action.
 #
 # The only arithmetic is the reduction that keeps the loads from being
-# dead-code-eliminated, and it carries the real kernel's dependency structure: one
-# accumulator chain per ROW, exactly as `_element_matrix_action!` has, never one
-# chain over the whole cell. The dof stream folds into an INTEGER accumulator and
-# is converted once per thread: an action uses a dof to index with, never to
-# compute in, and an `Int64`-to-`Float32` conversion per entry made an earlier
-# revision of this arm SLOWER than the kernel it is supposed to bound.
+# dead-code-eliminated, and it carries the real kernel's dependency structure:
+# one accumulator chain per ROW. The dof stream folds into an INTEGER
+# accumulator and is converted once per thread — a per-entry `Int64`-to-`Float32`
+# conversion made this arm slower than the kernel it bounds.
 @inline _stream_entry(K, cell, i, j, ::Val{ND}, ::Val{false}) where {ND} = @inbounds K[cell, i, j]
 @inline _stream_entry(K, cell, i, j, ::Val{ND}, ::Val{true}) where {ND} =
     @inbounds K[cell, _packed_index(i, j, Val(ND))]
@@ -253,9 +231,9 @@ end
 end
 
 # The same bytes under the LANE launch: one element slot per grid-stride step,
-# lane `l` reading rows `l:nlanes:ND` and the whole dof window per row — which is
-# the mapping's own cost, `uₑ` not being staged. The thread → (slot, lane) map is
-# `_lane_position`'s, so this arm streams what the mapping's kernel streams.
+# lane `l` reading rows `l:nlanes:ND` and the whole dof window per row, which is
+# the mapping's own cost since `uₑ` is not staged. The thread → (slot, lane) map
+# is `_lane_position`'s, so this arm streams what the mapping's kernel streams.
 @kernel function _stream_lane!(sink, @Const(K), @Const(cell_dofs), ::Val{ND}, ::Val{PACKED},
         ::Val{NLANES}, ::Val{PER}, n_slots, ncells) where {ND, PACKED, NLANES, PER}
     thread = @index(Global, Linear)
@@ -280,17 +258,12 @@ end
     @inbounds sink[thread] = acc + eltype(K)(idx % 2)
 end
 
-# EVERY floor arm is checked against a reference before it is timed. These are
-# hand-rolled kernels carrying `@inbounds` over indices the engine derives
-# differently, and they publish the differential the ELEMENT level is judged
-# against — a miscompiled or mis-indexed floor would publish a fast WRONG number
-# with nothing to notice it. The reference is the host's own arithmetic over the
-# same `K`/`cell_dofs`/`u`, sharing no code with the kernel under test.
+# Every floor arm is checked against a host reference before it is timed: these
+# hand-rolled kernels carry `@inbounds` over indices the engine derives
+# differently, so a mis-indexed floor would publish a fast WRONG number.
 #
-# The stream CEILINGS get no such check and cannot: they compute no action, only
-# a reduction whose sole purpose is to keep the loads from being eliminated. What
-# is asserted there is that the reduction ran and is finite — total elimination
-# would show, partial would not.
+# The stream CEILINGS compute no action, only a reduction, so all that can be
+# asserted is that it ran and is finite.
 function _check_floor!(label, yd, run!, reference; rtol = 1.0f-4)
     fill!(yd, 0)
     run!()
@@ -317,16 +290,16 @@ if CUDA_AVAILABLE
         device = KernelAbstractionsDevice(backend; value_type = Tv, index_type = Ti,
                                           items_per_worker = 2, max_workgroup_size = 256)
         # The hand-rolled kernels below index `K[cell, a, b]` directly — the DENSE
-        # (slot, i, j) layout, never the S5 packed one. `integrator` may now declare
+        # (slot, i, j) layout, never the packed one. `integrator` may declare
         # `element_matrix_symmetry` (the tensor-product diffusion cache does, for
-        # isotropic D), so the floor's own operator is always built over the
-        # analytic-Jacobian cache instead, which never declares the election.
+        # isotropic D), so the floor's own operator is built over the
+        # analytic-Jacobian cache, which never declares the election.
         floor_integrator = SimpleBilinearDiffusionIntegrator(2.5, integrator.qrc, :u)
         op = setup_operator(AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
                                              SequentialScheduling(), device), floor_integrator, dh)
         K = op.engine.subdomain_caches[1].device_cache.element.K
         # The PACKED store of the same form, for the stream ceilings: `integrator`
-        # declares `element_matrix_symmetry` for an isotropic D (S5), so its own
+        # declares `element_matrix_symmetry` for an isotropic D, so its own
         # ElementAssembly() store is the `(slot, t)` layout.
         packed_op = setup_operator(AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
                                                     SequentialScheduling(), device), integrator, dh)
@@ -334,12 +307,8 @@ if CUDA_AVAILABLE
         cell_dofs = CuVector(dh.cell_dofs)
         workgroup, blocks = FerriteOperators.launch_geometry(device, ncells)
         ndrange = workgroup * blocks
-        # The engine's residual slab at the size and layout the engine gives it:
-        # `n_workers(device, partition)` rows, which is this launch geometry.
-        re = CUDA.zeros(Tv, ndrange, nd)
-        # The host references, from the SAME stores the kernels read: the dense
-        # `Kₑ·uₑ` scattered over each cell's dof window, and the same window's
-        # gather-then-scatter with `Kₑ` removed.
+        re = CUDA.zeros(Tv, ndrange, nd)   # the engine's residual slab, same shape
+        # The host references, from the SAME stores the kernels read.
         Kh, dofs_h, uh = Array(K), Array(cell_dofs), Array(ud)
         action_reference = zeros(Tv, length(uh))
         move_reference   = zeros(Tv, length(uh))
@@ -374,9 +343,8 @@ if CUDA_AVAILABLE
                       sample("CUDA gather+scatter floor (ws.re slab)", _floor_move_re!(backend, workgroup),
                              move_reference, yd, ud, cell_dofs, re, Val(nd), ncells))
 
-        # The stream ceilings, one per (mapping, layout): the same loads, no
-        # product and no scatter. The lane arms launch the geometry the mapping
-        # itself launches.
+        # One per (mapping, layout); the lane arms launch the mapping's own
+        # geometry.
         sink_worker = CUDA.zeros(Tv, ndrange)
         nlanes = min(nd, device.max_workgroup_size)
         lane_wg, lane_blocks, n_slots = lane_launch_geometry(device, nlanes, ncells)
@@ -416,8 +384,6 @@ if CUDA_AVAILABLE
     end
 end
 
-# The action arm each stream ceiling is supposed to bound: same mapping, same
-# element-matrix layout.
 const CEILING_ARMS = Dict(
     "CUDA stream ceiling [worker, dense]"  => "CUDA worker-per-element action [EA general]",
     "CUDA stream ceiling [worker, packed]" => "CUDA worker-per-element action [EA]",
@@ -425,10 +391,8 @@ const CEILING_ARMS = Dict(
     "CUDA stream ceiling [lanes, packed]"  => "CUDA lanes-per-element action [EA]",
 )
 
-# A ceiling is the rate of an ACCESS PATTERN, not a hardware wall, so it can sit
-# BELOW the kernel that reads the same bytes and hides the latency behind
-# arithmetic. Where it does, the number bounds nothing and the row says so
-# instead of leaving the caveat in a source comment.
+# Where a ceiling sits BELOW its own action it bounds nothing, and the row says
+# so rather than leaving the caveat in a source comment.
 function _ceiling_note(name, time, results)
     arm = get(CEILING_ARMS, name, nothing)
     arm === nothing && return ""
@@ -440,10 +404,7 @@ function _ceiling_note(name, time, results)
 end
 
 const STORAGE = (("Stored", Stored()), ("Recompute", Recompute()), ("EA", ElementAssembly()))
-# The ELEMENT level maps one worker onto one dense product; it has no lattice
-# for a workgroup to split.
 const COOPERATIVE_STORAGE = (("Stored", Stored()), ("Recompute", Recompute()))
-# The lane mapping splits a stored `Kₑ`'s ROWS, which only the ELEMENT level has.
 const LANE_STORAGE = (("EA", ElementAssembly()),)
 
 function run_order(order)
@@ -456,13 +417,12 @@ function run_order(order)
     @printf("\norder %d: %d hexahedra, %d dofs, %d quadrature points per cell\n",
             order, ncells, n_dofs, nqp)
     # What each level keeps. PARTIAL holds one symmetric-by-construction 3x3
-    # factor per quadrature point, stored FULL so that level and NONE form it by
-    # the same expression; ELEMENT holds a dense `nd x nd` per cell, the term
-    # that grows fastest with the order.
+    # factor per quadrature point, stored FULL so PARTIAL and NONE form it by the
+    # same expression; ELEMENT holds a dense `nd x nd` per cell.
     nd = (order + 1)^3                       # dofs per hexahedron
     pa_bytes = nqp * 9 * sizeof(Tv)          # one full 3x3 factor per quadrature point
     ea_bytes = nd * nd * sizeof(Tv)          # one dense element matrix per cell
-    # S5: SymmetricElementMatrix() packs the upper triangle (diagonal included)
+    # SymmetricElementMatrix() packs the upper triangle (diagonal included)
     # instead of the full nd x nd block.
     ea_packed_bytes = ((nd * (nd + 1)) ÷ 2) * sizeof(Tv)
     @printf("  storage per cell: NONE 0 B | PARTIAL %d B (%.0f MB) | ELEMENT %d B (%.0f MB) | ELEMENT packed %d B (%.0f MB)\n",
@@ -473,8 +433,7 @@ function run_order(order)
 
     results = Pair{String, Tuple{Float64, Int}}[]
     fills = Pair{String, Float64}[]
-    # SM/memory clocks as each device arm finished sampling, so a cold arm is
-    # visible in the table.
+    # Sampled per arm, so a cold arm is visible in the table.
     clockstamps = Dict{String, Any}()
     u = Tv[sin(Tv(4.9) * i + Tv(2.1)) for i in 1:n_dofs]
     y = zeros(Tv, n_dofs)
@@ -497,9 +456,9 @@ function run_order(order)
         yd = CUDA.zeros(Tv, n_dofs)
         # Every device arm is built, measured and RELEASED before the next one
         # allocates. The stored levels and the per-worker scratch run into
-        # hundreds of megabytes between them, and an arm timed on an allocator
-        # the previous arms fragmented measures the allocator: the assembled
-        # SpMV at order 1 reads 6x its clean-device time that way.
+        # hundreds of megabytes, and an arm timed on an allocator the previous
+        # arms fragmented measures the allocator: the assembled SpMV at order 1
+        # reads 6x its clean-device time that way.
         function device_arm!(build)
             op = build()
             time = measure(() -> mul!(yd, op, ud))
@@ -511,8 +470,7 @@ function run_order(order)
             return time, fill
         end
 
-        # The assembled reference goes first, on the cleanest device state there
-        # is; only the SpMV is timed, never the assembly.
+        # First, on the cleanest device state; only the SpMV is timed.
         try
             device   = KernelAbstractionsDevice(CUDABackend(); value_type = Tv, index_type = Ti)
             spec     = StandardOperatorSpecification(; matrix_type = CuSparseMatrixCSC{Tv, Ti})
@@ -550,12 +508,12 @@ function run_order(order)
             storage isa Recompute || push!(fills, "$name [$label]" => fill)
         end
 
-        # S5: `SumFactorizedDiffusionIntegrator` declares `element_matrix_symmetry`
-        # for this isotropic D, so the "[EA]" arm above already reports the PACKED
-        # layout. This is the matched "full" comparison at the SAME order/mesh:
-        # the standard analytic-Jacobian diffusion cache never declares the
-        # election, so its ElementAssembly() store stays dense. Both fill through
-        # an action-derived or analytic Kₑ that is numerically the same form.
+        # `SumFactorizedDiffusionIntegrator` declares `element_matrix_symmetry` for
+        # this isotropic D, so the "[EA]" arm above reports the PACKED layout.
+        # This is the matched "full" comparison at the SAME order/mesh: the
+        # standard analytic-Jacobian diffusion cache never declares the election,
+        # so its ElementAssembly() store stays dense, and both fill a Kₑ that is
+        # numerically the same form.
         for (name, mapping) in (("CUDA worker-per-element action", WorkerPerElement()),
                                 ("CUDA lanes-per-element action", LanesPerElement()))
             general_time, general_fill = device_arm!() do
@@ -571,17 +529,10 @@ function run_order(order)
             push!(fills, "$name [EA general]" => general_fill)
         end
 
-        # The MATH FLOOR of the ELEMENT level: the same dense `Kₑ·uₑ` per cell,
-        # written as one hand-rolled kernel that reads the dof range straight out
-        # of the flat `cell_dofs`, gathers into registers and scatters the rows
-        # atomically. It carries no workspace, no element cache and no assembler,
-        # so the gap between it and the `[EA]` arm above is what the engine's
-        # per-item plumbing costs.
-        #
-        # Each floor is run in BOTH `yₑ` residencies — the register the math needs
-        # and the per-worker global slab the engine's `ws.re` actually is — so the
-        # round-trip's price is a measured difference between two arms that differ
-        # in nothing else, rather than an arithmetic estimate of bytes moved.
+        # The MATH FLOOR of the ELEMENT level: no workspace, no element cache and
+        # no assembler, so the gap to the `[EA]` arm is what the engine's per-item
+        # plumbing costs. Run in BOTH `yₑ` residencies — register and per-worker
+        # global slab — so the round-trip's price is a measured difference.
         for (name, time) in element_floor_times(yd, ud, integrator, dh, nd, ncells)
             push!(results, name => (time, 0))
             clockstamps[name] = clocks()

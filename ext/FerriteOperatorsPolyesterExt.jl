@@ -21,9 +21,9 @@ end
 
 # The per-worker copy of the task's scatter target — the only part of a task that is not
 # shared read-only — is one duplicate per worker, so a sweep's cost here is the worker
-# count and not the item count. A task carrying NO assembler has no such part, and it is
-# shared instead of duplicated: a sweep that scatters nothing (`QuadratureDataKind`) can
-# have every field a singleton, and a vector of ZERO-SIZED elements is what Polyester's
+# count and not the item count. A task carrying NO assembler has no such part and is
+# shared instead: a sweep that scatters nothing (`QuadratureDataKind`) can have every
+# field a singleton, and a vector of ZERO-SIZED elements is what Polyester's
 # pointer-backed closure capture cannot index.
 _worker_tasks(device, task, n) = [FerriteOperators.duplicate_for_device(device, task) for _ in 1:n]
 _worker_tasks(device, task::FerriteOperators.AssemblyTask{<:Any, Nothing}, n) = task

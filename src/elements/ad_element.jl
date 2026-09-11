@@ -7,23 +7,18 @@
 
 Supertype of the caches this package wraps around a user's element cache
 ([`ADElementCache`](@ref), [`FusedFromSplit`](@ref)). The wrapped cache sits in
-a field `inner`, and everything a decorator simply inherits is forwarded once
-here — including the AUTHOR-DECLARATION seams about the wrapped element itself
-([`assembly_iterator`](@ref), [`device_assembly_iterator`](@ref),
-[`item_provider`](@ref), [`item_update_flags`](@ref),
-[`element_local_length`](@ref), [`element_matrix_symmetry`](@ref),
-[`element_action_row`](@ref)) and the element's own matrix-free storage
+a field `inner`, and everything a decorator inherits is forwarded once here.
+
+A declaration about the wrapped ELEMENT is forwarded wholesale — the iteration
+seams, [`element_local_length`](@ref), [`element_matrix_symmetry`](@ref),
+[`element_action_row`](@ref), and the matrix-free storage
 ([`with_action_storage`](@ref), [`fill_quadrature_data!`](@ref)), which passes
-through and back via [`rewrap`](@ref): decoration does not change what the ELEMENT is,
-so a decorator inherits the inner's declaration of it wholesale, and one with
-its own explicit method for a seam (`ElementAssemblyCache`'s extent/row-action)
-wins by ordinary dispatch — it is strictly more specific than the blanket
-method here. This is the OTHER side of the rule below: what a decorator
-answers about REQUESTS it SERVES ([`provides_analytic`](@ref),
-[`serves_kind`](@ref)) stays decorator-owned, one that forwards only some
-requests must not inherit the inner's claims for the rest, and is not
-forwarded here — but a declaration about the element the decorator wraps is
-exactly the inner's to make, and blanket inheritance is what that calls for.
+through and back via [`rewrap`](@ref). A decorator with its own explicit method
+for a seam wins by ordinary dispatch.
+
+What a decorator answers about the REQUESTS it SERVES
+([`provides_analytic`](@ref), [`serves_kind`](@ref)) is NOT forwarded: one that
+forwards only some requests has no claim on the inner's for the rest.
 
 Which subject a probe takes is the whole convention:
 
@@ -52,13 +47,10 @@ unwrap(::Type{<:AbstractElementCacheDecorator{Inner}}) where {Inner} = unwrap(In
 """
     rewrap(d::AbstractElementCacheDecorator, inner) -> decorator
 
-`d` around a REPLACEMENT `inner` — the inverse of reading `d.inner`, and what a
-seam that transforms the wrapped cache rather than merely delegating to it needs
-([`with_action_storage`](@ref), whose storage election answers with a different
-cache than it was given). The default calls the decorator type's own
-constructor with the new inner, which is the whole of a one-field decorator; a
-decorator carrying state beside `inner` ([`ADElementCache`](@ref)'s buffers)
-overloads this to carry it across.
+`d` around a REPLACEMENT `inner`, for a seam that transforms the wrapped cache
+rather than delegating to it ([`with_action_storage`](@ref)). The default calls
+the decorator type's constructor with the new inner; a decorator carrying state
+beside `inner` overloads this to carry it across.
 """
 rewrap(d::D, inner) where {D <: AbstractElementCacheDecorator} = Base.typename(D).wrapper(inner)
 
@@ -73,25 +65,14 @@ allocate_element_unknown_vector(d::AbstractElementCacheDecorator, sdh) = allocat
 allocate_element_residual_vector(d::AbstractElementCacheDecorator, sdh) = allocate_element_residual_vector(d.inner, sdh)
 element_value_type(d::AbstractElementCacheDecorator) = element_value_type(d.inner)
 element_matrix_symmetry(d::AbstractElementCacheDecorator) = element_matrix_symmetry(d.inner)
-# The iteration-protocol seams (S1-S7, iterators.jl/strategy.jl/element_interface.jl):
-# what the ELEMENT positions on, provides and reports about itself. Forwarded
-# for the same reason as every declaration above; `ElementAssemblyCache`'s own
-# `item_update_flags`/`element_local_length`/`element_action_row` methods are
-# strictly more specific in the cache slot and win by ordinary dispatch.
 assembly_iterator(kind, d::AbstractElementCacheDecorator, sdh) = assembly_iterator(kind, d.inner, sdh)
 device_assembly_iterator(kind, d::AbstractElementCacheDecorator, sdh, device_sdh) =
     device_assembly_iterator(kind, d.inner, sdh, device_sdh)
 item_provider(kind, d::AbstractElementCacheDecorator, sdh) = item_provider(kind, d.inner, sdh)
 item_update_flags(kind, d::AbstractElementCacheDecorator) = item_update_flags(kind, d.inner)
-# The matrix-free storage election and the store it fills are the WRAPPED
-# element's, so both pass through. The election is a transformation rather than a
-# delegation — it answers with a different cache — hence `rewrap`, which puts the
-# decorator back around the elected inner. Only the two PER-QUADRATURE-POINT
-# levels are forwarded: `ElementAssembly()` is the FRAMEWORK's own election and
-# wraps the decorated cache whole (`with_action_storage(cache, ::ElementAssembly,
-# ::SubDofHandler)`), which is what it must do — the matrices it keeps are the
-# decorated element's. The two storage arguments are disjoint types, so the two
-# methods never tie.
+# Only the two PER-QUADRATURE-POINT levels are forwarded: `ElementAssembly()` is
+# the FRAMEWORK's own election and must wrap the decorated cache whole. The two
+# storage arguments are disjoint types, so the methods never tie.
 with_action_storage(d::AbstractElementCacheDecorator, storage::Union{Stored, Recompute}, sdh) =
     rewrap(d, with_action_storage(d.inner, storage, sdh))
 fill_quadrature_data!(d::AbstractElementCacheDecorator, args::CellArgs) =
@@ -336,8 +317,8 @@ end
 duplicate_for_device(device, ad::ADElementCache) =
     ADElementCache(duplicate_for_device(device, ad.inner), ad.backend, duplicate_for_device(device, ad.buffers))
 
-# The buffers are sized from the inner's `allocate_element_*` shapes, which a
-# storage election does not change, so they carry across unchanged.
+# A storage election does not change the inner's `allocate_element_*` shapes, so
+# the buffers carry across unchanged.
 rewrap(ad::ADElementCache, inner) = ADElementCache(inner, ad.backend, ad.buffers)
 
 """

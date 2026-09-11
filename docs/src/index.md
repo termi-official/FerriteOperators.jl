@@ -100,26 +100,20 @@ op = setup_operator(strategy, integrator, dh)   # op.A lives on the device
 update_operator!(op, p)
 ```
 
-`value_type` governs the GLOBAL system alone. The precision the element caches
-evaluate in is the INTEGRATOR's, elected through its quadrature collection
-(`QuadratureRuleCollection(Float32, 2)` — see
-[Evaluation precision](elements.md#Evaluation-precision)), so a device run
-elects it there as well. The two are free to differ: the scatter converts.
-Build the grid with `Float32` coordinates too: a `Float64` grid assembles
-correctly, but its coordinates are what the geometry mapping computes in, so
-the device pays `Float64` memory and arithmetic for it. The linear operator's
-vector is allocated on the device too, and the assembled matrix stays there — a
-sweep transfers nothing.
+`value_type` governs the GLOBAL system alone; the element caches' precision is
+the INTEGRATOR's, elected through its quadrature collection (see
+[Evaluation precision](elements.md#Evaluation-precision)). The two may differ —
+the scatter converts. Build the grid with `Float32` coordinates too: a
+`Float64` grid assembles correctly, but its coordinates are what the geometry
+mapping computes in. The vector and the assembled matrix both stay on the
+device; a sweep transfers nothing.
 
 What the device covers is CELL items under [`ColoredScheduling`](@ref), which
 is REQUIRED: Ferrite's device matrix assembler accumulates without atomics.
-Rejected at setup, each with a message naming the limitation:
-[`SequentialScheduling`](@ref), facet items, algebraic items, patch and
-transfer operators, condensed internal state, nonlinear integrators, a
-[`BlockedOperatorSpecification`](@ref), constraints declared on the operator
-specification, [`global_dofs`](@ref) declarations, value-returning sweeps
-(functionals, quadrature evaluation), and a device matrix type Ferrite has no
-assembler for.
+Everything outside that slice — other schedulings, other item families,
+condensed state, nonlinear integrators, blocked or constrained specifications,
+and so on — is rejected at setup with a message naming the limitation;
+[`KernelAbstractionsDevice`](@ref) lists them.
 
 An element cache reaches the device by declaring which of its fields are
 batched per worker and which are shared, through
@@ -131,9 +125,9 @@ setup_device_instances(dev::AbstractGPUDevice, c::MyCache, n) =
 device_worker_view(c::MyCache, w) = MyCache(c.D, device_worker_view(c.cellvalues, w))
 ```
 
-The cache's field type parameters have to admit the batched layout — a
-`cellvalues::CV` field holds a struct-of-arrays container over `n` workers on
-the device, not a `CellValues`.
+The cache's field type parameters have to admit the batched layout: on the
+device a `cellvalues::CV` field holds a struct-of-arrays container over `n`
+workers, not a `CellValues`.
 
 ## Assembly levels
 
@@ -144,8 +138,7 @@ operator family — the FULL level, and the default.
 matrix and every `mul!` evaluates `y = A·u` element by element. `setup_operator`
 returns a [`MatrixFreeFerriteOperator`](@ref) for a bilinear integrator whose
 caches serve the elected storage level — [`apply_element_action!`](@ref) for the
-two per-quadrature-point levels — and a cache that does not is a setup error
-naming the method.
+two per-quadrature-point levels — and a setup error naming the method otherwise.
 
 ```julia
 strategy = AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction())
@@ -175,11 +168,8 @@ op   = setup_operator(AssemblyStrategy(form, SequentialScheduling(), device), in
 ```
 
 The election is realized on the device at setup
-([`with_element_mapping`](@ref)), because the seams that change shape with it —
-[`n_workers`](@ref), [`setup_device_instances`](@ref),
-[`execute_on_device!`](@ref) — all read the device. The TERM never names the
-mapping: one element definition, two execution mappings, chosen on the strategy
-side.
+([`with_element_mapping`](@ref)). The TERM never names the mapping: one element
+definition, chosen between on the strategy side.
 
 It carries a third choice, `storage`, which is WHAT the operator keeps between
 actions ([`StorageElection`](@ref)) — MFEM's other three assembly levels:
@@ -199,29 +189,18 @@ form = MatrixFreeAction(; storage = ElementAssembly())   # `Stored()` is the def
   runs [`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref) — the two
   mappings of a dense product, whole or by rows.
 
-Measured bytes/cell against the same form's assembled matrix (`Float32`,
-tensor-product hexahedra):
-
-| `p` | `ElementAssembly` | packed (symmetric) | assembled |
-|---|---|---|---|
-| 1 | 256 | 144 | 220 |
-| 2 | 2916 | 1512 | 4157 |
-| 3 | 16384 | 8320 | 27318 |
-
 `ElementAssembly` is the cheapest matrix-free storage at `p = 1`–`2`;
 `ndofs_per_cell²` overtakes the assembled matrix's per-cell share above that,
-which is where [`Stored`](@ref)/[`Recompute`](@ref) take over. The table is
-bytes and nothing else — a count, not a card measurement.
+which is where [`Stored`](@ref)/[`Recompute`](@ref) take over.
+[`ElementAssembly`](@ref) tabulates the bytes and states the fill cost.
 
 An element whose form is symmetric may additionally elect
-[`SymmetricElementMatrix`](@ref) ([`element_matrix_symmetry`](@ref)), the
-`packed` column above — below the assembled matrix's own per-cell share at
-every measured order. Bytes are not the whole election: under
-[`WorkerPerElement`](@ref) the packed read costs ACTION time above `p = 1`
-(measured on an RTX 2080: −20% at `p = 1`, +96% at `p = 2`, +43% at `p = 3`,
-because the packed index map folds to literals at `ndofs_per_cell = 8` and not
-above), so the byte win is unconditional while the time win is not. See
-[`ElementAssembly`](@ref)'s own docstring for the fill cost.
+[`SymmetricElementMatrix`](@ref) ([`element_matrix_symmetry`](@ref)), which
+packs `Kₑ`'s upper triangle only. Bytes are not the whole election: the byte win
+is unconditional, but under [`WorkerPerElement`](@ref) the packed read costs
+ACTION time above `p = 1` (measured on an RTX 2080: −20% at `p = 1`, +96% at
+`p = 2`, +43% at `p = 3`, the packed index map folding to literals at
+`ndofs_per_cell = 8` and not above).
 
 Both stored levels are filled at setup and refilled by
 [`update_operator!`](@ref), whose freshness contract is the one an assembled
@@ -237,12 +216,11 @@ ELEMENT level, and a matrix-free one has its matrices filled from its own
 action.
 
 Writing such an element is [`AbstractTensorProductElementCache`](@ref FerriteOperatorsTensorProduct.AbstractTensorProductElementCache)
-plus a POINTWISE MAP ([`tensor_product_pointwise`](@ref FerriteOperatorsTensorProduct.tensor_product_pointwise)): the 1D operators, the
-lattice permutations, the contractions and both mapping pipelines are the
-core's, and what remains is the `D` block of the operator decomposition. The
-example elements ship two of them over that one core — a diffusion action
-(a tensor on the reference gradient) and a mass action (a scalar on the
-interpolated value).
+plus a POINTWISE MAP ([`tensor_product_pointwise`](@ref FerriteOperatorsTensorProduct.tensor_product_pointwise)) — the `D` block of the
+operator decomposition; the 1D operators, the lattice permutations, the
+contractions and both mapping pipelines are the core's. Two reference elements
+ship over that one core: a diffusion action (a tensor on the reference
+gradient) and a mass action (a scalar on the interpolated value).
 
 !!! warning "Experimental surface"
     The matrix-free form, [`MatrixFreeFerriteOperator`](@ref), the

@@ -1,21 +1,9 @@
 ####################################
 ## The ELEMENT assembly level
 ####################################
-#
-# The third member of a matrix-free operator's storage ladder
-# ([`MatrixFreeAction`](@ref)): the dense element matrices, kept between actions.
-# It is element-AGNOSTIC — a decorator over whatever cache the integrator built —
-# which is what lets it serve a cache with no matrix-free kernel at all.
 
-"""
-    UnitElementVector{T}(n, j)
-
-The `j`-th unit vector of length `n`, as an `AbstractVector{T}` that stores
-nothing. It exists so an element's action kernel can be applied to a basis of
-the local space without a per-worker scratch vector to hold one — which is what
-fills a column of an element matrix from an action
-([`ElementAssemblyCache`](@ref)).
-"""
+# The `j`-th unit vector of length `n`, storing nothing, so the action route can
+# fill a column of an element matrix without a scratch vector.
 struct UnitElementVector{T} <: AbstractVector{T}
     n::Int
     j::Int
@@ -23,64 +11,41 @@ end
 Base.size(v::UnitElementVector) = (v.n,)
 @inline Base.getindex(v::UnitElementVector{T}, i::Int) where {T} = ifelse(i == v.j, one(T), zero(T))
 
-"""
-    MatrixKernelFill()
-    ActionKernelFill()
-
-How an [`ElementAssemblyCache`](@ref) fills one cell's matrix: from the
-element's own element-matrix kernel (`assemble_cell!` on a
-`JacobianRequest{:u}`, where [`provides_analytic`](@ref) declares one), or from
-`ndofs_per_cell` applications of [`apply_element_action!`](@ref) to the unit
-vectors of the local space. Resolved once at setup and carried as a field, so
-the fill kernel has no runtime branch and the cache's type parameters stay
-determined by its fields.
-
-The action route is exact and costs `ndofs_per_cell` element actions per cell
-ONCE per fill — a setup-time price a sum-factorized element pays instead of
-growing a second, conventional implementation of the same form.
-"""
+# How an `ElementAssemblyCache` fills one cell's matrix — from the element's own
+# element-matrix kernel, or from `ndofs_per_cell` applications of the action to
+# the unit vectors. Resolved once at setup and carried as a field, so the fill
+# has no runtime branch.
 struct MatrixKernelFill end
-@doc (@doc MatrixKernelFill) struct ActionKernelFill end
+struct ActionKernelFill end
 
 """
     ElementAssemblyCache <: AbstractElementCacheDecorator
 
 The cache a `storage = ElementAssembly()` operator runs
 ([`MatrixFreeAction`](@ref)): the wrapped element cache, the subdomain's
-element matrices, and the cell → slot map that addresses them.
+element matrices, and the cell → slot map that addresses them. It is
+element-AGNOSTIC, so it serves a cache with no matrix-free kernel at all.
 
 `K`'s layout is the [`element_matrix_symmetry`](@ref) election, read once off
 the wrapped cache at construction and carried as `symmetry`:
 
 - [`GeneralElementMatrix`](@ref) (the default) — `K` is `(slot, i, j)` dense.
-  The CELL index is stride-1, so the lanes of one `(i, j)` step read adjacent
-  addresses.
 - [`SymmetricElementMatrix`](@ref) — `K` is `(slot, t)`, `t` the packed
-  upper-triangle index (row-major, diagonal included); `slot` stays leading and
-  stride-1. `Kₑ = Kₑᵀ` is TRUSTED, not checked: the action never reads the
-  lower triangle.
+  upper-triangle index (row-major, diagonal included). `Kₑ = Kₑᵀ` is TRUSTED,
+  not checked: the action never reads the lower triangle.
 
-`slots[cellid]` is the cell's row, `0` for a cell outside this subdomain, which
-keeps the store the size of the SUBDOMAIN rather than of the grid.
+`slot` is leading and stride-1 either way, so the lanes of one `(i, j)` step
+read adjacent addresses. `slots[cellid]` is the cell's row, `0` outside this
+subdomain, keeping the store the size of the SUBDOMAIN rather than of the grid.
 
-`local_size` is `Val(ndofs_per_cell)`, so the dense product's extents are a
-compile-time constant rather than the store's runtime dimensions
-([`element_local_length`](@ref)): a device kernel whose trip counts are known
-keeps the element vectors in registers instead of walking the store's
-dimensions, which is the reason the extent is a type parameter at all. The gap
-it closed was measured at 0.69 ms against 0.27 ms for one action over 132k
-trilinear hexahedra on an RTX 2080 — before the packed layout and the mapping
-family landed, so read it as the ORDER of the effect and not as a current
-number. `benchmarks/matrix_free_action.jl` reports what this level costs today.
+`local_size` is `Val(ndofs_per_cell)` ([`element_local_length`](@ref)), so a
+device kernel's trip counts are compile-time constants and the element vectors
+stay in registers.
 
-The matrices are shared read-only by the action and written per cell by the
-fill, so `K`/`slots` are not per worker and the device layout batches neither:
-[`setup_device_instances`](@ref) moves them across once ([`adapt_shared`](@ref))
-and recurses into the inner cache, whose own per-worker fields are the only
-OTHER batched ones. `scratch` is the exception — a per-worker `ndofs_per_cell²`
-buffer the SYMMETRIC fill packs from (0×0 and unbatched under
-[`GeneralElementMatrix`](@ref), where the fill writes `K`'s own view
-directly).
+`K`/`slots` are shared read-only by the action, so the device layout batches
+neither ([`adapt_shared`](@ref)) and recurses into the inner cache. `scratch`
+is the exception — a per-worker `ndofs_per_cell²` buffer the SYMMETRIC fill
+packs from, 0×0 and unbatched under [`GeneralElementMatrix`](@ref).
 
 !!! warning "Experimental surface"
     This decorator and the elections that build it may change in a minor
@@ -98,15 +63,11 @@ end
 
 element_local_length(c::ElementAssemblyCache) = c.local_size
 
-# The stored matrices ARE the element matrix, so the engine's per-worker `Ke`
-# would be a second copy of one: the fill writes into the store's own slot (or,
-# under SymmetricElementMatrix(), the cache's own `scratch`) and the action
-# reads `K`, neither touching the workspace buffer.
+# The stored matrices ARE the element matrix; nothing touches the workspace `Ke`.
 allocate_element_matrix(cache::ElementAssemblyCache, sdh) = zeros(element_value_type(cache), 0, 0)
 
-# The ELEMENT level's action reads the cell's stored matrix and nothing else: the
-# wrapped cache's values objects are consumed by the FILL, so positioning them
-# per action would re-derive geometry no kernel then reads.
+# The wrapped cache's values objects are consumed by the FILL, so positioning
+# them per action would re-derive geometry no kernel reads.
 reinit_values!(::ElementAssemblyCache, cell, ::MatrixFreeActionKind) = nothing
 item_update_flags(::MatrixFreeActionKind, ::ElementAssemblyCache) =
     Ferrite.UpdateFlags(nodes = false, coords = false, dofs = true)
@@ -126,10 +87,8 @@ device_worker_view(c::ElementAssemblyCache, worker) =
 ## Setup
 ####################################
 
-# The framework's half of the storage election: any bilinear cache becomes an
-# element-assembling one, whatever it implements. The route is probed on the
-# cache being WRAPPED, which is the one the fill calls; the symmetry election
-# (design.md C11) is read off the same cache.
+# The route and the symmetry election are read off the cache being WRAPPED,
+# which is the one the fill calls.
 with_action_storage(cache, ::ElementAssembly, sdh::SubDofHandler) =
     ElementAssemblyCache(cache, sdh, element_matrix_fill_route(typeof(cache)), element_matrix_symmetry(cache))
 
@@ -144,12 +103,8 @@ function ElementAssemblyCache(cache, sdh::SubDofHandler, route, symmetry)
     return ElementAssemblyCache(cache, K, slots, route, symmetry, scratch, Val(nd))
 end
 
-# GeneralElementMatrix(): `K` dense, no scratch needed — the fill writes `K`'s
-# own view directly, as it always has.
 _allocate_element_matrix_store(::GeneralElementMatrix, T, ncells, nd) =
     (zeros(T, ncells, nd, nd), zeros(T, 0, 0))
-# SymmetricElementMatrix(): `K` packed (upper triangle, diagonal included), and
-# a per-worker `nd × nd` scratch the fill packs from (design.md C11).
 _allocate_element_matrix_store(::SymmetricElementMatrix, T, ncells, nd) =
     (zeros(T, ncells, (nd * (nd + 1)) ÷ 2), zeros(T, nd, nd))
 
@@ -157,11 +112,9 @@ _allocate_element_matrix_store(::SymmetricElementMatrix, T, ncells, nd) =
     element_matrix_fill_route(::Type{C}) -> MatrixKernelFill() or ActionKernelFill()
 
 Which route an [`ElementAssemblyCache`](@ref) over `C` fills its matrices
-through, and the setup-time capability check behind the ELEMENT level: the
-element's own element-matrix kernel where [`provides_analytic`](@ref) declares
-one, the action applied to the unit vectors where
-[`apply_element_action!`](@ref) exists, and a loud rejection naming both where
-neither does.
+through: the element's own element-matrix kernel where
+[`provides_analytic`](@ref) declares one, the action applied to the unit vectors
+where [`apply_element_action!`](@ref) exists, a rejection where neither does.
 """
 function element_matrix_fill_route(::Type{C}) where {C}
     provides_analytic(C, JacobianKind{:u}()) && return MatrixKernelFill()
@@ -183,12 +136,9 @@ end
     apply_element_action!(yₑ, cache::ElementAssemblyCache, uₑ, args)
 
 The ELEMENT-level action: the dense product `yₑ += Kₑ·uₑ` over the matrix this
-cell's slot holds. No quadrature point is visited and no contraction runs — the
-element's own kernels are consumed by the FILL, not by the action.
-
-The extents come from the cache's `local_size`, not from the store's
-dimensions: a compile-time trip count is what lets a device kernel hold `uₑ` and
-the row accumulator in registers instead of walking two arrays in memory.
+cell's slot holds. No quadrature point is visited — the element's own kernels
+are consumed by the FILL. The extents come from `local_size`, not from the
+store's dimensions.
 """
 @inline apply_element_action!(yₑ, cache::ElementAssemblyCache, uₑ, args::CellArgs) =
     _element_matrix_action!(cache.symmetry, yₑ, cache.K, (@inbounds cache.slots[cellid(args.cell)]), uₑ, cache.local_size)
@@ -204,9 +154,6 @@ the row accumulator in registers instead of walking two arrays in memory.
     return nothing
 end
 
-# The packed read: `K[slot, i, j]` becomes `K[slot, t(i, j)]` with `t` the
-# canonical (row ≤ col) packed index — the symmetric expansion happens in
-# registers, never by reading the (absent) lower triangle.
 @inline function _element_matrix_action!(::SymmetricElementMatrix, yₑ, K, slot, uₑ, ::Val{ND}) where {ND}
     for i in 1:ND
         acc = zero(eltype(K))
@@ -223,12 +170,7 @@ end
 
 The ELEMENT level's row: the dot product of row `i` of this cell's stored matrix
 with `uₑ`, accumulated in ONE register and returned by value — what a
-[`LanesPerElement`](@ref) lane owns.
-
-The two layouts differ only in where the row's entries live. Dense reads
-`K[slot, i, j]` along `j`; packed reads `K[slot, t(i, j)]`, whose `j`-walk
-crosses the packed triangle's rows below the diagonal and runs along it above.
-Neither reads the lower triangle.
+[`LanesPerElement`](@ref) lane owns. Neither layout reads the lower triangle.
 """
 @inline element_action_row(cache::ElementAssemblyCache, uₑ, args::CellArgs, i::Int) =
     _element_matrix_action_row(cache.symmetry, cache.K, (@inbounds cache.slots[cellid(args.cell)]),
@@ -250,13 +192,9 @@ end
     return acc
 end
 
-"""
-    _packed_index(i, j, ::Val{ND}) -> t
-
-The 1-based linear index of `(i, j)` in a row-major packed upper triangle
-(diagonal included) of an `ND × ND` matrix — `t(i, j) == t(j, i)`, so a caller
-addressing either triangle reads the SAME entry. `ND*(ND+1)÷2` entries total.
-"""
+# 1-based index of `(i, j)` in a row-major packed upper triangle (diagonal
+# included) of an `ND × ND` matrix, `ND*(ND+1)÷2` entries. `t(i, j) == t(j, i)`,
+# so either triangle addresses the SAME entry.
 @inline function _packed_index(i::Integer, j::Integer, ::Val{ND}) where {ND}
     a, b = i <= j ? (i, j) : (j, i)
     return ((a - 1) * (2ND - a + 2)) ÷ 2 + (b - a + 1)
@@ -265,14 +203,12 @@ end
 """
     fill_quadrature_data!(cache::ElementAssemblyCache, args)
 
-Fill this cell's element matrix — the ELEMENT level's answer to the same fill
-sweep ([`QuadratureDataKind`](@ref)) the PARTIAL level runs, so `setup_operator`
-and [`update_operator!`](@ref) need no second entry point and the freshness
-contract is one contract.
+Fill this cell's element matrix — the ELEMENT level's answer to the same
+[`QuadratureDataKind`](@ref) sweep the PARTIAL level runs.
 
-The inner cache is filled FIRST where it keeps a store of its own, so an
-element assembled through its action route reads factors as fresh as the sweep
-that is filling it.
+The inner cache is filled FIRST where it keeps a store of its own, so an element
+assembled through its action route reads factors as fresh as the sweep filling
+it.
 """
 function fill_quadrature_data!(cache::ElementAssemblyCache, args::CellArgs)
     fill_quadrature_data!(cache.inner, args)
@@ -300,11 +236,8 @@ function _fill_element_matrix!(::ActionKernelFill, ::GeneralElementMatrix, cache
     return nothing
 end
 
-# SymmetricElementMatrix(): `K`'s packed row has no square view for the
-# element's kernel to write, so the fill writes the cache's own per-worker
-# `ndofs_per_cell²` `scratch` — exactly as the general route writes `K`'s view
-# — and then packs its upper triangle. Paid at FILL time only
-# (`setup_operator`/`update_operator!`), never on the action.
+# `K`'s packed row has no square view for the element's kernel to write, so the
+# fill writes `scratch` and packs its upper triangle afterwards.
 function _fill_element_matrix!(::MatrixKernelFill, ::SymmetricElementMatrix, cache::ElementAssemblyCache,
         slot::Integer, args::CellArgs)
     Kₑ = cache.scratch
@@ -326,11 +259,8 @@ function _fill_element_matrix!(::ActionKernelFill, ::SymmetricElementMatrix, cac
     return nothing
 end
 
-# The packed commit: only the upper triangle (row ≤ col) of the square `Kₑ` is
-# read — the SAME entries `_element_matrix_action!`'s `SymmetricElementMatrix`
-# route later reads back through `_packed_index`. A wrongly-declared election
-# silently drops the lower triangle here rather than erroring — see
-# `element_matrix_symmetry`'s trust contract.
+# Only the upper triangle is read. A wrongly-declared election silently drops the
+# lower one here rather than erroring; see `element_matrix_symmetry`.
 @inline function _pack_symmetric!(K, slot, Kₑ, ::Val{ND}) where {ND}
     for i in 1:ND, j in i:ND
         @inbounds K[slot, _packed_index(i, j, Val(ND))] = Kₑ[i, j]

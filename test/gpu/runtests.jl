@@ -1,7 +1,6 @@
 # CUDA equivalence tests for `KernelAbstractionsDevice`, in their own
 # environment so the main suite — which covers the same device path on the
-# `KernelAbstractions.CPU()` backend — carries no GPU dependency and needs no
-# GPU on CI. Run with
+# `KernelAbstractions.CPU()` backend — carries no GPU dependency. Run with
 #
 #     julia --project=test/gpu test/gpu/runtests.jl
 #
@@ -30,12 +29,11 @@ function hex_testbed(dims = (5, 5, 5))
     return dh
 end
 
-# Deterministic, dependency-free probes, matching `test/test_matrix_free.jl`.
+# Deterministic, dependency-free probes.
 probe(n, k) = Tv[sin(Tv(0.7) * k * i + Tv(0.3) * k) for i in 1:n]
 wobble(node, d) = Tv(sin(2.7 * node + 1.3 * d))
 
-# Perturbed interior nodes: the matrix-free element evaluates the Jacobian per
-# quadrature point and must not be validated on an affine mesh.
+# Perturbed interior nodes: not an affine mesh.
 function distorted_hex_testbed(order, dims = (4, 4, 4); distortion = 0.15f0,
         coordinate_type::Type = Tv)
     T = coordinate_type
@@ -63,8 +61,7 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
 
 @testset "CUDA assembly equivalence" begin
     dh  = hex_testbed()
-    # The element precision is the integrator's election; the device's
-    # `value_type` above is the global system's. Here they agree.
+    # The two precision elections agree here.
     qrc = QuadratureRuleCollection(Tv, 2)
 
     @testset "bilinear $(nameof(typeof(integrator)))" for integrator in (
@@ -81,8 +78,7 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
 
         @test SparseMatrixCSC(device.A) ≈ reference.A rtol = 1.0f-4
 
-        # Coloring fixes the accumulation order per entry, so a repeated sweep
-        # reproduces the previous one exactly.
+        # Coloring fixes the accumulation order, so a repeat is exact.
         first_run = Array(nonzeros(device.A))
         update_operator!(device, nothing)
         @test first_run == Array(nonzeros(device.A))
@@ -120,10 +116,10 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
         @test occursin("start_assemble", err.value.msg)
     end
 
-    # `primal_cell_sweep!` is `@inline`, so the compiled device kernel must contain its
-    # body rather than call out to it — a call would marshal the workspace through
-    # per-thread local memory (see its docstring). A regression that drops the
-    # annotation reappears here as a `julia_primal_cell_sweep_` device function in the PTX.
+    # `primal_cell_sweep!` is `@inline`, so the compiled device kernel must
+    # CONTAIN its body rather than call out to it (see its docstring). A
+    # regression dropping the annotation reappears here as a
+    # `julia_primal_cell_sweep_` device function in the PTX.
     @testset "FullAssembly device sweep has no call to primal_cell_sweep!" begin
         strategy = cuda_strategy(; matrix_type = CuSparseMatrixCSC{Tv, Ti})
         op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
@@ -137,9 +133,8 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
 end
 
 @testset "CUDA matrix-free action" begin
-    # ONE element definition, two execution mappings and two quadrature-data
-    # elections, all selected on the strategy side. The scatter is atomic, so
-    # the device result is compared with a tolerance rather than bitwise.
+    # ONE element definition over every mapping and election. The scatter is
+    # atomic, so the comparison is a tolerance rather than bitwise.
     @testset "p = $p, $(nameof(typeof(mapping))), $(nameof(typeof(storage)))" for p in 1:3,
             mapping in (WorkerPerElement(), CooperativeElement()),
             storage in (Stored(), Recompute())
@@ -164,16 +159,14 @@ end
         mul!(yd, op, ud)
         @test Array(yd) ≈ reference rtol = 1.0f-3
 
-        # The action is linear, so the five-argument form is the same sweep
-        # with the accumulator scaled.
+        # The action is linear: the 5-arg form is the same sweep, scaled.
         base = CuVector(probe(ndofs(dh), 9))
         y2 = copy(base)
         mul!(y2, op, ud, -1.0f0, 1.0f0)
         @test Array(y2) ≈ Array(base) .- reference rtol = 1.0f-3
     end
 
-    # The second consumer of the sum-factorization core on the device: a scalar
-    # pointwise map on the interpolated value, over the same contractions.
+    # The second consumer of the core: a scalar map on the interpolated value.
     @testset "mass action, p = $p, $(nameof(typeof(mapping))), $(nameof(typeof(storage)))" for p in 1:3,
             mapping in (WorkerPerElement(), CooperativeElement()),
             storage in (Stored(), Recompute())
@@ -194,12 +187,11 @@ end
         @test Array(yd) ≈ assembled.A * u rtol = 1.0f-3
     end
 
-    # The ELEMENT level on the device: dense per-cell matrices in a
-    # (cell, i, j) store, gathered, multiplied and scattered atomically — or,
-    # for `:sumfact` (which now declares `element_matrix_symmetry` for an
-    # isotropic D), the packed `(cell, t)` layout. This is the "packed vs
-    # full device equivalence" the S5 gate asks for: `:assembled` never
-    # declares the election and stays the dense/full comparison arm.
+    # The ELEMENT level on the device: dense per-cell matrices in a (cell, i, j)
+    # store, gathered, multiplied and scattered atomically — or, for `:sumfact`
+    # (which declares `element_matrix_symmetry` for an isotropic D), the packed
+    # `(cell, t)` layout. `:assembled` never declares the election and is the
+    # dense comparison arm.
     @testset "ELEMENT level, p = $p, $(nameof(typeof(integrator)))" for p in 1:3,
             integrator in (:sumfact, :assembled)
 
@@ -210,8 +202,7 @@ end
         update_operator!(assembled, nothing)
         u = probe(ndofs(dh), 7)
 
-        # Both fill routes: the sum-factorized cache builds its matrices from the
-        # action, the standard cache from its own element-matrix kernel.
+        # Both fill routes: from the action, and from an element-matrix kernel.
         term = integrator === :sumfact ? SumFactorizedDiffusionIntegrator(Tv(2.5), qrc, :u) :
                                          SimpleBilinearDiffusionIntegrator(2.5, qrc, :u)
         strategy = AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
@@ -231,9 +222,7 @@ end
         end
     end
 
-    # The mass form's cache declares SymmetricElementMatrix() unconditionally
-    # (a scalar coefficient is always symmetric) — the second, MASS-form
-    # consumer of the packed ELEMENT level on the device.
+    # The mass cache declares SymmetricElementMatrix() unconditionally.
     @testset "ELEMENT level (mass), p = $p, $(nameof(typeof(integrator)))" for p in 1:3,
             integrator in (:sumfact, :assembled)
 
@@ -265,9 +254,9 @@ end
 
     # The lane mapping on the device it exists for: lane `l` owns rows
     # `l:nlanes:ND` of `yₑ` and scatters each atomically, so a row assignment or
-    # a row read that is wrong for one of the two `Kₑ` layouts shows up as a
-    # wrong operator. Pinned twice — against the assembled CPU matrix and
-    # against `WorkerPerElement` over the SAME store — on a distorted mesh, both
+    # read that is wrong for either `Kₑ` layout shows up as a wrong operator.
+    # Pinned twice — against the assembled CPU matrix and against
+    # `WorkerPerElement` over the SAME store — on a distorted mesh, both
     # precisions, `:sumfact` packed and `:assembled` dense.
     @testset "ELEMENT level, LanesPerElement ($T, p = $p, $integrator)" for
             T in (Float32, Float64), p in 1:3, integrator in (:sumfact, :assembled)
@@ -290,8 +279,7 @@ end
                     SequentialScheduling(), device), term, dh)
             yd = CUDA.zeros(T, ndofs(dh))
             mul!(yd, op, CuVector(u))
-            # The fill has no rows to split and takes the grid-stride mapping;
-            # refilling and re-acting is what checks the lane device runs both.
+            # The fill takes the grid-stride mapping; this checks both run.
             update_operator!(op, nothing)
             mul!(yd, op, CuVector(u))
             Array(yd)
@@ -300,10 +288,9 @@ end
         @test y_lanes ≈ y_worker rtol = rtol
     end
 
-    # `nlanes` is a launch policy: a count that matches the element's extent,
-    # divides it, or overshoots it (leaving lanes with no row) is the same
-    # action. `lanes = 5` at `ND = 27` additionally gives each lane SEVERAL
-    # rows, which the default policy never does at these orders.
+    # `nlanes` is a launch policy: matching, dividing or overshooting the
+    # element's extent is the same action. `lanes = 5` at `ND = 27` additionally
+    # gives each lane several rows.
     @testset "the lane count is a launch policy alone (lanes = $lanes)" for
             lanes in (nothing, 1, 5, 27, 64)
 
@@ -325,9 +312,9 @@ end
     end
 
     # The device action positions its items on a cursor that stages no dof row
-    # and, at the two stored levels, no coordinates either. These pin the whole
-    # ladder against the assembled CPU reference on a distorted mesh, where a
-    # cell whose geometry is not re-derived per point would be visibly wrong.
+    # and, at the two stored levels, no coordinates. These pin the whole ladder
+    # against the assembled CPU reference on a distorted mesh, where a cell
+    # whose geometry is not re-derived per point would be visibly wrong.
     @testset "device action vs CPU reference ($T, $(nameof(typeof(storage))), p = $p)" for
             T in (Float32, Float64), p in 1:3,
             storage in (Stored(), Recompute(), ElementAssembly())
@@ -348,8 +335,7 @@ end
         mul!(yd, op, CuVector(u))
         @test Array(yd) ≈ reference rtol = (T === Float32 ? 1.0f-3 : 1.0e-8)
 
-        # `update_operator!` refills through the same iterator, on the kind whose
-        # positioning DOES stage coordinates.
+        # The refill rides the same iterator, on the kind that DOES stage coords.
         update_operator!(op, nothing)
         fill!(yd, zero(T))
         mul!(yd, op, CuVector(u))

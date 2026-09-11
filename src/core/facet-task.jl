@@ -393,10 +393,9 @@ end
 # The FACET ITEM family's [`setup_family_caches`](@ref) method: one
 # `SubdomainCache` per subdomain that declares [`facet_items`](@ref) — resolve
 # and validate the declaration, build the cache [`setup_facet_item_cache`](@ref)
-# names, derive the partition, and build the shared
-# [`FacetItemWorkspace`](@ref). A subdomain declaring nothing contributes no
-# cache, which is how this family declines an operator that has no boundary
-# term.
+# names, derive the partition, and build the shared [`FacetItemWorkspace`](@ref).
+# A subdomain declaring nothing contributes no cache, which is how this family
+# declines an operator with no boundary term.
 #
 # Unlike the algebraic family, nothing has to be resolved before the
 # `InternalVariableHandler`: a facet item owns no condensed internal state (its

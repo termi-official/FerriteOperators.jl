@@ -7,9 +7,8 @@ scalar type `T` (`Float64` where it is not named).
 
 `T` is the INTEGRATOR's election of the precision its elements evaluate in: the
 rules [`getquadraturerule`](@ref) hands out carry it, and an element cache reads
-it back through [`element_value_type`](@ref) to build its values objects in the
-same scalar. It is independent of the [`value_type`](@ref) the device
-accumulates the global system in.
+it back through [`element_value_type`](@ref). It is independent of the
+[`value_type`](@ref) the device accumulates the global system in.
 """
 struct QuadratureRuleCollection{order, T}
 end

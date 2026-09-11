@@ -9,13 +9,11 @@ using Polyester
 import Adapt, GPUArrays, GPUArraysCore
 import KernelAbstractions as KA
 
-# Deterministic, dependency-free and version-stable probes, in the style of
-# `check_derivatives`' own.
+# Deterministic, dependency-free probes.
 probe(::Type{T}, n, k) where {T} = T[sin(T(0.7) * k * i + T(0.3) * k) for i in 1:n]
 wobble(::Type{T}, node, d) where {T} = T(sin(2.7 * node + 1.3 * d))
 
-# Perturbed interior nodes: the element must not assume an affine map, so every
-# testbed here is a genuinely distorted mesh.
+# Perturbed interior nodes: the element must not assume an affine map.
 function distorted_testbed(cellT, interpolation, ::Type{T}, dims, p; distortion = 0.15) where {T}
     dim = length(dims)
     grid = generate_grid(cellT, dims, Vec{dim}(ntuple(_ -> -one(T), dim)),
@@ -40,10 +38,9 @@ matrix_free_ka(::Type{T}, mapping; scheduling = SequentialScheduling(), storage 
 ####################################
 #
 # `SimpleBilinearDiffusionIntegrator`'s cache verbatim, plus the symmetry
-# declaration: the sum-factorized caches below never exercise the
-# MatrixKernelFill route under ElementAssembly() (they have no analytic
-# Jacobian kernel, only the action route), so this is the only way to cover
-# the packed election's "per-worker ndofs² scratch" fill path (design.md C11).
+# declaration. The sum-factorized caches below have no analytic Jacobian kernel,
+# so they never exercise the MatrixKernelFill route under ElementAssembly();
+# this fixture covers the packed election's per-worker ndofs² scratch fill path.
 struct SymmetricAnalyticDiffusionCache{CV} <: FerriteOperators.AbstractVolumetricElementCache
     D::Float64
     cellvalues::CV
@@ -99,8 +96,8 @@ end
 #
 # Written entirely outside `src/`: it forwards what a decorator OWNS (the
 # kernels it serves, and its claims about them) and declares nothing about the
-# wrapped ELEMENT, which is `AbstractElementCacheDecorator`'s blanket-forward
-# half — the storage election and the store's fill included.
+# wrapped ELEMENT — the blanket-forward half of
+# `AbstractElementCacheDecorator`, storage election and store fill included.
 struct PassthroughDecorator{I} <: FerriteOperators.AbstractElementCacheDecorator{I}
     inner::I
 end
@@ -123,11 +120,11 @@ FerriteOperators.setup_element_cache(m::DecoratedIntegrator, sdh::SubDofHandler)
 ## An element whose store is allocated EAGERLY and filled only by the fill sweep
 ####################################
 #
-# `with_action_storage` cannot mask an unforwarded `fill_quadrature_data!` here:
-# the store exists whatever the election says, starts at zero, and the action
-# reads it. A fill that does not reach the element gives `y == 0` — no error and
-# no `MethodError`, which is why this is a test and not a capability wall. The
-# action is `Kₑ = f·I` over the cell's own dofs, so the reference is closed form.
+# The store exists whatever the election says, starts at zero, and the action
+# reads it, so `with_action_storage` cannot mask an unforwarded
+# `fill_quadrature_data!`. A fill that does not reach the element gives `y == 0`
+# — no error and no `MethodError`, which is why this is a test and not a
+# capability wall. The action is `Kₑ = f·I`, so the reference is closed form.
 struct EagerStoreCache{S} <: FerriteOperators.AbstractVolumetricElementCache
     factor::Float64
     store::S          # one scalar per cell, written by `fill_quadrature_data!`
@@ -150,8 +147,7 @@ end
 FerriteOperators.setup_element_cache(m::EagerStoreIntegrator, sdh::SubDofHandler) =
     EagerStoreCache(m.factor, zeros(getncells(Ferrite.get_grid(sdh.dh))))
 
-# `@allocated` is measured from INSIDE a function: at testset scope the
-# surrounding block's own boxing lands in the count.
+# From INSIDE a function: at testset scope the block's own boxing would count.
 function action_allocations(op, y, u)
     mul!(y, op, u)
     mul!(y, op, u)
@@ -160,7 +156,7 @@ end
 
 @testset "MatrixFreeAction" begin
     # ONE element definition under every execution mapping the strategy axis
-    # offers, against the assembled matrix of the same bilinear form.
+    # offers, against the assembled matrix of the same form.
     @testset "action matches the assembled operator ($label, $T, p = $p)" for
             (label, cellT, interpolation, dims) in (
                 ("quad", Quadrilateral, o -> Lagrange{RefQuadrilateral, o}(), (4, 3)),
@@ -194,7 +190,7 @@ end
         end
     end
 
-    # The SECOND consumer of the sum-factorization core: a different pointwise
+    # The second consumer of the sum-factorization core: a different pointwise
     # map (a scalar on the interpolated value rather than a tensor on the
     # reference gradient) over the same contractions, mappings and elections.
     @testset "the mass action matches the assembled mass operator ($label, $T, p = $p)" for
@@ -229,10 +225,10 @@ end
 
     # The three storage levels are three ways to keep the same operator.
     # `Stored()` reads the pointwise factor the fill sweep formed and
-    # `Recompute()` forms it at the point of use — the SAME expression, so those
+    # `Recompute()` forms it at the point of use — the SAME expression, so the
     # two reproduce bit for bit on the sequential arm. `ElementAssembly()`
-    # contracts a different way (a dense product over columns the fill built
-    # from the action), so it agrees to a tolerance and not bitwise.
+    # contracts differently (a dense product over columns the fill built from
+    # the action), so it agrees to a tolerance and not bitwise.
     @testset "the storage levels agree ($(nameof(typeof(integrator))), p = $p)" for
             integrator in (SumFactorizedDiffusionIntegrator(2.5, QuadratureRuleCollection(3), :u),
                            SumFactorizedMassIntegrator(1.7, QuadratureRuleCollection(3), :u)),
@@ -260,18 +256,17 @@ end
             @test action(matrix_free_ka(Float64, mapping; storage = Stored())) ≈
                   action(matrix_free_ka(Float64, mapping; storage = Recompute())) rtol = 1.0e-11
         end
-        # The ELEMENT level is worker-per-element only, so it has one arm.
+        # The ELEMENT level is worker-per-element only.
         @test action(matrix_free_ka(Float64, WorkerPerElement(); storage = ElementAssembly())) ≈
               action(matrix_free_ka(Float64, WorkerPerElement(); storage = Stored())) rtol = 1.0e-11
     end
 
-    # Two device-cursor shortcuts are elected purely from a subdomain's shape: a
+    # Two device-cursor shortcuts are elected from a subdomain's shape alone: a
     # sequential partition's chunk is a `UnitRange` where the cellset is
-    # contiguous, and a cursor's dof-window offset is computed by arithmetic
-    # where `cell_dofs_offset` is affine in the cell id. Every test above runs
-    # one contiguous, single-order subdomain and so takes both shortcuts; these
-    # two put the subdomain out of that shape and check the fallback each one
-    # keeps, still against an assembled reference.
+    # contiguous, and a cursor's dof-window offset is arithmetic where
+    # `cell_dofs_offset` is affine in the cell id. Every test above runs one
+    # contiguous, single-order subdomain and takes both; these two put the
+    # subdomain out of that shape and check each fallback.
     @testset "the action matches the assembled operator over a non-contiguous cellset" begin
         grid = generate_grid(Hexahedron, (3, 2, 2), Vec{3}((-1.0, -1.0, -1.0)), Vec{3}((1.0, 1.0, 1.0)))
         ncells = getncells(grid)
@@ -296,8 +291,7 @@ end
         mul!(y, op, u)
         @test y ≈ reference rtol = 1.0e-11
 
-        # Interleaved cell ids: neither subdomain's chunk is contiguous, so
-        # `compute_partition` keeps the `Vector` fallback rather than a `UnitRange`.
+        # Neither subdomain's chunk is contiguous, so the `Vector` fallback stands.
         @test all(sc -> all(chunk -> chunk isa Vector{Int}, sc.partition), get_subdomain_caches(op))
 
         lanes = setup_operator(matrix_free_ka(Float64, LanesPerElement(); storage = ElementAssembly()),
@@ -332,8 +326,7 @@ end
         mul!(y, op, u)
         @test y ≈ reference rtol = 1.0e-11
 
-        # The two subdomains carry different extents, so the lane mapping
-        # launches a different lane count for each.
+        # Different extents, so the lane mapping launches a different count for each.
         lanes = setup_operator(matrix_free_ka(Float64, LanesPerElement(); storage = ElementAssembly()),
                                integrator, dh)
         fill!(y, 0.0)
@@ -342,10 +335,10 @@ end
     end
 
     # The device sweeps position their items on ONE iterator but refresh what
-    # each KIND reads: the two stored levels' action reads a cell id and a dof
+    # each KIND reads: the stored levels' action reads a cell id and a dof
     # range, while the quadrature-data fill forms the geometry. Interleaving the
-    # two is what would catch an action leaving the iterator in a state the next
-    # fill reads, or a fill's staging being skipped.
+    # two catches an action leaving the iterator in a state the next fill reads,
+    # or a fill's staging being skipped.
     @testset "the action and the fill share one device iterator ($(nameof(typeof(storage))))" for
             storage in (Stored(), Recompute(), ElementAssembly())
 
@@ -370,9 +363,9 @@ end
     end
 
     # The fill sweep carries no assembler, so its task can have every field a
-    # singleton — and a parallel device must not assume per-worker task state it
-    # can index. `min_items_per_worker = 1` is what puts more than one worker on
-    # this mesh's largest colour, which is where that assumption shows.
+    # singleton, and a parallel device must not assume per-worker task state it
+    # can index. `min_items_per_worker = 1` puts more than one worker on this
+    # mesh's largest colour, where that assumption would show.
     @testset "the fill sweep runs on several workers ($(nameof(typeof(storage))))" for
             storage in (Stored(), ElementAssembly())
 
@@ -395,7 +388,7 @@ end
 
     # The ELEMENT level is element-agnostic: it keeps the dense matrices the
     # element's own kernels produce, so a cache with an element-matrix kernel and
-    # NO matrix-free kernel serves it just as well as a sum-factorized one.
+    # NO matrix-free kernel serves it too.
     @testset "the ELEMENT level serves a cache with no matrix-free kernel" begin
         dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
         qrc = QuadratureRuleCollection(3)
@@ -411,16 +404,15 @@ end
             y = zeros(ndofs(dh))
             mul!(y, op, u)
             @test y ≈ assembled.A * u rtol = 1.0e-12
-            # Neither cache declares `element_matrix_symmetry`, so the election
-            # stays OFF (`GeneralElementMatrix()`) and `K` stays dense.
+            # Neither cache declares `element_matrix_symmetry`, so `K` stays dense.
             cache = get_subdomain_caches(op)[1].domain.element
             @test cache.symmetry isa GeneralElementMatrix
             @test ndims(cache.K) == 3
         end
     end
 
-    # The ELEMENT level under every mapping-free arm, over the sum-factorized
-    # cache — whose matrices the fill builds from the action itself.
+    # The ELEMENT level over the sum-factorized cache, whose matrices the fill
+    # builds from the action itself.
     @testset "the ELEMENT level matches the assembled operator ($label, $T, p = $p)" for
             (label, cellT, interpolation, dims) in (
                 ("quad", Quadrilateral, o -> Lagrange{RefQuadrilateral, o}(), (4, 3)),
@@ -449,9 +441,7 @@ end
             mul!(y, op, u)
             @test y ≈ reference rtol = rtol
             # Isotropic D is symmetric, so the tensor-product cache declares
-            # SymmetricElementMatrix() and this arm runs the PACKED layout —
-            # the "GPU floor vs assembled" table this proves matches the
-            # assembled reference is the packed one.
+            # SymmetricElementMatrix() and this arm runs the PACKED layout.
             cache = get_subdomain_caches(op)[1].domain.element
             @test cache.symmetry isa SymmetricElementMatrix
             @test ndims(cache.K) == 2
@@ -460,12 +450,11 @@ end
     end
 
     # The MatrixKernelFill route (an analytic element-matrix kernel, unlike the
-    # sum-factorized caches above which only ever fill via the action) under a
-    # symmetric election — the "per-worker ndofs² scratch" fill path
-    # (design.md C11) the sum-factorized caches never exercise. Same physics as
-    # `SimpleBilinearDiffusionIntegrator`, so the packed action and the dense
-    # one it is compared against are the SAME `Kₑ`, filled through the SAME
-    # kernel, differing only in the symmetry declaration.
+    # sum-factorized caches above, which only fill via the action) under a
+    # symmetric election — the per-worker ndofs² scratch fill path. Same physics
+    # as `SimpleBilinearDiffusionIntegrator`, so the packed action and the dense
+    # one it is compared against are the SAME `Kₑ` through the SAME kernel,
+    # differing only in the symmetry declaration.
     @testset "ElementAssembly, MatrixKernelFill route, packed matches dense ($T, p = $p)" for
             T in (Float64, Float32), p in 1:3
 
@@ -498,8 +487,8 @@ end
     # The lane mapping reads a ROW of the stored matrix, and the two layouts put
     # a row in different places: dense walks `K[slot, i, :]`, packed walks the
     # triangle through `_packed_index`. Both are checked against the assembled
-    # matrix AND against `WorkerPerElement` on the same store, so a layout the
-    # row reader gets wrong cannot hide behind a matching reference.
+    # matrix AND against `WorkerPerElement` on the same store, so a wrongly-read
+    # layout cannot hide behind a matching reference.
     @testset "the lane mapping serves both element-matrix layouts ($T, p = $p)" for
             T in (Float64, Float32), p in 1:3
 
@@ -533,9 +522,9 @@ end
 
     # `nlanes` is a launch policy, not element math: every count gives the same
     # action, whether it matches the element's extent, divides it, or exceeds it
-    # (leaving lanes with no row at all). The wide group additionally puts
-    # SEVERAL elements in one workgroup, which is the geometry a small element
-    # runs — the narrow one leaves a single block per group.
+    # (leaving lanes with no row). The wide group additionally puts SEVERAL
+    # elements in one workgroup — the geometry a small element runs — where the
+    # narrow one leaves a single block per group.
     @testset "the lane count is a launch policy alone (lanes = $lanes, group = $max_group)" for
             (lanes, max_group) in ((nothing, 8), (nothing, 64), (1, 8), (5, 8),
                                    (5, 64), (27, 64), (64, 64))
@@ -559,11 +548,10 @@ end
     end
 
     # The hazard `element_matrix_symmetry`'s docstring warns about: a
-    # declared-symmetric element whose assembled `Kₑ` really ISN'T symmetric
-    # would silently symmetrize the operator. This is the suite's direct check
-    # on a genuinely non-diagonal, off-diagonal-coupled `D` — a diagonal
-    # coefficient would never exercise the packed index's off-diagonal
-    # arithmetic (`_packed_index`) at all.
+    # declared-symmetric element whose assembled `Kₑ` is not symmetric would
+    # silently symmetrize the operator. Checked on a genuinely off-diagonally
+    # coupled `D`, a diagonal coefficient never exercising `_packed_index`'s
+    # off-diagonal arithmetic at all.
     @testset "a declared-symmetric element's ElementAssembly operator stays symmetric (anisotropic D)" begin
         dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
         qrc = QuadratureRuleCollection(3)
@@ -584,17 +572,15 @@ end
         mul!(Av, op, v)
         @test dot(v, Au) ≈ dot(u, Av) rtol = 1.0e-12
 
-        # Independent reference: the SAME anisotropic form under `Stored()`,
-        # a completely different code path (sum-factorized contraction, no
-        # dense `Kₑ` at all).
+        # Independent reference: the SAME anisotropic form under `Stored()`, a
+        # different code path — sum-factorized contraction, no dense `Kₑ`.
         stored = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction()), integrator, dh)
         y_stored = zeros(ndofs(dh))
         mul!(y_stored, stored, u)
         @test Au ≈ y_stored rtol = 1.0e-11
     end
 
-    # The store is what a `Stored()` action reads, and `update_operator!` is what
-    # refills it — the same freshness contract an assembled operator has.
+    # The same freshness contract an assembled operator has.
     @testset "update_operator! refills the quadrature-data store" begin
         dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
         qrc = QuadratureRuleCollection(3)
@@ -607,7 +593,6 @@ end
 
         op = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction()), integrator, dh)
         y = zeros(ndofs(dh))
-        # Setup filled it, so the operator acts correctly before any update.
         mul!(y, op, u)
         @test y ≈ reference rtol = 1.0e-11
 
@@ -623,7 +608,6 @@ end
         recomputing = setup_operator(
             AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction(; storage = Recompute())),
             integrator, dh)
-        # Nothing is stored, so there is nothing to refill.
         @test update_operator!(recomputing, nothing) === nothing
         @test get_subdomain_caches(recomputing)[1].domain.element.qdata === nothing
     end
@@ -638,9 +622,8 @@ end
         integrator = SumFactorizedDiffusionIntegrator(2.5, qrc, :u)
         # The vector scatter is atomic under `SequentialScheduling` and plain
         # under `ColoredScheduling`; both are race-free and must agree. The lane
-        # mapping is race-free under a colouring for the same reason plus one:
-        # the lanes of ONE element scatter to different rows of the local system,
-        # which are different dofs.
+        # mapping adds one reason: the lanes of ONE element scatter to different
+        # rows of the local system, which are different dofs.
         for (mapping, storage) in ((WorkerPerElement(), Stored()),
                                    (CooperativeElement(), Stored()),
                                    (LanesPerElement(), ElementAssembly()))
@@ -660,22 +643,20 @@ end
         y, z = zeros(ndofs(dh)), zeros(ndofs(dh))
         mul!(y, op, u)
         mul!(z, op, u)
-        # No atomics on this arm, and the item order is fixed, so the two sweeps
-        # agree bit for bit.
+        # No atomics and a fixed item order, so the two sweeps agree bit for bit.
         @test y == z
         @test (@allocated mul!(y, op, u)) == 0
     end
 
     @testset "every ELEMENT-level arm's per-mul! host allocations stay O(1)" begin
-        # The gate the `Stored()` arm above carries, extended to the arms the
-        # ELEMENT level adds. What it protects is not a byte budget but the
-        # INVARIANT: an action allocates per CALL and never per item, so the
-        # count must not follow the cell count.
+        # The gate the `Stored()` arm above carries, extended to the ELEMENT
+        # level's arms. It protects an INVARIANT rather than a byte budget: an
+        # action allocates per CALL and never per item, so the count must not
+        # follow the cell count.
         packed(o) = SumFactorizedDiffusionIntegrator(2.5, QuadratureRuleCollection(o + 1), :u)
         dense(o) = SimpleBilinearDiffusionIntegrator(2.5, QuadratureRuleCollection(o + 1), :u)
         ea = MatrixFreeAction(; storage = ElementAssembly())
 
-        # Both element-matrix layouts, sequentially: nothing at all.
         for (layout, build) in ("packed" => packed, "dense" => dense)
             @testset "sequential, $layout" begin
                 dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (4, 4, 4), 2)
@@ -684,14 +665,13 @@ end
             end
         end
 
-        # The device arms track one workgroup object per launch, which is a
-        # per-CALL constant. Gated for the PACKED layout on both mappings, where
-        # that holds on every supported Julia. The DENSE arms are NOT gated: on
+        # The device arms track one workgroup object per launch, a per-CALL
+        # constant. Gated for the PACKED layout on both mappings, where that
+        # holds on every supported Julia. The DENSE arms are NOT gated: on
         # Julia 1.10 their per-worker views of the analytic cache allocate —
         # between a 27-cell and a 216-cell mesh the count grows by 96 kB
         # (worker) and 774 kB (lanes) — while Julia 1.12 keeps both flat at
-        # ~3 kB. A single bound cannot describe both, and which one is right is
-        # a question about the per-worker view, not about this arm.
+        # ~3 kB, and no single bound describes both.
         for mapping in (WorkerPerElement(), LanesPerElement())
             @testset "KA $(nameof(typeof(mapping))), packed" begin
                 counts = map(((3, 3, 3), (6, 6, 6))) do dims
@@ -726,9 +706,9 @@ end
 
         # `Stored()` is the PARTIAL level, and the store it elects is the WRAPPED
         # element's. An unforwarded election is not an error: the cache comes
-        # back untouched, nothing is ever allocated and the action silently runs
-        # the `Recompute()` code path — the same number for THIS element and a
-        # different one for an element whose factors are not re-derivable.
+        # back untouched, nothing is allocated and the action silently runs the
+        # `Recompute()` path — the same number for THIS element, a different one
+        # for an element whose factors are not re-derivable.
         stored = MatrixFreeAction(; storage = Stored())
         bare = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = stored), inner, dh)
         decorated = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = stored),
@@ -745,7 +725,7 @@ end
         u = probe(Float64, ndofs(dh), 19)
         integrator = EagerStoreIntegrator(1.5)
         # `Kₑ = 1.5·I` over each cell's dofs, so a dof carries 1.5 per cell it
-        # belongs to — computed from the DofHandler, sharing no code with the engine.
+        # belongs to — from the DofHandler, sharing no code with the engine.
         multiplicity = zeros(ndofs(dh))
         for cell in 1:getncells(Ferrite.get_grid(dh)), d in celldofs(dh, cell)
             multiplicity[d] += 1.5
@@ -759,7 +739,7 @@ end
             y = zeros(ndofs(dh))
             mul!(y, op, u)
             @test y ≈ expected rtol = 1.0e-12
-            @test !iszero(y)                      # the fill reached the element at all
+            @test !iszero(y)                      # the fill reached the element
         end
     end
 
@@ -774,7 +754,6 @@ end
         mul!(Au, op, u)
         mul!(Av, op, v)
         @test dot(v, Au) ≈ dot(u, Av) rtol = 1.0e-12
-        # An isotropic tensor is the scalar case, which the assembled reference covers.
         isotropic = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction()),
                                    SumFactorizedDiffusionIntegrator(2.5 * one(SymmetricTensor{2, 3}),
                                                                     QuadratureRuleCollection(3), :u), dh)
@@ -833,7 +812,6 @@ end
         residual = zeros(ndofs(dh))
         update_linearization!(op, residual, u, nothing)
         @test residual == y
-        # Nothing is stored, so there is nothing to update.
         @test update_operator!(op, nothing) === nothing
     end
 end
@@ -842,8 +820,7 @@ end
 ## Capability walls
 ####################################
 
-# Neither an analytic `JacobianKind{:u}` kernel nor a matrix-free action, so
-# the ELEMENT level has no route to fill its matrices through.
+# Neither fill route.
 struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
 
 @testset "MatrixFreeAction capability walls" begin
@@ -872,8 +849,8 @@ struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
     @testset "a cache without the cooperative entries is refused" begin
         err = @test_throws ArgumentError setup_operator(
             matrix_free_ka(Float64, CooperativeElement()), assembled_form, dh)
-        # `setup_operator` reports the action entry first; the cooperative half
-        # of the check is what the direct call below exercises.
+        # `setup_operator` reports the action entry first; the direct call below
+        # exercises the cooperative half.
         @test occursin("apply_element_action!", err.value.msg)
         cache = setup_element_cache(assembled_form, dh.subdofhandlers[1])
         err = @test_throws ArgumentError FerriteOperators._assert_mapping_capability(
@@ -903,9 +880,8 @@ struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
         @test occursin("ElementAssembly", err.value.msg)
     end
 
-    # A cache reaching the lane mapping at the ELEMENT level without the row
-    # entry: the decorator implements it, so the refusal is exercised directly
-    # on the cache the decorator wraps.
+    # The decorator implements the row entry, so the refusal is exercised
+    # directly on the cache it wraps.
     @testset "a cache without the row entry is refused" begin
         cache = setup_element_cache(assembled_form, dh.subdofhandlers[1])
         err = @test_throws ArgumentError FerriteOperators._assert_mapping_capability(
@@ -989,10 +965,9 @@ struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
         @test occursin("BilinearKind", err.value.msg)
     end
 
-    # Complements the call-time check just above: an assembling form on a
+    # Complements the call-time check above: an assembling form on a
     # `CooperativeElement` device is refused at `setup_operator`, before any
-    # cache or sweep exists, rather than surfacing only inside the first
-    # `execute_on_device!` call.
+    # cache or sweep exists.
     @testset "an assembling form on a CooperativeElement device is refused at setup" begin
         device = FerriteOperators.with_element_mapping(
             KernelAbstractionsDevice(KA.CPU()), CooperativeElement())

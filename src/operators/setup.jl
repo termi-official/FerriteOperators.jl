@@ -31,8 +31,7 @@ function _create_system_matrix(strategy, spec, dh)
     return allocate_operator_matrix(strategy.device, matrix_type(strategy), sp)
 end
 
-# The item families' own coupling, added last so it unions with the cell pattern
-# rather than replacing it. `nothing` is the whole cost of the undeclared case.
+# Added last, so it unions with the cell pattern rather than replacing it.
 _add_declared_entries!(::Nothing, sp, dh) = sp
 _add_declared_entries!(f, sp, dh) = (f(sp, dh); sp)
 
@@ -42,14 +41,10 @@ _add_declared_entries!(f, sp, dh) = (f(sp, dh); sp)
 The operator's global matrix over the sparsity pattern `sp`
 [`create_system_matrix`](@ref) built.
 
-Ferrite ships no `allocate_matrix(::Type{<:device matrix}, ::SparsityPattern)`
-— only the `DofHandler` form, which rebuilds the pattern from the handler and
-would drop this package's coupling declarations. So a GPU device allocates the
-host `SparseMatrixCSC` over the SAME pattern every other device uses and hands
-it to the device type's constructor, which is the conversion Ferrite's
-`DofHandler` form performs internally. The type parameters come from that
-constructor (CUSPARSE fixes the index type at `Cint`), not from the requested
-spelling.
+Ferrite ships no `allocate_matrix(::Type{<:device matrix}, ::SparsityPattern)`,
+so a GPU device allocates the host `SparseMatrixCSC` over that pattern and hands
+it to the device type's constructor. The type parameters come from that
+constructor (CUSPARSE fixes the index type at `Cint`), not from the request.
 """
 allocate_operator_matrix(::AbstractDevice, ::Type{MT}, sp) where {MT} = allocate_matrix(MT, sp)
 allocate_operator_matrix(device::AbstractGPUDevice, ::Type{MT}, sp) where {MT} =
@@ -59,9 +54,8 @@ allocate_operator_matrix(device::AbstractGPUDevice, ::Type{MT}, sp) where {MT} =
 init_operator_sparsity_pattern(::StandardOperatorSpecification, dh) = Ferrite.init_sparsity_pattern(dh)
 init_operator_sparsity_pattern(spec::BlockedOperatorSpecification, dh) = BlockSparsityPattern(spec.block_sizes)
 
-# The form's element-side elections ([`with_assembly_form`](@ref)) are applied to
-# the raw cache, before any decoration and before the engine builds the
-# workspaces and device layouts from it.
+# `with_assembly_form` is applied to the RAW cache, before any decoration and
+# before the engine builds the workspaces and device layouts from it.
 function setup_elements(integrator, dh, form, ad_backend, n_global_dofs)
     needs_ad_decoration(integrator) ||
         return [with_assembly_form(setup_element_cache(integrator, sdh), form, sdh) for sdh in dh.subdofhandlers]
@@ -173,25 +167,14 @@ function _build_internal_variable_handler(integrator, element_caches, algebraic_
     return InternalVariableHandler(cell_offsets, item_offsets, ndofs(dh), cell_len + item_len)
 end
 
-"""
-    iteration_kind(form) -> kind
-
-The sweep kind an operator of `form` resolves its item iterator
-([`assembly_iterator`](@ref)) and its item set ([`item_provider`](@ref)) for.
-`nothing` for a form whose sweeps are the primal
-family — every one of them positions on the full geometry cache, so there is no
-kind to narrow by. A [`MatrixFreeAction`](@ref) operator answers with its ACTION
-kind: that is the sweep run per `mul!`, and the quadrature-data fill it also
-runs rides the same iterator (which is why what each sweep REFRESHES is
-[`item_update_flags`](@ref)'s per-kind declaration and not the iterator's).
-"""
+# The sweep kind an operator of `form` resolves its iterator and item set for.
+# `nothing` for the primal family, which positions on the full geometry cache
+# and has no kind to narrow by.
 iteration_kind(form) = nothing
 iteration_kind(::MatrixFreeAction) = MatrixFreeActionKind()
 
-# The CELL family's [`setup_family_caches`](@ref) method: one `SubdomainCache`
-# per subdomain, over the iterator and the provider the (kind, element cache,
-# subdomain) triple resolves to. The only shipped family that needs a
-# device-resident handler.
+# The CELL family's `setup_family_caches` method — the only shipped family
+# needing a device-resident handler.
 function setup_family_caches(::CellFamily, strategy, integrator, dh, shared)
     device = strategy.device
     ivh    = shared.ivh
@@ -199,9 +182,8 @@ function setup_family_caches(::CellFamily, strategy, integrator, dh, shared)
     needs_sensitivity = shared.needs_sensitivity
     kind = iteration_kind(strategy.form)
     # One device-resident handler for the whole operator, split per subdomain
-    # below: it is what a device item iterator must be built from, and
-    # rebuilding it per subdomain would upload the cell-id maps of every other
-    # subdomain again.
+    # below: rebuilding it per subdomain would upload every other subdomain's
+    # cell-id maps again.
     device_dh = setup_device_handler(device, dh)
     return [begin
         partition = adapt_partition(device, compute_partition(
@@ -218,9 +200,7 @@ function setup_family_caches(::CellFamily, strategy, integrator, dh, shared)
 end
 
 # A CPU device has no device handler and therefore no device iterator; the
-# workspace it duplicates already carries the host one. `sdh` is the HOST
-# subdomain, passed alongside `device_sdh` since a device iterator may need a
-# host-only setup-time fact (`device_assembly_iterator`, C2).
+# workspace it duplicates already carries the host one.
 _device_iterator(kind, element_cache, sdh, ::Nothing) = nothing
 _device_iterator(kind, element_cache, sdh, device_sdh) =
     device_assembly_iterator(kind, element_cache, sdh, device_sdh)
@@ -292,31 +272,19 @@ end
 ## Device support walls
 ####################################
 
-"""
-    assert_device_supported(device, strategy, integrator, dh)
-    assert_device_internal_state_supported(device, ivh)
-
-Reject at setup what a device cannot assemble. Both are no-ops for a CPU
-device, which serves every item family; the [`AbstractGPUDevice`](@ref) methods
-cover the cell-item, coloring-only slice a device kernel supports today, and
-each rejection names the limitation rather than surfacing as a `MethodError`
-inside the first sweep — or, for the scheduling one, as a silent data race.
-
-The first form runs on the strategy and the integrator's DECLARATIONS, before
-any cache is built; the second needs the resolved
-[`InternalVariableHandler`](@ref).
-"""
+# Reject at setup what a device cannot assemble. No-ops for a CPU device; the
+# `AbstractGPUDevice` methods are the list of what a device kernel covers. The
+# first runs on the integrator's DECLARATIONS before any cache is built, the
+# second needs the resolved `InternalVariableHandler`.
 assert_device_supported(::AbstractDevice, strategy, integrator, dh) = nothing
 
 function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblyStrategy, integrator, dh)
     dev = nameof(typeof(device))
     # The coloring requirement is the MATRIX assembler's: Ferrite's device one
-    # accumulates with a plain `+=` — its `AbstractThreadSafeAssembler` supertype
-    # means "safe to alias across workers given a valid coloring", not race-free
-    # — so an uncolored device sweep into a matrix is a silent data race. A form
-    # that assembles no matrix scatters through this package's own
-    # `VectorAssembler`, which IS atomic-capable on device, and takes either
-    # scheduling.
+    # accumulates with a plain `+=`, so an uncolored device sweep into a matrix
+    # is a silent data race. A form that assembles no matrix scatters through
+    # this package's own `VectorAssembler`, which IS atomic-capable on device
+    # and takes either scheduling.
     (operator_specification(strategy.form) === nothing || strategy.scheduling isa ColoredScheduling) || throw(ArgumentError(
         "$dev requires `ColoredScheduling` for an assembling form (got " *
         "$(nameof(typeof(strategy.scheduling)))). Ferrite's device matrix assembler accumulates " *
@@ -347,7 +315,6 @@ function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblySt
     return nothing
 end
 
-# A form that allocates no global array declares no storage to check.
 _assert_device_specification(device, ::Nothing, integrator) = nothing
 
 function _assert_device_specification(device, spec, integrator)
@@ -364,15 +331,14 @@ function _assert_device_specification(device, spec, integrator)
     return nothing
 end
 
-# `matrix_type(device, spec)` resolves a `StandardOperatorSpecification` with
-# no `matrix_type` named — or one explicitly given as a host type — to the
-# host `SparseMatrixCSC`, and [`allocate_operator_matrix`](@ref) allocates
-# exactly that: the system matrix would silently land on the HOST. Loud here,
-# at setup, before any cache is built. Scoped to the integrator families that
-# actually allocate the global MATRIX under this form ([`create_system_matrix`](@ref));
-# a linear integrator allocates a vector, whose type this spec's `matrix_type`
-# has no say over. The `KernelAbstractions.CPU` debug backend is genuinely
-# host-resident — there is no device memory to have missed — and is exempt.
+# A `StandardOperatorSpecification` with no `matrix_type` named — or one given
+# as a host type — resolves to the host `SparseMatrixCSC`, and
+# [`allocate_operator_matrix`](@ref) allocates exactly that: the system matrix
+# would silently land on the HOST. Loud here, at setup. Scoped to the integrator
+# families that allocate the global MATRIX ([`create_system_matrix`](@ref)); a
+# linear integrator allocates a vector, whose type this spec has no say over.
+# The `KernelAbstractions.CPU` debug backend is genuinely host-resident and
+# exempt.
 _assert_no_silent_host_matrix(device, spec, ::AbstractLinearIntegrator) = nothing
 function _assert_no_silent_host_matrix(device, spec, integrator)
     MT = matrix_type(device, spec)
@@ -390,20 +356,16 @@ _host_resident_backend(device::KernelAbstractionsDevice) = nameof(typeof(device.
 
 _assert_device_matrix_type(device, ::Nothing) = nothing
 
-# The GLOBAL side alone: the device's `value_type` and the named matrix type
-# describe the same system matrix, so they have to agree. The ELEMENT-local
-# scalar is the integrator's own election ([`element_value_type`](@ref)) and is
-# deliberately not part of this check — a `Float64` element scattering into a
-# `Float32` system converts entry-wise, which is a supported configuration.
+# The GLOBAL side alone. The ELEMENT-local scalar is the integrator's own
+# election and is deliberately NOT checked here: a `Float64` element scattering
+# into a `Float32` system converts entry-wise and is supported.
 function _assert_device_matrix_type(device, ::Type{MT}) where {MT}
     eltype(MT) === value_type(device) || throw(ArgumentError(
         "$(nameof(typeof(device))) assembles in $(value_type(device)) but the operator " *
         "specification names the matrix type $MT, whose element type is $(eltype(MT)). Set the " *
         "device's `value_type` and the matrix type's element type to the same scalar."))
-    # A capability check, not a name check: Ferrite 1.7 ships a device assembler
-    # for `CuSparseMatrixCSC` and nothing else — `CuSparseMatrixCSR` is
-    # allocatable but has no `start_assemble`/`assemble!`, so it would fail on
-    # the first sweep instead of here.
+    # A capability check, not a name check: a CSR device matrix is allocatable
+    # but has no `start_assemble`, and would fail on the first sweep instead.
     hasmethod(Ferrite.start_assemble, Tuple{MT}) || throw(ArgumentError(
         "No `Ferrite.start_assemble` method accepts $MT, so it cannot be assembled into. " *
         "Ferrite 1.7 ships a device assembler for CSC device matrices only; a CSR device " *
@@ -497,31 +459,20 @@ triple — not on the integrator — so they are checked here rather than in
 kind is resolved.
 
 Both default to the cell answer (`CellCache`, [`CellItems`](@ref)), so a drifted
-method is never reached and never a `MethodError`: the default answers, and the
-sweep positions on CELL ids and visits CELLS. That is a silently wrong operator,
-which is why the drift is worth a setup-time rejection.
+method is never reached and never a `MethodError`: the default answers and the
+sweep positions on CELL ids and visits CELLS — a silently wrong operator, hence
+the setup-time rejection.
 
 The subject is the [`unwrap`](@ref) fixpoint of the element cache, not the
-possibly-decorated cache the engine calls — the [`AbstractElementCacheDecorator`](@ref)
-convention's AUTHOR-WRITTEN-METHOD half, since both seams are decoration's
-declarations now ([`AbstractElementCacheDecorator`](@ref) forwards them): probing
-the decorated cache would resolve to that forwarding method itself, which
-narrows the cache argument just enough to look like a declaration and would
-pass every drifted inner silently, exactly the failure mode this check exists
-to catch. The argument the seams are keyed on: a hook with ANY method narrowing
-that argument to a type this subdomain's UNWRAPPED cache conforms to must have
-one the engine's own call — which runs on the decorated cache and forwards down
-to the same inner — resolves to. A method narrowing only the KIND is not a
-declaration about a cache and is not treated as drift; it is also the one
-spelling a declaration must not take, since it ties with the decorator forwards
-(see [`assembly_iterator`](@ref)). A kind-level DEFAULT belongs on
-[`default_assembly_iterator`](@ref), below the cache declarations, which is
-where the matrix-free action's device cursor sits.
+possibly-decorated cache the engine calls: probing the decorated one would
+resolve to the decorator's forwarding method, which narrows the cache argument
+just enough to look like a declaration and would pass every drifted inner
+silently. A hook with ANY method narrowing that argument to a type this
+subdomain's UNWRAPPED cache conforms to must have one the engine's own call
+resolves to. A method narrowing only the KIND is not treated as drift.
 
-What no check can see, and the docs say so instead: a method that is simply
-ABSENT. An author who overloads [`assembly_iterator`](@ref) and forgets
-[`item_provider`](@ref) gets the default provider with no drift to detect, and
-only the item COUNT a sweep visits reveals it.
+A method that is simply ABSENT no check can see; only the item COUNT a sweep
+visits reveals it.
 """
 function assert_iteration_signatures(kind, element_caches, dh::AbstractDofHandler)
     for (cache, sdh) in zip(element_caches, dh.subdofhandlers)
@@ -532,9 +483,8 @@ function assert_iteration_signatures(kind, element_caches, dh::AbstractDofHandle
     return nothing
 end
 
-# A type no declaration can name, used to tell "narrows the cache argument"
-# apart from "leaves it open": a method that also accepts THIS is not a
-# declaration about any particular cache.
+# A type no declaration can name: a method that also accepts THIS leaves the
+# cache argument open and is not a declaration about any particular cache.
 struct _UnrelatedElementCache end
 
 _accepts_element_cache(m::Method, C::Type) =
@@ -586,23 +536,22 @@ The declaration hooks are signature-checked first
 declaration and a drifted method would otherwise assemble a silent subset.
 
 Once the caches exist the ITERATION seams are signature-checked against them
-([`assert_iteration_signatures`](@ref)), which is where they belong: they are
-keyed on the element cache, and they too default rather than erroring. Each
-subdomain's [`validate_element_cache`](@ref) call then probes `reinit_values!`
-against that subdomain's RESOLVED host [`assembly_iterator`](@ref) type rather
-than against `CellCache` unconditionally, so an author-annotated
+([`assert_iteration_signatures`](@ref)), being keyed on the element cache and
+defaulting rather than erroring. Each subdomain's
+[`validate_element_cache`](@ref) call then probes `reinit_values!` against that
+subdomain's RESOLVED host [`assembly_iterator`](@ref) type rather than against
+`CellCache` unconditionally, so an author-annotated
 `reinit_values!(c, ::MyIterator)` method is validated on the type it was
 written against.
 
 The subdomain caches are then the concatenation of what each REGISTERED item
 family builds, in the order [`item_families`](@ref) returns them — cells, then
 facet items ([`facet_items`](@ref)), then algebraic items
-([`algebraic_items`](@ref)) for the default declaration. Every family, shipped
-or downstream, is built by the same [`setup_family_caches`](@ref) dispatch;
-there is no privileged path beside it. The algebraic domain is resolved BEFORE
-the [`InternalVariableHandler`](@ref) is built, since a condensed algebraic
-cache's item block sizes itself from the resolved items and cache, and
-decorated afterwards alongside the cell caches.
+([`algebraic_items`](@ref)) for the default declaration — every one of them
+through the same [`setup_family_caches`](@ref) dispatch. The algebraic domain is
+resolved BEFORE the [`InternalVariableHandler`](@ref) is built, since a
+condensed algebraic cache's item block sizes itself from the resolved items and
+cache, and decorated afterwards alongside the cell caches.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler;
         slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD())

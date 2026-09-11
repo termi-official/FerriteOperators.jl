@@ -27,11 +27,11 @@ Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix, re
     _start_matrix_assemble(strategy.device, strategy, J, residual; fillzero)
 _start_matrix_assemble(::AbstractDevice, strategy, args...; fillzero::Bool) =
     start_assemble(args..., atomic = dof_scatter_needs_atomic(strategy); fillzero)
-# Ferrite's device `start_assemble` takes no `atomic` keyword, and there is
+# Ferrite's device `start_assemble` takes no `atomic` keyword and there is
 # nothing to pass: its `DeviceCSCAssembler` accumulates with a plain `+=`.
 # `AbstractThreadSafeAssembler` means "safe to alias across workers GIVEN a
 # valid coloring", NOT race-free — which is why a GPU device requires
-# `ColoredScheduling` and rejects `SequentialScheduling` at setup.
+# `ColoredScheduling`.
 _start_matrix_assemble(::AbstractGPUDevice, strategy, args...; fillzero::Bool) =
     start_assemble(args...; fillzero)
 function Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, residual::AbstractVector{T}; fillzero::Bool=true) where T
@@ -40,8 +40,8 @@ function Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, residual::Ab
 end
 duplicate_for_device(device, a::VectorAssembler) = a
 # The GPU counterpart of the line above: every worker gets the same assembler.
-# It carries no per-worker scratch — the scatter is a bare indexed accumulation
-# — so aliasing it is exactly what a colored sweep wants.
+# It carries no per-worker scratch, the scatter being a bare indexed
+# accumulation, so aliasing it is what a colored sweep wants.
 Ferrite.get_substruct(a::VectorAssembler, worker) = a
 
 # FIXME we might want to upstream this
@@ -51,8 +51,8 @@ Ferrite.assemble!(assembler::Ferrite.AbstractAssembler, cell::CellCache, fe::Abs
 Ferrite.assemble!(assembler::VectorAssembler, cell::CellCache, fe::AbstractVector) =
     assemble!(assembler, celldofs(cell), fe)
 # `@inline`: on a device this is the scatter INSIDE the per-item kernel, and a
-# call would marshal the dof view and the element vector through per-thread local
-# memory instead of keeping them in registers.
+# call would marshal the dof view and the element vector through per-thread
+# local memory instead of registers.
 @inline function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic}, dofs::AbstractVector{<:Integer}, fe::AbstractVector) where {atomic}
     @boundscheck length(fe) == length(dofs) || throw(DimensionMismatch(
         "the local vector and the dof vector of a scatter must have the same length"))
@@ -108,7 +108,7 @@ allocate_vector(::Type{Vector{T}}, dh) where T = zeros(T, ndofs(dh))
     allocate_vector(device, dh)
 
 The operator's global vector for `device`. A device whose vectors are a plain
-`Vector` answers through `vector_type`; one whose allocator needs the backend
-OBJECT rather than a type — a GPU device — has its own method.
+`Vector` answers through `vector_type`; a GPU device, whose allocator needs the
+backend OBJECT rather than a type, has its own method.
 """
 allocate_vector(device::AbstractDevice, dh) = allocate_vector(vector_type(device), dh)

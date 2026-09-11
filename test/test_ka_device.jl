@@ -3,15 +3,14 @@ using FerriteOperatorsExampleElements
 using Test
 using SparseArrays
 using LinearAlgebra
-# FerriteKAExt — which supplies `distribute_to_workers`, the device handler and
-# every Adapt rule the device kernel builds on — is triggered by these four
-# together, not by KernelAbstractions alone.
+# FerriteKAExt — `distribute_to_workers`, the device handler and every Adapt
+# rule the device kernel builds on — is triggered by these four together, not by
+# KernelAbstractions alone.
 import Adapt, GPUArrays, GPUArraysCore
 import KernelAbstractions as KA
 
-# The CPU backend runs the very same kernels as a GPU backend, so it covers the
-# device path on CI, where there is no GPU. `test/gpu/` runs the same
-# equivalence assertions on `CUDABackend()`.
+# The CPU backend runs the same kernels as a GPU backend, so it covers the
+# device path where there is no GPU. `test/gpu/` runs these on `CUDABackend()`.
 ka_device(::Type{T} = Float64, ::Type{I} = Int) where {T, I} =
     KernelAbstractionsDevice(KA.CPU(); value_type = T, index_type = I,
                              items_per_worker = 2, max_workgroup_size = 8)
@@ -36,8 +35,7 @@ function hex_testbed(::Type{T} = Float64; dims = (3, 3, 3)) where {T}
 end
 
 @testset "KernelAbstractionsDevice" begin
-    # The device's `value_type` is the GLOBAL system's; the element precision is
-    # elected on the integrator's quadrature collection, and both are `T` here.
+    # Both elections are `T` here.
     @testset "matches the sequential result ($name, $T, $label)" for
             (label, testbed) in (("quad", quad_testbed), ("hex", hex_testbed)),
             T in (Float64, Float32),
@@ -50,8 +48,7 @@ end
         I   = T === Float32 ? Int32 : Int
         rtol = T === Float32 ? 1.0f-5 : 1.0e-12
 
-        # The coloring has to actually split the cells, or the test would pass
-        # with a single barrier and never exercise the synchronization.
+        # Without more than one colour the synchronization is never exercised.
         @test length(Ferrite.create_coloring(Ferrite.get_grid(dh))) > 1
 
         reference = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, I}()), integrator, dh)
@@ -63,17 +60,15 @@ end
         @test eltype(target) === T
         @test target ≈ FerriteOperators.operator_payload(reference) rtol = rtol
 
-        # Coloring fixes the accumulation order per entry, so a repeated sweep
-        # reproduces the previous one exactly.
+        # Coloring fixes the accumulation order, so a repeat is exact.
         first_run = copy(target)
         update_operator!(device, nothing)
         @test first_run == FerriteOperators.operator_payload(device)
     end
 
     @testset "mixed local and global precision" begin
-        # The two elections are independent by design: the element evaluates in
-        # what its collection says, the device accumulates in its `value_type`,
-        # and the scatter converts entry-wise.
+        # The element evaluates in its collection's scalar, the device
+        # accumulates in its `value_type`, and the scatter converts entry-wise.
         dh = quad_testbed(Float64)
         for (Te, Tg, Ig) in ((Float64, Float32, Int32), (Float32, Float64, Int))
             integrator = SimpleBilinearDiffusionIntegrator(2.5, QuadratureRuleCollection(Te, 2), :u)
@@ -94,19 +89,17 @@ end
                             SimpleBilinearDiffusionIntegrator(2.5, QuadratureRuleCollection(Float32, 2), :u), dh)
         update_operator!(op, nothing)
         update_operator!(op, nothing)
-        # Nothing is transferred or rebuilt per sweep: the workspaces, the
-        # coloring and the device handler were all built at setup. What is left
-        # is the per-color kernel object and the distributed assembler, so the
-        # count must not scale with the 216 cells.
+        # Nothing is transferred or rebuilt per sweep — the workspaces, the
+        # coloring and the device handler were all built at setup — so what is
+        # left is the per-color kernel object and the distributed assembler, and
+        # the count must not scale with the 216 cells.
         allocations = @allocated update_operator!(op, nothing)
         @test allocations < 200_000
     end
 
     @testset "launch geometry" begin
         device = ka_device()
-        # One worker per `items_per_worker` items, capped by the workgroup size,
-        # and monotone: a barrier never launches more workers than the largest
-        # barrier's `n_workers` allocated caches for.
+        # Monotone: no barrier launches more workers than `n_workers` sized for.
         @test prod(FerriteOperators.launch_geometry(device, 4)) == 2
         @test prod(FerriteOperators.launch_geometry(device, 100)) ≥ prod(FerriteOperators.launch_geometry(device, 40))
         @test FerriteOperators.launch_geometry(device, 0) == (1, 0)
@@ -117,15 +110,11 @@ end
 
     @testset "lane launch geometry" begin
         device = ka_device()   # items_per_worker = 2, max_workgroup_size = 8
-        # 40 items -> 24 element slots, and a block of 8 lanes fills the group by
-        # itself: one element per group, 24 groups.
+        # 40 items -> 24 slots; a block of 8 lanes fills a group by itself.
         @test FerriteOperators.lane_launch_geometry(device, 8, 40) == (8, 24, 24)
-        # A block of 3 leaves room for one more in the same 8-wide group, which
-        # is the multi-element geometry a small element runs: 2 blocks of 3
-        # lanes per group, 12 groups for the 24 slots.
+        # A block of 3 leaves room for a second in the same 8-wide group.
         @test FerriteOperators.lane_launch_geometry(device, 3, 40) == (6, 12, 24)
-        # The slot count is the grid-stride mapping's worker count, unchanged —
-        # which is why this mapping needs no `n_workers` method of its own.
+        # The slot count is the grid-stride mapping's worker count, unchanged.
         for n in (1, 7, 40, 400)
             for nlanes in (1, 3, 8)
                 workgroup, blocks, n_slots = FerriteOperators.lane_launch_geometry(device, nlanes, n)
@@ -143,8 +132,7 @@ end
 ## Scope walls
 ####################################
 
-# Each wall needs an integrator carrying exactly one offending declaration; the
-# element cache itself is the plain diffusion one throughout.
+# One offending declaration each, over the plain diffusion cache.
 struct FacetWallIntegrator <: AbstractBilinearIntegrator
     qrc::QuadratureRuleCollection
     facetset::Any
@@ -173,9 +161,7 @@ end
 FerriteOperators.setup_element_cache(m::NonlinearWallIntegrator, sdh::SubDofHandler) =
     FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(1.0, m.qrc, :u), sdh)
 
-# A backend double that is not `KernelAbstractions.CPU`, so the host-resident
-# exemption does not apply — this stands in for a real accelerator backend
-# without depending on one.
+# Not `KernelAbstractions.CPU`, so the host-resident exemption does not apply.
 struct FakeGPUBackend end
 
 @testset "KernelAbstractionsDevice scope walls" begin
@@ -224,29 +210,26 @@ struct FakeGPUBackend end
     end
 
     @testset "rejects a silent host matrix on a non-CPU GPU-class device" begin
-        # No `matrix_type` named: `matrix_type(device, spec)` resolves to the
-        # host `SparseMatrixCSC`, which a real accelerator device must not get
-        # silently. Caught here, through the full `setup_operator` route, since
-        # `assert_device_supported` runs before any device cache is built and
-        # so needs nothing from `FakeGPUBackend` beyond its type name.
+        # No `matrix_type` named resolves to the host `SparseMatrixCSC`, which a
+        # real accelerator device must not get silently. Caught through the full
+        # `setup_operator` route, `assert_device_supported` running before any
+        # device cache is built and so needing nothing from `FakeGPUBackend`
+        # beyond its type name.
         fake_device = KernelAbstractionsDevice(FakeGPUBackend(); value_type = Float64, index_type = Int)
         strategy = AssemblyStrategy(FullAssembly(), ColoredScheduling(), fake_device)
         err = @test_throws ArgumentError setup_operator(strategy, bilinear, dh)
         @test occursin("matrix_type", err.value.msg)
         @test occursin("host", err.value.msg)
 
-        # A linear integrator allocates a VECTOR, never this matrix type, so
-        # the same device and the same (absent) `matrix_type` is not an error
-        # — checked directly, since a full `setup_operator` round trip on
-        # `FakeGPUBackend` would need real KernelAbstractions backend support
-        # past this point, which is not what is under test here.
+        # A linear integrator allocates a VECTOR, never this matrix type, so the
+        # same device and the same (absent) `matrix_type` is not an error.
+        # Checked directly: a full `setup_operator` round trip on
+        # `FakeGPUBackend` would need real backend support past this point.
         spec = StandardOperatorSpecification()
         linear = SimpleLinearIntegrator(3.1, qrc, :u)
         @test FerriteOperators._assert_no_silent_host_matrix(fake_device, spec, linear) === nothing
 
-        # `KernelAbstractions.CPU()`, exercised throughout this file with the
-        # very same default spec, is exempt — the debug backend is genuinely
-        # host-resident.
+        # The `KernelAbstractions.CPU()` debug backend is genuinely host-resident.
         @test FerriteOperators._assert_no_silent_host_matrix(ka_device(), spec, bilinear) === nothing
     end
 

@@ -248,11 +248,11 @@ legitimately has none.
 
 FerriteOperators ships this for [`NullOperator`](@ref) (materializing its
 all-zero matrix on demand) and for the two operator kinds whose matrix field is
-unambiguous — [`BilinearFerriteOperator`](@ref)'s `A`, [`LinearizedFerriteOperator`](@ref)'s
-`J` — both of which also expose the same array through [`operator_payload`](@ref),
-which is what `Base.eltype`/`Base.size` read. A [`LinearFerriteOperator`](@ref)
-holds a load VECTOR, not a matrix, and has no method here; an operator type
-defined downstream implements `get_matrix` as its own accessor.
+unambiguous — [`BilinearFerriteOperator`](@ref)'s `A`,
+[`LinearizedFerriteOperator`](@ref)'s `J` — both of which also expose that array
+through [`operator_payload`](@ref), which is what `Base.eltype`/`Base.size`
+read. A [`LinearFerriteOperator`](@ref) holds a load VECTOR and has no method
+here; a downstream operator type implements `get_matrix` as its own accessor.
 """
 get_matrix(op) = error("Operator matrix is not explicitly accessible for given operator")
 
