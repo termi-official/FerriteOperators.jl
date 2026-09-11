@@ -8,9 +8,20 @@
 Supertype of the caches this package wraps around a user's element cache
 ([`ADElementCache`](@ref), [`FusedFromSplit`](@ref)). The wrapped cache sits in
 a field `inner`, and everything a decorator simply inherits is forwarded once
-here. What a decorator answers about REQUESTS ([`provides_analytic`](@ref),
-[`serves_kind`](@ref)) stays with the decorators: one that forwards only some
-requests must not inherit the inner's claims for the rest.
+here — including the AUTHOR-DECLARATION seams about the wrapped element itself
+([`assembly_iterator`](@ref), [`device_assembly_iterator`](@ref),
+[`item_provider`](@ref), [`item_update_flags`](@ref),
+[`element_local_length`](@ref), [`element_matrix_symmetry`](@ref),
+[`element_action_row`](@ref)): decoration does not change what the ELEMENT is,
+so a decorator inherits the inner's declaration of it wholesale, and one with
+its own explicit method for a seam (`ElementAssemblyCache`'s extent/row-action)
+wins by ordinary dispatch — it is strictly more specific than the blanket
+method here. This is the OTHER side of the rule below: what a decorator
+answers about REQUESTS it SERVES ([`provides_analytic`](@ref),
+[`serves_kind`](@ref)) stays decorator-owned, one that forwards only some
+requests must not inherit the inner's claims for the rest, and is not
+forwarded here — but a declaration about the element the decorator wraps is
+exactly the inner's to make, and blanket inheritance is what that calls for.
 
 Which subject a probe takes is the whole convention:
 
@@ -47,6 +58,19 @@ allocate_element_unknown_vector(d::AbstractElementCacheDecorator, sdh) = allocat
 allocate_element_residual_vector(d::AbstractElementCacheDecorator, sdh) = allocate_element_residual_vector(d.inner, sdh)
 element_value_type(d::AbstractElementCacheDecorator) = element_value_type(d.inner)
 element_matrix_symmetry(d::AbstractElementCacheDecorator) = element_matrix_symmetry(d.inner)
+# The iteration-protocol seams (S1-S7, iterators.jl/strategy.jl/element_interface.jl):
+# what the ELEMENT positions on, provides and reports about itself. Forwarded
+# for the same reason as every declaration above; `ElementAssemblyCache`'s own
+# `item_update_flags`/`element_local_length`/`element_action_row` methods are
+# strictly more specific in the cache slot and win by ordinary dispatch.
+assembly_iterator(kind, d::AbstractElementCacheDecorator, sdh) = assembly_iterator(kind, d.inner, sdh)
+device_assembly_iterator(kind, d::AbstractElementCacheDecorator, sdh, device_sdh) =
+    device_assembly_iterator(kind, d.inner, sdh, device_sdh)
+item_provider(kind, d::AbstractElementCacheDecorator, sdh) = item_provider(kind, d.inner, sdh)
+item_update_flags(kind, d::AbstractElementCacheDecorator) = item_update_flags(kind, d.inner)
+element_local_length(d::AbstractElementCacheDecorator) = element_local_length(d.inner)
+element_action_row(d::AbstractElementCacheDecorator, uₑ, args::CellArgs, i::Int) =
+    element_action_row(d.inner, uₑ, args, i)
 evaluate_cell_functional(kind, d::AbstractElementCacheDecorator, args) = evaluate_cell_functional(kind, d.inner, args)
 evaluate_algebraic_functional(kind, d::AbstractElementCacheDecorator, args) =
     evaluate_algebraic_functional(kind, d.inner, args)

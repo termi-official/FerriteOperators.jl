@@ -386,6 +386,158 @@ FerriteOperators.setup_element_cache(::IterationDriftIntegrator{hook}, ::SubDofH
 end
 
 ####################################
+## Decorator forwarding of author declarations
+####################################
+# `AbstractElementCacheDecorator` forwards the seams that declare what the
+# ELEMENT itself is/does — `assembly_iterator`, `device_assembly_iterator`,
+# `item_provider`, `item_update_flags`, `element_local_length`,
+# `element_action_row` (`element_matrix_symmetry` already forwarded, S5) — so a
+# cache wrapped in `ADElementCache`/`ElementAssemblyCache` keeps its own
+# declarations instead of silently losing them to the cell default.
+# `assert_iteration_signatures`'s drift probe runs on the `unwrap` fixpoint for
+# the same reason `_assert_trait_backed` does — see `IterationDriftCache` above.
+
+# A `CellCache` wrapper distinct in TYPE from the engine's own default, so a
+# hook resolving to it proves the CUSTOM declaration ran and not the open one.
+struct TaggedCellCache{C}
+    cc::C
+end
+TaggedCellCache(sdh::SubDofHandler) = TaggedCellCache(Ferrite.CellCache(sdh))
+Ferrite.reinit!(t::TaggedCellCache, item::Int) = (Ferrite.reinit!(t.cc, item); t)
+Ferrite.cellid(t::TaggedCellCache) = Ferrite.cellid(t.cc)
+FerriteOperators.iterator_dofs(t::TaggedCellCache) = FerriteOperators.iterator_dofs(t.cc)
+FerriteOperators.iterator_handler(t::TaggedCellCache) = FerriteOperators.iterator_handler(t.cc)
+
+# A distinct provider type, so `item_provider`'s forwarding is checked the same
+# way; `compute_partition` delegates so a real sweep still partitions.
+struct TaggedItems{P}
+    provider::P
+end
+FerriteOperators.compute_partition(s::FerriteOperators.AssemblyStrategy, p::TaggedItems) =
+    FerriteOperators.compute_partition(s, p.provider)
+
+# A sentinel the DEFAULT `device_assembly_iterator` never answers with — it
+# falls through to `assembly_iterator` (a `TaggedCellCache`) instead — so
+# resolving to THIS proves the decorator forwards `device_assembly_iterator`
+# itself and not just the seam it happens to default through.
+struct DeviceSentinel end
+
+# The declaring inner: residual-only, so `setup_operator` auto-wraps it in
+# `ADElementCache` exactly as `WrapDiffusionCache` in test_ad_element.jl is,
+# plus every newly forwarded seam, each answering something the cell default
+# never would.
+struct DeclaringIntegrator <: AbstractNonlinearIntegrator
+    qrc::QuadratureRuleCollection
+    field_name::Symbol
+end
+struct DeclaringCache{CV <: CellValues} <: AbstractVolumetricElementCache
+    cv::CV
+end
+function FerriteOperators.setup_element_cache(m::DeclaringIntegrator, sdh::SubDofHandler)
+    qr     = getquadraturerule(m.qrc, sdh)
+    ip     = Ferrite.getfieldinterpolation(sdh, m.field_name)
+    ip_geo = geometric_subdomain_interpolation(sdh)
+    return DeclaringCache(CellValues(qr, ip, ip_geo))
+end
+FerriteOperators.duplicate_for_device(device, c::DeclaringCache) =
+    DeclaringCache(FerriteOperators.duplicate_for_device(device, c.cv))
+FerriteOperators.reinit_values!(c::DeclaringCache, cell::TaggedCellCache) = reinit!(c.cv, cell.cc)
+function FerriteOperators.assemble_cell!(req::ResidualRequest, cache::DeclaringCache, args)
+    (; cv) = cache
+    uₑ = args.states.u
+    for qp in 1:getnquadpoints(cv)
+        dΩ = getdetJdV(cv, qp)
+        ∇u = function_gradient(cv, qp, uₑ)
+        for i in 1:getnbasefunctions(cv)
+            req.r[i] += (shape_gradient(cv, qp, i) ⋅ ∇u) * dΩ
+        end
+    end
+end
+
+FerriteOperators.assembly_iterator(kind, ::DeclaringCache, sdh) = TaggedCellCache(sdh)
+FerriteOperators.device_assembly_iterator(kind, ::DeclaringCache, sdh, device_sdh) = DeviceSentinel()
+FerriteOperators.item_provider(kind, ::DeclaringCache, sdh) = TaggedItems(CellItems(sdh))
+FerriteOperators.item_update_flags(kind, ::DeclaringCache) =
+    Ferrite.UpdateFlags(nodes = false, coords = false, dofs = true)
+FerriteOperators.element_local_length(::DeclaringCache) = Val(7)
+FerriteOperators.element_action_row(::DeclaringCache, uₑ, args::CellArgs, i::Int) = 99.0 + i
+
+@testset "Decorator forwarding of author declarations" begin
+    (; dh, qrc, strategy) = scalar_quad_testbed((3, 2))
+    sdh = dh.subdofhandlers[1]
+
+    @testset "a wrapped cache's declarations reach setup, and the resolved seams are the inner's" begin
+        op = setup_operator(strategy, DeclaringIntegrator(qrc, :u), dh)
+        wrapped = first_element_cache(op)
+        @test wrapped isa ADElementCache
+        inner = FerriteOperators.unwrap(wrapped)
+        @test inner isa DeclaringCache
+
+        # Reached through SETUP itself: `setup_family_caches` partitions over
+        # `item_provider(kind, wrapped, sdh)` and positions the workspace on
+        # `assembly_iterator(kind, wrapped, sdh)`, and `validate_element_cache`
+        # then probes `reinit_values!` against that resolved iterator type —
+        # `DeclaringCache` implements that only for `TaggedCellCache`, so a
+        # broken forward would have thrown before `setup_operator` returned.
+        @test assembly_iterator(nothing, wrapped, sdh) isa TaggedCellCache
+        @test item_provider(nothing, wrapped, sdh) isa TaggedItems
+        @test device_assembly_iterator(nothing, wrapped, sdh, sdh) isa DeviceSentinel
+        @test item_update_flags(nothing, wrapped) == item_update_flags(nothing, inner)
+        @test item_update_flags(nothing, wrapped) == Ferrite.UpdateFlags(nodes = false, coords = false, dofs = true)
+        @test FerriteOperators.element_local_length(wrapped) == Val(7)
+
+        n = ndofs_per_cell(sdh)
+        cc = Ferrite.CellCache(sdh); reinit!(cc, 1)
+        args = CellArgs((u = zeros(n),), cc, nothing, nothing)
+        @test element_action_row(wrapped, zeros(n), args, 2) == element_action_row(inner, zeros(n), args, 2)
+    end
+
+    @testset "a decorator's own explicit method wins over the forwarded default" begin
+        bilinear = FerriteOperators.setup_element_cache(SimpleBilinearDiffusionIntegrator(2.0, qrc, :u), sdh)
+        eac      = with_action_storage(bilinear, ElementAssembly(), sdh)
+        @test eac isa ElementAssemblyCache
+
+        # `SimpleBilinearDiffusionElementCache` declares neither iteration
+        # seam, so both still resolve to the plain cell default THROUGH the
+        # decorator — the new forwarding changes nothing for a cache that
+        # declares nothing.
+        @test assembly_iterator(nothing, eac, sdh) isa Ferrite.CellCache
+        @test item_provider(nothing, eac, sdh) isa CellItems
+
+        # `ElementAssemblyCache` OWNS extent/row-action/matrix-free flags —
+        # its own explicit methods answer, not the (undeclared) forwarded
+        # default.
+        @test FerriteOperators.element_local_length(bilinear) === nothing
+        @test FerriteOperators.element_local_length(eac) == eac.local_size
+        @test item_update_flags(MatrixFreeActionKind(), eac) ==
+            Ferrite.UpdateFlags(nodes = false, coords = false, dofs = true)
+
+        # Further wrapped in `ADElementCache`, the SAME override still wins —
+        # the outer decorator's forwarding lands on `ElementAssemblyCache`'s
+        # own method by ordinary dispatch, never on `eac.inner`'s default —
+        # and the seams `ElementAssemblyCache` does NOT override still forward
+        # straight through both layers.
+        ad = ADElementCache(eac, sdh)
+        @test FerriteOperators.element_local_length(ad) == eac.local_size
+        @test item_update_flags(MatrixFreeActionKind(), ad) == item_update_flags(MatrixFreeActionKind(), eac)
+        @test assembly_iterator(nothing, ad, sdh) isa Ferrite.CellCache
+    end
+
+    @testset "the drift probe sees a declaration the decorated path would otherwise mask" begin
+        check(cache) = FerriteOperators.assert_iteration_signatures(nothing, [cache], dh)
+        wrapped_drift   = ADElementCache(IterationDriftCache{:assembly_iterator}(), sdh)
+        wrapped_correct = ADElementCache(IterationDriftCache{:correct}(), sdh)
+        wrapped_none    = ADElementCache(IterationDriftCache{:none}(), sdh)
+
+        err = @test_throws ArgumentError check(wrapped_drift)
+        @test occursin("iteration seam `assembly_iterator`", err.value.msg)
+        @test occursin("IterationDriftCache{:assembly_iterator}", err.value.msg)
+        @test check(wrapped_correct) === nothing
+        @test check(wrapped_none) === nothing
+    end
+end
+
+####################################
 ## Downstream-style custom kinds
 ####################################
 # Everything below is what a downstream package writes: kind + request +

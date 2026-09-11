@@ -8,7 +8,7 @@ import KernelAbstractions: @kernel, @index, @Const, @localmem, @synchronize, @un
 
 import FerriteOperators: KernelAbstractionsDevice, AssemblyWorkspace, AssemblyTask, VectorAssembler
 import FerriteOperators: CooperativeElement, WorkerPerElement, LanesPerElement, QVector,
-    MatrixFreeActionKind
+    MatrixFreeActionKind, AbstractElementCacheDecorator
 import FerriteOperators: device_worker_view, launch_geometry, lane_launch_geometry, n_workers,
     value_type
 import FerriteOperators: cooperative_group_size, cooperative_scratch_shape,
@@ -172,6 +172,20 @@ device counterpart worth paying for.
 """
 FerriteOperators.device_assembly_iterator(kind::MatrixFreeActionKind, element_cache, sdh, device_sdh) =
     _with_uniform_dof_stride(assembly_iterator(kind, element_cache, device_sdh), sdh)
+
+# Both methods above narrow only the KIND, leaving the cache argument open —
+# which is exactly as specific as `AbstractElementCacheDecorator`'s own
+# open-kind forwarding narrows only the CACHE. Neither dominates the other, so
+# Julia calls it ambiguous over a decorated cache under `MatrixFreeActionKind`
+# unless the (kind, decorator) corner is named explicitly, same as any other
+# dispatch diamond. The body is the ordinary one-level forward: an inner that
+# is itself decorated recurses through its own such method (or this one again),
+# and an inner with its own `MatrixFreeActionKind`-specific declaration is
+# strictly more specific than both diamond arms and still wins there.
+FerriteOperators.assembly_iterator(kind::MatrixFreeActionKind, d::AbstractElementCacheDecorator, sdh) =
+    assembly_iterator(kind, d.inner, sdh)
+FerriteOperators.device_assembly_iterator(kind::MatrixFreeActionKind, d::AbstractElementCacheDecorator, sdh, device_sdh) =
+    device_assembly_iterator(kind, d.inner, sdh, device_sdh)
 
 _with_uniform_dof_stride(c::DeviceCellCursor, sdh::Ferrite.SubDofHandler) =
     DeviceCellCursor(c.sdh, c.coords, c.cellid, c.dofbase, _uniform_dof_stride(sdh))

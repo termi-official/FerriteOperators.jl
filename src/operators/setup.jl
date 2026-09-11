@@ -501,11 +501,19 @@ method is never reached and never a `MethodError`: the default answers, and the
 sweep positions on CELL ids and visits CELLS. That is a silently wrong operator,
 which is why the drift is worth a setup-time rejection.
 
-The subject is the ELEMENT CACHE, the argument the seams are keyed on: a hook
-with ANY method narrowing that argument to a type this subdomain's cache
-conforms to must have one the engine's own call resolves to. A method narrowing
-only the KIND is not a declaration about a cache — the matrix-free action's
-device iterator is the shipped one — and is not treated as drift.
+The subject is the [`unwrap`](@ref) fixpoint of the element cache, not the
+possibly-decorated cache the engine calls — the [`AbstractElementCacheDecorator`](@ref)
+convention's AUTHOR-WRITTEN-METHOD half, since both seams are decoration's
+declarations now ([`AbstractElementCacheDecorator`](@ref) forwards them): probing
+the decorated cache would resolve to that forwarding method itself, which
+narrows the cache argument just enough to look like a declaration and would
+pass every drifted inner silently, exactly the failure mode this check exists
+to catch. The argument the seams are keyed on: a hook with ANY method narrowing
+that argument to a type this subdomain's UNWRAPPED cache conforms to must have
+one the engine's own call — which runs on the decorated cache and forwards down
+to the same inner — resolves to. A method narrowing only the KIND is not a
+declaration about a cache — the matrix-free action's device iterator is the
+shipped one — and is not treated as drift.
 
 What no check can see, and the docs say so instead: a method that is simply
 ABSENT. An author who overloads [`assembly_iterator`](@ref) and forgets
@@ -514,8 +522,9 @@ only the item COUNT a sweep visits reveals it.
 """
 function assert_iteration_signatures(kind, element_caches, dh::AbstractDofHandler)
     for (cache, sdh) in zip(element_caches, dh.subdofhandlers)
-        _assert_iteration_hook_signature(assembly_iterator, kind, cache, sdh)
-        _assert_iteration_hook_signature(item_provider, kind, cache, sdh)
+        author = unwrap(cache)
+        _assert_iteration_hook_signature(assembly_iterator, kind, author, sdh)
+        _assert_iteration_hook_signature(item_provider, kind, author, sdh)
     end
     return nothing
 end
