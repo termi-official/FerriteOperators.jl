@@ -511,9 +511,32 @@ materialized* separate from *what the physics is*.
 | `D` | pointwise quadrature-point operation | the quadrature-point kernel tier |
 
 MFEM's **assembly levels** — FULL, ELEMENT, PARTIAL, NONE — name the strategy
-axis, orthogonal to the device axis. Full sparse assembly is the shipped level;
-the [`QVector`](@ref) is exactly the qdata store a partial-assembly level needs,
-which is why it is described as matrix-free precomputation.
+axis, orthogonal to the device axis. [`FullAssembly`](@ref) and
+[`MatrixFreeAction`](@ref) are the shipped FORMS, and the latter spans the other
+three levels through its `storage` election ([`StorageElection`](@ref)): the
+[`QVector`](@ref) is the qdata store a `Stored()` element precomputes its
+geometric factors into (PARTIAL), a `Recompute()` one keeps none and
+re-evaluates the Jacobian at the quadrature point that consumes it (NONE), and
+an `ElementAssembly()` one keeps the dense element matrices (ELEMENT). The first
+two are the ELEMENT's storage, not the framework's — the fill
+([`fill_quadrature_data!`](@ref)) is the element's own kernel — because what is
+worth storing per quadrature point is a property of the pointwise map, and only
+the element knows it. The third is the framework's, because a dense `Kₑ` is not:
+[`ElementAssemblyCache`](@ref) wraps any bilinear cache and fills it from the
+element's matrix kernel or, where there is none, from `ndofs_per_cell`
+applications of its action.
+
+Splitting the axis in two is the one deliberate deviation from MFEM's flat one:
+FULL is a different OPERATOR (it holds a global matrix, answers `get_matrix`,
+and every global-storage wall applies to it), while ELEMENT, PARTIAL and NONE
+are the same operator keeping different amounts of the same evaluation. The form
+axis separates what an operator IS; the storage election separates what it
+KEEPS.
+
+The matrix-free level is also where the SECOND mapping question appears, and the
+answer is strategy-side: [`AbstractElementMapping`](@ref) says whether one
+worker or one workgroup evaluates an element, the element implements both
+decompositions of the SAME math, and the term names neither.
 
 **The deliberate deviation from libCEED:** an element may own the whole `Bᵀ D B`
 block, because condensed materials with element-level local solves do not

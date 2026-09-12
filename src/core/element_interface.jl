@@ -19,18 +19,90 @@ slot sourced by [`InternalSource`](@ref) (see [`condense_internal!`](@ref)).
 abstract type AbstractVolumetricElementCache end
 
 """
+    element_value_type(x) -> Type
+
+The scalar type an ELEMENT evaluates and stores in — the integrator's own
+election, independent of the [`value_type`](@ref) a device accumulates the
+GLOBAL system in. Defined on the quadrature collections
+([`QuadratureRuleCollection`](@ref), [`FacetQuadratureRuleCollection`](@ref)),
+on Ferrite's values objects, and on element caches, where it is the scalar the
+generic `allocate_element_*` buffers carry.
+
+The cache method DEFAULTS to `Float64`:
+
+    FerriteOperators.element_value_type(c::MyCache) = element_value_type(c.cv)
+
+Overriding the `allocate_element_*` hooks instead expresses a DELIBERATE
+mismatch — `Float32` values accumulating into `Float64` element buffers, say.
+"""
+element_value_type(element_cache) = Float64
+element_value_type(v::Ferrite.AbstractValues) = eltype(Ferrite.shape_value_type(v))
+element_value_type(qr::QuadratureRule) = eltype(Ferrite.getweights(qr))
+element_value_type(qr::FacetQuadratureRule) = eltype(Ferrite.getweights(qr, 1))
+
+"""
     allocate_element_matrix(element_cache, sdh)
     allocate_element_unknown_vector(element_cache, sdh)
     allocate_element_residual_vector(element_cache, sdh)
 
 The element-local buffers of one item, sized in the FIELD SPACE — the
-`ndofs_per_cell(sdh)` dofs `celldofs` carries. Where the integrator declares
+`ndofs_per_cell(sdh)` dofs `celldofs` carries — and carrying the cache's
+[`element_value_type`](@ref). Where the integrator declares
 [`global_dofs`](@ref) the engine PADS what these return, so an override states
 the field-space size and never the augmented one.
 """
-allocate_element_matrix(element_cache, sdh)          = zeros(ndofs_per_cell(sdh), ndofs_per_cell(sdh))
-@doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh)  = zeros(ndofs_per_cell(sdh))
-@doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh) = zeros(ndofs_per_cell(sdh))
+allocate_element_matrix(element_cache, sdh)          = zeros(element_value_type(element_cache), ndofs_per_cell(sdh), ndofs_per_cell(sdh))
+@doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh)  = zeros(element_value_type(element_cache), ndofs_per_cell(sdh))
+@doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh) = zeros(element_value_type(element_cache), ndofs_per_cell(sdh))
+
+"""
+    element_local_length(element_cache) -> Val{N} or nothing
+
+The length of `element_cache`'s element-local unknown vector as a COMPILE-TIME
+constant, or `nothing` where the cache does not name one. It lets the
+matrix-free action gather `uₑ` into an immutable static vector — registers on a
+device — instead of into the per-worker buffer.
+
+Declaring it is also a promise about the KERNELS: they may only read `uₑ`, an
+immutable vector having no `setindex!`. Return a literal `Val`.
+
+!!! warning "Experimental surface"
+    Internal to the matrix-free action; it may change in a minor release.
+"""
+element_local_length(element_cache) = nothing
+
+"""
+    element_action_row(element_cache, uₑ, args::CellArgs, i::Int) -> yᵢ
+
+ONE row of the matrix-free element kernel: `yᵢ = (Kₑ·uₑ)[i]` for the current
+cell, returned BY VALUE — what a [`LanesPerElement`](@ref) lane owns.
+
+`uₑ` is indexable but not necessarily stored: under the lane mapping it is a
+WINDOW onto the global vector, so an implementation may read `uₑ[j]` and nothing
+else.
+
+Declaring it is the element's promise that a row costs `O(ndofs_per_cell)`, not
+a whole element action per row. A cache that cannot answer a single row serves
+[`WorkerPerElement`](@ref) instead.
+
+!!! warning "Experimental surface"
+    Internal to the matrix-free action; it may change in a minor release.
+"""
+function element_action_row end
+
+# `uₑ` as a WINDOW onto the global vector — no storage and no gather — which is
+# what a `LanesPerElement` lane reads: staging `ndofs_per_cell` values per lane
+# is `nlanes` times the residency the whole-element gather needs. `T` is the
+# element's precision, converted on read as the staged gather converts.
+struct ElementUnknownWindow{T, U, D} <: AbstractVector{T}
+    u::U
+    dofs::D
+end
+ElementUnknownWindow{T}(u::U, dofs::D) where {T, U, D} = ElementUnknownWindow{T, U, D}(u, dofs)
+Base.size(w::ElementUnknownWindow) = (length(w.dofs),)
+Base.IndexStyle(::Type{<:ElementUnknownWindow}) = IndexLinear()
+Base.@propagate_inbounds Base.getindex(w::ElementUnknownWindow{T}, j::Int) where {T} =
+    convert(T, w.u[w.dofs[j]])
 
 # The padding itself: `similar` keeps whatever array type the element chose.
 function pad_element_matrix(Ke, n::Int)
@@ -106,6 +178,127 @@ function reinit_values! end
 reinit_values!(cache, cell, kind) = reinit_values!(cache, cell)
 
 """
+    apply_element_action!(yₑ, cache, uₑ, args::CellArgs)
+
+The MATRIX-FREE element kernel: accumulate `yₑ += Kₑ·uₑ` for the current cell
+WITHOUT forming `Kₑ`. `yₑ` and `uₑ` are the cell's local vectors in
+`celldofs` order and `args` the ordinary [`CellArgs`](@ref); `yₑ` arrives
+zeroed.
+
+Implementing it is what makes a cache usable under [`MatrixFreeAction`](@ref).
+It is separate from the mandatory `assemble_cell!(::ResidualRequest, …)` because
+the two promise different things: the residual kernel evaluates the form, this
+one evaluates the action at the cost the matrix-free level exists for. An
+element whose action is `Kₑ·uₑ` at `O(ndofs²)` should not declare it.
+
+Both arguments may be views into a shared device batch, so an implementation
+indexes them and neither resizes nor reallocates.
+
+!!! warning "Experimental surface"
+    This entry point may change in a minor release.
+"""
+function apply_element_action! end
+
+"""
+    with_assembly_form(cache, form, sdh) -> cache
+
+The cache `setup_element_cache` built, carrying the element-side half of the
+operator FORM's elections. The identity for every form that elects nothing of
+the element; [`MatrixFreeAction`](@ref) resolves its storage election through
+[`with_action_storage`](@ref) here, before the engine builds the workspaces and
+device layouts.
+
+!!! warning "Experimental surface"
+    This hook exists for the matrix-free form's storage election and may change
+    in a minor release.
+"""
+with_assembly_form(cache, form, sdh) = cache
+with_assembly_form(cache, form::MatrixFreeAction, sdh) = with_action_storage(cache, form.storage, sdh)
+
+"""
+    with_action_storage(cache, storage::StorageElection, sdh) -> cache
+
+The cache a matrix-free operator's `storage` election
+([`MatrixFreeAction`](@ref)) asks for. Two kinds of method meet here, and
+dispatch keeps them apart:
+
+- The ELEMENT's, specialized on ITS cache type and the member it keeps
+  something for — a `Stored()` method allocating the element's
+  per-quadrature-point store. An element that keeps nothing writes none and
+  serves `Stored()` and `Recompute()` identically.
+- The FRAMEWORK's, specialized on [`ElementAssembly`](@ref) and no cache type,
+  which wraps ANY bilinear cache in an [`ElementAssemblyCache`](@ref). It is
+  strictly more specific in the storage argument than an element's
+  `Recompute()` method and strictly less specific in the cache argument than an
+  element's `Stored()` one, so the two never collide.
+
+!!! warning "Experimental surface"
+    This hook exists for the matrix-free form's storage election and may change
+    in a minor release.
+"""
+with_action_storage(cache, storage, sdh) = cache
+
+"""
+    fill_quadrature_data!(cache, args::CellArgs)
+
+Fill the per-quadrature-point store `cache` owns for the current cell — the
+PARTIAL-assembly half of a matrix-free element. The default is a no-op.
+
+Called by a [`QuadratureDataKind`](@ref) sweep at setup and on every
+[`update_operator!`](@ref), so a factor depending on `p` or on the context's
+time is refreshed there and nowhere else.
+
+The store is the cache's own. The sweep visits every cell exactly once and cells
+write disjoint slices, so no synchronization is needed and none is provided.
+
+!!! warning "Experimental surface"
+    This entry point may change in a minor release.
+"""
+fill_quadrature_data!(cache, args::CellArgs) = nothing
+
+"""
+    cooperative_lattice_dim(cache) -> Int
+    cooperative_group_size(cache) -> Int
+    cooperative_scratch_shape(cache) -> (Val(length), Val(count))
+    cooperative_load!(scratch, cache, uₑ, lane::Int, nlanes::Int)
+    cooperative_stage!(scratch, cache, args, stage::Int, lane::Int, nlanes::Int)
+    cooperative_store!(yₑ, scratch, cache, lane::Int, nlanes::Int)
+
+The [`CooperativeElement`](@ref) entries: one WORKGROUP evaluates one element's
+action, its `nlanes` workers splitting the element's lattice between them and
+staging everything in group-local memory.
+
+The device kernel owns the barriers, a KernelAbstractions `@synchronize` being a
+lexical split of the kernel body that cannot live in a callee. So the element
+declares a FIXED PIPELINE and the kernel synchronizes between its steps:
+
+    cooperative_load!            # gather uₑ into the scratch lattice
+    cooperative_stage!(…, 1)     # …
+    ⋮                            # `2 * cooperative_lattice_dim(cache) - 1` stages
+    cooperative_store!           # write the local result into yₑ
+
+`cooperative_scratch_shape` sizes the group-local scratch, a `length × count`
+array the kernel allocates and hands to every step. `cooperative_group_size` is
+the workgroup the kernel launches with, `cooperative_lattice_dim` the pipeline
+length. Every step is called by all `nlanes` workers with `lane` in `1:nlanes`
+and writes only what that lane owns.
+
+The pipeline's shape is a tensor-product gradient operator's: `dim` forward
+contractions with the pointwise map fused into the last, then `dim` backward
+contractions with the store fused into the last. An element whose pipeline has a
+different length, or a data-dependent one, is not supported.
+
+!!! warning "Experimental surface"
+    These entry points may change in a minor release.
+"""
+function cooperative_lattice_dim end
+@doc (@doc cooperative_lattice_dim) function cooperative_group_size end
+@doc (@doc cooperative_lattice_dim) function cooperative_scratch_shape end
+@doc (@doc cooperative_lattice_dim) function cooperative_load! end
+@doc (@doc cooperative_lattice_dim) function cooperative_stage! end
+@doc (@doc cooperative_lattice_dim) function cooperative_store! end
+
+"""
     evaluate_cell_functional(kind::FunctionalKind, cache, args) -> value
 
 Element kernel for functional (reduction) queries: returns this cell's
@@ -137,6 +330,15 @@ evaluate_cell_functional(kind, ::EmptyVolumetricElementCache, args) = nothing
 Setup the element cache on a given subdofhandler. There is deliberately no
 silent no-op fallback: a missing method is a loud setup error, not an
 operator that assembles nothing.
+
+The INTEGRATOR decides the precision its cache evaluates in; the engine passes
+no scalar type. Read it off the quadrature collection the integrator carries and
+spell it into the values object — `CellValues(qr, ip, ip_geo)` is `Float64`
+whatever the rule says:
+
+    qr = getquadraturerule(integrator.qrc, sdh)
+    T  = element_value_type(integrator.qrc)
+    MyCache(CellValues(T, qr, ip, ip_geo))
 """
 function setup_element_cache(integrator, sdh)
     throw(ArgumentError(

@@ -5,9 +5,10 @@
 # inference cost out of every user session and into the package image.
 #
 # Core ships no element implementations (those live in the separate,
-# unregistered lib/FerriteOperatorsExampleElements, which depends on core and
-# so cannot be depended on back), so the workload below defines its own
-# throwaway diffusion double. It runs `execute_on_device!`/`reduce_on_device`
+# unregistered lib/ subpackages — FerriteOperatorsExampleElements,
+# FerriteOperatorsTensorProduct — which depend on core and so cannot be
+# depended on back), so the workload below defines its own throwaway
+# diffusion double. It runs `execute_on_device!`/`reduce_on_device`
 # only for (FullAssembly, SequentialScheduling, SequentialCPUDevice):
 # PolyesterDevice's methods live in the weak-dependency extension
 # FerriteOperatorsPolyesterExt, which core cannot load, so that device has no

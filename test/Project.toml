@@ -1,8 +1,12 @@
 [deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 BlockArrays = "8e7c35d0-a365-5155-bbbb-fb81a777f24e"
 ConcreteStructs = "2569d6c7-a4a2-43d3-a901-331e8e4be471"
 FerriteOperators = "27d9367a-5072-424e-9c5f-fe582399bac3"
+GPUArrays = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
+GPUArraysCore = "46192b85-c4d5-4398-a991-12ede77f4527"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LinearSolve = "7ed4a6bd-45f5-4d41-b270-4a48e9bafcae"
 NonlinearSolve = "8913a72c-1f9b-4ce2-8d82-65094dcecaec"

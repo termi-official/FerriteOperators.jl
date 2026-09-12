@@ -74,3 +74,23 @@ Ferrite.close!(lvh::InternalVariableHandler) = nothing
 
 # Offsets are shared read-only data, so duplication just returns the same instance.
 duplicate_for_device(device, ivh::InternalVariableHandler) = ivh
+
+"""
+    DeviceInternalVariableHandler()
+
+The device-side stand-in for an [`InternalVariableHandler`](@ref) that lays out
+NO condensed block. `InternalVariableHandler` is mutable and so never `isbits`,
+which keeps it out of a GPU kernel; this singleton is, and answers the one
+question a sweep asks — every cell's and item's internal range is empty, exactly
+as the placeholder handler answers on the host.
+
+A handler that DOES lay out a block has no device counterpart: condensation is
+rejected at setup for a GPU device.
+"""
+struct DeviceInternalVariableHandler <: AbstractDofHandler end
+internal_variable_range(::DeviceInternalVariableHandler, cellid::Int) = 1:0
+Ferrite.ndofs(::DeviceInternalVariableHandler) = 0
+
+"Whether `ivh` lays out a condensed block at all — the placeholder does not."
+has_internal_dof_block(ivh::InternalVariableHandler) =
+    ivh.internal_variable_offsets !== nothing || ivh.item_variable_offsets !== nothing

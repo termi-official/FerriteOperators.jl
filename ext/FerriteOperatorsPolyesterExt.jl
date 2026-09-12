@@ -19,19 +19,27 @@ end
 @inline active_workers(workspaces, num_items, min_items) =
     min(length(workspaces), cld(num_items, min_items))
 
+# The per-worker copy of the task's scatter target — the only part of a task that is not
+# shared read-only — is one duplicate per worker, so a sweep's cost here is the worker
+# count and not the item count. A task carrying NO assembler has no such part and is
+# shared instead: a sweep that scatters nothing (`QuadratureDataKind`) can have every
+# field a singleton, and a vector of ZERO-SIZED elements is what Polyester's
+# pointer-backed closure capture cannot index.
+_worker_tasks(device, task, n) = [FerriteOperators.duplicate_for_device(device, task) for _ in 1:n]
+_worker_tasks(device, task::FerriteOperators.AssemblyTask{<:Any, Nothing}, n) = task
+@inline _worker_task(tasks::AbstractVector, w) = tasks[w]
+@inline _worker_task(task, w) = task
+
 function FerriteOperators.execute_on_device!(task, device::FerriteOperators.PolyesterDevice, workspaces, items)
     (; min_items_per_worker) = device
-    # The per-worker copy of the task's scatter target — the only part of a task that is
-    # not shared read-only — is one duplicate per worker, so a sweep's cost here is the
-    # worker count and not the item count.
-    tasks = [FerriteOperators.duplicate_for_device(device, task) for _ in eachindex(workspaces)]
+    tasks = _worker_tasks(device, task, length(workspaces))
 
     for chunk in items
         num_items   = length(chunk)
         num_workers = active_workers(workspaces, num_items, min_items_per_worker)
         num_workers == 0 && continue
         @batch for w in 1:num_workers
-            local_task = tasks[w]
+            local_task = _worker_task(tasks, w)
             local_ws   = workspaces[w]
 
             for itemid in worker_items(w, num_workers, num_items, min_items_per_worker)
@@ -55,7 +63,7 @@ function FerriteOperators.reduce_on_device(task, device::FerriteOperators.Polyes
         "contributing item."))
     num_workers_max = length(workspaces)
 
-    tasks = [FerriteOperators.duplicate_for_device(device, task) for _ in eachindex(workspaces)]
+    tasks = _worker_tasks(device, task, num_workers_max)
     # One partial per worker, carried across the barriers so a worker's whole contribution
     # folds in one sequence. Seeded with the reduction's additive identity, so a worker
     # that contributes nothing hands back `zero(T)`.
@@ -66,7 +74,7 @@ function FerriteOperators.reduce_on_device(task, device::FerriteOperators.Polyes
         num_workers = active_workers(workspaces, num_items, min_items_per_worker)
         num_workers == 0 && continue
         @batch for w in 1:num_workers
-            local_task = tasks[w]
+            local_task = _worker_task(tasks, w)
             local_ws   = workspaces[w]
 
             partials[w] = FerriteOperators.fold_items(

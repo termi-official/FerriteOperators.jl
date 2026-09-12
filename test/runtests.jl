@@ -16,6 +16,8 @@ let specs = Pkg.PackageSpec[]
         push!(specs, Pkg.PackageSpec(path = joinpath(@__DIR__, "..")))
     resolvable("FerriteOperatorsExampleElements", "465fd1ee-fdf1-4c5c-a097-38ab1ffcf927") ||
         push!(specs, Pkg.PackageSpec(path = joinpath(@__DIR__, "..", "lib", "FerriteOperatorsExampleElements")))
+    resolvable("FerriteOperatorsTensorProduct", "3201a26f-dd62-453f-b9f2-4be67ac8202a") ||
+        push!(specs, Pkg.PackageSpec(path = joinpath(@__DIR__, "..", "lib", "FerriteOperatorsTensorProduct")))
     isempty(specs) || Pkg.develop(specs)
 end
 
@@ -44,4 +46,9 @@ args = parse_args(argv)
 testsuite = find_tests(@__DIR__)
 # Shared element doubles and testbeds, `include`d by the files that need them.
 delete!(testsuite, "fixture_elements")
+# `test/gpu/` is a separate environment (CUDA) needing an actual GPU, run by
+# hand through `julia --project=test/gpu test/gpu/runtests.jl`. The device
+# assembly path itself is covered here on the `KernelAbstractions.CPU()`
+# backend, which runs the same kernels.
+filter!(entry -> !startswith(first(entry), "gpu/"), testsuite)
 runtests(FerriteOperators, args; testsuite, exeflags = ["--threads=$(WORKER_THREADS)"])

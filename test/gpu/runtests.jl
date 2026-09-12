@@ -1,0 +1,355 @@
+# CUDA equivalence tests for `KernelAbstractionsDevice`, in their own
+# environment so the main suite — which covers the same device path on the
+# `KernelAbstractions.CPU()` backend — carries no GPU dependency. Run with
+#
+#     julia --project=test/gpu test/gpu/runtests.jl
+#
+# The [sources] section wires the repo in by path, so this needs Julia ≥ 1.11.
+using FerriteOperators
+using FerriteOperatorsExampleElements
+using FerriteOperatorsTensorProduct
+using Test
+using SparseArrays
+using LinearAlgebra
+using CUDA
+import CUDA: CUSPARSE.CuSparseMatrixCSC, CUSPARSE.CuSparseMatrixCSR
+import KernelAbstractions as KA
+
+@test CUDA.functional()
+
+const Tv = Float32
+const Ti = Int32
+
+function hex_testbed(dims = (5, 5, 5))
+    grid = generate_grid(Hexahedron, dims,
+                         Vec{3}((-1.0f0, -1.0f0, -1.0f0)), Vec{3}((1.0f0, 1.0f0, 1.0f0)))
+    dh = DofHandler(grid)
+    add!(dh, :u, Lagrange{RefHexahedron, 1}())
+    close!(dh)
+    return dh
+end
+
+# Deterministic, dependency-free probes.
+probe(n, k) = Tv[sin(Tv(0.7) * k * i + Tv(0.3) * k) for i in 1:n]
+wobble(node, d) = Tv(sin(2.7 * node + 1.3 * d))
+
+# Perturbed interior nodes: not an affine mesh.
+function distorted_hex_testbed(order, dims = (4, 4, 4); distortion = 0.15f0,
+        coordinate_type::Type = Tv)
+    T = coordinate_type
+    grid = generate_grid(Hexahedron, dims,
+                         Vec{3}((-1.0f0, -1.0f0, -1.0f0)), Vec{3}((1.0f0, 1.0f0, 1.0f0)))
+    h = 2.0f0 / maximum(dims)
+    nodes = [Ferrite.Node(Vec{3, T}(ntuple(d -> T(node.x[d] +
+                (all(abs.(node.x) .< 1 - 1.0f-4) ? distortion * h * wobble(i, d) : 0.0f0)), 3)))
+             for (i, node) in enumerate(Ferrite.getnodes(grid))]
+    dh = DofHandler(Grid(Ferrite.getcells(grid), nodes))
+    add!(dh, :u, Lagrange{RefHexahedron, order}())
+    close!(dh)
+    return dh
+end
+
+cuda_device() = KernelAbstractionsDevice(CUDABackend(); value_type = Tv, index_type = Ti,
+                                         items_per_worker = 2, max_workgroup_size = 256)
+
+function cuda_strategy(; matrix_type = nothing)
+    return AssemblyStrategy(FullAssembly(StandardOperatorSpecification(; matrix_type)),
+                            ColoredScheduling(), cuda_device())
+end
+
+sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
+
+@testset "CUDA assembly equivalence" begin
+    dh  = hex_testbed()
+    # The two precision elections agree here.
+    qrc = QuadratureRuleCollection(Tv, 2)
+
+    @testset "bilinear $(nameof(typeof(integrator)))" for integrator in (
+            SimpleBilinearDiffusionIntegrator(2.5, qrc, :u),
+            SimpleBilinearMassIntegrator(1.7, qrc, :u))
+
+        reference = setup_operator(sequential_strategy(), integrator, dh)
+        update_operator!(reference, nothing)
+
+        strategy = cuda_strategy(; matrix_type = CuSparseMatrixCSC{Tv, Ti})
+        device   = setup_operator(strategy, integrator, dh)
+        @test device.A isa CuSparseMatrixCSC
+        update_operator!(device, nothing)
+
+        @test SparseMatrixCSC(device.A) ≈ reference.A rtol = 1.0f-4
+
+        # Coloring fixes the accumulation order, so a repeat is exact.
+        first_run = Array(nonzeros(device.A))
+        update_operator!(device, nothing)
+        @test first_run == Array(nonzeros(device.A))
+    end
+
+    @testset "linear form" begin
+        integrator = SimpleLinearIntegrator(3.1, qrc, :u)
+
+        reference = setup_operator(sequential_strategy(), integrator, dh)
+        update_operator!(reference, nothing)
+
+        device = setup_operator(cuda_strategy(), integrator, dh)
+        @test device.b isa CuVector{Tv}
+        update_operator!(device, nothing)
+
+        @test Array(device.b) ≈ reference.b rtol = 1.0f-4
+
+        first_run = Array(device.b)
+        update_operator!(device, nothing)
+        @test first_run == Array(device.b)
+    end
+
+    @testset "per-sweep host allocations stay O(1)" begin
+        op = setup_operator(cuda_strategy(; matrix_type = CuSparseMatrixCSC{Tv, Ti}),
+                            SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(op, nothing)
+        update_operator!(op, nothing)
+        @test (@allocated update_operator!(op, nothing)) < 200_000
+    end
+
+    @testset "rejects a CSR device matrix" begin
+        strategy = cuda_strategy(; matrix_type = CuSparseMatrixCSR{Tv, Ti})
+        err = @test_throws ArgumentError setup_operator(
+            strategy, SimpleBilinearDiffusionIntegrator(1.0, qrc, :u), dh)
+        @test occursin("start_assemble", err.value.msg)
+    end
+
+    # `primal_cell_sweep!` is `@inline`, so the compiled device kernel must
+    # CONTAIN its body rather than call out to it (see its docstring). A
+    # regression dropping the annotation reappears here as a
+    # `julia_primal_cell_sweep_` device function in the PTX.
+    @testset "FullAssembly device sweep has no call to primal_cell_sweep!" begin
+        strategy = cuda_strategy(; matrix_type = CuSparseMatrixCSC{Tv, Ti})
+        op = setup_operator(strategy, SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(op, nothing) # warm up: JIT before the capture below
+
+        io = IOBuffer()
+        CUDA.@device_code_ptx io=io update_operator!(op, nothing)
+        ptx = String(take!(io))
+        @test !occursin("primal_cell_sweep", ptx)
+    end
+end
+
+@testset "CUDA matrix-free action" begin
+    # ONE element definition over every mapping and election. The scatter is
+    # atomic, so the comparison is a tolerance rather than bitwise.
+    @testset "p = $p, $(nameof(typeof(mapping))), $(nameof(typeof(storage)))" for p in 1:3,
+            mapping in (WorkerPerElement(), CooperativeElement()),
+            storage in (Stored(), Recompute())
+
+        dh  = distorted_hex_testbed(p)
+        qrc = QuadratureRuleCollection(Tv, p + 1)
+
+        assembled = setup_operator(sequential_strategy(),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(ndofs(dh), 7)
+        reference = assembled.A * u
+
+        strategy = AssemblyStrategy(MatrixFreeAction(; element_mapping = mapping, storage),
+                                    SequentialScheduling(), cuda_device())
+        op = setup_operator(strategy, SumFactorizedDiffusionIntegrator(Tv(2.5), qrc, :u), dh)
+        @test size(op) == (ndofs(dh), ndofs(dh))
+        @test eltype(op) === Tv
+
+        ud = CuVector(u)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, ud)
+        @test Array(yd) ≈ reference rtol = 1.0f-3
+
+        # The action is linear: the 5-arg form is the same sweep, scaled.
+        base = CuVector(probe(ndofs(dh), 9))
+        y2 = copy(base)
+        mul!(y2, op, ud, -1.0f0, 1.0f0)
+        @test Array(y2) ≈ Array(base) .- reference rtol = 1.0f-3
+    end
+
+    # The second consumer of the core: a scalar map on the interpolated value.
+    @testset "mass action, p = $p, $(nameof(typeof(mapping))), $(nameof(typeof(storage)))" for p in 1:3,
+            mapping in (WorkerPerElement(), CooperativeElement()),
+            storage in (Stored(), Recompute())
+
+        dh  = distorted_hex_testbed(p)
+        qrc = QuadratureRuleCollection(Tv, p + 1)
+
+        assembled = setup_operator(sequential_strategy(),
+                                   SimpleBilinearMassIntegrator(1.7, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(ndofs(dh), 7)
+
+        strategy = AssemblyStrategy(MatrixFreeAction(; element_mapping = mapping, storage),
+                                    SequentialScheduling(), cuda_device())
+        op = setup_operator(strategy, SumFactorizedMassIntegrator(1.7, qrc, :u), dh)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ assembled.A * u rtol = 1.0f-3
+    end
+
+    # The ELEMENT level on the device: dense per-cell matrices in a (cell, i, j)
+    # store, gathered, multiplied and scattered atomically — or, for `:sumfact`
+    # (which declares `element_matrix_symmetry` for an isotropic D), the packed
+    # `(cell, t)` layout. `:assembled` never declares the election and is the
+    # dense comparison arm.
+    @testset "ELEMENT level, p = $p, $(nameof(typeof(integrator)))" for p in 1:3,
+            integrator in (:sumfact, :assembled)
+
+        dh  = distorted_hex_testbed(p)
+        qrc = QuadratureRuleCollection(Tv, p + 1)
+        assembled = setup_operator(sequential_strategy(),
+                                   SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(ndofs(dh), 7)
+
+        # Both fill routes: from the action, and from an element-matrix kernel.
+        term = integrator === :sumfact ? SumFactorizedDiffusionIntegrator(Tv(2.5), qrc, :u) :
+                                         SimpleBilinearDiffusionIntegrator(2.5, qrc, :u)
+        strategy = AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
+                                    SequentialScheduling(), cuda_device())
+        op = setup_operator(strategy, term, dh)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ assembled.A * u rtol = 1.0f-3
+
+        cache = op.engine.subdomain_caches[1].device_cache.element
+        if integrator === :sumfact
+            @test cache.symmetry isa SymmetricElementMatrix
+            @test ndims(cache.K) == 2
+        else
+            @test cache.symmetry isa GeneralElementMatrix
+            @test ndims(cache.K) == 3
+        end
+    end
+
+    # The mass cache declares SymmetricElementMatrix() unconditionally.
+    @testset "ELEMENT level (mass), p = $p, $(nameof(typeof(integrator)))" for p in 1:3,
+            integrator in (:sumfact, :assembled)
+
+        dh  = distorted_hex_testbed(p)
+        qrc = QuadratureRuleCollection(Tv, p + 1)
+        assembled = setup_operator(sequential_strategy(),
+                                   SimpleBilinearMassIntegrator(1.7, qrc, :u), dh)
+        update_operator!(assembled, nothing)
+        u = probe(ndofs(dh), 7)
+
+        term = integrator === :sumfact ? SumFactorizedMassIntegrator(1.7, qrc, :u) :
+                                         SimpleBilinearMassIntegrator(1.7, qrc, :u)
+        strategy = AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
+                                    SequentialScheduling(), cuda_device())
+        op = setup_operator(strategy, term, dh)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ assembled.A * u rtol = 1.0f-3
+
+        cache = op.engine.subdomain_caches[1].device_cache.element
+        if integrator === :sumfact
+            @test cache.symmetry isa SymmetricElementMatrix
+            @test ndims(cache.K) == 2
+        else
+            @test cache.symmetry isa GeneralElementMatrix
+            @test ndims(cache.K) == 3
+        end
+    end
+
+    # The lane mapping on the device it exists for: lane `l` owns rows
+    # `l:nlanes:ND` of `yₑ` and scatters each atomically, so a row assignment or
+    # read that is wrong for either `Kₑ` layout shows up as a wrong operator.
+    # Pinned twice — against the assembled CPU matrix and against
+    # `WorkerPerElement` over the SAME store — on a distorted mesh, both
+    # precisions, `:sumfact` packed and `:assembled` dense.
+    @testset "ELEMENT level, LanesPerElement ($T, p = $p, $integrator)" for
+            T in (Float32, Float64), p in 1:3, integrator in (:sumfact, :assembled)
+
+        dh  = distorted_hex_testbed(p, (4, 4, 4); coordinate_type = T)
+        qrc = QuadratureRuleCollection(T, p + 1)
+        cpu = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, Int}()),
+                             SimpleBilinearDiffusionIntegrator(T(2.5), qrc, :u), dh)
+        update_operator!(cpu, nothing)
+        u = T[sin(T(0.7) * 7 * i + T(0.3) * 7) for i in 1:ndofs(dh)]
+        rtol = T === Float32 ? 1.0f-3 : 1.0e-8
+
+        term = integrator === :sumfact ? SumFactorizedDiffusionIntegrator(T(2.5), qrc, :u) :
+                                         SimpleBilinearDiffusionIntegrator(T(2.5), qrc, :u)
+        device = KernelAbstractionsDevice(CUDABackend(); value_type = T, index_type = Ti,
+                                          items_per_worker = 2, max_workgroup_size = 256)
+        y_worker, y_lanes = map((WorkerPerElement(), LanesPerElement())) do mapping
+            op = setup_operator(AssemblyStrategy(
+                    MatrixFreeAction(; element_mapping = mapping, storage = ElementAssembly()),
+                    SequentialScheduling(), device), term, dh)
+            yd = CUDA.zeros(T, ndofs(dh))
+            mul!(yd, op, CuVector(u))
+            # The fill takes the grid-stride mapping; this checks both run.
+            update_operator!(op, nothing)
+            mul!(yd, op, CuVector(u))
+            Array(yd)
+        end
+        @test y_lanes ≈ cpu.A * u rtol = rtol
+        @test y_lanes ≈ y_worker rtol = rtol
+    end
+
+    # `nlanes` is a launch policy: matching, dividing or overshooting the
+    # element's extent is the same action. `lanes = 5` at `ND = 27` additionally
+    # gives each lane several rows.
+    @testset "the lane count is a launch policy alone (lanes = $lanes)" for
+            lanes in (nothing, 1, 5, 27, 64)
+
+        dh  = distorted_hex_testbed(2, (4, 4, 4))
+        qrc = QuadratureRuleCollection(Tv, 3)
+        cpu = setup_operator(sequential_strategy(),
+                             SimpleBilinearDiffusionIntegrator(2.5, qrc, :u), dh)
+        update_operator!(cpu, nothing)
+        u = probe(ndofs(dh), 7)
+
+        op = setup_operator(AssemblyStrategy(
+                MatrixFreeAction(; element_mapping = LanesPerElement(; lanes),
+                                 storage = ElementAssembly()),
+                SequentialScheduling(), cuda_device()),
+            SumFactorizedDiffusionIntegrator(Tv(2.5), qrc, :u), dh)
+        yd = CUDA.zeros(Tv, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ cpu.A * u rtol = 1.0f-3
+    end
+
+    # The device action positions its items on a cursor that stages no dof row
+    # and, at the two stored levels, no coordinates. These pin the whole ladder
+    # against the assembled CPU reference on a distorted mesh, where a cell
+    # whose geometry is not re-derived per point would be visibly wrong.
+    @testset "device action vs CPU reference ($T, $(nameof(typeof(storage))), p = $p)" for
+            T in (Float32, Float64), p in 1:3,
+            storage in (Stored(), Recompute(), ElementAssembly())
+
+        dh  = distorted_hex_testbed(p, (4, 4, 4); coordinate_type = T)
+        qrc = QuadratureRuleCollection(T, p + 1)
+        cpu = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, Int}()),
+                             SimpleBilinearDiffusionIntegrator(T(2.5), qrc, :u), dh)
+        update_operator!(cpu, nothing)
+        u = T[sin(T(0.7) * 7 * i + T(0.3) * 7) for i in 1:ndofs(dh)]
+        reference = cpu.A * u
+
+        device = KernelAbstractionsDevice(CUDABackend(); value_type = T, index_type = Ti,
+                                          items_per_worker = 2, max_workgroup_size = 256)
+        op = setup_operator(AssemblyStrategy(MatrixFreeAction(; storage), SequentialScheduling(), device),
+                            SumFactorizedDiffusionIntegrator(T(2.5), qrc, :u), dh)
+        yd = CUDA.zeros(T, ndofs(dh))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ reference rtol = (T === Float32 ? 1.0f-3 : 1.0e-8)
+
+        # The refill rides the same iterator, on the kind that DOES stage coords.
+        update_operator!(op, nothing)
+        fill!(yd, zero(T))
+        mul!(yd, op, CuVector(u))
+        @test Array(yd) ≈ reference rtol = (T === Float32 ? 1.0f-3 : 1.0e-8)
+    end
+
+    @testset "per-mul! host allocations stay O(1)" begin
+        dh  = distorted_hex_testbed(2, (6, 6, 6))
+        op  = setup_operator(AssemblyStrategy(MatrixFreeAction(), SequentialScheduling(), cuda_device()),
+                             SumFactorizedDiffusionIntegrator(Tv(2.5), QuadratureRuleCollection(Tv, 3), :u), dh)
+        u = CUDA.rand(Tv, ndofs(dh))
+        y = CUDA.zeros(Tv, ndofs(dh))
+        mul!(y, op, u)
+        mul!(y, op, u)
+        @test (@allocated mul!(y, op, u)) < 200_000
+    end
+end

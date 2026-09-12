@@ -36,6 +36,11 @@ end
 query_cell_parameters(composite::CompositeVolumetricElementCache, cell, p) =
     CompositeParameters(map(inner -> query_cell_parameters(inner, cell, p), composite.inner_caches))
 
+# The inners share ONE local system, so its scalar has to hold every inner's:
+# a `Float32` term composed with a `Float64` one accumulates in `Float64`.
+element_value_type(composite::CompositeVolumetricElementCache) =
+    promote_type(map(element_value_type, composite.inner_caches)...)
+
 assemble_cell!(req::AbstractAssemblyRequest, composite::CompositeVolumetricElementCache, args) =
     _composite_assemble_cell!(req, composite.inner_caches, args, args.p)
 
@@ -81,7 +86,7 @@ end
 # The blanket fan-out method satisfies any `hasmethod` check, so validation must
 # recurse: each inner is its own validation subject, kernels and admissibility
 # alike.
-function _validate_element_kernels(composite::CompositeVolumetricElementCache, declared_requests::Tuple)
+function _validate_element_kernels(composite::CompositeVolumetricElementCache, declared_requests::Tuple; iterator_type::Type = CellCache)
     stateful = filter(inner -> has_internal_state(typeof(inner)), composite.inner_caches)
     isempty(stateful) || throw(ArgumentError(
         "Composing condensed elements is not supported yet, but $(_cache_names(stateful)) " *
@@ -90,7 +95,7 @@ function _validate_element_kernels(composite::CompositeVolumetricElementCache, d
         "variable handler keys on the outer integrator — so the internal dofs would never be " *
         "allocated and `condense_internal!`'s write-back would have nowhere to land. Assemble " *
         "the condensed element as its own operator term."))
-    foreach(cache -> validate_element_cache(cache, declared_requests), composite.inner_caches)
+    foreach(cache -> validate_element_cache(cache, declared_requests; iterator_type), composite.inner_caches)
     return nothing
 end
 
@@ -182,6 +187,9 @@ end
 
 query_facet_parameters(composite::CompositeFacetItemCache, cell, local_facet_index, p) =
     CompositeParameters(map(inner -> query_facet_parameters(inner, cell, local_facet_index, p), composite.inner_caches))
+
+element_value_type(composite::CompositeFacetItemCache) =
+    promote_type(map(element_value_type, composite.inner_caches)...)
 
 duplicate_for_device(device, cache::CompositeFacetItemCache) = CompositeFacetItemCache(
     map(inner_cache -> duplicate_for_device(device, inner_cache), cache.inner_caches),

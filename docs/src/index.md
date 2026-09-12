@@ -70,7 +70,8 @@ Which machinery an operator is built on is one composite choice, and the three
 axes are orthogonal: the *operator form* ([`AbstractAssemblyForm`](@ref) — the
 MFEM assembly level), the *scheduling policy* ([`SequentialScheduling`](@ref) /
 [`ColoredScheduling`](@ref) — how parallel work is made race-safe), and the
-*device* (sequential CPU, threaded via Polyester).
+*device* (sequential CPU, threaded via Polyester, GPU via
+KernelAbstractions.jl).
 [`AssemblyStrategy`](@ref)`(device; form, scheduling)` is the keyword
 convenience constructor for the common compositions: `AssemblyStrategy(device)`
 and `AssemblyStrategy(device; scheduling = ColoredScheduling())`.
@@ -80,10 +81,151 @@ activates it, and without that load the type exists with no execution route.
 [`default_strategy`](@ref) resolves that at call time — the Polyester device
 where the extension is loaded, [`SequentialCPUDevice`](@ref) otherwise.
 
+## GPU assembly
+
+[`KernelAbstractionsDevice`](@ref) assembles bilinear and linear forms on a
+KernelAbstractions.jl backend. This package depends on no GPU vendor package:
+the backend object and the device matrix type both come from the caller.
+
+```julia
+using CUDA, Adapt, KernelAbstractions   # `using CUDA` loads all of these
+import CUDA: CUSPARSE.CuSparseMatrixCSC
+
+device   = KernelAbstractionsDevice(CUDABackend(); value_type = Float32, index_type = Int32)
+spec     = StandardOperatorSpecification(; matrix_type = CuSparseMatrixCSC{Float32, Int32})
+strategy = AssemblyStrategy(FullAssembly(spec), ColoredScheduling(), device)
+
+integrator = MyIntegrator(QuadratureRuleCollection(Float32, 2), :u)  # element precision
+op = setup_operator(strategy, integrator, dh)   # op.A lives on the device
+update_operator!(op, p)
+```
+
+`value_type` governs the GLOBAL system alone; the element caches' precision is
+the INTEGRATOR's, elected through its quadrature collection (see
+[Evaluation precision](elements.md#Evaluation-precision)). The two may differ —
+the scatter converts. Build the grid with `Float32` coordinates too: a
+`Float64` grid assembles correctly, but its coordinates are what the geometry
+mapping computes in. The vector and the assembled matrix both stay on the
+device; a sweep transfers nothing.
+
+What the device covers is CELL items under [`ColoredScheduling`](@ref), which
+is REQUIRED: Ferrite's device matrix assembler accumulates without atomics.
+Everything outside that slice — other schedulings, other item families,
+condensed state, nonlinear integrators, blocked or constrained specifications,
+and so on — is rejected at setup with a message naming the limitation;
+[`KernelAbstractionsDevice`](@ref) lists them.
+
+An element cache reaches the device by declaring which of its fields are
+batched per worker and which are shared, through
+[`setup_device_instances`](@ref) and [`device_worker_view`](@ref):
+
+```julia
+setup_device_instances(dev::AbstractGPUDevice, c::MyCache, n) =
+    MyCache(c.D, setup_device_instances(dev, c.cellvalues, n))
+device_worker_view(c::MyCache, w) = MyCache(c.D, device_worker_view(c.cellvalues, w))
+```
+
+The cache's field type parameters have to admit the batched layout: on the
+device a `cellvalues::CV` field holds a struct-of-arrays container over `n`
+workers, not a `CellValues`.
+
+## Assembly levels
+
 [`FullAssembly`](@ref) assembles the global matrix and vector and serves every
-operator family. It is the form axis' sole member; the axis and the `form`
-keyword are the extension point a further assembly level (element assembly,
-matrix-free) is added at.
+operator family — the FULL level, and the default.
+
+[`MatrixFreeAction`](@ref) covers the other three: the operator stores no GLOBAL
+matrix and every `mul!` evaluates `y = A·u` element by element. `setup_operator`
+returns a [`MatrixFreeFerriteOperator`](@ref) for a bilinear integrator whose
+caches serve the elected storage level — [`apply_element_action!`](@ref) for the
+two per-quadrature-point levels — and a setup error naming the method otherwise.
+
+```julia
+strategy = AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction())
+op = setup_operator(strategy, SumFactorizedDiffusionIntegrator(2.5, qrc, :u), dh)
+mul!(y, op, u)          # no matrix anywhere
+```
+
+The form carries a second choice, how ONE element's work maps onto the device's
+workers ([`AbstractElementMapping`](@ref)):
+
+- [`WorkerPerElement`](@ref) — one worker owns one element from gather to
+  scatter. Runs on every device.
+- [`CooperativeElement`](@ref) — one WORKGROUP owns one element, its workers
+  splitting the element's lattice between them with the state and every
+  intermediate in group-local memory. A [`KernelAbstractionsDevice`](@ref)
+  mapping only, and served by caches that implement the cooperative pipeline
+  ([`cooperative_stage!`](@ref)).
+- [`LanesPerElement`](@ref) — one BLOCK OF LANES owns one element, each lane
+  owning rows of `yₑ` in registers and scattering them itself
+  ([`element_action_row`](@ref)). No group-local memory and no barrier. A
+  [`KernelAbstractionsDevice`](@ref) mapping only, and the
+  [`ElementAssembly`](@ref) storage level only.
+
+```julia
+form = MatrixFreeAction(; element_mapping = CooperativeElement())
+op   = setup_operator(AssemblyStrategy(form, SequentialScheduling(), device), integrator, dh)
+```
+
+The election is realized on the device at setup
+([`with_element_mapping`](@ref)). The TERM never names the mapping: one element
+definition, chosen between on the strategy side.
+
+It carries a third choice, `storage`, which is WHAT the operator keeps between
+actions ([`StorageElection`](@ref)) — MFEM's other three assembly levels:
+
+```julia
+form = MatrixFreeAction(; storage = ElementAssembly())   # `Stored()` is the default
+```
+
+- [`Recompute`](@ref) is NONE: nothing is kept and the geometry is re-derived at
+  the quadrature point that consumes it.
+- [`Stored`](@ref) is PARTIAL: the element precomputes its per-quadrature-point
+  factors ([`fill_quadrature_data!`](@ref)) and every action is contractions and
+  reads.
+- [`ElementAssembly`](@ref) is ELEMENT: the dense element matrices are kept and
+  every action is a gather, a dense `yₑ = Kₑ·uₑ` and a scatter. It costs
+  `ndofs_per_cell²` scalars per cell, so it is the LOW-order election, and it
+  runs [`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref) — the two
+  mappings of a dense product, whole or by rows.
+
+`ElementAssembly` is the cheapest matrix-free storage at `p = 1`–`2`;
+`ndofs_per_cell²` overtakes the assembled matrix's per-cell share above that,
+which is where [`Stored`](@ref)/[`Recompute`](@ref) take over.
+[`ElementAssembly`](@ref) tabulates the bytes and states the fill cost.
+
+An element whose form is symmetric may additionally elect
+[`SymmetricElementMatrix`](@ref) ([`element_matrix_symmetry`](@ref)), which
+packs `Kₑ`'s upper triangle only. Bytes are not the whole election: the byte win
+is unconditional, but under [`WorkerPerElement`](@ref) the packed read costs
+ACTION time above `p = 1` (measured on an RTX 2080: −20% at `p = 1`, +96% at
+`p = 2`, +43% at `p = 3`, the packed index map folding to literals at
+`ndofs_per_cell = 8` and not above).
+
+Both stored levels are filled at setup and refilled by
+[`update_operator!`](@ref), whose freshness contract is the one an assembled
+operator has: a factor that depends on `p` or on the context time is as fresh as
+the last such call.
+
+The first two are the element's own storage and reach its cache through
+[`with_action_storage`](@ref) at setup — an element that keeps nothing serves
+both identically. The third is the framework's
+([`ElementAssemblyCache`](@ref)) and serves ANY bilinear cache: an element with
+an ordinary element-matrix kernel and no matrix-free kernel at all runs the
+ELEMENT level, and a matrix-free one has its matrices filled from its own
+action.
+
+Writing such an element is [`AbstractTensorProductElementCache`](@ref FerriteOperatorsTensorProduct.AbstractTensorProductElementCache)
+plus a POINTWISE MAP ([`tensor_product_pointwise`](@ref FerriteOperatorsTensorProduct.tensor_product_pointwise)) — the `D` block of the
+operator decomposition; the 1D operators, the lattice permutations, the
+contractions and both mapping pipelines are the core's. Two reference elements
+ship over that one core: a diffusion action (a tensor on the reference
+gradient) and a mass action (a scalar on the interpolated value).
+
+!!! warning "Experimental surface"
+    The matrix-free form, [`MatrixFreeFerriteOperator`](@ref), the
+    tensor-product core and the element entry points they call may change in a
+    minor release.
 
 All operator entry points funnel into one task body executed by a shared
 device loop:

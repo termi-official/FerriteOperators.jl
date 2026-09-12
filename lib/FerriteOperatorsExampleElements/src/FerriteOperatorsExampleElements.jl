@@ -4,14 +4,19 @@ Example elements for [FerriteOperators](https://github.com/termi-official/Ferrit
 Minimal, readable implementations of the element contract — one per feature it
 exposes: a bilinear form ([`SimpleBilinearDiffusionIntegrator`](@ref),
 [`SimpleBilinearMassIntegrator`](@ref)), a linear form
-([`SimpleLinearIntegrator`](@ref)), a nonlinear element with analytic tangent
-([`SimpleHyperelasticityIntegrator`](@ref)), a condensed element with
+([`SimpleLinearIntegrator`](@ref)), a nonlinear element with analytic
+tangent ([`SimpleHyperelasticityIntegrator`](@ref)), a condensed element with
 per-quadrature-point internal state
 ([`SimpleCondensedLinearViscoelasticity`](@ref)), one whose local problem is
 nonlinear and communicates with the outer solver
 ([`SimpleCondensedPowerLawRelaxation`](@ref)), and a NESTED pair whose local
 problem is itself a condensed finite element problem
 ([`SimpleRelaxingBar`](@ref) inside [`SimpleNestedHomogenization`](@ref)).
+
+The two bilinear forms' matrix-free, sum-factorized counterparts
+(`SumFactorizedDiffusionIntegrator`, `SumFactorizedMassIntegrator`) live in
+[FerriteOperatorsTensorProduct](https://github.com/termi-official/FerriteOperators.jl/tree/main/lib/FerriteOperatorsTensorProduct)
+as that package's own reference consumers.
 
 Meant to be read, copied and used as test fixtures: not tuned for production
 use, and carrying no stability guarantee beyond the contract they demonstrate.
@@ -23,15 +28,16 @@ using Ferrite
 using Tensors
 using StaticArrays
 
-using LinearAlgebra: dot, lu, norm
+using LinearAlgebra: dot, lu, norm, det, inv
 
 import Ferrite: getnquadpoints
 
 import FerriteOperators: AbstractBilinearIntegrator, AbstractLinearIntegrator,
     AbstractCondensedNonlinearIntegrator, AbstractNonlinearIntegrator,
-    AbstractVolumetricElementCache
-import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!,
+    AbstractVolumetricElementCache, AbstractGPUDevice
+import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!, element_value_type,
     provides_analytic, has_internal_state, duplicate_for_device,
+    setup_device_instances, device_worker_view,
     geometric_subdomain_interpolation, get_number_of_internal_dofs_per_element,
     internal_variable_offset, internal_variable_range,
     evaluation_time, with_time, stage_scaling, CellArgs,

@@ -38,3 +38,4 @@ evaluate!(op::BilinearFerriteOperator, residual::AbstractVector, u::AbstractVect
 mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector) = mul!(out, op.A, in)
 mul!(out::AbstractVector, op::BilinearFerriteOperator, in::AbstractVector, α, β) = mul!(out, op.A, in, α, β)
 operator_payload(op::BilinearFerriteOperator) = op.A
+get_matrix(op::BilinearFerriteOperator) = op.A

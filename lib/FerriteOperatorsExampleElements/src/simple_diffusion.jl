@@ -13,8 +13,11 @@ end
 
 """
 The cache associated with [`SimpleBilinearDiffusionIntegrator`](@ref) to assemble element diffusion matrices.
+
+`cellvalues` is left unconstrained because a GPU device's batched cache holds
+the struct-of-arrays container over `n_workers` `CellValues`, not a `CellValues`.
 """
-struct SimpleBilinearDiffusionElementCache{CV <: CellValues} <: AbstractVolumetricElementCache
+struct SimpleBilinearDiffusionElementCache{CV} <: AbstractVolumetricElementCache
     D::Float64
     cellvalues::CV
 end
@@ -28,6 +31,12 @@ function duplicate_for_device(device, cache::SimpleBilinearDiffusionElementCache
         duplicate_for_device(device, cache.cellvalues),
     )
 end
+
+# The GPU pair: one batched cache for all workers, and worker `w`'s view of it.
+setup_device_instances(device::AbstractGPUDevice, cache::SimpleBilinearDiffusionElementCache, n) =
+    SimpleBilinearDiffusionElementCache(cache.D, setup_device_instances(device, cache.cellvalues, n))
+device_worker_view(cache::SimpleBilinearDiffusionElementCache, worker) =
+    SimpleBilinearDiffusionElementCache(cache.D, device_worker_view(cache.cellvalues, worker))
 
 function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleBilinearDiffusionElementCache, args::CellArgs)
     Kₑ = req.K
@@ -47,13 +56,19 @@ function assemble_cell!(req::JacobianRequest{:u}, element_cache::SimpleBilinearD
     end
 end
 
+# The integrator elects the evaluation precision through its quadrature
+# collection; `CellValues(qr, ip, ip_geo)` would be `Float64` whatever the rule
+# says, so `T` is spelled out.
 function setup_element_cache(element_model::SimpleBilinearDiffusionIntegrator, sdh::SubDofHandler)
     qr         = getquadraturerule(element_model.qrc, sdh)
+    T          = element_value_type(element_model.qrc)
     field_name = element_model.field_name
     ip         = Ferrite.getfieldinterpolation(sdh, field_name)
     ip_geo     = geometric_subdomain_interpolation(sdh)
-    return SimpleBilinearDiffusionElementCache(element_model.D, CellValues(qr, ip, ip_geo))
+    return SimpleBilinearDiffusionElementCache(element_model.D, CellValues(T, qr, ip, ip_geo))
 end
+
+element_value_type(cache::SimpleBilinearDiffusionElementCache) = element_value_type(cache.cellvalues)
 
 provides_analytic(::Type{<:SimpleBilinearDiffusionElementCache}, ::JacobianKind{:u}) = true
 # The bilinear form induces a linear operator, so its residual is the element

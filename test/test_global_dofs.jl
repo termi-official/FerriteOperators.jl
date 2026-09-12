@@ -23,6 +23,22 @@ else
     FerriteOperators.setup_element_cache(::DeclaredGlobalDofs, ::SubDofHandler) =
         FerriteOperators.EmptyVolumetricElementCache()
 
+    # Bilinear doubles: `MatrixFreeAction` only accepts bilinear integrators,
+    # and the rejection below must fire for that family too.
+    struct DeclaredGlobalDofsBilinear <: AbstractBilinearIntegrator
+        dofs::Vector{Int}
+    end
+    FerriteOperators.global_dofs(m::DeclaredGlobalDofsBilinear, sdh::SubDofHandler) = m.dofs
+    FerriteOperators.setup_element_cache(::DeclaredGlobalDofsBilinear, ::SubDofHandler) =
+        FerriteOperators.EmptyVolumetricElementCache()
+
+    struct DeclaredFacetItemGlobalDofsBilinear <: AbstractBilinearIntegrator
+        dofs::Vector{Int}
+    end
+    FerriteOperators.facet_item_global_dofs(m::DeclaredFacetItemGlobalDofsBilinear, sdh::SubDofHandler) = m.dofs
+    FerriteOperators.setup_element_cache(::DeclaredFacetItemGlobalDofsBilinear, ::SubDofHandler) =
+        FerriteOperators.EmptyVolumetricElementCache()
+
     @testset "Elements with global dofs" begin
         testbed = stress_driven_testbed((3, 3))
         (; dh, var, coupling, E, σ̄) = testbed
@@ -83,6 +99,20 @@ else
             m = StressDrivenIntegrator(var, E, σ̄)
             @test_throws ArgumentError setup_operator(
                 AssemblyStrategy(FullAssembly(spec), ColoredScheduling(), SequentialCPUDevice()), m, dh)
+        end
+
+        @testset "MatrixFreeAction rejects a global-dof declaration" begin
+            # The action is defined on the cell's FIELD space alone: a declared
+            # tail would be gathered, ignored by the element, and scattered back
+            # as zero. Rejected at setup, for both declaration families.
+            mf = AssemblyStrategy(MatrixFreeAction(), SequentialScheduling(), SequentialCPUDevice())
+            err = @test_throws ArgumentError setup_operator(mf, DeclaredGlobalDofsBilinear([1]), dh)
+            @test occursin("MatrixFreeAction", err.value.msg)
+            @test occursin("global_dofs", err.value.msg)
+
+            err2 = @test_throws ArgumentError setup_operator(mf, DeclaredFacetItemGlobalDofsBilinear([1]), dh)
+            @test occursin("MatrixFreeAction", err2.value.msg)
+            @test occursin("facet_item_global_dofs", err2.value.msg)
         end
 
         @testset "declaration validation" begin

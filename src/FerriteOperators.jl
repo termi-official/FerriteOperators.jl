@@ -9,7 +9,7 @@ import SparseArrays: AbstractSparseMatrixCSC, getcolptr
 
 using ConcreteStructs
 
-import LinearAlgebra: mul!, ldiv!, qr, lu!, cholesky!, Symmetric, dot, norm
+import LinearAlgebra: mul!, rmul!, ldiv!, qr, lu!, cholesky!, Symmetric, dot, norm
 
 import ForwardDiff
 
@@ -36,6 +36,7 @@ include("core/requests.jl")           # Assembly requests: the element kernel co
 include("core/element_interface.jl")  # Cache supertypes + the empty caches
 include("core/tasks.jl")              # Assembly kinds and the task system
 include("core/iterators.jl")          # Two-DofHandler cell iterators
+include("core/families.jl")           # Item-family registration: item_families/setup_family_caches
 
 include("core/utils.jl")
 include("core/qvector.jl")           # Flat per-cell quadrature data storage
@@ -102,6 +103,7 @@ abstract type AbstractLinearIntegrator end
 
 include("elements/composite_elements.jl")     # High-level composition of operators
 include("elements/ad_element.jl")             # ADElementCache: AD as an element cache decorator
+include("elements/element_assembly.jl")       # ElementAssemblyCache: the ELEMENT storage level of the matrix-free action
 
 include("operators/general.jl")         # Domain descriptors, NullOperator
 include("operators/nonlinear.jl")       # Assembly and action tasks
@@ -112,6 +114,7 @@ include("operators/transfer.jl")        # Prolongation/restriction operators
 include("elements/prolongators.jl")     # Mass-based prolongator integrators
 include("operators/ad_decoration.jl")   # Construction-time ADElementCache/FusedFromSplit wrapping policy
 include("operators/setup.jl")           # Operator setup, so callers need not poke into internals
+include("operators/matrix_free.jl")     # MatrixFreeAction: the operator's action without a matrix
 include("elements/domain_elements.jl")  # Subdomain routing; specializes setup.jl's per-DofHandler cache seam
 include("operators/components.jl")      # Component bags over a shared sparsity pattern + combine!
 include("operators/stage_block.jl")     # Fully implicit Runge-Kutta stage blocks
@@ -129,7 +132,7 @@ include("postprocessing/quadrature-query.jl") # VTKQuadratureFile + write_quadra
 
 export QuadratureRuleCollection, InternalVariableHandler
 export internal_variable_offset, internal_variable_range
-export getquadraturerule
+export getquadraturerule, element_value_type
 export AbstractBilinearIntegrator, AbstractNonlinearIntegrator, AbstractLinearIntegrator
 export AbstractCondensedNonlinearIntegrator
 export get_number_of_internal_dofs_per_element, setup_internal_variable_handler
@@ -158,7 +161,7 @@ export CondensationReport, condense_internal!, condense_cell!, condense_algebrai
 export local_conditions!
 export rollback_state!, commit_state!, invalidate_correctors!
 export allocate_internal_jacobian, update_internal_jacobian!
-export CorrectorElection, Stored, Recompute, corrector_election, corrector_election_error
+export CorrectorElection, corrector_election, corrector_election_error
 export AbstractAssemblyRequest, ResidualRequest, JacobianRequest, JacobianResidualRequest
 export WeightedJacobianRequest
 export ParameterJacobianRequest, ParameterVJPRequest, TimeSensitivityRequest
@@ -188,13 +191,29 @@ export get_first_cell, geometric_subdomain_interpolation
 export NullOperator, LinearNullOperator
 export AbstractNonlinearOperator
 
-export SequentialCPUDevice, PolyesterDevice
+export SequentialCPUDevice, PolyesterDevice, KernelAbstractionsDevice
 export AbstractCPUDevice, AbstractGPUDevice
 export value_type, duplicate_for_device
+export setup_device_instances, device_worker_view
 export default_strategy
 export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAssembly
+export MatrixFreeAction, MatrixFreeFerriteOperator, MatrixFreeActionKind, apply_element_action!
+export QuadratureDataKind, fill_quadrature_data!, with_assembly_form, with_action_storage, adapt_shared
+export StorageElection, Stored, Recompute, ElementAssembly, ElementAssemblyCache, element_matrix_fill_route
+export element_matrix_symmetry, GeneralElementMatrix, SymmetricElementMatrix
+export AbstractElementMapping, WorkerPerElement, CooperativeElement, LanesPerElement
+export with_element_mapping, element_action_row
+export cooperative_lattice_dim, cooperative_group_size, cooperative_scratch_shape
+export cooperative_load!, cooperative_stage!, cooperative_store!
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling
 export StandardOperatorSpecification, BlockedOperatorSpecification
+
+export assembly_iterator, device_assembly_iterator, position_item, position_iterator
+export item_update_flags, iterator_dofs, iterator_handler, iterator_scatter_address
+export item_provider, compute_partition, CellItems
+export item_families, setup_family_caches
+export CellFamily, FacetItemFamily, AlgebraicItemFamily
+export allocate_element_matrix, allocate_element_unknown_vector, allocate_element_residual_vector
 
 # Transfer operator infrastructure
 export SameGridCellCache, SameGridCellIterator

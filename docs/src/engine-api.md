@@ -8,6 +8,7 @@ CurrentModule = FerriteOperators
 Modules = [FerriteOperators]
 Pages = [
     "core/tasks.jl",
+    "core/families.jl",
     "core/facet-task.jl",
     "core/algebraic-task.jl",
     "core/strategy.jl",
@@ -15,6 +16,7 @@ Pages = [
     "core/iterators.jl",
     "core/qvector.jl",
     "core/quadrature-task.jl",
+    "core/ferrite-addons/assembly.jl",
     "core/ferrite-addons/collections.jl",
     "core/ferrite-addons/internal_variable_handler.jl",
     "postprocessing/quadrature-grid.jl",

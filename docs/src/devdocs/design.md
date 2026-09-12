@@ -205,12 +205,12 @@ trait ↔ kernel validation.
 
 Thirteen provided bodies exist, across the four workspace types:
 
-| item family | workspace | provided bodies |
-|---|---|---|
-| cells | `AssemblyWorkspace` | [`primal_cell_sweep!`](@ref) (buffer zeroing, values reinit, slot gather, cell kernel, scatter — no write-back: [`condense_internal!`](@ref) is the only writer of `q`); [`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to `sensitivity_kernel!`); [`functional_cell_sweep`](@ref) (slot gather, no write-back, RETURN what the kernel hook gives); [`condensation_cell_sweep!`](@ref) (slot gather, dispatch to [`condense_cell!`](@ref), RETURN the [`CondensationReport`](@ref) AND write the trial `q` back — the one combination the others don't have); [`internal_jacobian_cell_sweep!`](@ref) (the rectangular ∂F/∂q block) |
-| facet items | `FacetItemWorkspace` | [`primal_facet_item_sweep!`](@ref); [`sensitivity_facet_item_sweep!`](@ref); [`functional_facet_item_sweep`](@ref) (slot gather, no write-back, fold what the facet hook gives over the item's declared facets). Condensation, `JacobianKind{:q}` and quadrature evaluation are explicit `nothing` methods — the family has no body for them |
-| algebraic items | `AlgebraicWorkspace` | [`primal_algebraic_sweep!`](@ref); [`sensitivity_algebraic_sweep!`](@ref); [`functional_algebraic_sweep`](@ref); [`condensation_algebraic_sweep!`](@ref); [`internal_jacobian_algebraic_sweep!`](@ref) |
-| patches | `PatchAssemblyWorkspace` | the `PatchCallbackKind` body, reached through [`foreach_patch`](@ref) rather than the operator entry points; the per-patch assembly itself is [`assemble_patch_target!`](@ref), called by the callback |
+| item family | registration | workspace | provided bodies |
+|---|---|---|---|
+| cells | [`CellFamily`](@ref) | `AssemblyWorkspace` | [`primal_cell_sweep!`](@ref) (buffer zeroing, values reinit, slot gather, cell kernel, scatter — no write-back: [`condense_internal!`](@ref) is the only writer of `q`); [`sensitivity_cell_sweep!`](@ref) (trial gather, no write-back, dispatch to `sensitivity_kernel!`); [`functional_cell_sweep`](@ref) (slot gather, no write-back, RETURN what the kernel hook gives); [`condensation_cell_sweep!`](@ref) (slot gather, dispatch to [`condense_cell!`](@ref), RETURN the [`CondensationReport`](@ref) AND write the trial `q` back — the one combination the others don't have); [`internal_jacobian_cell_sweep!`](@ref) (the rectangular ∂F/∂q block) |
+| facet items | [`FacetItemFamily`](@ref) | `FacetItemWorkspace` | [`primal_facet_item_sweep!`](@ref); [`sensitivity_facet_item_sweep!`](@ref); [`functional_facet_item_sweep`](@ref) (slot gather, no write-back, fold what the facet hook gives over the item's declared facets). Condensation, `JacobianKind{:q}` and quadrature evaluation are explicit `nothing` methods — the family has no body for them |
+| algebraic items | [`AlgebraicItemFamily`](@ref) | `AlgebraicWorkspace` | [`primal_algebraic_sweep!`](@ref); [`sensitivity_algebraic_sweep!`](@ref); [`functional_algebraic_sweep`](@ref); [`condensation_algebraic_sweep!`](@ref); [`internal_jacobian_algebraic_sweep!`](@ref) |
+| patches | — (see [`setup_family_caches`](@ref)) | `PatchAssemblyWorkspace` | the `PatchCallbackKind` body, reached through [`foreach_patch`](@ref) rather than the operator entry points; the per-patch assembly itself is [`assemble_patch_target!`](@ref), called by the callback |
 
 A kind riding `primal_cell_sweep!` without its own `cell_kernel!` method gets
 the plain analytic route.
@@ -246,4 +246,229 @@ MyBackend())`.
 
 **New devices and scheduling** — `execute_on_device!`,
 `setup_device_instances` and `compute_partition` are the three hooks a device
-or scheduling policy implements; the item loop and the workspaces are shared.
+or scheduling policy implements; the item loop and the workspaces are shared. A
+device whose per-worker state is a struct of arrays rather than an array of
+structs — [`KernelAbstractionsDevice`](@ref) is the shipped one — additionally
+implements [`device_worker_view`](@ref) (the in-kernel slice),
+[`n_workers`](@ref), [`adapt_partition`](@ref) and, where its geometry cache
+needs a device-resident handler, [`setup_device_handler`](@ref). It answers
+`allocate_vector(device, dh)` for the global vector, and
+[`allocate_operator_matrix`](@ref) for the global matrix whose type the
+operator specification names.
+
+A device that cannot serve an item family says so at setup through
+`assert_device_supported` rather than failing inside the first sweep; the GPU
+method there is the list of what the device kernel covers today.
+
+**New item iterators** — [`assembly_iterator`](@ref)`(kind, element_cache,
+sdh)` decides what a sweep of `kind` positions on one item of the HOST
+`SubDofHandler` `sdh`, and what rides `args.cell` while the element kernels
+run; the default is Ferrite's `CellCache`. Three accessors are REQUIRED by the
+framework and no more:
+
+```julia
+struct MyIterator
+    # ...
+end
+Ferrite.reinit!(it::MyIterator, item) = (# position in place; return it)
+
+Ferrite.cellid(it::MyIterator)                    = ...  # a representative cell id
+FerriteOperators.iterator_dofs(it::MyIterator)    = ...  # the item's global dof indices
+FerriteOperators.iterator_handler(it::MyIterator) = ...  # the SubDofHandler it was built over
+
+FerriteOperators.assembly_iterator(kind, ::MyCache, sdh) = MyIterator(sdh)
+```
+
+Everything else a shipped element kernel reaches for through `args.cell` —
+`Ferrite.getcoordinates`, `Ferrite.getnodes`, `Ferrite.reinit!(cv, it)`, … — is
+CONVENTIONAL between the iterator and the elements written for it: the
+framework never calls them, so an iterator author implements whichever subset
+its own elements need.
+
+An iterator positioned by CONSTRUCTION (an immutable value, as the device
+cursor is) rather than in place overloads
+[`position_iterator`](@ref)`(it, item, flags)` instead of `Ferrite.reinit!`,
+returning the new value; [`position_item`](@ref) — the only thing a sweep
+calls — carries whichever value came back into the workspace, so both
+positioning styles compose with the rest of the engine unchanged.
+[`item_update_flags`](@ref)`(kind, element_cache)` lets an iterator that stages
+some of what it carries answer, per `(kind, cache)` pair, which members a
+positioning refreshes; an iterator that stages nothing ignores it, and an
+under-declaring pair reads a stale buffer rather than erroring, the same
+contract Ferrite's own `UpdateFlags` carries.
+
+The DEVICE shape is a fourth hook,
+[`device_assembly_iterator`](@ref)`(kind, element_cache, sdh, device_sdh)`,
+whose default forwards to `assembly_iterator` over the device handler — a
+downstream iterator needing no host-only setup fact writes only the host
+method; one that does either overloads this instead (narrowing the CACHE, per
+the rule below) or answers [`decorate_device_iterator`](@ref) on its own
+iterator type, which is where the matrix-free action's uniform-dof-stride check
+lives. `reinit_values!`'s setup-time admissibility probe is validated against
+the subdomain's RESOLVED iterator type, so a cache author who annotates it
+against a custom iterator still passes.
+
+Once constructed, a device iterator reaches the workspace through a FIFTH hook:
+the batching [`setup_device_instances`](@ref)`(device, it, n)` moves whatever it
+STAGES onto the device, and [`device_worker_view`](@ref)`(it, worker)` is the
+in-kernel slice. The workspace's iterator slot routes through a private,
+`ext`-level `_batch_iterator(device, it, n)` whose GENERIC default is
+`setup_device_instances(device, it, n)` itself, so a downstream device iterator
+writes only that 3-arg hook and needs no `ext`-private method.
+`Ferrite.CellCache` and the KA extension's `DeviceCellCursor` are the two
+shipped iterators with a more specific answer — Ferrite's own struct-of-arrays
+batching, and the cooperative mapping's positioned-by-construction fork.
+
+**New item SETS** — an iterator says how to POSITION on an item; it does not say
+what the items ARE. That is the second seam,
+[`item_provider`](@ref)`(kind, element_cache, sdh)`, whose answer
+[`compute_partition`](@ref) turns into the barriers and chunks a sweep walks.
+The default is [`CellItems`](@ref)`(sdh)`.
+
+The two vary independently, which is why they are two seams: the facet family
+runs a custom provider over the stock cell iterator, and the matrix-free action
+a custom iterator over the stock provider. A family that is BOTH — a two-sided
+interface traversal whose item is a pair of cells and whose local system is
+indexed by both cells' dofs — is these six methods and nothing else:
+
+```julia
+FerriteOperators.assembly_iterator(kind, ::MyCache, sdh) = MyIterator(sdh, …)
+FerriteOperators.item_provider(kind, ::MyCache, sdh)     = MyItems(sdh, …)
+
+Ferrite.reinit!(it::MyIterator, item::Int) = …   # position it; `position_iterator`'s default calls this
+FerriteOperators.compute_partition(::SequentialScheduling, p::MyItems) = (collect(eachindex(…)),)
+FerriteOperators.compute_partition(::ColoredScheduling,    p::MyItems) = …  # see below
+FerriteOperators.duplicate_for_device(::AbstractCPUDevice, it::MyIterator) = MyIterator(…)
+```
+
+plus the three required accessors above. `Ferrite.reinit!` is what positions the
+iterator on an item — [`position_iterator`](@ref)'s default is exactly that call,
+and an iterator positioned by CONSTRUCTION instead (a device cursor) overloads
+`position_iterator` and writes no `reinit!` at all.
+
+**Both seams narrow the CACHE argument, and that is a rule.** A declaration may
+narrow the sweep kind on top of it; it must never narrow ONLY the kind. The
+decorators forward these seams with methods that narrow the cache and leave the
+kind open ([`AbstractElementCacheDecorator`](@ref)), so a kind-narrow/cache-open
+method ties with those forwards over every decorated cache and Julia reports the
+call ambiguous. The rule covers [`item_update_flags`](@ref) and
+[`reinit_values!`](@ref) for the same reason. A KIND-level default — the
+matrix-free action's device cursor — goes on
+[`default_assembly_iterator`](@ref) instead, which sits BELOW every cache
+declaration, so a cache that names its own iterator keeps it under every kind.
+
+Overloading one seam and forgetting the other is not an error and not a
+`MethodError`: the other answers with its default, and an interface iterator left
+with `CellItems` is positioned on CELL ids.
+
+Half of that hazard is checked and half is not. A method written against a
+signature the engine does not call — the wrong sweep kind, the wrong handler
+type, the wrong arity — is rejected at setup by
+[`assert_iteration_signatures`](@ref), which takes the ELEMENT CACHE as its
+subject: a hook with any method narrowing that argument to a type this
+subdomain's cache conforms to must have one the engine's own call resolves to.
+A method that is simply ABSENT has no drift to detect and stays invisible.
+Assert the item COUNT a sweep visits; no framework check can see that one.
+
+A provider carries its family's whole partition safety argument, and the wording
+the package uses is exact: a partition is **safe given a valid partition**,
+never *thread-safe*. Under [`ColoredScheduling`](@ref) the provider promises that
+no two items of one inner chunk share a SCATTER DOF — that promise, and nothing
+else, is what makes the scatter race-free without atomics. Under
+[`SequentialScheduling`](@ref) it promises nothing and the atomic scatter
+resolves the collisions. The three shipped providers each argue it in their own
+terms ([`FacetItems`](@ref) colors the owning cells, [`AlgebraicItems`](@ref)
+puts one item per barrier, [`PatchItems`](@ref) refuses to color at all).
+
+Two structural consequences of a local system spanning more than one cell:
+
+- The dof window [`iterator_dofs`](@ref) returns is the scatter's address, and
+  Ferrite's assembler requires it to be DUPLICATE FREE. Two cells of a
+  continuous space share the dofs on their common facet, so a two-sided item
+  over one repeats them; the family's space is discontinuous, or the item's
+  sides do not touch.
+- The entries that window addresses are not in the `DofHandler`'s cell pattern,
+  and the framework never infers them. Declare them through the operator
+  specification's `sparsity_entries`
+  ([`StandardOperatorSpecification`](@ref)) — the same doctrine
+  [`global_dofs`](@ref) states for its tail.
+
+**New item FAMILIES** — the two seams above narrow what the CELL family
+positions on and enumerates, which is all a family riding the cell route needs.
+Registering a family of its OWN is the third seam, and it is what an operator
+carrying more than one traversal at a time needs:
+[`item_families`](@ref)`(integrator, dh)` names the families the engine carries,
+in TRAVERSAL order, and [`setup_family_caches`](@ref)`(family, strategy,
+integrator, dh, shared)` builds one family's `SubdomainCache`s.
+
+```julia
+struct MyFamily end
+
+FerriteOperators.item_families(::MyIntegrator, dh) = (CellFamily(), MyFamily())
+
+FerriteOperators.setup_family_caches(::MyFamily, strategy, integrator, dh, shared) =
+    # one SubdomainCache per subdomain this family serves; `()` declines
+```
+
+The tuple REPLACES the default, which derives `CellFamily()` always,
+[`FacetItemFamily`](@ref) where a subdomain declares [`facet_items`](@ref) and
+[`AlgebraicItemFamily`](@ref) where the handler declares
+[`algebraic_items`](@ref). So an integrator returning only its own marker
+carries only that family — the cells are not swept — and one returning
+`(CellFamily(), MyFamily())` carries both, cells first. That order is the order
+of `engine.subdomain_caches`, which the reduction determinism contract rests on.
+
+`shared` carries what `setup_engine` resolved before any family ran, and every
+field is available to every family; [`setup_family_caches`](@ref) tabulates
+them.
+
+**No ENGINE-REGISTERED family has a privileged setup path.** The three shipped
+families are three `setup_family_caches` methods and nothing else — the cell one
+in `operators/setup.jl`, the facet-item one in `core/facet-task.jl`, the
+algebraic one in `core/algebraic-task.jl` — reached by the same dispatch a
+downstream marker reaches, and `setup_engine` iterates `item_families` rather
+than calling any of them by name.
+
+**Two families deliberately do not register**, for reasons that are properties
+of those families rather than of this seam. [`foreach_patch`](@ref) is
+sequential-CPU-only because the callback's collectors are the CALLER's, so this
+package cannot duplicate them per worker, and `PatchAssemblyWorkspace` positions
+through a `Ref` resolved against its provider. [`setup_transfer_operator`](@ref)
+restricts to sequential full assembly by design and assembles a RECTANGULAR
+matrix through a driver of its own. Both adopt the iteration seams above and
+keep their own entry points.
+
+Two scope limits. The composite and multi-domain wrappers forward
+[`facet_items`](@ref) and [`algebraic_items`](@ref), so a wrapped
+sub-integrator's BUILT-IN families are carried through the default above — but
+they do not forward [`item_families`](@ref): a wrapper's own answer is the
+operator's. And a family whose subdomain caches are not cell-shaped builds them
+from names this package does not export; a downstream family with cell-shaped
+caches answers with the [`CellFamily`](@ref) method instead.
+
+!!! warning "Experimental surface"
+    `item_families`, `setup_family_caches` and the three family markers are
+    experimental and may change in a minor release, as the whole iteration
+    protocol's registration half.
+
+**New assembly levels** — a form member decides what `setup_operator` returns
+and, through [`operator_specification`](@ref), whether the global-storage walls
+apply to it at all. [`MatrixFreeAction`](@ref) is the second member: it
+allocates nothing, and its operator's `mul!` rides the ordinary sweep
+(`run_sweep!` → `execute_on_subdomains!` → `execute_on_device!`) under its own
+kind, whose driver body ([`matrix_free_cell_sweep!`](@ref)) differs from
+[`primal_cell_sweep!`](@ref) only in gathering fixed-width.
+
+A form choice a DEVICE has to realize — the element mapping — resolves onto the
+device at setup through [`with_element_mapping`](@ref), because
+[`n_workers`](@ref), [`setup_device_instances`](@ref) and
+[`execute_on_device!`](@ref) receive the device and never the form. A choice the
+ELEMENT has to realize — the `storage` election separating the ELEMENT, PARTIAL
+and NONE levels — resolves onto the caches through
+[`with_assembly_form`](@ref) for the mirrored reason: `setup_element_cache`
+receives the subdomain and never the form. Its two per-quadrature-point members
+reach the element's own hook ([`with_action_storage`](@ref)); the ELEMENT member
+is element-AGNOSTIC and wraps whatever cache the integrator built in an
+[`ElementAssemblyCache`](@ref), which is why a cache with no matrix-free kernel
+serves it. What either keeps is filled by a sweep of its own kind
+([`QuadratureDataKind`](@ref)), which scatters nothing and carries no assembler.

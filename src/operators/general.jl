@@ -246,11 +246,13 @@ no default — the fallback errors — so an operator has this accessor only whe
 its own type implements it, and an operator backed by no explicit matrix
 legitimately has none.
 
-FerriteOperators ships one method, for [`NullOperator`](@ref), which
-materializes its all-zero matrix on demand. The assembled operators hold their
-array in a field and expose it through [`operator_payload`](@ref), which is what
-`Base.eltype`/`Base.size` read; an operator type defined downstream implements
-`get_matrix` as its own accessor.
+FerriteOperators ships this for [`NullOperator`](@ref) (materializing its
+all-zero matrix on demand) and for the two operator kinds whose matrix field is
+unambiguous — [`BilinearFerriteOperator`](@ref)'s `A`,
+[`LinearizedFerriteOperator`](@ref)'s `J` — both of which also expose that array
+through [`operator_payload`](@ref), which is what `Base.eltype`/`Base.size`
+read. A [`LinearFerriteOperator`](@ref) holds a load VECTOR and has no method
+here; a downstream operator type implements `get_matrix` as its own accessor.
 """
 get_matrix(op) = error("Operator matrix is not explicitly accessible for given operator")
 

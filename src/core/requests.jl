@@ -390,7 +390,7 @@ element author declares `provides_analytic` and this default composes.
 serves_kind(T::Type, kind) = provides_analytic(T, kind)
 
 """
-    validate_element_cache(cache, declared_requests = ())
+    validate_element_cache(cache, declared_requests = (); iterator_type = CellCache)
 
 Setup-time consistency check for element caches: a cache opting into the
 request protocol must implement the mandatory [`ResidualRequest`](@ref)
@@ -398,6 +398,11 @@ kernel, and every request kind [`provides_analytic`](@ref) claims must have a
 matching kernel method. Runs once per subdomain at `setup_operator` time, so
 a typo'd port fails loudly instead of silently assembling through the wrong
 path.
+
+`iterator_type` is the subdomain's RESOLVED host [`assembly_iterator`](@ref)
+type: `reinit_values!` is probed against it rather than against `CellCache`
+unconditionally, so a cache written for a custom iterator (`reinit_values!(c,
+::MyIterator)`) is validated against the type it was actually annotated on.
 
 The two halves take different subjects, per the
 [`AbstractElementCacheDecorator`](@ref) convention. The KERNEL half — the
@@ -416,22 +421,22 @@ other kind only when declared via
 `setup_operator(...; requests = (ParameterVJPKind, …))`. Undeclared,
 non-primal kinds stay usable; their checks run at the call-time entry points.
 """
-function validate_element_cache(cache, declared_requests::Tuple = ())
-    _validate_element_kernels(unwrap(cache), declared_requests)
+function validate_element_cache(cache, declared_requests::Tuple = (); iterator_type::Type = CellCache)
+    _validate_element_kernels(unwrap(cache), declared_requests; iterator_type)
     _assert_admissible_kinds(typeof(cache), declared_requests)
     return nothing
 end
 
-function _validate_element_kernels(cache, declared_requests::Tuple)
+function _validate_element_kernels(cache, declared_requests::Tuple; iterator_type::Type = CellCache)
     T = typeof(cache)
     hasmethod(assemble_cell!, Tuple{ResidualRequest, T, CellArgs}) || throw(ArgumentError(
         "$(T) implements no `assemble_cell!(::ResidualRequest, ::$(nameof(T)), ::CellArgs)` " *
         "method. The residual kernel is mandatory: it is the basis for AD-derived Jacobians " *
         "and sensitivities."))
-    hasmethod(reinit_values!, Tuple{T, CellCache}) || throw(ArgumentError(
-        "$(T) implements no `reinit_values!(::$(nameof(T)), cell)` method. The engine " *
-        "reinitializes element values once per cell and sweep through this hook; " *
-        "kernels are pure evaluation and must not rely on reinit inside them."))
+    hasmethod(reinit_values!, Tuple{T, iterator_type}) || throw(ArgumentError(
+        "$(T) implements no `reinit_values!(::$(nameof(T)), ::$(nameof(iterator_type)))` " *
+        "method. The engine reinitializes element values once per cell and sweep through this " *
+        "hook; kernels are pure evaluation and must not rely on reinit inside them."))
     for kind in _primal_validatable_kinds()
         _assert_trait_backed(T, kind)
     end

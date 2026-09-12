@@ -23,6 +23,38 @@ struct BilinearKind end             # u-independent matrix
 struct LinearKind end               # u-independent vector
 
 """
+    MatrixFreeActionKind()
+
+The ACTION `y = A·u` of the operator a bilinear form induces — the sweep a
+[`MatrixFreeAction`](@ref) operator's `mul!` runs. It reaches
+[`apply_element_action!`](@ref), never a request, there being no element matrix
+for one to point at.
+
+Its state gather writes exactly `ndofs_per_cell` entries, unlike the
+[`ResidualKind`](@ref) gather that resizes, which is what lets the sweep run on
+a device whose per-worker slot buffer is a view into a shared batch.
+
+!!! warning "Experimental surface"
+    This kind may change in a minor release.
+"""
+struct MatrixFreeActionKind end
+
+"""
+    QuadratureDataKind()
+
+The PARTIAL-assembly fill: every cell's element cache writes the
+per-quadrature-point factors its action will read
+([`fill_quadrature_data!`](@ref)). It reaches no request and no assembler, cells
+writing disjoint slices of a store the cache owns, and runs at setup and on
+every [`update_operator!`](@ref) — so a factor depending on a parameter or on
+the time is as fresh as the last such call and no fresher.
+
+!!! warning "Experimental surface"
+    This kind may change in a minor release.
+"""
+struct QuadratureDataKind end
+
+"""
     ParameterJacobianKind()
 
 Assembly of `∂F/∂θ` into a dense `residual_size × nθ` target, θ being the flat
@@ -226,6 +258,9 @@ assembles_matrix(kind) = kind isa MatrixAssemblyKind
 @doc (@doc assembles_matrix) assembles_vector(kind) = kind isa VectorAssemblyKind
 @doc (@doc assembles_matrix) depends_on_unknowns(kind) = kind isa UnknownDependentKind
 
+assembles_vector(::MatrixFreeActionKind) = true
+depends_on_unknowns(::MatrixFreeActionKind) = true
+
 """
     NoFamily
     FunctionalFamily
@@ -341,6 +376,10 @@ requires_admissibility_check(::JacobianResidualKind{FrozenQ}) = false
 # Functional kernels return their contribution through `evaluate_cell_functional`
 # rather than filling a request, so there is no cell request to validate.
 has_cell_request(::Type{<:FunctionalKind}) = false
+# Both reach the element through an entry point of their own rather than a
+# request: `apply_element_action!` and `fill_quadrature_data!`.
+has_cell_request(::Type{MatrixFreeActionKind}) = false
+has_cell_request(::Type{QuadratureDataKind}) = false
 
 materialize_request(::ResidualKind, ws)                    = ResidualRequest(ws.re)
 materialize_request(::LinearKind, ws)                      = ResidualRequest(ws.re)
@@ -415,7 +454,18 @@ end
 duplicate_for_device(device, task::AssemblyTask) =
     AssemblyTask(task.kind, duplicate_for_device(device, task.inner_assembler), task.states, task.p, task.ctx)
 
-execute_single_task!(task::AssemblyTask, ws::AssemblyWorkspace) = execute_kind!(task.kind, task, ws)
+"""
+    execute_single_task!(task, ws)
+
+One item's work: route `task`'s kind to its driver body (`execute_kind!`) on the
+workspace `ws` is positioned on. This is where the per-item debug timer sits.
+
+A DEVICE kernel calls `execute_kind!` directly instead: `@timeit_debug` expands
+to a `try`/`finally` whether or not the timings are enabled, and GPUCompiler
+rejects the exception frame.
+"""
+execute_single_task!(task::AssemblyTask, ws::AssemblyWorkspace) =
+    @timeit_debug "assemble cell item" execute_kind!(task.kind, task, ws)
 
 # Loud once-per-sweep check instead of a raw NamedTuple field error per cell.
 function _check_declared_slots(engine, states::NamedTuple{names}) where {names}
@@ -442,30 +492,31 @@ end
 """
     item_dofs(ws) -> AbstractVector{Int}
 
-The global dof indices of the current item's local system: `celldofs(cell)`
+The global dof indices of the current item's local system: [`iterator_dofs`](@ref)
 where the item's family declares no global dofs ([`global_dofs`](@ref) for
 cells, [`facet_item_global_dofs`](@ref) for facet items), and the augmented
-`[celldofs(cell); global dofs]` vector the workspace carries otherwise. Every
+`[iterator_dofs(cell); global dofs]` vector the workspace carries otherwise. Every
 gather of a sweep addresses through this, so the augmented tail reaches the
 slot buffers and the adjoint payloads. On an [`AlgebraicWorkspace`](@ref) it is
 the item's own dof vector, that family having no cell dofs to start from.
 """
 @inline item_dofs(ws) = _item_dofs(ws.dofs, ws.cell)
-@inline _item_dofs(::Nothing, cell) = celldofs(cell)
+@inline _item_dofs(::Nothing, cell) = iterator_dofs(cell)
 @inline _item_dofs(dofs, cell) = dofs
 
 """
     scatter_address(ws)
 
 What a scatter of the current item addresses. Without a global-dof declaration
-for the item's family it is the geometry cache, which every assembler in the
-package takes and reads `celldofs` from. With them the local system spans dofs
-no cell owns, so the augmented dof vector is the only address that describes
-it. An algebraic item is addressed by its dof vector, there being no cell to
-name it by.
+for the item's family it is [`iterator_scatter_address`](@ref)'s answer for the
+item's iterator, which every assembler in the package takes and reads
+`celldofs` from by default. With them the local system spans dofs no cell owns,
+so the augmented dof vector is the only address that describes it. An
+algebraic item is addressed by its dof vector, there being no cell to name it
+by.
 """
 @inline scatter_address(ws) = _scatter_address(ws.dofs, ws.cell)
-@inline _scatter_address(::Nothing, cell) = cell
+@inline _scatter_address(::Nothing, cell) = iterator_scatter_address(cell)
 @inline _scatter_address(dofs, cell) = dofs
 
 # Gather every task slot into the workspace's slot buffers, returning the
@@ -502,7 +553,7 @@ function load_slot!(buf, src::InternalSource, ws)
     return buf
 end
 
-execute_kind!(kind::PrimalKind, task, ws) = primal_cell_sweep!(kind, task, ws)
+@inline execute_kind!(kind::PrimalKind, task, ws) = primal_cell_sweep!(kind, task, ws)
 
 """
     primal_cell_sweep!(kind, task, ws)
@@ -521,19 +572,95 @@ The kernel it calls is `cell_kernel!(kind, …)`, whose generic method issues th
 kind's request analytically; the built-in kinds with an AD fallback specialize
 it. It writes nothing back: [`condense_internal!`](@ref) is the only writer of
 `q`, so a primal sweep is a pure evaluation at whatever `q` is stored.
+
+The body carries no `@timeit_debug` frame — it has to compile for a GPU, and
+GPUCompiler rejects the `try`/`finally` the macro expands to. The per-item
+timer sits at [`execute_single_task!`](@ref) instead.
+
+It is `@inline` for the same reason [`matrix_free_cell_sweep!`](@ref) is: a
+device kernel that CALLS it instead of containing it passes `ws` — a struct of
+array views — through per-thread local memory instead of registers.
 """
-function primal_cell_sweep!(kind, task, ws)
+@inline function primal_cell_sweep!(kind, task, ws)
     assembles_matrix(kind) && fill!(ws.Ke, zero(eltype(ws.Ke)))
     assembles_vector(kind) && fill!(ws.re, zero(eltype(ws.re)))
     reinit_values!(ws.element, ws.cell, kind)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     if depends_on_unknowns(kind)
         statesₑ = load_slots!(ws, task.states)
-        @timeit_debug "assemble element" cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx)
+        cell_kernel!(kind, ws.element, ws, statesₑ, pₑ, task.ctx)
     else
-        @timeit_debug "assemble element" cell_kernel!(kind, ws.element, ws, (;), pₑ, task.ctx)
+        cell_kernel!(kind, ws.element, ws, (;), pₑ, task.ctx)
     end
     scatter_local!(kind, task.inner_assembler, ws)
+end
+
+@inline execute_kind!(kind::MatrixFreeActionKind, task, ws) = matrix_free_cell_sweep!(kind, task, ws)
+
+"""
+    matrix_free_cell_sweep!(kind, task, ws)
+
+The matrix-free ACTION driver body: gather the trial state into the workspace's
+`:u` slot buffer, evaluate `yₑ = Kₑ·uₑ` through [`apply_element_action!`](@ref)
+into `ws.re`, and scatter it. No element matrix is formed and none is stored.
+
+It differs from [`primal_cell_sweep!`](@ref) in one way, and that is what makes
+it run on a device: the gather is FIXED-WIDTH instead of `load_slots!`'s
+resize-then-broadcast, which a per-worker view into a shared device batch cannot
+serve. Where the cache names that width as a compile-time constant
+([`element_local_length`](@ref)) the gather targets an immutable static vector,
+which is also the dof window the scatter uses, so the window is read off the
+item ONCE. Without a static extent the scatter re-derives it through
+[`scatter_address`](@ref).
+
+`@inline` and `@timeit_debug`-free for the same reasons
+[`primal_cell_sweep!`](@ref) is.
+"""
+@inline function matrix_free_cell_sweep!(kind, task, ws)
+    fill!(ws.re, zero(eltype(ws.re)))
+    uₑ, dofs = _gather_element_unknowns(ws, task.states.u, element_local_length(ws.element))
+    reinit_values!(ws.element, ws.cell, kind)
+    pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
+    apply_element_action!(ws.re, ws.element, uₑ, _cell_args(ws, (u = uₑ,), pₑ, task.ctx))
+    scatter_local!(kind, task.inner_assembler, ws, dofs === nothing ? scatter_address(ws) : dofs)
+    return nothing
+end
+
+@inline _gather_element_unknowns(ws, src, ::Nothing) =
+    (_gather_item_dofs!(ws.slot_buffers.u, src, item_dofs(ws)), nothing)
+@inline function _gather_element_unknowns(ws, src, ::Val{ND}) where {ND}
+    d = item_dofs(ws)
+    dofs = SVector{ND, Int}(ntuple(i -> (@inbounds d[i]), Val(ND)))
+    T = eltype(ws.re)
+    uₑ = SVector{ND, T}(ntuple(i -> convert(T, @inbounds src[dofs[i]]), Val(ND)))
+    return uₑ, dofs
+end
+
+@inline execute_kind!(kind::QuadratureDataKind, task, ws) = quadrature_data_sweep!(kind, task, ws)
+
+"""
+    quadrature_data_sweep!(kind, task, ws)
+
+The PARTIAL-assembly fill driver body: position the element's values, query its
+parameters, and let it write its own per-quadrature-point store
+([`fill_quadrature_data!`](@ref)). Nothing is gathered or scattered and no
+workspace buffer is touched, so this sweep needs no assembler and runs under
+either scheduling policy.
+"""
+@inline function quadrature_data_sweep!(kind, task, ws)
+    reinit_values!(ws.element, ws.cell, kind)
+    pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
+    fill_quadrature_data!(ws.element, _cell_args(ws, (;), pₑ, task.ctx))
+    return nothing
+end
+
+# Entry-by-entry: on a device the destination is one worker's row of a shared
+# batch, which can be neither resized nor broadcast into.
+@inline function _gather_item_dofs!(buf, src, dofs)
+    for i in eachindex(dofs)
+        @inbounds buf[i] = src[dofs[i]]
+    end
+    return buf
 end
 
 # The single CellArgs/FacetArgs construction seams.
@@ -642,16 +769,16 @@ end
 
 
 """
-    scatter_local!(kind, assembler, ws)
+    scatter_local!(kind, assembler, ws, address = scatter_address(ws))
 
 Hand the local buffers a sweep of `kind` filled to the assembler. Which
 buffers those are is [`assembles_matrix`](@ref)/[`assembles_vector`](@ref), so
 the three routes are selected at compile time and a downstream kind is
 scattered by the same body. The item is addressed through
-[`scatter_address`](@ref).
+[`scatter_address`](@ref) by default; a caller that already holds that address
+([`matrix_free_cell_sweep!`](@ref), off its own gather) passes it instead.
 """
-function scatter_local!(kind, assembler, ws)
-    address = scatter_address(ws)
+@inline function scatter_local!(kind, assembler, ws, address = scatter_address(ws))
     if assembles_matrix(kind) && assembles_vector(kind)
         assemble!(assembler, address, ws.Ke, ws.re)
     elseif assembles_matrix(kind)

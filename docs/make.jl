@@ -1,12 +1,14 @@
 using FerriteOperators
 using FerriteOperatorsExampleElements
+using FerriteOperatorsTensorProduct
 using Documenter
 
 DocMeta.setdocmeta!(FerriteOperators, :DocTestSetup, :(using FerriteOperators); recursive=true)
+DocMeta.setdocmeta!(FerriteOperatorsTensorProduct, :DocTestSetup, :(using FerriteOperators, FerriteOperatorsTensorProduct); recursive=true)
 DocMeta.setdocmeta!(FerriteOperatorsExampleElements, :DocTestSetup, :(using FerriteOperators, FerriteOperatorsExampleElements); recursive=true)
 
 makedocs(;
-    modules=[FerriteOperators, FerriteOperatorsExampleElements],
+    modules=[FerriteOperators, FerriteOperatorsTensorProduct, FerriteOperatorsExampleElements],
     authors="Dennis Ogiermann <termi-official@users.noreply.github.com> and contributors",
     sitename="FerriteOperators.jl",
     format=Documenter.HTML(;

@@ -59,6 +59,22 @@ function setup_qvector(::Type{T}, dh::AbstractDofHandler, qrc) where {T}
 end
 
 """
+    setup_qvector(::Type{T}, sdh::SubDofHandler, npoints_per_cell::Integer) -> QVector{T}
+
+Build a [`QVector`](@ref) carrying `npoints_per_cell` points on every cell of
+`sdh` and none on any other cell of the grid — the layout a PER-SUBDOMAIN store
+needs (a matrix-free element's partial-assembly quadrature data), where the
+`(dh, qrc)` form above sizes the data for every subdomain at once.
+"""
+function setup_qvector(::Type{T}, sdh::SubDofHandler, npoints_per_cell::Integer) where {T}
+    npoints = zeros(Int, getncells(get_grid(sdh.dh)))
+    for cellid in sdh.cellset
+        npoints[cellid] = npoints_per_cell
+    end
+    return _qvector_from_npoints(T, npoints)
+end
+
+"""
     setup_qvector(::Type{T}, operator) -> QVector{T}
 
 Build a [`QVector`](@ref) laid out by the quadrature structure of `operator`,

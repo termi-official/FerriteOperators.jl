@@ -1,6 +1,172 @@
-## Cell iterators for assembling rectangular (transfer/prolongation) operators:
-## SameGridCellIterator for two DofHandlers on the *same* grid (p-multigrid),
-## NestedGridCellIterator for a fine grid nested inside a coarse one (geometric multigrid).
+## The item-iteration seam of a square-operator sweep, and the cell iterators for
+## assembling rectangular (transfer/prolongation) operators: SameGridCellIterator
+## for two DofHandlers on the *same* grid (p-multigrid), NestedGridCellIterator
+## for a fine grid nested inside a coarse one (geometric multigrid).
+
+##########################################
+## The assembly iteration seam          ##
+##########################################
+
+"""
+    assembly_iterator(kind, element_cache, sdh)
+
+EXPERIMENTAL. What a sweep of `kind` positions on one item of the HOST
+`SubDofHandler` `sdh`, and what rides `args.cell` while the element kernels
+run. Resolved ONCE per (sweep kind, element cache, subdomain) at
+[`setup_operator`](@ref); a sweep only calls [`position_item`](@ref) on it. The
+default is Ferrite's `CellCache` over `sdh`;
+[`device_assembly_iterator`](@ref) is the device shape.
+
+The positioned value must answer three accessors and no more:
+`Ferrite.cellid(it)`, [`iterator_dofs`](@ref) and [`iterator_handler`](@ref).
+Everything else a shipped kernel reaches for — `Ferrite.getcoordinates`,
+`Ferrite.getnodes`, `Ferrite.reinit!(cv, it)`, … — is CONVENTIONAL between the
+iterator and the elements written for it; the framework never calls them.
+Which members a sweep REFRESHES is [`item_update_flags`](@ref)'s separate
+per-kind declaration.
+
+A declaration narrows the CACHE argument, and may narrow the kind on top of it,
+but must never narrow ONLY the kind — the same rule governs
+[`item_provider`](@ref), [`item_update_flags`](@ref) and
+[`reinit_values!`](@ref); `devdocs/design.md` states why. A kind-level default
+goes on [`default_assembly_iterator`](@ref) instead.
+"""
+assembly_iterator(kind, element_cache, sdh) = default_assembly_iterator(kind, sdh)
+
+"""
+    default_assembly_iterator(kind, sdh)
+
+What a sweep of `kind` positions on where the element cache declares nothing —
+[`assembly_iterator`](@ref)'s default body, keyed on the kind and the handler
+alone, so it sits BELOW every cache declaration instead of tying with it. The
+default is Ferrite's `CellCache` over `sdh`.
+
+!!! warning "Experimental surface"
+    Internal to the iteration seam; it may change in a minor release.
+"""
+default_assembly_iterator(kind, sdh) = CellCache(sdh)
+
+"""
+    device_assembly_iterator(kind, element_cache, sdh, device_sdh)
+
+EXPERIMENTAL. The DEVICE shape of [`assembly_iterator`](@ref): what a sweep of
+`kind` positions on one item of the device-resident `device_sdh`. It takes BOTH
+handlers, since a device iterator may need a setup-time fact only the HOST one
+can cheaply produce.
+
+The default forwards to the host construction over the device handler, so a
+downstream iterator needing no host-only fact writes only the host method. One
+that does either overloads this directly (narrowing the CACHE, per
+[`assembly_iterator`](@ref)'s spelling rule) or answers
+[`decorate_device_iterator`](@ref) on its own iterator type.
+
+!!! warning "Experimental surface"
+    The device iterator layout is still moving; this seam's spelling may
+    change in a minor release. A device-resident iterator also indexes fields
+    of Ferrite's own `DeviceSubDofHandler` (`cell_dofs`, `cell_dofs_offset`) to
+    answer [`iterator_dofs`](@ref). Those fields are UNEXPORTED Ferrite
+    internals: this seam is only as stable as they are.
+"""
+device_assembly_iterator(kind, element_cache, sdh, device_sdh) =
+    decorate_device_iterator(assembly_iterator(kind, element_cache, device_sdh), sdh)
+
+"""
+    decorate_device_iterator(it, sdh) -> it
+
+The setup-time fact only the HOST `SubDofHandler` `sdh` can cheaply produce,
+folded into the device iterator `it` — [`device_assembly_iterator`](@ref)'s
+default body, keyed on the ITERATOR's type. The default returns `it` unchanged.
+
+!!! warning "Experimental surface"
+    Internal to the device iteration seam; it may change in a minor release.
+"""
+decorate_device_iterator(it, sdh) = it
+
+"""
+    item_update_flags(kind, element_cache) -> Ferrite.UpdateFlags
+
+What a sweep of `kind` over `element_cache` READS off the cache
+[`assembly_iterator`](@ref) positions, in Ferrite's `UpdateFlags` vocabulary.
+Every flag is set by default.
+
+It governs STAGING only: a declaration that under-states what the kernels read
+is a stale read rather than an error, the same contract Ferrite's own
+`UpdateFlags` carries. Answer it with a literal, so the staging it guards folds
+away.
+
+    FerriteOperators.item_update_flags(::MatrixFreeActionKind, ::MyCache) =
+        Ferrite.UpdateFlags(nodes = false, coords = false, dofs = true)
+"""
+item_update_flags(kind, element_cache) = Ferrite.UpdateFlags()
+
+"""
+    position_item(ws, item, kind) -> ws
+
+Position the workspace `ws` on `item` for a sweep of `kind` and return the
+POSITIONED workspace, which need not be `ws` itself: an iterator positioned by
+CONSTRUCTION hands back a new value, and only the returned one is positioned.
+
+The default is `Ferrite.reinit!(ws, item)`; `AssemblyWorkspace` overloads it,
+dispatching to [`position_iterator`](@ref) for the iterator's own half.
+"""
+@inline position_item(ws, item, kind) = (Ferrite.reinit!(ws, item); ws)
+
+"""
+    position_iterator(it, item, flags::Ferrite.UpdateFlags) -> it
+
+The ITERATOR's half of positioning an [`AssemblyWorkspace`](@ref) on `item`,
+with `flags` looked up from [`item_update_flags`](@ref). Returns the positioned
+iterator: the default mutates `it` in place and returns it (Ferrite's `reinit!`
+contract), an iterator positioned by CONSTRUCTION returns a new value.
+
+`flags` are ADVISORY — an iterator that stages nothing ignores them.
+"""
+@inline position_iterator(it, item, flags) = (Ferrite.reinit!(it, item); it)
+
+"""
+    iterator_dofs(it) -> AbstractVector{<:Integer}
+
+REQUIRED accessor (one of three — see [`assembly_iterator`](@ref)): the global
+dof indices of the item `it` is positioned on. The default is
+`Ferrite.celldofs(it)`.
+
+This window doubles as the scatter address by default
+([`iterator_scatter_address`](@ref)), and Ferrite's assembler requires it to be
+DUPLICATE FREE. An item spanning more than one cell repeats a dof wherever the
+cells share it — two face-neighbours of a CONTINUOUS space share the dofs on
+their common facet — so such a family needs a discontinuous space, or item
+sides that do not touch a shared facet.
+"""
+iterator_dofs(it) = Ferrite.celldofs(it)
+
+"""
+    iterator_handler(it) -> SubDofHandler-like
+
+REQUIRED accessor (one of three — see [`assembly_iterator`](@ref)): the
+`SubDofHandler` (or device counterpart) `it` was constructed over. The default
+reads the `dh` field Ferrite's own caches carry; framework code goes through
+this rather than the field, so an iterator need not carry one named `dh`.
+"""
+iterator_handler(it) = it.dh
+
+"""
+    iterator_scatter_address(it)
+
+What a scatter of the current item addresses, absent a family-level global-dof
+declaration ([`global_dofs`](@ref)) — see [`scatter_address`](@ref), which reads
+this. The default is [`iterator_dofs`](@ref).
+
+Left untyped so a rectangular transfer item may answer with a two-index
+`(rowdofs, coldofs)` pair. That shape is EXPERIMENTAL and has no consumer in
+`scatter_local!`; the transfer family keeps its own driver.
+
+NOT CONSULTED by the matrix-free action wherever the element names a
+compile-time [`element_local_length`](@ref): [`matrix_free_cell_sweep!`](@ref)
+and the [`LanesPerElement`](@ref) kernel both address through
+[`iterator_dofs`](@ref) directly. An item family whose scatter address DIFFERS
+from its dof window must therefore not name a compile-time extent.
+"""
+iterator_scatter_address(it) = iterator_dofs(it)
 
 ####################################
 ## SameGridCellCache      ##

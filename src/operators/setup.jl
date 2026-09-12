@@ -6,14 +6,16 @@ operator specification declares ([`StandardOperatorSpecification`](@ref) →
 `SparsityPattern`, [`BlockedOperatorSpecification`](@ref) →
 `BlockSparsityPattern`), with entries added by Ferrite's
 `add_sparsity_entries!` from the specification's `algebraic_couplings` and
-`constraint_handler`, allocated as `matrix_type(strategy)`.
+`constraint_handler`, then by the specification's `sparsity_entries` callable —
+the coupling an item family introduces and the handler's cell pattern does not
+carry — allocated as `matrix_type(strategy)`.
 
 The constraint handler contributes SPARSITY ENTRIES only; applying the
 constraints to the assembled system stays the caller's, through Ferrite's
 `apply!`/`apply_assemble!`.
 """
 create_system_matrix(strategy, dh) = _create_system_matrix(strategy, strategy.form.operator_specification, dh)
-create_system_vector(strategy, dh) = allocate_vector(vector_type(strategy), dh)
+create_system_vector(strategy, dh) = allocate_vector(strategy.device, dh)
 
 function _create_system_matrix(strategy, spec, dh)
     sp = init_operator_sparsity_pattern(spec, dh)
@@ -25,23 +27,47 @@ function _create_system_matrix(strategy, spec, dh)
     else
         add_sparsity_entries!(sp, dh, spec.constraint_handler; algebraic_couplings = couplings)
     end
-    return allocate_matrix(matrix_type(strategy), sp)
+    _add_declared_entries!(spec.sparsity_entries, sp, dh)
+    return allocate_operator_matrix(strategy.device, matrix_type(strategy), sp)
 end
+
+# Added last, so it unions with the cell pattern rather than replacing it.
+_add_declared_entries!(::Nothing, sp, dh) = sp
+_add_declared_entries!(f, sp, dh) = (f(sp, dh); sp)
+
+"""
+    allocate_operator_matrix(device, matrix_type, sp)
+
+The operator's global matrix over the sparsity pattern `sp`
+[`create_system_matrix`](@ref) built.
+
+Ferrite ships no `allocate_matrix(::Type{<:device matrix}, ::SparsityPattern)`,
+so a GPU device allocates the host `SparseMatrixCSC` over that pattern and hands
+it to the device type's constructor. The type parameters come from that
+constructor (CUSPARSE fixes the index type at `Cint`), not from the request.
+"""
+allocate_operator_matrix(::AbstractDevice, ::Type{MT}, sp) where {MT} = allocate_matrix(MT, sp)
+allocate_operator_matrix(device::AbstractGPUDevice, ::Type{MT}, sp) where {MT} =
+    Base.typename(MT).wrapper(
+        allocate_matrix(SparseMatrixCSC{value_type(device), index_type(device)}, sp))
 
 init_operator_sparsity_pattern(::StandardOperatorSpecification, dh) = Ferrite.init_sparsity_pattern(dh)
 init_operator_sparsity_pattern(spec::BlockedOperatorSpecification, dh) = BlockSparsityPattern(spec.block_sizes)
 
-function setup_elements(integrator, dh, ad_backend, n_global_dofs)
-    needs_ad_decoration(integrator) || return [setup_element_cache(integrator, sdh) for sdh in dh.subdofhandlers]
-    return [setup_decorated_element_cache(integrator, sdh, ad_backend, n)
+# `with_assembly_form` is applied to the RAW cache, before any decoration and
+# before the engine builds the workspaces and device layouts from it.
+function setup_elements(integrator, dh, form, ad_backend, n_global_dofs)
+    needs_ad_decoration(integrator) ||
+        return [with_assembly_form(setup_element_cache(integrator, sdh), form, sdh) for sdh in dh.subdofhandlers]
+    return [setup_decorated_element_cache(integrator, sdh, form, ad_backend, n)
             for (sdh, n) in zip(dh.subdofhandlers, n_global_dofs)]
 end
 
 # One subdomain's element cache, built and decorated. Both counts the decorator
 # is sized from are the INTEGRATOR's declarations, resolved here, which is what
 # keeps `decorate_element_cache` itself integrator-free.
-function setup_decorated_element_cache(integrator, sdh, ad_backend, n_global_dofs::Int)
-    cache = setup_element_cache(integrator, sdh)
+function setup_decorated_element_cache(integrator, sdh, form, ad_backend, n_global_dofs::Int)
+    cache = with_assembly_form(setup_element_cache(integrator, sdh), form, sdh)
     return decorate_element_cache(cache, sdh, ad_backend, n_global_dofs;
                                   n_internal_dofs = resolve_internal_dofs_per_element(integrator, cache, sdh))
 end
@@ -141,19 +167,43 @@ function _build_internal_variable_handler(integrator, element_caches, algebraic_
     return InternalVariableHandler(cell_offsets, item_offsets, ndofs(dh), cell_len + item_len)
 end
 
-function setup_subdomain_caches(strategy, element_caches, ivh, dh;
-        slots::NTuple{<:Any, Symbol}, needs_sensitivity::Bool, global_dof_sets)
+# The sweep kind an operator of `form` resolves its iterator and item set for.
+# `nothing` for the primal family, which positions on the full geometry cache
+# and has no kind to narrow by.
+iteration_kind(form) = nothing
+iteration_kind(::MatrixFreeAction) = MatrixFreeActionKind()
+
+# The CELL family's `setup_family_caches` method — the only shipped family
+# needing a device-resident handler.
+function setup_family_caches(::CellFamily, strategy, integrator, dh, shared)
     device = strategy.device
+    ivh    = shared.ivh
+    slots  = shared.slots
+    needs_sensitivity = shared.needs_sensitivity
+    kind = iteration_kind(strategy.form)
+    # One device-resident handler for the whole operator, split per subdomain
+    # below: rebuilding it per subdomain would upload every other subdomain's
+    # cell-id maps again.
+    device_dh = setup_device_handler(device, dh)
     return [begin
-        partition = compute_partition(strategy, sdh)
+        partition = adapt_partition(device, compute_partition(
+            strategy, item_provider(kind, element_cache, sdh)))
         n = n_workers(device, partition)
         ws = create_assembly_workspace(element_cache, sdh, ivh, slots;
-                                       needs_sensitivity, global_dofs = gdofs)
-        dc = setup_device_instances(device, ws, n)
+                                       needs_sensitivity, global_dofs = gdofs,
+                                       iterator = assembly_iterator(kind, element_cache, sdh))
+        dc = setup_device_instances(device, ws, n,
+            _device_iterator(kind, element_cache, sdh, device_subdomain_handler(device_dh, index)))
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
-    end for (sdh, element_cache, gdofs) in
-        zip(dh.subdofhandlers, element_caches, global_dof_sets)]
+    end for (index, (sdh, element_cache, gdofs)) in
+        enumerate(zip(dh.subdofhandlers, shared.element_caches, shared.global_dof_sets))]
 end
+
+# A CPU device has no device handler and therefore no device iterator; the
+# workspace it duplicates already carries the host one.
+_device_iterator(kind, element_cache, sdh, ::Nothing) = nothing
+_device_iterator(kind, element_cache, sdh, device_sdh) =
+    device_assembly_iterator(kind, element_cache, sdh, device_sdh)
 
 # Each family's global-dof declaration is resolved once per subdomain, before
 # any cache exists, and validated here rather than surfacing later as an
@@ -175,6 +225,17 @@ function _resolve_global_dof_sets(strategy, dh, sets, declaration)
 end
 
 function _reject_unsupported_global_dof_strategy(strategy::AssemblyStrategy, declaration)
+    strategy.form isa MatrixFreeAction && throw(ArgumentError(
+        "A subdomain declaring `$declaration` cannot be evaluated under `MatrixFreeAction`: the " *
+        "element action is defined on the cell's FIELD space (`apply_element_action!` receives " *
+        "`uₑ`/`yₑ` in `celldofs` order and the ELEMENT level's matrices are `ndofs_per_cell` " *
+        "square), so the declared tail would be gathered, ignored by the element, and scattered " *
+        "back as zero. Assemble this operator under `FullAssembly`."))
+    strategy.device isa AbstractGPUDevice && throw(ArgumentError(
+        "A subdomain declaring `$declaration` cannot be assembled on " *
+        "$(nameof(typeof(strategy.device))): a GPU device assembles under `ColoredScheduling` " *
+        "only, and a dof shared by every item of a subdomain admits no coloring. Assemble this " *
+        "operator on a CPU device."))
     strategy.scheduling isa ColoredScheduling && throw(ArgumentError(
         "A subdomain declaring `$declaration` cannot be assembled under `ColoredScheduling`: " *
         "coloring makes a scatter race-free by giving no two items of a color a shared dof, " *
@@ -207,15 +268,132 @@ function _validate_global_dofs(index, sdh, gdofs, ndofs_total, declaration)
     return nothing
 end
 
+####################################
+## Device support walls
+####################################
+
+# Reject at setup what a device cannot assemble. No-ops for a CPU device; the
+# `AbstractGPUDevice` methods are the list of what a device kernel covers. The
+# first runs on the integrator's DECLARATIONS before any cache is built, the
+# second needs the resolved `InternalVariableHandler`.
+assert_device_supported(::AbstractDevice, strategy, integrator, dh) = nothing
+
+function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblyStrategy, integrator, dh)
+    dev = nameof(typeof(device))
+    # The coloring requirement is the MATRIX assembler's: Ferrite's device one
+    # accumulates with a plain `+=`, so an uncolored device sweep into a matrix
+    # is a silent data race. A form that assembles no matrix scatters through
+    # this package's own `VectorAssembler`, which IS atomic-capable on device
+    # and takes either scheduling.
+    (operator_specification(strategy.form) === nothing || strategy.scheduling isa ColoredScheduling) || throw(ArgumentError(
+        "$dev requires `ColoredScheduling` for an assembling form (got " *
+        "$(nameof(typeof(strategy.scheduling)))). Ferrite's device matrix assembler accumulates " *
+        "with a plain `+=` — its `AbstractThreadSafeAssembler` supertype means \"safe to alias " *
+        "across workers given a valid coloring\", not race-free — so an uncolored device sweep " *
+        "is a silent data race. Pass `scheduling = ColoredScheduling()`."))
+    (operator_specification(strategy.form) === nothing || element_mapping(device) isa WorkerPerElement) ||
+        throw(ArgumentError(
+            "$dev carries `$(nameof(typeof(element_mapping(device))))`, which executes the " *
+            "matrix-free action only. An assembling form is `WorkerPerElement`; build the device " *
+            "without `with_element_mapping`, or set the operator up with `form = MatrixFreeAction(; " *
+            "element_mapping = $(nameof(typeof(element_mapping(device))))())`, which resolves the " *
+            "mapping itself."))
+    _assert_device_specification(device, operator_specification(strategy.form), integrator)
+
+    needs_ad_decoration(integrator) && throw(ArgumentError(
+        "$dev assembles bilinear and linear forms only (got $(nameof(typeof(integrator)))). A " *
+        "nonlinear integrator carries the `ADElementCache` decoration and the per-worker " *
+        "sensitivity buffers, neither of which has a device layout."))
+    isempty(algebraic_items(integrator, dh)) || throw(ArgumentError(
+        "$dev does not support the algebraic item family (`algebraic_items`): its items are a " *
+        "dof set with no cell, and the device geometry cache addresses cells."))
+    for sdh in dh.subdofhandlers
+        isempty(facet_items(integrator, sdh)) || throw(ArgumentError(
+            "$dev does not support the facet item family (`facet_items`): Ferrite 1.7 has no " *
+            "device `FacetValues`."))
+    end
+    return nothing
+end
+
+_assert_device_specification(device, ::Nothing, integrator) = nothing
+
+function _assert_device_specification(device, spec, integrator)
+    dev = nameof(typeof(device))
+    spec isa BlockedOperatorSpecification && throw(ArgumentError(
+        "$dev does not support `BlockedOperatorSpecification`: Ferrite ships no device " *
+        "`BlockAssembler`. Use a `StandardOperatorSpecification`, naming the device matrix type."))
+    spec.constraint_handler === nothing || throw(ArgumentError(
+        "$dev does not support a `constraint_handler` on the operator specification. Allocate " *
+        "the operator without one and apply the constraints yourself — Ferrite's `apply!` takes " *
+        "a device constraint handler (`adapt(backend, ch)`)."))
+    _assert_device_matrix_type(device, spec.matrix_type)
+    _assert_no_silent_host_matrix(device, spec, integrator)
+    return nothing
+end
+
+# A `StandardOperatorSpecification` with no `matrix_type` named — or one given
+# as a host type — resolves to the host `SparseMatrixCSC`, and
+# [`allocate_operator_matrix`](@ref) allocates exactly that: the system matrix
+# would silently land on the HOST. Loud here, at setup. Scoped to the integrator
+# families that allocate the global MATRIX ([`create_system_matrix`](@ref)); a
+# linear integrator allocates a vector, whose type this spec has no say over.
+# The `KernelAbstractions.CPU` debug backend is genuinely host-resident and
+# exempt.
+_assert_no_silent_host_matrix(device, spec, ::AbstractLinearIntegrator) = nothing
+function _assert_no_silent_host_matrix(device, spec, integrator)
+    MT = matrix_type(device, spec)
+    (MT <: SparseMatrixCSC && !_host_resident_backend(device)) && throw(ArgumentError(
+        "$(nameof(typeof(device))) resolves the operator specification's matrix type to the " *
+        "host $MT: no device matrix type was named (or a host one was named explicitly), so " *
+        "`StandardOperatorSpecification`'s default is what gets allocated on a device whose " *
+        "system matrix belongs off the host. Pass `StandardOperatorSpecification(matrix_type = " *
+        "<device matrix type>)`."))
+    return nothing
+end
+
+_host_resident_backend(::AbstractGPUDevice) = false
+_host_resident_backend(device::KernelAbstractionsDevice) = nameof(typeof(device.backend)) === :CPU
+
+_assert_device_matrix_type(device, ::Nothing) = nothing
+
+# The GLOBAL side alone. The ELEMENT-local scalar is the integrator's own
+# election and is deliberately NOT checked here: a `Float64` element scattering
+# into a `Float32` system converts entry-wise and is supported.
+function _assert_device_matrix_type(device, ::Type{MT}) where {MT}
+    eltype(MT) === value_type(device) || throw(ArgumentError(
+        "$(nameof(typeof(device))) assembles in $(value_type(device)) but the operator " *
+        "specification names the matrix type $MT, whose element type is $(eltype(MT)). Set the " *
+        "device's `value_type` and the matrix type's element type to the same scalar."))
+    # A capability check, not a name check: a CSR device matrix is allocatable
+    # but has no `start_assemble`, and would fail on the first sweep instead.
+    hasmethod(Ferrite.start_assemble, Tuple{MT}) || throw(ArgumentError(
+        "No `Ferrite.start_assemble` method accepts $MT, so it cannot be assembled into. " *
+        "Ferrite 1.7 ships a device assembler for CSC device matrices only; a CSR device " *
+        "matrix is allocatable but not assemblable."))
+    return nothing
+end
+
+assert_device_internal_state_supported(::AbstractDevice, ivh) = nothing
+
+function assert_device_internal_state_supported(device::AbstractGPUDevice, ivh)
+    has_internal_dof_block(ivh) && throw(ArgumentError(
+        "$(nameof(typeof(device))) does not support condensed internal state: the " *
+        "element-local solves `condense_internal!` runs, and the internal-variable handler " *
+        "that lays their block out, have no device path."))
+    return nothing
+end
+
 """
     assert_declaration_signatures(integrator, dh)
 
 Reject a declaration hook whose method was written against a signature the
 engine does not call. [`global_dofs`](@ref), [`facet_items`](@ref),
 [`facet_item_global_dofs`](@ref) and [`algebraic_items`](@ref) all default to an
-EMPTY declaration, so a drifted signature never surfaces as a `MethodError`: the
-default answers instead, and the operator assembles a subset — a missing
-local-system tail, an unvisited boundary, absent algebraic rows — without a word.
+EMPTY declaration and [`item_families`](@ref) to the families those three imply,
+so a drifted signature never surfaces as a `MethodError`: the default answers
+instead, and the operator assembles a subset — a missing local-system tail, an
+unvisited boundary, absent algebraic rows, an unregistered family — without a
+word.
 
 The check is type-level and runs once per [`setup_engine`](@ref). For every
 integrator that answers these hooks — the outer one and, through the wrappers
@@ -223,11 +401,16 @@ that forward them, their sub-integrators — a hook with ANY method specialized 
 that integrator's type must have one the engine's own call resolves to. An
 integrator declaring nothing has no specialized method and passes; a correct
 declarer's method is what the call resolves to and passes.
+
+The iteration seams are keyed on the ELEMENT CACHE rather than the integrator,
+so they are checked separately and later, once the caches exist —
+[`assert_iteration_signatures`](@ref).
 """
 function assert_declaration_signatures(integrator, dh::AbstractDofHandler)
     subjects = _declaration_subjects!(Any[], integrator)
     for subject in subjects
         _assert_hook_signature(algebraic_items, subject, typeof(dh))
+        _assert_hook_signature(item_families, subject, typeof(dh))
     end
     isempty(dh.subdofhandlers) && return nothing
     # Type-level, and every subdomain of one DofHandler shares `typeof(sdh)`, so
@@ -243,25 +426,86 @@ end
 
 function _assert_hook_signature(hook, subject, argtype::Type)
     IT = typeof(subject)
-    _is_empty_declaration_default(which(hook, Tuple{IT, argtype})) || return nothing
+    _is_open_declaration_default(which(hook, Tuple{IT, argtype})) || return nothing
     drifted = [m for m in methods(hook, Tuple{IT, Vararg{Any}})
-               if !_is_empty_declaration_default(m)]
+               if !_is_open_declaration_default(m)]
     isempty(drifted) && return nothing
     expected = "$(nameof(hook))(::$(nameof(IT)), ::$(nameof(argtype)))"
     throw(ArgumentError(
         "$(IT) has a method for the declaration hook `$(nameof(hook))`, but the engine's call " *
-        "`$expected` resolves to the empty default, so this integrator declares nothing at " *
-        "all. The declaration hooks default to an empty declaration rather than erroring, so " *
-        "a drifted signature assembles a silent subset instead of failing.\n" *
+        "`$expected` resolves to the hook's DEFAULT, so this integrator's declaration is never " *
+        "reached. These hooks default rather than erroring — to an empty declaration, or, for " *
+        "`item_families`, to the families the other declarations imply — so a drifted signature " *
+        "assembles a silent subset instead of failing.\n" *
         "found:    " * join(drifted, "\n          ") * "\n" *
         "expected: " * expected))
 end
 
-# The empty default of a declaration hook is its one method left open in the
-# integrator slot; every other method is some integrator type's declaration.
-function _is_empty_declaration_default(m::Method)
+# A declaration hook's default is its one method left open in the integrator
+# slot; every other method is some integrator type's declaration.
+function _is_open_declaration_default(m::Method)
     params = Base.unwrap_unionall(m.sig).parameters
     return length(params) ≥ 2 && params[2] === Any
+end
+
+"""
+    assert_iteration_signatures(kind, element_caches, dh)
+
+Reject an ITERATION-seam declaration whose method was written against a
+signature the engine does not call. [`assembly_iterator`](@ref) and
+[`item_provider`](@ref) are keyed on the `(kind, element cache, subdomain)`
+triple — not on the integrator — so they are checked here rather than in
+[`assert_declaration_signatures`](@ref), once the caches exist and the sweep
+kind is resolved.
+
+Both default to the cell answer (`CellCache`, [`CellItems`](@ref)), so a drifted
+method is never reached and never a `MethodError`: the default answers and the
+sweep positions on CELL ids and visits CELLS — a silently wrong operator, hence
+the setup-time rejection.
+
+The subject is the [`unwrap`](@ref) fixpoint of the element cache, not the
+possibly-decorated cache the engine calls: probing the decorated one would
+resolve to the decorator's forwarding method, which narrows the cache argument
+just enough to look like a declaration and would pass every drifted inner
+silently. A hook with ANY method narrowing that argument to a type this
+subdomain's UNWRAPPED cache conforms to must have one the engine's own call
+resolves to. A method narrowing only the KIND is not treated as drift.
+
+A method that is simply ABSENT no check can see; only the item COUNT a sweep
+visits reveals it.
+"""
+function assert_iteration_signatures(kind, element_caches, dh::AbstractDofHandler)
+    for (cache, sdh) in zip(element_caches, dh.subdofhandlers)
+        author = unwrap(cache)
+        _assert_iteration_hook_signature(assembly_iterator, kind, author, sdh)
+        _assert_iteration_hook_signature(item_provider, kind, author, sdh)
+    end
+    return nothing
+end
+
+# A type no declaration can name: a method that also accepts THIS leaves the
+# cache argument open and is not a declaration about any particular cache.
+struct _UnrelatedElementCache end
+
+_accepts_element_cache(m::Method, C::Type) =
+    typeintersect(m.sig, Tuple{Any, Any, C, Vararg{Any}}) !== Union{}
+
+_declares_for_element_cache(m::Method, C::Type) =
+    _accepts_element_cache(m, C) && !_accepts_element_cache(m, _UnrelatedElementCache)
+
+function _assert_iteration_hook_signature(hook, kind, cache, sdh)
+    CT = typeof(cache)
+    _declares_for_element_cache(which(hook, Tuple{typeof(kind), CT, typeof(sdh)}), CT) && return nothing
+    drifted = [m for m in methods(hook) if _declares_for_element_cache(m, CT)]
+    isempty(drifted) && return nothing
+    expected = "$(nameof(hook))(::$(nameof(typeof(kind))), ::$(nameof(CT)), ::$(nameof(typeof(sdh))))"
+    throw(ArgumentError(
+        "$(CT) has a method for the iteration seam `$(nameof(hook))`, but the engine's call " *
+        "`$expected` resolves to the default instead, so this cache's declaration is never " *
+        "reached. Both iteration seams default to the CELL answer rather than erroring, so a " *
+        "drifted signature sweeps the cells silently instead of failing.\n" *
+        "found:    " * join(drifted, "\n          ") * "\n" *
+        "expected: " * expected))
 end
 
 # Kind types or instances normalize to their UnionAll base, so a declaration
@@ -291,40 +535,47 @@ The declaration hooks are signature-checked first
 ([`assert_declaration_signatures`](@ref)), since each defaults to an empty
 declaration and a drifted method would otherwise assemble a silent subset.
 
-Facet item ([`facet_items`](@ref)) and then algebraic item
-([`algebraic_items`](@ref)) caches are appended after the cell subdomains, so
-traversal order follows the declarations rather than which families are
-present. The algebraic domain is resolved BEFORE the
-[`InternalVariableHandler`](@ref) is built, since a condensed algebraic cache's
-item block sizes itself from the resolved items and cache, and decorated
-afterwards alongside the cell caches.
+Once the caches exist the ITERATION seams are signature-checked against them
+([`assert_iteration_signatures`](@ref)), being keyed on the element cache and
+defaulting rather than erroring. Each subdomain's
+[`validate_element_cache`](@ref) call then probes `reinit_values!` against that
+subdomain's RESOLVED host [`assembly_iterator`](@ref) type rather than against
+`CellCache` unconditionally, so an author-annotated
+`reinit_values!(c, ::MyIterator)` method is validated on the type it was
+written against.
+
+The subdomain caches are then the concatenation of what each REGISTERED item
+family builds, in the order [`item_families`](@ref) returns them — cells, then
+facet items ([`facet_items`](@ref)), then algebraic items
+([`algebraic_items`](@ref)) for the default declaration — every one of them
+through the same [`setup_family_caches`](@ref) dispatch. The algebraic domain is
+resolved BEFORE the [`InternalVariableHandler`](@ref) is built, since a
+condensed algebraic cache's item block sizes itself from the resolved items and
+cache, and decorated afterwards alongside the cell caches.
 """
 function setup_engine(strategy::AbstractAssemblyStrategy, integrator, dh::AbstractDofHandler;
         slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD())
     assert_declaration_signatures(integrator, dh)
+    assert_device_supported(strategy.device, strategy, integrator, dh)
     declared_slots    = Tuple(slots)
     declared_kinds    = map(_kind_type, requests)
     global_dof_sets   = resolve_global_dof_sets(strategy, integrator, dh)
     facet_item_sets   = resolve_facet_item_global_dof_sets(strategy, integrator, dh)
-    element_caches    = setup_elements(integrator, dh, ad_backend, map(length, global_dof_sets))
-    foreach(cache -> validate_element_cache(cache, declared_kinds), element_caches)
+    element_caches    = setup_elements(integrator, dh, strategy.form, ad_backend, map(length, global_dof_sets))
+    kind              = iteration_kind(strategy.form)
+    assert_iteration_signatures(kind, element_caches, dh)
+    foreach(element_caches, dh.subdofhandlers) do cache, sdh
+        validate_element_cache(cache, declared_kinds; iterator_type = typeof(assembly_iterator(kind, cache, sdh)))
+    end
     algebraic_domain  = resolve_algebraic_domain(integrator, dh, declared_kinds)
     ivh               = setup_internal_variable_handler(integrator, element_caches, algebraic_domain, dh)
     needs_sensitivity = needs_ad_decoration(integrator)
-    cell_caches       = setup_subdomain_caches(strategy, element_caches, ivh, dh;
-                                               slots = declared_slots,
-                                               needs_sensitivity,
-                                               global_dof_sets)
-    facet_caches      = setup_facet_item_caches(strategy, integrator, dh, declared_kinds, ivh;
-                                                slots = declared_slots,
-                                                needs_sensitivity,
-                                                facet_item_global_dof_sets = facet_item_sets)
-    algebraic_caches  = setup_algebraic_caches(strategy, algebraic_domain, declared_slots, ad_backend,
-                                               needs_sensitivity, ivh)
-    # The families carry different domain types; widening only where something
-    # is declared keeps a cells-only operator's element type concrete.
-    subdomain_caches  = (isempty(facet_caches) && isempty(algebraic_caches)) ? cell_caches :
-        vcat(Vector{SubdomainCache}(cell_caches), facet_caches, algebraic_caches)
+    assert_device_internal_state_supported(strategy.device, ivh)
+    shared            = (; slots = declared_slots, needs_sensitivity, ivh, ad_backend, declared_kinds,
+                           element_caches, global_dof_sets,
+                           facet_item_global_dof_sets = facet_item_sets, algebraic_domain)
+    subdomain_caches  = _family_subdomain_caches(
+        item_families(integrator, dh), strategy, integrator, dh, shared)
     return AssemblyEngine(strategy, subdomain_caches, dh, ivh, declared_slots)
 end
 
