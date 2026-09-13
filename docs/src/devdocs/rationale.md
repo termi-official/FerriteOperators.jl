@@ -524,7 +524,10 @@ worth storing per quadrature point is a property of the pointwise map, and only
 the element knows it. The third is the framework's, because a dense `Kₑ` is not:
 [`ElementAssemblyCache`](@ref) wraps any bilinear cache and fills it from the
 element's matrix kernel or, where there is none, from `ndofs_per_cell`
-applications of its action.
+applications of its action. [`BlockRowAssembly`](@ref) is that same level for an
+element whose local system spans TWO cells, where the cell-square store has no
+shape for it: it keeps the cell's matrix ROW in blocks and condenses each
+two-sided item into the two rows it touches.
 
 Splitting the axis in two is the one deliberate deviation from MFEM's flat one:
 FULL is a different OPERATOR (it holds a global matrix, answers `get_matrix`,

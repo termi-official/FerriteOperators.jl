@@ -299,6 +299,12 @@ end
 # nothing per sweep.
 reinit_values!(::JumpPenaltyCache, ::PairCache) = nothing
 
+# The third iterator this cache is validated against: under
+# `storage = BlockRowAssembly()` the ACTION positions a cell-with-neighbours
+# cursor, and the two-sided kernels run only at FILL time, on the pair iterator
+# above. Also a no-op, and for the same reason.
+reinit_values!(::JumpPenaltyCache, ::CellNeighbourCursor) = nothing
+
 ####################################
 ## The testbed
 ####################################

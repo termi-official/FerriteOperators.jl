@@ -355,3 +355,4 @@ end
 end
 
 include("test_custom_iterator_family.jl")
+include("test_block_row.jl")

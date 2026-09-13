@@ -159,8 +159,9 @@ workers ([`AbstractElementMapping`](@ref)):
 - [`LanesPerElement`](@ref) — one BLOCK OF LANES owns one element, each lane
   owning rows of `yₑ` in registers and scattering them itself
   ([`element_action_row`](@ref)). No group-local memory and no barrier. A
-  [`KernelAbstractionsDevice`](@ref) mapping only, and the
-  [`ElementAssembly`](@ref) storage level only.
+  [`KernelAbstractionsDevice`](@ref) mapping only, and the two ELEMENT-level
+  storage elections only ([`ElementAssembly`](@ref),
+  [`BlockRowAssembly`](@ref)).
 
 ```julia
 form = MatrixFreeAction(; element_mapping = CooperativeElement())
@@ -188,6 +189,12 @@ form = MatrixFreeAction(; storage = ElementAssembly())   # `Stored()` is the def
   `ndofs_per_cell²` scalars per cell, so it is the LOW-order election, and it
   runs [`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref) — the two
   mappings of a dense product, whole or by rows.
+- [`BlockRowAssembly`](@ref) is ELEMENT for an element whose local system spans
+  TWO cells (a DG interface term): the cell's whole matrix ROW is kept in
+  blocks, and every action gathers the cell's own and its neighbours' dofs and
+  scatters the cell's own rows alone. Those scatter addresses are disjoint
+  between items, so the action needs neither atomics nor a colouring algorithm
+  and repeats bit for bit. It optionally fuses `M⁻¹A` at fill time.
 
 `ElementAssembly` is the cheapest matrix-free storage at `p = 1`–`2`;
 `ndofs_per_cell²` overtakes the assembled matrix's per-cell share above that,

@@ -99,17 +99,21 @@ abstract type AbstractAssemblyStrategy end
     Stored <: StorageElection
     Recompute <: StorageElection
     ElementAssembly <: StorageElection
+    BlockRowAssembly <: StorageElection
 
 WHAT a sweep keeps between evaluations — a construction-time election trading
 memory against flops. Two consumers: the `storage` field of
-[`MatrixFreeAction`](@ref), where the three members are MFEM's PARTIAL, NONE and
-ELEMENT assembly levels, and [`corrector_election`](@ref).
+[`MatrixFreeAction`](@ref), where the first three members are MFEM's PARTIAL,
+NONE and ELEMENT assembly levels, and [`corrector_election`](@ref).
 
 - [`Recompute`](@ref) — keep nothing.
 - [`Stored`](@ref) — keep the per-quadrature-point quantity.
 - [`ElementAssembly`](@ref) — keep the dense element MATRICES. A
   matrix-free-action election only; a consumer that does not implement it says
   so ([`corrector_election_error`](@ref)).
+- [`BlockRowAssembly`](@ref) — keep the cell's whole matrix ROW, in blocks: the
+  ELEMENT level for a term whose local system spans two cells. A
+  matrix-free-action election only.
 
 `CorrectorElection` is an alias for this supertype.
 
@@ -177,6 +181,53 @@ An element whose bilinear form is symmetric may additionally elect
 at FILL time only.
 """
 struct ElementAssembly <: StorageElection end
+
+"""
+    BlockRowAssembly(; premultiply_inverse_mass = nothing)
+
+Keep the cell's whole matrix ROW, in blocks — the ELEMENT level for a term whose
+element-local system spans TWO cells (a DG interface term), where
+[`ElementAssembly`](@ref)'s cell-square store has neither the shape nor a
+collision-free slot for it.
+
+The store is `(slot, 1 + Nf, Nb, Nb)`: the cell's diagonal block plus one block
+per local facet ([`BlockRowAssemblyCache`](@ref)). Every `mul!` gathers the
+cell's own and its `Nf` neighbours' dofs, accumulates the blocks against them
+and scatters the cell's OWN `Nb` rows — the two-window shape
+([`element_scatter_length`](@ref)) whose disjoint scatter addresses make
+[`CellNeighbourItems`](@ref)'s ONE-COLOUR partition valid, so the action is
+bitwise repeatable with no atomics and no colouring algorithm.
+[`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref), but never
+[`CooperativeElement`](@ref), a dense block product having no lattice to split.
+
+It costs `(1 + Nf)·Nb²` scalars per cell, so it is — like
+[`ElementAssembly`](@ref) — the LOW-order election.
+
+**The fill runs on the HOST, outside the sweep.** The action's items are CELLS
+and the fill's are two-sided, and one operator resolves ONE traversal per sweep,
+so [`update_operator!`](@ref) walks the wrapped element's own two-sided
+traversal itself ([`fill_block_rows!`](@ref)) instead of running an engine
+sweep. On a GPU device the store is then a host mirror: a refill fills on the
+host and copies the whole store to the device. That is the round trip a
+[`Stored`](@ref) operator does not pay, and it is paid per REFILL — none for a
+time-independent form, which is filled once at [`setup_operator`](@ref).
+
+`premultiply_inverse_mass` elects the fused operator `M⁻¹A`: pass a bilinear
+MASS integrator and each cell's row is left-multiplied by that cell's inverse
+mass block once at fill time ([`finalize_action_storage!`](@ref)). `M` is block
+diagonal by cell over a discontinuous space, so the fused store has the same
+block-row sparsity, the action is unchanged and no inverse is formed per `mul!`.
+Two costs, recorded: it forecloses a `K_IJ = K_JIᵀ` exploit between blocks, and
+every refill must re-fuse — which it does, the fusion being part of the fill.
+
+!!! warning "Experimental surface"
+    This election, its cache and the host fill route may change in a minor
+    release.
+"""
+struct BlockRowAssembly{M} <: StorageElection
+    premultiply_inverse_mass::M
+end
+BlockRowAssembly(; premultiply_inverse_mass = nothing) = BlockRowAssembly(premultiply_inverse_mass)
 
 @doc (@doc StorageElection) const CorrectorElection = StorageElection
 
@@ -268,6 +319,9 @@ spans:
   every action is a gather, a dense product and a scatter — no quadrature point
   is visited. `ndofs_per_cell²` scalars per cell, so it is the LOW-order
   election, and [`WorkerPerElement`](@ref) or [`LanesPerElement`](@ref).
+- [`BlockRowAssembly`](@ref) is ELEMENT for a TWO-SIDED term: the cell's whole
+  matrix row is kept in blocks, and the action gathers the cell's neighbours
+  and scatters the cell's own rows.
 
 The first two are the element's own storage and reach its cache through
 [`with_action_storage`](@ref); a cache that keeps nothing serves both
@@ -287,8 +341,9 @@ function MatrixFreeAction(; element_mapping::AbstractElementMapping = WorkerPerE
     storage isa StorageElection || throw(ArgumentError(
         "`MatrixFreeAction`'s `storage` election is `Stored()` (the element's " *
         "per-quadrature-point factors, the PARTIAL level), `Recompute()` (re-derive them per " *
-        "action, the NONE level) or `ElementAssembly()` (the dense element matrices, the " *
-        "ELEMENT level), got $(storage)."))
+        "action, the NONE level), `ElementAssembly()` (the dense element matrices, the " *
+        "ELEMENT level) or `BlockRowAssembly()` (the condensed matrix rows of a two-sided " *
+        "element, the ELEMENT level), got $(storage)."))
     return MatrixFreeAction(element_mapping, storage)
 end
 

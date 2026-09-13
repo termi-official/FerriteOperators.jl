@@ -88,9 +88,22 @@ device_worker_view(c::ElementAssemblyCache, worker) =
 ####################################
 
 # The route and the symmetry election are read off the cache being WRAPPED,
-# which is the one the fill calls.
-with_action_storage(cache, ::ElementAssembly, sdh::SubDofHandler) =
-    ElementAssemblyCache(cache, sdh, element_matrix_fill_route(typeof(cache)), element_matrix_symmetry(cache))
+# which is the one the fill calls. The element's own residual-buffer election is
+# the honest signal that its local system is not cell-square: a multi-cell item
+# family would be sized into the cell-square store below and slotted by
+# `cellid`, which answers the item's FIRST cell and collides between items.
+function with_action_storage(cache, ::ElementAssembly, sdh::SubDofHandler)
+    nd = ndofs_per_cell(sdh)
+    nl = length(allocate_element_residual_vector(cache, sdh))
+    nl == nd || throw(ArgumentError(
+        "$(typeof(cache)) declares an element-local system of $(nl) rows over a subdomain with " *
+        "$(nd) dofs per cell, so its items span more than one cell. `ElementAssembly()` keeps " *
+        "ONE $(nd) × $(nd) matrix per cell, addressed by `cellid`, which names only the first " *
+        "cell of such an item — the store would be too small and several items would claim the " *
+        "same slot. Elect `storage = BlockRowAssembly()`, which keeps the cell's whole matrix " *
+        "row in blocks, or `storage = Stored()`/`Recompute()`."))
+    return ElementAssemblyCache(cache, sdh, element_matrix_fill_route(typeof(cache)), element_matrix_symmetry(cache))
+end
 
 function ElementAssemblyCache(cache, sdh::SubDofHandler, route, symmetry)
     T  = element_value_type(cache)

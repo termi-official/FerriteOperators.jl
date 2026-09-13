@@ -18,6 +18,7 @@ import FerriteOperators: element_value_type, item_dofs, query_cell_parameters
 import FerriteOperators: default_assembly_iterator, decorate_device_iterator,
     item_update_flags, position_item
 import FerriteOperators: position_iterator, iterator_dofs, iterator_scatter_address
+import FerriteOperators: CellNeighbourCursor
 
 # Without FerriteKAExt, `adapt(backend, dh)` silently returns the HOST handler
 # (Adapt's fallback is the identity) and the kernel reads host memory.
@@ -37,6 +38,9 @@ end
 Adapt.@adapt_structure AssemblyWorkspace
 Adapt.@adapt_structure AssemblyTask
 Adapt.@adapt_structure QVector
+# The block-row action's cursor: core owns no `Adapt` rule for an iterator, and
+# its window/slot tables reach the kernel as device arrays.
+Adapt.@adapt_structure CellNeighbourCursor
 
 # The `atomic` parameter is a compile-time constant, not a field, so the
 # generated rule's positional constructor would drop it.

@@ -24,7 +24,9 @@ differ in the last bits. The sequential CPU device (one worker) and
 [`ColoredScheduling`](@ref) (no atomics) do repeat bit for bit. A Krylov method
 over this operator therefore sees an operator that is not a function of `u` to
 the last bit; treat run-to-run iteration counts accordingly, or elect a
-colouring.
+colouring. [`BlockRowAssembly`](@ref) is the exception that needs neither: every
+item owns its own scatter rows, so its ONE colour ([`CellNeighbourItems`](@ref))
+costs nothing and no colouring algorithm runs.
 
 !!! warning "Experimental surface"
     This operator, its entry points and the element hooks it calls may change
@@ -83,19 +85,42 @@ with one [`QuadratureDataKind`](@ref) sweep carrying `p` and `ctx` to
 [`fill_quadrature_data!`](@ref). Under [`Recompute`](@ref) nothing is kept and
 this does nothing.
 
+[`BlockRowAssembly`](@ref) is the one election this does not sweep for: its fill
+walks a different item shape from its action, so it refills through the host
+mirror ([`fill_block_rows!`](@ref)) and copies the store to the device.
+
 FRESHNESS IS THE CALLER'S, exactly as for an assembled operator: the store holds
 what the last such call put there (`setup_operator` makes one with
 `p = nothing`), and an action evaluated after `p` or the context time changed
 reads stale factors until this is called again.
 """
 function update_operator!(op::MatrixFreeFerriteOperator, p, ctx = nothing)
-    _keeps_storage(op.engine.strategy.form.storage) || return nothing
-    run_sweep!(QuadratureDataKind(), nothing, op, (;), p, ctx)
+    storage = op.engine.strategy.form.storage
+    _keeps_storage(storage) || return nothing
+    _refill_action_storage!(storage, op, p, ctx)
     return nothing
 end
 
 _keeps_storage(::Recompute) = false
 _keeps_storage(::StorageElection) = true
+
+_refill_action_storage!(::StorageElection, op::MatrixFreeFerriteOperator, p, ctx) =
+    run_sweep!(QuadratureDataKind(), nothing, op, (;), p, ctx)
+
+# The two-sided fill and the cell-item action are different item shapes, and one
+# operator resolves one traversal per sweep: the fill therefore runs HERE, over
+# the host mirror, and the device store is refreshed from it.
+function _refill_action_storage!(::BlockRowAssembly, op::MatrixFreeFerriteOperator, p, ctx)
+    engine = op.engine
+    for sc in engine.subdomain_caches
+        sc.contributes || continue
+        host = _block_row_cache(sc.domain.element)
+        fill_block_rows!(host, p, ctx)
+        finalize_action_storage!(host, engine.strategy.device)
+        _upload_action_storage!(engine.strategy.device, host, sc.device_cache)
+    end
+    return nothing
+end
 
 update_linearization!(op::MatrixFreeFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
     evaluate!(op, residual, (u = u,), p, nothing)
@@ -160,6 +185,7 @@ end
 # The ELEMENT level needs no action entry point: `element_matrix_fill_route`
 # already refused a cache serving neither fill route.
 _assert_action_capability(::ElementAssembly, ::Type) = nothing
+_assert_action_capability(::BlockRowAssembly, ::Type) = nothing
 _assert_action_capability(::StorageElection, ::Type{C}) where {C} = _assert_element_action(C)
 
 function _assert_element_action(::Type{C}) where {C}
@@ -222,6 +248,14 @@ _assert_mapping_capability(::CooperativeElement, ::ElementAssembly, cache) = thr
     "or `element_mapping = LanesPerElement()` for `storage = ElementAssembly()`, or keep the " *
     "cooperative mapping with `storage = Stored()`/`Recompute()`."))
 
+_assert_mapping_capability(::CooperativeElement, ::BlockRowAssembly, cache) = throw(ArgumentError(
+    "`CooperativeElement` cannot execute the `BlockRowAssembly` storage level: one workgroup per " *
+    "element exists to split the element's lattice between lanes, and the block-row level " *
+    "replaces that lattice with `1 + Nf` dense block products per cell. Elect " *
+    "`element_mapping = WorkerPerElement()` or `element_mapping = LanesPerElement()` for " *
+    "`storage = BlockRowAssembly()`, or keep the cooperative mapping with " *
+    "`storage = Stored()`/`Recompute()`."))
+
 _assert_mapping_capability(::LanesPerElement, storage::StorageElection, cache) = throw(ArgumentError(
     "`LanesPerElement` cannot execute the `$(nameof(typeof(storage)))` storage level: a lane owns " *
     "one ROW of a stored `Kₑ`, and a level that visits quadrature points instead re-derives one " *
@@ -235,8 +269,12 @@ _assert_mapping_capability(::LanesPerElement, storage::StorageElection, cache) =
 # inner. `ElementAssemblyCache` answers for itself.
 _declares_element_action_row(d::AbstractElementCacheDecorator) = _declares_element_action_row(d.inner)
 _declares_element_action_row(::ElementAssemblyCache) = true
+_declares_element_action_row(::BlockRowAssemblyCache) = true
 _declares_element_action_row(cache) =
     hasmethod(element_action_row, Tuple{typeof(cache), Any, CellArgs, Int})
+
+_assert_mapping_capability(mapping::LanesPerElement, ::BlockRowAssembly, cache) =
+    _assert_mapping_capability(mapping, ElementAssembly(), cache)
 
 function _assert_mapping_capability(::LanesPerElement, ::ElementAssembly, cache)
     C = typeof(cache)
