@@ -10,8 +10,9 @@ Supertype of the caches this package wraps around a user's element cache
 a field `inner`, and everything a decorator inherits is forwarded once here.
 
 A declaration about the wrapped ELEMENT is forwarded wholesale — the iteration
-seams, [`element_local_length`](@ref), [`element_matrix_symmetry`](@ref),
-[`element_action_row`](@ref), and the matrix-free storage
+seams, [`element_local_length`](@ref), [`element_scatter_length`](@ref),
+[`element_matrix_symmetry`](@ref), [`element_action_row`](@ref), and the
+matrix-free storage
 ([`with_action_storage`](@ref), [`fill_quadrature_data!`](@ref)), which passes
 through and back via [`rewrap`](@ref). A decorator with its own explicit method
 for a seam wins by ordinary dispatch.
@@ -78,6 +79,7 @@ with_action_storage(d::AbstractElementCacheDecorator, storage::Union{Stored, Rec
 fill_quadrature_data!(d::AbstractElementCacheDecorator, args::CellArgs) =
     fill_quadrature_data!(d.inner, args)
 element_local_length(d::AbstractElementCacheDecorator) = element_local_length(d.inner)
+element_scatter_length(d::AbstractElementCacheDecorator) = element_scatter_length(d.inner)
 element_action_row(d::AbstractElementCacheDecorator, uₑ, args::CellArgs, i::Int) =
     element_action_row(d.inner, uₑ, args, i)
 evaluate_cell_functional(kind, d::AbstractElementCacheDecorator, args) = evaluate_cell_functional(kind, d.inner, args)

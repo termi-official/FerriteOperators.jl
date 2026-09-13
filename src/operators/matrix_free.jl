@@ -172,6 +172,45 @@ function _assert_element_action(::Type{C}) where {C}
     return nothing
 end
 
+"""
+    assert_scatter_window_supported(form, cache, ::Type{IT})
+
+The setup wall for the two-window scatter ([`element_scatter_length`](@ref)): a
+no-op for every form but [`MatrixFreeAction`](@ref), and for that form a no-op
+unless ALL THREE hold — `cache` names a compile-time
+[`element_local_length`](@ref) (the fixed-width gather that bypasses
+[`iterator_scatter_address`](@ref) when the seam agrees with
+[`iterator_dofs`](@ref)), the RESOLVED iterator type `IT` declares its own
+[`iterator_scatter_address`](@ref) (so it genuinely disagrees), and `cache`
+names no [`element_scatter_length`](@ref) — in which case the disagreement
+would otherwise be served silently through the wrong window.
+
+Called from the cell family's setup on both the HOST and the DEVICE iterator,
+since a family may decorate only one of the two types.
+"""
+assert_scatter_window_supported(form, cache, ::Type{IT}) where {IT} = nothing
+
+function assert_scatter_window_supported(::MatrixFreeAction, cache, ::Type{IT}) where {IT}
+    element_local_length(cache) isa Val || return nothing
+    element_scatter_length(cache) === nothing || return nothing
+    _declares_own_scatter_address(IT) || return nothing
+    C = typeof(cache)
+    throw(ArgumentError(
+        "$(C) names a compile-time `element_local_length`, and its resolved iterator " *
+        "$(nameof(IT)) declares its own `iterator_scatter_address`, distinct from " *
+        "`iterator_dofs`. The matrix-free action's fixed-width gather addresses the scatter " *
+        "through the GATHER window whenever `element_scatter_length` is absent, so this " *
+        "combination would be scattered silently through the wrong dofs. Declare " *
+        "`element_scatter_length(::$(nameof(C))) = Val(R)`, `R` the scatter row count — a " *
+        "PREFIX of the gather window `iterator_scatter_address` addresses."))
+end
+
+# `iterator_scatter_address(it) = iterator_dofs(it)` (src/core/iterators.jl) is
+# the catch-all; a downstream override is exactly a different method, so `which`
+# tells the two apart without positioning an iterator on an item.
+_declares_own_scatter_address(::Type{IT}) where {IT} =
+    which(iterator_scatter_address, Tuple{IT}) !== which(iterator_scatter_address, Tuple{Any})
+
 _assert_mapping_capability(::WorkerPerElement, ::StorageElection, cache) = nothing
 
 # The rejection is the storage level's, not the cache's — the wrapped element

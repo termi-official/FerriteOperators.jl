@@ -189,11 +189,14 @@ function setup_family_caches(::CellFamily, strategy, integrator, dh, shared)
         partition = adapt_partition(device, compute_partition(
             strategy, item_provider(kind, element_cache, sdh)))
         n = n_workers(device, partition)
+        host_it = assembly_iterator(kind, element_cache, sdh)
+        dev_it  = _device_iterator(kind, element_cache, sdh, device_subdomain_handler(device_dh, index))
+        assert_scatter_window_supported(strategy.form, element_cache, typeof(host_it))
+        dev_it === nothing || assert_scatter_window_supported(strategy.form, element_cache, typeof(dev_it))
         ws = create_assembly_workspace(element_cache, sdh, ivh, slots;
                                        needs_sensitivity, global_dofs = gdofs,
-                                       iterator = assembly_iterator(kind, element_cache, sdh))
-        dc = setup_device_instances(device, ws, n,
-            _device_iterator(kind, element_cache, sdh, device_subdomain_handler(device_dh, index)))
+                                       iterator = host_it)
+        dc = setup_device_instances(device, ws, n, dev_it)
         SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
     end for (index, (sdh, element_cache, gdofs)) in
         enumerate(zip(dh.subdofhandlers, shared.element_caches, shared.global_dof_sets))]

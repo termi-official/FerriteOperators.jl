@@ -13,11 +13,11 @@ import FerriteOperators: device_worker_view, launch_geometry, lane_launch_geomet
     value_type
 import FerriteOperators: cooperative_group_size, cooperative_scratch_shape,
     cooperative_load!, cooperative_stage!, cooperative_store!
-import FerriteOperators: element_action_row, element_local_length, ElementUnknownWindow
+import FerriteOperators: element_action_row, element_local_length, element_scatter_length, ElementUnknownWindow
 import FerriteOperators: element_value_type, item_dofs, query_cell_parameters
 import FerriteOperators: default_assembly_iterator, decorate_device_iterator,
     item_update_flags, position_item
-import FerriteOperators: position_iterator, iterator_dofs
+import FerriteOperators: position_iterator, iterator_dofs, iterator_scatter_address
 
 # Without FerriteKAExt, `adapt(backend, dh)` silently returns the HOST handler
 # (Adapt's fallback is the identity) and the kernel reads host memory.
@@ -309,16 +309,32 @@ end
 # runs once PER LANE on that shared cache, so a parameter query that GATHERS into
 # the cache rather than returning a value would race; such a cache must serve
 # `WorkerPerElement()` instead.
+#
+# `ND` is the ROW extent (`element_scatter_length` where the cache names one,
+# `element_local_length` otherwise — resolved by the caller, `_lane_row_extent`
+# below); `dofs` stays the full GATHER window regardless, since `uₑ` reads it.
 @inline function _lane_action!(task, ws, lane::Int, ::Val{NLANES}, ::Val{ND}) where {NLANES, ND}
     dofs = item_dofs(ws)
     uₑ = ElementUnknownWindow{eltype(ws.re)}(task.states.u, dofs)
     args = CellArgs((u = uₑ,), ws.cell, query_cell_parameters(ws.element, ws.cell, task.p), task.ctx)
+    rows = _lane_scatter_rows(ws, dofs, element_scatter_length(ws.element))
     for i in lane:NLANES:ND
         yᵢ = element_action_row(ws.element, uₑ, args, i)
-        Ferrite.assemble!(task.inner_assembler, (@inbounds dofs[i]), yᵢ)
+        Ferrite.assemble!(task.inner_assembler, (@inbounds rows[i]), yᵢ)
     end
     return nothing
 end
+
+# One method each, so neither pays for the other's branch: the `::Nothing` one
+# is character-for-character today's `dofs[i]` scatter.
+@inline _lane_scatter_rows(ws, dofs, ::Nothing) = dofs
+@inline _lane_scatter_rows(ws, dofs, ::Val) = iterator_scatter_address(ws.cell)
+
+# The lane block's ROW extent: the gather window's own length by default, the
+# narrower `element_scatter_length` where the cache names one — every shipped
+# cache leaves this at `::Nothing` and keeps `nd` exactly `element_local_length`.
+_lane_row_extent(nd::Val, ::Nothing) = nd
+_lane_row_extent(::Val, ns::Val) = ns
 
 # The ELEMENT-level fill has no rows to split and takes the grid-stride mapping.
 function FerriteOperators.execute_on_device!(task,
@@ -331,7 +347,7 @@ function FerriteOperators.execute_on_device!(task,
         "action, which is not a shape the generic per-item driver has. Elect " *
         "`element_mapping = WorkerPerElement()` for every other sweep."))
     backend = device.backend
-    nd = element_local_length(workspaces.element)
+    nd = _lane_row_extent(element_local_length(workspaces.element), element_scatter_length(workspaces.element))
     nlanes = _lane_count(device.element_mapping, nd, device.max_workgroup_size)
     device_task = adapt(backend, AssemblyTask(
         task.kind, _worker_assemblers(backend, task.inner_assembler, n_workers(device, items)),

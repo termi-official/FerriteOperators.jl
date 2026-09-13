@@ -340,7 +340,8 @@ LATTICE and needs the barriers that go with it. A
 per worker from gather to scatter.
 
 `lanes` is a LAUNCH POLICY, not element math: `nothing` takes the block from the
-element's own extent ([`element_local_length`](@ref)) capped by the device's
+element's ROW extent ([`element_scatter_length`](@ref) where the cache names
+one, [`element_local_length`](@ref) otherwise) capped by the device's
 `max_workgroup_size`, and an explicit count overrides that. A block shorter than
 the row count gives each lane several rows, which is the same kernel. The
 workgroup hosts `max_workgroup_size ÷ nlanes` ELEMENTS, so a small element
@@ -354,10 +355,12 @@ element would race on. That restriction, and a cache serving neither
 setup errors naming the alternative.
 
 Its scatter addresses one dof per owned row, read off the item's dof window
-([`iterator_dofs`](@ref)) directly — [`iterator_scatter_address`](@ref) is not
-consulted, so an item family whose scatter address differs from that window is
-outside this mapping. That one is NOT checked at setup: the two seams agree for
-every item family this package ships.
+([`iterator_dofs`](@ref)) directly — UNLESS the cache names
+[`element_scatter_length`](@ref), in which case it reads
+[`iterator_scatter_address`](@ref) instead. Naming a compile-time
+[`element_local_length`](@ref) while the item's [`iterator_scatter_address`](@ref)
+disagrees with [`iterator_dofs`](@ref) and [`element_scatter_length`](@ref) is
+absent is rejected at setup, rather than served through the wrong window.
 
 !!! warning "Experimental surface"
     This mapping and the element entry it calls may change in a minor release.

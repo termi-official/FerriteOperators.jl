@@ -202,7 +202,7 @@ export QuadratureDataKind, fill_quadrature_data!, with_assembly_form, with_actio
 export StorageElection, Stored, Recompute, ElementAssembly, ElementAssemblyCache, element_matrix_fill_route
 export element_matrix_symmetry, GeneralElementMatrix, SymmetricElementMatrix
 export AbstractElementMapping, WorkerPerElement, CooperativeElement, LanesPerElement
-export with_element_mapping, element_action_row
+export with_element_mapping, element_action_row, element_scatter_length
 export cooperative_lattice_dim, cooperative_group_size, cooperative_scratch_shape
 export cooperative_load!, cooperative_stage!, cooperative_store!
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling

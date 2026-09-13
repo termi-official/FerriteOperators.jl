@@ -165,11 +165,15 @@ Left untyped so a rectangular transfer item may answer with a two-index
 `(rowdofs, coldofs)` pair. That shape is EXPERIMENTAL and has no consumer in
 `scatter_local!`; the transfer family keeps its own driver.
 
-NOT CONSULTED by the matrix-free action wherever the element names a
-compile-time [`element_local_length`](@ref): [`matrix_free_cell_sweep!`](@ref)
-and the [`LanesPerElement`](@ref) kernel both address through
-[`iterator_dofs`](@ref) directly. An item family whose scatter address DIFFERS
-from its dof window must therefore not name a compile-time extent.
+CONSULTED by the matrix-free action wherever the element names a compile-time
+[`element_local_length`](@ref) AND [`element_scatter_length`](@ref):
+[`matrix_free_cell_sweep!`](@ref) and the [`LanesPerElement`](@ref) kernel both
+then scatter through this instead of [`iterator_dofs`](@ref). Without
+[`element_scatter_length`](@ref) they still address through
+[`iterator_dofs`](@ref) directly — the cheaper, single-window read a cache
+whose scatter address agrees with its dof window is entitled to — and setup
+REJECTS an item family whose scatter address differs from that window in this
+case, rather than serving it silently wrong.
 """
 iterator_scatter_address(it) = iterator_dofs(it)
 
