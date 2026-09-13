@@ -353,3 +353,5 @@ end
         @test (@allocated mul!(y, op, u)) < 200_000
     end
 end
+
+include("test_custom_iterator_family.jl")

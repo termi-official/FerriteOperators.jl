@@ -60,6 +60,11 @@ that does either overloads this directly (narrowing the CACHE, per
 [`assembly_iterator`](@ref)'s spelling rule) or answers
 [`decorate_device_iterator`](@ref) on its own iterator type.
 
+The returned iterator, and every element-cache field that crosses the launch
+alongside it, must be `isbits` AFTER `adapt` — a downstream iterator type needs
+its own `Adapt` rule (`Adapt.@adapt_structure` on the type is the shipped
+pattern) since the package supplies none for iterators by default.
+
 !!! warning "Experimental surface"
     The device iterator layout is still moving; this seam's spelling may
     change in a minor release. A device-resident iterator also indexes fields
