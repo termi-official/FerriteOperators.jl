@@ -71,6 +71,11 @@ device_assembly_iterator(kind, d::AbstractElementCacheDecorator, sdh, device_sdh
     device_assembly_iterator(kind, d.inner, sdh, device_sdh)
 item_provider(kind, d::AbstractElementCacheDecorator, sdh) = item_provider(kind, d.inner, sdh)
 item_update_flags(kind, d::AbstractElementCacheDecorator) = item_update_flags(kind, d.inner)
+# A decorator that needs its OWN kind (`BlockRowAssemblyCache`) overrides this
+# directly — the same explicit-method treatment `assembly_iterator`'s own
+# comment on that cache states, since this blanket forward would otherwise hand
+# back the WRAPPED element's declaration and silence the decorator's own.
+additional_iteration_kinds(form, d::AbstractElementCacheDecorator) = additional_iteration_kinds(form, d.inner)
 # Only the two PER-QUADRATURE-POINT levels are forwarded: `ElementAssembly()` is
 # the FRAMEWORK's own election and must wrap the decorated cache whole. The two
 # storage arguments are disjoint types, so the methods never tie.

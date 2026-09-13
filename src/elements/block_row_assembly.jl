@@ -151,7 +151,8 @@ The FILL is two-sided and runs on the HOST — see [`BlockRowAssembly`](@ref).
     This decorator and the elections that build it may change in a minor
     release.
 """
-struct BlockRowAssemblyCache{Inner, KT, NT, ST, WT, R, SDH, MI, ND, NB, NF} <: AbstractElementCacheDecorator{Inner}
+struct BlockRowAssemblyCache{Inner, KT, NT, ST, WT, R, SDH, MI, SCT, DT, ND, NB, NF} <:
+        AbstractElementCacheDecorator{Inner}
     inner::Inner
     K::KT
     neighbours::NT
@@ -160,6 +161,8 @@ struct BlockRowAssemblyCache{Inner, KT, NT, ST, WT, R, SDH, MI, ND, NB, NF} <: A
     route::R
     sdh::SDH          # the HOST subdomain the fill walks; `nothing` on a device instance
     mass::MI          # the fused mass integrator, or `nothing`
+    scratch::SCT      # per-worker `2Nb × 2Nb` fill scratch (the engine-driven fill)
+    fill_dofs::DT     # per-worker `Nb` fill scratch, `_condense_pair!`'s temp dof buffer
     local_size::Val{ND}
     row_size::Val{NB}
     nfacets::Val{NF}
@@ -183,29 +186,81 @@ reinit_values!(::BlockRowAssemblyCache, cell, ::MatrixFreeActionKind) = nothing
 item_update_flags(::MatrixFreeActionKind, ::BlockRowAssemblyCache) =
     Ferrite.UpdateFlags(nodes = false, coords = false, dofs = true)
 
-assembly_iterator(kind, c::BlockRowAssemblyCache, sdh) =
-    CellNeighbourCursor(default_assembly_iterator(kind, sdh), c.windows, c.slots,
+assembly_iterator(::MatrixFreeActionKind, c::BlockRowAssemblyCache, sdh) =
+    CellNeighbourCursor(default_assembly_iterator(MatrixFreeActionKind(), sdh), c.windows, c.slots,
                         _extent(c.local_size), _extent(c.row_size))
 # The generic default body, stated here because the decorator's own forward would
 # otherwise hand back the WRAPPED element's device iterator — its two-sided one,
 # which is the FILL's and not the action's.
-device_assembly_iterator(kind, c::BlockRowAssemblyCache, sdh, device_sdh) =
-    decorate_device_iterator(assembly_iterator(kind, c, device_sdh), sdh)
-item_provider(kind, ::BlockRowAssemblyCache, sdh) = CellNeighbourItems(sdh)
+device_assembly_iterator(::MatrixFreeActionKind, c::BlockRowAssemblyCache, sdh, device_sdh) =
+    decorate_device_iterator(assembly_iterator(MatrixFreeActionKind(), c, device_sdh), sdh)
+item_provider(::MatrixFreeActionKind, ::BlockRowAssemblyCache, sdh) = CellNeighbourItems(sdh)
+
+# The declared fill kind: the WRAPPED element's own two-sided traversal, not
+# the action's cell-with-neighbours one — this is what makes `QuadratureDataKind`
+# resolve its OWN pair here instead of narrowing only the cache (the spelling
+# rule `assembly_iterator`'s docstring states) and inheriting the action's.
+additional_iteration_kinds(::MatrixFreeAction, ::BlockRowAssemblyCache) = (QuadratureDataKind(),)
+
+assembly_iterator(::QuadratureDataKind, c::BlockRowAssemblyCache, sdh) =
+    assembly_iterator(QuadratureDataKind(), c.inner, sdh)
+device_assembly_iterator(::QuadratureDataKind, c::BlockRowAssemblyCache, sdh, device_sdh) =
+    device_assembly_iterator(QuadratureDataKind(), c.inner, sdh, device_sdh)
+
+"""
+    BlockRowFillItems(inner)
+
+The FILL's item provider: `inner`, the wrapped element's own two-sided
+provider, coloured REGARDLESS of the scheduling policy requested.
+
+The condensation accumulates into `K` across items that share a cell and runs
+with no assembler ([`QuadratureDataKind`](@ref) scatters nothing), so it has no
+atomic fallback the way a `SequentialScheduling` sweep's DOF scatter does — a
+multi-worker device would race on a shared `SequentialScheduling` chunk. The
+colouring `inner` provides for [`ColoredScheduling`](@ref) already argues the
+promise this needs (no two items of one chunk share a cell), so both scheduling
+policies resolve to it here.
+
+!!! warning "Experimental surface"
+    Internal to the block-row fill; it may change in a minor release.
+"""
+struct BlockRowFillItems{P}
+    inner::P
+end
+compute_partition(::SequentialScheduling, p::BlockRowFillItems) = compute_partition(ColoredScheduling(), p.inner)
+compute_partition(::ColoredScheduling, p::BlockRowFillItems) = compute_partition(ColoredScheduling(), p.inner)
+
+item_provider(::QuadratureDataKind, c::BlockRowAssemblyCache, sdh) =
+    BlockRowFillItems(item_provider(QuadratureDataKind(), c.inner, sdh))
 
 duplicate_for_device(device, c::BlockRowAssemblyCache) =
     BlockRowAssemblyCache(duplicate_for_device(device, c.inner), c.K, c.neighbours, c.slots, c.windows,
-                          c.route, c.sdh, c.mass, c.local_size, c.row_size, c.nfacets)
-# The fill runs on the HOST mirror and its result is copied here, so the device
-# instance drops the two members only a fill reads — neither is `isbits`.
+                          c.route, c.sdh, c.mass, similar(c.scratch), similar(c.fill_dofs),
+                          c.local_size, c.row_size, c.nfacets)
+# `mass` is read only by the HOST-side `finalize_action_storage!`, so it drops
+# to `nothing` on every device instance. `sdh` is different: a HOST-resident
+# `KernelAbstractionsDevice(KA.CPU())` runs the fill THROUGH this very instance
+# (`_engine_driven_fill`), and `fill_quadrature_data!`/`_condense_pair!` read
+# `cache.sdh.dh` to identify the pair's two cells — dropping it there is a
+# `FieldError`, not a savings, since a real GPU never reaches it anyway. A real
+# GPU device's `sdh` is `nothing`: it has no `InterfaceValues` to run the fill
+# with, so it never reaches this cache through the fill at all — the store
+# arrives already filled, from the host mirror's `copyto!`.
+# `scratch`/`fill_dofs` stay batched either way, exactly as
+# `ElementAssemblyCache.scratch` does.
 setup_device_instances(device::AbstractGPUDevice, c::BlockRowAssemblyCache, n) =
     BlockRowAssemblyCache(setup_device_instances(device, c.inner, n),
                           adapt_shared(device, c.K), adapt_shared(device, c.neighbours),
                           adapt_shared(device, c.slots), adapt_shared(device, c.windows),
-                          c.route, nothing, nothing, c.local_size, c.row_size, c.nfacets)
+                          c.route, (_engine_driven_fill(device) ? c.sdh : nothing), nothing,
+                          setup_device_instances(device, c.scratch, n),
+                          setup_device_instances(device, c.fill_dofs, n),
+                          c.local_size, c.row_size, c.nfacets)
 device_worker_view(c::BlockRowAssemblyCache, worker) =
     BlockRowAssemblyCache(device_worker_view(c.inner, worker), c.K, c.neighbours, c.slots, c.windows,
-                          c.route, c.sdh, c.mass, c.local_size, c.row_size, c.nfacets)
+                          c.route, c.sdh, c.mass,
+                          device_worker_view(c.scratch, worker), device_worker_view(c.fill_dofs, worker),
+                          c.local_size, c.row_size, c.nfacets)
 
 ####################################
 ## Setup
@@ -235,7 +290,9 @@ function BlockRowAssemblyCache(cache, sdh::SubDofHandler, route, mass)
     end
     neighbours, windows = _cell_neighbour_tables(sdh, grid, slots, nb, nf)
     K = zeros(T, length(sdh.cellset), 1 + nf, nb, nb)
-    return BlockRowAssemblyCache(cache, K, neighbours, slots, windows, route, sdh, mass,
+    scratch = zeros(T, 2nb, 2nb)
+    fill_dofs = Vector{Int}(undef, nb)
+    return BlockRowAssemblyCache(cache, K, neighbours, slots, windows, route, sdh, mass, scratch, fill_dofs,
                                  Val((1 + nf) * nb), Val(nb), Val(nf))
 end
 
@@ -324,6 +381,28 @@ end
 ####################################
 
 """
+    fill_quadrature_data!(cache::BlockRowAssemblyCache, args)
+
+The FILL half of the `QuadratureDataKind` sweep [`additional_iteration_kinds`](@ref)
+declaration resolves onto the wrapped element's own pair items: condense
+`args.cell`'s `2Nb × 2Nb` system into the two cells it spans, exactly
+[`fill_block_rows!`](@ref)'s per-item body — `cache.scratch`/`cache.fill_dofs`
+are this method's per-worker counterparts of that function's local buffers, so
+neither allocates per item.
+
+Blocks ACCUMULATE (a cell's diagonal block collects every item it takes part
+in), so the CALLER zeroes `cache.K` once before the sweep; this method does not,
+being called once per item.
+"""
+function fill_quadrature_data!(cache::BlockRowAssemblyCache, args::CellArgs)
+    fill_quadrature_data!(cache.inner, args)
+    fill!(cache.scratch, zero(eltype(cache.scratch)))
+    _fill_pair_matrix!(cache.route, cache.scratch, cache.inner, args)
+    _condense_pair!(cache, cache.scratch, args.cell, cache.fill_dofs)
+    return nothing
+end
+
+"""
     fill_block_rows!(cache::BlockRowAssemblyCache, p, ctx)
 
 Refill the subdomain's block rows from the wrapped element's own TWO-SIDED
@@ -333,9 +412,11 @@ spans: `LL → K[slotL, 1]`, `LR → K[slotL, 1+fL]`, `RL → K[slotR, 1+fR]`,
 `RR → K[slotR, 1]`. Blocks ACCUMULATE, so a cell's diagonal block collects the
 contribution of every item it takes part in.
 
-It runs on the HOST and outside the engine's sweep: the action's items are cells
-and the fill's are two-sided, and one operator resolves one traversal per sweep
-([`BlockRowAssembly`](@ref) states the consequence).
+It runs on the HOST, outside the engine's sweep, and is the GPU/host-mirror
+route [`update_operator!`](@ref) keeps for a device with no `InterfaceValues`
+of its own. A CPU-resident device instead runs [`fill_quadrature_data!`](@ref)
+through the ordinary [`QuadratureDataKind`](@ref) engine sweep, the two
+routes doing the same per-item work.
 """
 function fill_block_rows!(cache::BlockRowAssemblyCache, p, ctx)
     sdh   = cache.sdh
@@ -482,6 +563,22 @@ end
 ####################################
 ## The host mirror
 ####################################
+
+# Whether a refill can run the ENGINE-driven pair sweep instead of the
+# HOST-mirror walk below: a device that is genuinely HOST-resident, since the
+# fill reads host `InterfaceValues` — `KernelAbstractionsDevice(KA.CPU())`
+# included, sharing `AbstractGPUDevice`'s launch machinery but running on the
+# host; a real GPU backend is not.
+_engine_driven_fill(::AbstractCPUDevice) = true
+_engine_driven_fill(::AbstractGPUDevice) = false
+_engine_driven_fill(device::KernelAbstractionsDevice) = nameof(typeof(device.backend)) === :CPU
+
+# The element cache an ALTERNATE kind's resolved `device_cache` carries, its
+# shape depending on the device: a `Tuple`/`Vector` of per-worker duplicates
+# (`AbstractCPUDevice`, `setup_device_instances`) or one batched workspace
+# (`KernelAbstractionsDevice`) — both read-only here, so any one worker's answers.
+_alternate_fill_element(dc) = dc.element
+_alternate_fill_element(dc::Union{Tuple, AbstractVector}) = first(dc).element
 
 # A CPU device's workers SHARE the store the fill wrote; a GPU device's is the
 # copy `adapt_shared` made at setup, and the refill is a host round trip.

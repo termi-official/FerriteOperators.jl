@@ -82,6 +82,50 @@ action(op, u) = (y = zeros(length(u)); mul!(y, op, u); y)
         @test action(op, u) ≈ reference rtol = 1.0e-12
     end
 
+    @testset "additional_iteration_kinds is BlockRowAssemblyCache's OWN declaration" begin
+        op = setup_operator(sequential_arm(BlockRowAssembly()), tb.integrator, tb.dh)
+        cache = first(get_subdomain_caches(op)).domain.element
+        @test FerriteOperators.additional_iteration_kinds(MatrixFreeAction(), cache) == (QuadratureDataKind(),)
+        # Without `BlockRowAssemblyCache`'s own method, the decorator's blanket
+        # forward would hand back the WRAPPED element's answer instead — `()`,
+        # since the demo pair family declares nothing extra of its own.
+        @test FerriteOperators.additional_iteration_kinds(MatrixFreeAction(), cache.inner) == ()
+    end
+
+    @testset "the fill runs engine-driven on a CPU-resident device" begin
+        # `KA.CPU()` shares `AbstractGPUDevice`'s launch machinery but is
+        # HOST-resident, so — like `SequentialCPUDevice` — its fill prefers the
+        # engine sweep over the host mirror (`update_operator!`'s docstring).
+        # `SequentialScheduling` on the ACTION is deliberate: the fill's own
+        # partition (`BlockRowFillItems`) is ALWAYS coloured, independent of
+        # what the action was set up with.
+        strategy = ka_arm(WorkerPerElement(), BlockRowAssembly(); scheduling = SequentialScheduling())
+        op = setup_operator(strategy, tb.integrator, tb.dh)
+        sc = first(get_subdomain_caches(op))
+
+        # It resolved a traversal of its own, and that traversal's item count
+        # is the PAIR count — not the action's cell count.
+        @test sc.alternates !== nothing
+        _, alt_partition = FerriteOperators._kind_caches(sc, QuadratureDataKind())
+        @test sum(length, alt_partition) == length(tb.prs)
+        _, primary_partition = FerriteOperators._kind_caches(sc, MatrixFreeActionKind())
+        @test primary_partition === sc.partition
+        @test sum(length, primary_partition) == getncells(tb.grid)
+
+        # Same store S2's host-path fill (`fill_block_rows!`) builds, up to
+        # summation order: the engine sweep groups pair items by COLOUR
+        # (race-safety on a multi-worker device), the host mirror walks them in
+        # LINEAR pair order, so a cell touched by more than one item accumulates
+        # in a different order — `≈`, not `==`.
+        cache = sc.domain.element
+        reference_cache = deepcopy(cache)
+        fill!(reference_cache.K, 0.0)
+        FerriteOperators.fill_block_rows!(reference_cache, nothing, nothing)
+        @test cache.K ≈ reference_cache.K rtol = 1.0e-12
+
+        @test action(op, u) ≈ reference rtol = 1.0e-12
+    end
+
     @testset "the one colour is disjoint on SCATTER dofs and not on gather dofs" begin
         op = setup_operator(sequential_arm(BlockRowAssembly(); scheduling = ColoredScheduling()),
                             tb.integrator, tb.dh)

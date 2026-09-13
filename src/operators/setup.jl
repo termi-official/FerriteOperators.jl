@@ -169,37 +169,70 @@ end
 
 # The sweep kind an operator of `form` resolves its iterator and item set for.
 # `nothing` for the primal family, which positions on the full geometry cache
-# and has no kind to narrow by.
+# and has no kind to narrow by. A `MatrixFreeAction` operator's `update_operator!`
+# fill rides this SAME iterator by default — the exception is an element cache
+# declaring `additional_iteration_kinds` of its own.
 iteration_kind(form) = nothing
 iteration_kind(::MatrixFreeAction) = MatrixFreeActionKind()
+
+"""
+    additional_iteration_kinds(form, element_cache) -> Tuple
+
+EXPERIMENTAL. Sweep kinds `element_cache` resolves a traversal of its OWN for,
+beyond `form`'s primary (`iteration_kind`) — keyed on the ELEMENT CACHE, so
+declaring one costs every other cache nothing. `()` by default.
+
+[`BlockRowAssemblyCache`](@ref) answers `(QuadratureDataKind(),)`: its fill
+visits pair items while its `MatrixFreeAction` action visits cells, and one
+operator resolves one traversal per kind ([`setup_family_caches`](@ref)). Each
+declared kind gets its own `(device_cache, partition)` pair on
+[`SubdomainCache`](@ref)'s `alternates` field, resolved through the SAME
+[`assembly_iterator`](@ref)/[`item_provider`](@ref)/[`compute_partition`](@ref)
+seams as the primary and consulted by [`execute_on_subdomains!`](@ref) and
+[`reduce_on_subdomains`](@ref) whenever a sweep's kind matches.
+"""
+additional_iteration_kinds(form, element_cache) = ()
 
 # The CELL family's `setup_family_caches` method — the only shipped family
 # needing a device-resident handler.
 function setup_family_caches(::CellFamily, strategy, integrator, dh, shared)
-    device = strategy.device
-    ivh    = shared.ivh
-    slots  = shared.slots
-    needs_sensitivity = shared.needs_sensitivity
-    kind = iteration_kind(strategy.form)
     # One device-resident handler for the whole operator, split per subdomain
     # below: rebuilding it per subdomain would upload every other subdomain's
-    # cell-id maps again.
-    device_dh = setup_device_handler(device, dh)
+    # cell-id maps again. Shared across every kind this family resolves, primary
+    # and additional alike.
+    device_dh = setup_device_handler(strategy.device, dh)
+    kind = iteration_kind(strategy.form)
     return [begin
-        partition = adapt_partition(device, compute_partition(
-            strategy, item_provider(kind, element_cache, sdh)))
-        n = n_workers(device, partition)
-        host_it = assembly_iterator(kind, element_cache, sdh)
-        dev_it  = _device_iterator(kind, element_cache, sdh, device_subdomain_handler(device_dh, index))
-        assert_scatter_window_supported(strategy.form, element_cache, typeof(host_it))
-        dev_it === nothing || assert_scatter_window_supported(strategy.form, element_cache, typeof(dev_it))
-        ws = create_assembly_workspace(element_cache, sdh, ivh, slots;
-                                       needs_sensitivity, global_dofs = gdofs,
-                                       iterator = host_it)
-        dc = setup_device_instances(device, ws, n, dev_it)
-        SubdomainCache(AssemblyDomain(sdh, ivh, element_cache), dc, partition)
+        dc, partition = _resolve_kind_traversal(strategy, kind, element_cache, sdh, shared,
+                                                gdofs, device_dh, index)
+        alt_kinds = additional_iteration_kinds(strategy.form, element_cache)
+        alternates = isempty(alt_kinds) ? nothing : map(alt_kinds) do altkind
+            altdc, altpartition = _resolve_kind_traversal(strategy, altkind, element_cache, sdh,
+                                                           shared, gdofs, device_dh, index)
+            (typeof(altkind), altdc, altpartition)
+        end
+        SubdomainCache(AssemblyDomain(sdh, shared.ivh, element_cache), dc, partition, alternates)
     end for (index, (sdh, element_cache, gdofs)) in
         enumerate(zip(dh.subdofhandlers, shared.element_caches, shared.global_dof_sets))]
+end
+
+# One kind's `(device_cache, partition)` pair — the body every kind resolves
+# through, primary or additional, so `setup_family_caches` above stays a plain
+# loop over kinds instead of special-casing which one it is.
+function _resolve_kind_traversal(strategy, kind, element_cache, sdh, shared, gdofs, device_dh, index)
+    device = strategy.device
+    partition = adapt_partition(device, compute_partition(
+        strategy, item_provider(kind, element_cache, sdh)))
+    n = n_workers(device, partition)
+    host_it = assembly_iterator(kind, element_cache, sdh)
+    dev_it  = _device_iterator(kind, element_cache, sdh, device_subdomain_handler(device_dh, index))
+    assert_scatter_window_supported(strategy.form, element_cache, typeof(host_it))
+    dev_it === nothing || assert_scatter_window_supported(strategy.form, element_cache, typeof(dev_it))
+    ws = create_assembly_workspace(element_cache, sdh, shared.ivh, shared.slots;
+                                   needs_sensitivity = shared.needs_sensitivity, global_dofs = gdofs,
+                                   iterator = host_it)
+    dc = setup_device_instances(device, ws, n, dev_it)
+    return dc, partition
 end
 
 # A CPU device has no device handler and therefore no device iterator; the

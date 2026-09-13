@@ -471,4 +471,10 @@ reach the element's own hook ([`with_action_storage`](@ref)); the ELEMENT member
 is element-AGNOSTIC and wraps whatever cache the integrator built in an
 [`ElementAssemblyCache`](@ref), which is why a cache with no matrix-free kernel
 serves it. What either keeps is filled by a sweep of its own kind
-([`QuadratureDataKind`](@ref)), which scatters nothing and carries no assembler.
+([`QuadratureDataKind`](@ref)), which scatters nothing and carries no assembler,
+and which by default rides the SAME iterator the action resolved. The exception
+is an element cache declaring [`additional_iteration_kinds`](@ref) of its own —
+`BlockRowAssemblyCache`'s fill visits pair items while its action visits cells,
+each kind resolving its own `(device_cache, partition)` pair on
+[`SubdomainCache`](@ref)'s `alternates` field through the SAME
+`assembly_iterator`/`item_provider`/`compute_partition` seams.

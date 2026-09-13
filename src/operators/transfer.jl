@@ -98,6 +98,10 @@ end
     p
 end
 duplicate_for_device(device, task::AssembleTransferTerm) = AssembleTransferTerm(duplicate_for_device(device, task.inner_assembler), task.p)
+# No sweep KIND: a `TransferDomain` subdomain's `alternates` is always
+# `nothing` (no cache built over one ever declares `additional_iteration_kinds`),
+# so `execute_on_subdomains!`'s lookup just needs an answer, not a meaningful one.
+_task_kind(::AssembleTransferTerm) = nothing
 
 function execute_single_task!(task::AssembleTransferTerm, ws::TransferWorkspace)
     pₑ = query_cell_parameters(ws.element, ws.tc, task.p)

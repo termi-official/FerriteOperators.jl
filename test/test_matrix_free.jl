@@ -116,6 +116,13 @@ end
 FerriteOperators.setup_element_cache(m::DecoratedIntegrator, sdh::SubDofHandler) =
     PassthroughDecorator(FerriteOperators.setup_element_cache(m.inner, sdh))
 
+# A synthetic cache declaring a traversal of its own — `additional_iteration_kinds`'s
+# forward on `AbstractElementCacheDecorator` (`PassthroughDecorator` takes none
+# of its own) must reach it through the wrapper.
+struct MarkerIterationKind end
+struct DeclaringCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.additional_iteration_kinds(form, ::DeclaringCache) = (MarkerIterationKind(),)
+
 ####################################
 ## An element whose store is allocated EAGERLY and filled only by the fill sweep
 ####################################
@@ -741,6 +748,21 @@ end
             @test y ≈ expected rtol = 1.0e-12
             @test !iszero(y)                      # the fill reached the element
         end
+    end
+
+    @testset "additional_iteration_kinds forwards through a decorator" begin
+        form = MatrixFreeAction()
+        # A plain cache declares none, and neither does a decorator wrapping it.
+        @test FerriteOperators.additional_iteration_kinds(form, EagerStoreCache(1.0, zeros(1))) == ()
+        @test FerriteOperators.additional_iteration_kinds(
+            form, PassthroughDecorator(EagerStoreCache(1.0, zeros(1)))) == ()
+        # A cache that DOES declare one reaches it through the decorator's
+        # blanket forward — the same forward the docstring on
+        # `AbstractElementCacheDecorator`'s method warns can silently hand back
+        # the wrong answer for a declaration a decorator needs to own itself.
+        @test FerriteOperators.additional_iteration_kinds(form, DeclaringCache()) == (MarkerIterationKind(),)
+        @test FerriteOperators.additional_iteration_kinds(form, PassthroughDecorator(DeclaringCache())) ==
+            (MarkerIterationKind(),)
     end
 
     @testset "an anisotropic tensor gives a symmetric operator" begin

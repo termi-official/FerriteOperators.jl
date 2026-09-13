@@ -203,14 +203,19 @@ bitwise repeatable with no atomics and no colouring algorithm.
 It costs `(1 + Nf)·Nb²` scalars per cell, so it is — like
 [`ElementAssembly`](@ref) — the LOW-order election.
 
-**The fill runs on the HOST, outside the sweep.** The action's items are CELLS
-and the fill's are two-sided, and one operator resolves ONE traversal per sweep,
-so [`update_operator!`](@ref) walks the wrapped element's own two-sided
-traversal itself ([`fill_block_rows!`](@ref)) instead of running an engine
-sweep. On a GPU device the store is then a host mirror: a refill fills on the
-host and copies the whole store to the device. That is the round trip a
-[`Stored`](@ref) operator does not pay, and it is paid per REFILL — none for a
-time-independent form, which is filled once at [`setup_operator`](@ref).
+**The fill and the action visit different item shapes** — the action's items
+are CELLS and the fill's are two-sided — which one resolved traversal per sweep
+cannot serve both at once. `additional_iteration_kinds` is the cache's opt-in
+to a SECOND one: [`BlockRowAssemblyCache`](@ref) declares a traversal of its
+own for the fill, so on a HOST-resident device (sequential, Polyester or
+`KernelAbstractionsDevice(KA.CPU())`) [`update_operator!`](@ref) runs it through
+the ordinary engine sweep, over the wrapped element's own pair items. On a
+device with no host `InterfaceValues` of its own the fill instead walks that
+same traversal directly ([`fill_block_rows!`](@ref)) and the store is a HOST
+MIRROR: a refill fills on the host and copies the whole store to the device.
+That is the round trip a [`Stored`](@ref) operator does not pay, and it is paid
+per REFILL — none for a time-independent form, which is filled once at
+[`setup_operator`](@ref).
 
 `premultiply_inverse_mass` elects the fused operator `M⁻¹A`: pass a bilinear
 MASS integrator and each cell's row is left-multiplied by that cell's inverse

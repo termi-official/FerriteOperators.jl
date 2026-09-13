@@ -85,9 +85,11 @@ with one [`QuadratureDataKind`](@ref) sweep carrying `p` and `ctx` to
 [`fill_quadrature_data!`](@ref). Under [`Recompute`](@ref) nothing is kept and
 this does nothing.
 
-[`BlockRowAssembly`](@ref) is the one election this does not sweep for: its fill
-walks a different item shape from its action, so it refills through the host
-mirror ([`fill_block_rows!`](@ref)) and copies the store to the device.
+[`BlockRowAssembly`](@ref) fills differently: its fill and its action visit
+different item shapes, so on a HOST-resident device it runs its OWN
+`QuadratureDataKind` sweep over the pair items instead of the cell action's,
+and on a device with no host `InterfaceValues` it refills through the host
+mirror ([`fill_block_rows!`](@ref)) and copies the store down.
 
 FRESHNESS IS THE CALLER'S, exactly as for an assembled operator: the store holds
 what the last such call put there (`setup_operator` makes one with
@@ -107,17 +109,44 @@ _keeps_storage(::StorageElection) = true
 _refill_action_storage!(::StorageElection, op::MatrixFreeFerriteOperator, p, ctx) =
     run_sweep!(QuadratureDataKind(), nothing, op, (;), p, ctx)
 
-# The two-sided fill and the cell-item action are different item shapes, and one
-# operator resolves one traversal per sweep: the fill therefore runs HERE, over
-# the host mirror, and the device store is refreshed from it.
+# The two-sided fill and the cell-item action are different item shapes.
+# On a HOST-resident device the fill runs through the ENGINE's own
+# `QuadratureDataKind` sweep, over the pair-item `(device_cache, partition)`
+# `additional_iteration_kinds` resolved onto `alternates`; elsewhere (no host
+# `InterfaceValues`) it runs the HOST-mirror walk instead. Either way the store
+# is zeroed first (blocks ACCUMULATE) and the device copy refreshed after.
 function _refill_action_storage!(::BlockRowAssembly, op::MatrixFreeFerriteOperator, p, ctx)
     engine = op.engine
+    device = engine.strategy.device
+    if _engine_driven_fill(device)
+        for sc in engine.subdomain_caches
+            sc.contributes || continue
+            host = _block_row_cache(sc.domain.element)
+            fill!(host.K, zero(eltype(host.K)))
+        end
+        run_sweep!(QuadratureDataKind(), nothing, op, (;), p, ctx)
+        # The sweep wrote the ALTERNATE kind's device-resident store, which is a
+        # SEPARATE object from `host` on a device `adapt` moves data for
+        # (`KernelAbstractionsDevice`, even on its CPU backend — it shares
+        # `AbstractGPUDevice`'s layout); a plain CPU device's is the same array
+        # already and this is a harmless self-copy.
+        for sc in engine.subdomain_caches
+            sc.contributes || continue
+            host = _block_row_cache(sc.domain.element)
+            altdc, _ = _kind_caches(sc, QuadratureDataKind())
+            copyto!(host.K, _block_row_cache(_alternate_fill_element(altdc)).K)
+        end
+    else
+        for sc in engine.subdomain_caches
+            sc.contributes || continue
+            fill_block_rows!(_block_row_cache(sc.domain.element), p, ctx)
+        end
+    end
     for sc in engine.subdomain_caches
         sc.contributes || continue
         host = _block_row_cache(sc.domain.element)
-        fill_block_rows!(host, p, ctx)
-        finalize_action_storage!(host, engine.strategy.device)
-        _upload_action_storage!(engine.strategy.device, host, sc.device_cache)
+        finalize_action_storage!(host, device)
+        _upload_action_storage!(device, host, sc.device_cache)
     end
     return nothing
 end
