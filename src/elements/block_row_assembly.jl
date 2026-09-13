@@ -9,10 +9,11 @@
 """
     CellNeighbourWindow
 
-One item's dof window as a VIEW into the `(slot, k)` window table
-[`CellNeighbourCursor`](@ref) carries — no staging and no per-item copy. `n` is
-the prefix read: the whole `(1 + Nf)·Nb` gather window, or the leading `Nb` of
-it that the item SCATTERS.
+One item's dof window as a VIEW into the materialized `(slot, k)` window table a
+[`CellNeighbourCursor`](@ref) carries where the subdomain's dofs are NOT
+cell-contiguous — no staging and no per-item copy. `n` is the prefix read: the
+whole `(1 + Nf)·Nb` gather window, or the leading `Nb` of it that the item
+SCATTERS.
 
 !!! warning "Experimental surface"
     Internal to the block-row action; it may change in a minor release.
@@ -27,6 +28,67 @@ Base.IndexStyle(::Type{<:CellNeighbourWindow}) = IndexLinear()
 Base.@propagate_inbounds Base.getindex(w::CellNeighbourWindow, i::Int) = w.windows[w.slot, i]
 
 """
+    ContiguousCellDofs(neighbours, Val(Nb))
+
+The window source a [`CellNeighbourCursor`](@ref) carries where the subdomain's
+dofs are CELL-CONTIGUOUS with uniform stride `Nb` — `celldofs(c) == (c-1)Nb+1 : c·Nb`
+for every cell of the subdomain, which `DiscontinuousLagrange` over a single
+`SubDofHandler` satisfies. Window entry `(f, j)` is then `(cell(f) - 1)·Nb + j`:
+ARITHMETIC on the per-slot neighbour list, and no `(slot, k)` table is built,
+uploaded or read at all.
+
+`neighbours` is [`BlockRowAssemblyCache`](@ref)'s own table — `Int32` CELL ids,
+bounded at setup — and `stride` carries `Nb` as a compile-time constant, so the
+`(f, j)` recovery is a `divrem` by a literal. The derived dof index is `Int`, the
+cell id widening before it multiplies: unlike the table's entries, it is computed
+and never stored, so its width is register traffic and not DRAM traffic.
+(Measured: narrowing this arithmetic to `Int32` moves the RTX 2080 DG benchmark
+by less than 1% at either order.)
+
+The election is `_dof_window_source`'s, made ONCE against the HOST
+`SubDofHandler`. It is strictly stronger than the affine-offset test the device
+cell cursor's dof stride rests on: a renumbered handler keeps affine
+`cell_dofs_offset` while its `cell_dofs` are no longer the offsets themselves.
+
+!!! warning "Experimental surface"
+    Internal to the block-row action; it may change in a minor release.
+"""
+struct ContiguousCellDofs{NT <: AbstractMatrix, NB}
+    neighbours::NT
+    stride::Val{NB}
+end
+
+"""
+    ContiguousDofWindow
+
+One item's dof window DERIVED rather than read: entry `(f, j)` of the window is
+`(cell(f) - 1)·Nb + j`, with `cell(0)` the item's own cell and `cell(f)` the
+neighbour across its local facet `f`. The counterpart of
+[`CellNeighbourWindow`](@ref) for a [`ContiguousCellDofs`](@ref) source.
+
+A BOUNDARY facet (`neighbours[slot, f] == 0`) derives the own cell's dofs: the
+gather is fixed-width and every entry must address live memory, and the block
+those entries pair with is zero and skipped.
+
+!!! warning "Experimental surface"
+    Internal to the block-row action; it may change in a minor release.
+"""
+struct ContiguousDofWindow{NT <: AbstractMatrix, NB} <: AbstractVector{Int}
+    neighbours::NT
+    slot::Int
+    cellid::Int
+    n::Int
+    stride::Val{NB}
+end
+Base.size(w::ContiguousDofWindow) = (w.n,)
+Base.IndexStyle(::Type{<:ContiguousDofWindow}) = IndexLinear()
+Base.@propagate_inbounds function Base.getindex(w::ContiguousDofWindow{<:Any, NB}, k::Int) where {NB}
+    f, j = divrem(k - 1, NB)
+    c = f == 0 ? w.cellid : Int(w.neighbours[w.slot, f])
+    return (ifelse(c == 0, w.cellid, c) - 1) * NB + j + 1
+end
+
+"""
     CellNeighbourCursor
 
 What a [`BlockRowAssembly`](@ref) action positions on: ONE cell of the
@@ -39,11 +101,10 @@ serves the host, `KernelAbstractions.CPU()` and CUDA, and the sequential CPU
 device (which positions in place and discards the returned iterator) is served
 by the inner cursor's own positioning.
 
-`windows` is the `(slot, k)` window table, `slot` STRIDE-1 so a warp of
-consecutive slots reads adjacent dofs, and `slots[cellid]` is the row of it this
-item reads. A BOUNDARY facet's `Nb` window entries repeat the own cell's dofs:
-the gather is fixed-width and every entry must address live memory, and the
-block those entries pair with is zero and skipped.
+`windows` is the item's dof-window SOURCE, elected once at setup: a
+[`ContiguousCellDofs`](@ref) descriptor deriving every entry arithmetically, or
+the materialized `(slot, k)` table with `slot` STRIDE-1 so a warp of consecutive
+slots reads adjacent dofs. `slots[cellid]` is the row either one is addressed by.
 
 [`iterator_scatter_address`](@ref) answers the own-cell PREFIX of that same row
 — the two-window shape [`element_scatter_length`](@ref) names.
@@ -51,7 +112,7 @@ block those entries pair with is zero and skipped.
 !!! warning "Experimental surface"
     Internal to the block-row action; it may change in a minor release.
 """
-struct CellNeighbourCursor{IT, W <: AbstractMatrix, S <: AbstractVector}
+struct CellNeighbourCursor{IT, W, S <: AbstractVector}
     inner::IT
     windows::W
     slots::S
@@ -63,10 +124,14 @@ Ferrite.cellid(c::CellNeighbourCursor) = Ferrite.cellid(c.inner)
 iterator_handler(c::CellNeighbourCursor) = iterator_handler(c.inner)
 
 @inline block_row_slot(c::CellNeighbourCursor) = Int(@inbounds c.slots[Ferrite.cellid(c)])
-@inline iterator_dofs(c::CellNeighbourCursor) =
-    CellNeighbourWindow(c.windows, block_row_slot(c), c.nwindow)
-@inline iterator_scatter_address(c::CellNeighbourCursor) =
-    CellNeighbourWindow(c.windows, block_row_slot(c), c.nrows)
+@inline iterator_dofs(c::CellNeighbourCursor) = _dof_window(c.windows, c, c.nwindow)
+@inline iterator_scatter_address(c::CellNeighbourCursor) = _dof_window(c.windows, c, c.nrows)
+
+# One method each, so neither window source pays for the other's branch.
+@inline _dof_window(windows::AbstractMatrix, c::CellNeighbourCursor, n::Int) =
+    CellNeighbourWindow(windows, block_row_slot(c), n)
+@inline _dof_window(windows::ContiguousCellDofs, c::CellNeighbourCursor, n::Int) =
+    ContiguousDofWindow(windows.neighbours, block_row_slot(c), Ferrite.cellid(c), n, windows.stride)
 
 @inline position_iterator(c::CellNeighbourCursor, item, flags::Ferrite.UpdateFlags) =
     CellNeighbourCursor(position_iterator(c.inner, item, flags), c.windows, c.slots, c.nwindow, c.nrows)
@@ -139,7 +204,12 @@ this cell's rows to the neighbour across its local facet `f`.
 `neighbours[slot, f]` is that neighbour's cell id, `0` where the facet is a
 boundary of the SUBDOMAIN — which is the whole of the bookkeeping the action
 needs, the facet being the column index itself. `slots[cellid]` is the cell's
-row, `0` outside this subdomain.
+row, `0` outside this subdomain. Both are `Int32`, the cell count bounded at
+setup.
+
+`windows` is the item's dof-window source, elected against this subdomain's dof
+layout by `_dof_window_source`: a [`ContiguousCellDofs`](@ref) descriptor where
+the arithmetic derivation applies, the materialized table otherwise.
 
 Two windows, not one ([`element_scatter_length`](@ref)): the action GATHERS
 `(1 + Nf)·Nb` dofs (`local_size`) and SCATTERS `Nb` (`row_size`), which is what
@@ -248,14 +318,23 @@ duplicate_for_device(device, c::BlockRowAssemblyCache) =
 # arrives already filled, from the host mirror's `copyto!`.
 # `scratch`/`fill_dofs` stay batched either way, exactly as
 # `ElementAssemblyCache.scratch` does.
-setup_device_instances(device::AbstractGPUDevice, c::BlockRowAssemblyCache, n) =
-    BlockRowAssemblyCache(setup_device_instances(device, c.inner, n),
-                          adapt_shared(device, c.K), adapt_shared(device, c.neighbours),
-                          adapt_shared(device, c.slots), adapt_shared(device, c.windows),
-                          c.route, (_engine_driven_fill(device) ? c.sdh : nothing), nothing,
-                          setup_device_instances(device, c.scratch, n),
-                          setup_device_instances(device, c.fill_dofs, n),
-                          c.local_size, c.row_size, c.nfacets)
+function setup_device_instances(device::AbstractGPUDevice, c::BlockRowAssemblyCache, n)
+    neighbours = adapt_shared(device, c.neighbours)
+    return BlockRowAssemblyCache(setup_device_instances(device, c.inner, n),
+                                 adapt_shared(device, c.K), neighbours,
+                                 adapt_shared(device, c.slots),
+                                 _device_window_source(device, c.windows, neighbours),
+                                 c.route, (_engine_driven_fill(device) ? c.sdh : nothing), nothing,
+                                 setup_device_instances(device, c.scratch, n),
+                                 setup_device_instances(device, c.fill_dofs, n),
+                                 c.local_size, c.row_size, c.nfacets)
+end
+
+# The descriptor is rebuilt around the neighbour table this very cache already
+# moved, so the cache holds ONE copy of it rather than two.
+_device_window_source(device, windows, neighbours) = adapt_shared(device, windows)
+_device_window_source(device, windows::ContiguousCellDofs, neighbours) =
+    ContiguousCellDofs(neighbours, windows.stride)
 device_worker_view(c::BlockRowAssemblyCache, worker) =
     BlockRowAssemblyCache(device_worker_view(c.inner, worker), c.K, c.neighbours, c.slots, c.windows,
                           c.route, c.sdh, c.mass,
@@ -284,11 +363,17 @@ function BlockRowAssemblyCache(cache, sdh::SubDofHandler, route, mass)
     grid = get_grid(sdh.dh)
     nb   = ndofs_per_cell(sdh)
     nf   = Ferrite.nfacets(getcells(grid, first(sdh.cellset)))
+    # `neighbours`/`slots` store CELL ids narrowed to `Int32`; refuse the mesh
+    # that would not fit rather than truncating it silently.
+    getncells(grid) <= typemax(Int32) || throw(ArgumentError(
+        "`BlockRowAssembly()` keeps its neighbour and slot maps as `Int32` cell ids, and this " *
+        "grid has $(getncells(grid)) cells."))
     slots = zeros(Int32, getncells(grid))
     for (slot, cellid) in enumerate(sdh.cellset)
         slots[cellid] = slot
     end
-    neighbours, windows = _cell_neighbour_tables(sdh, grid, slots, nb, nf)
+    neighbours = _cell_neighbour_table(sdh, grid, slots, nf)
+    windows = _dof_window_source(sdh, neighbours, nb, nf)
     K = zeros(T, length(sdh.cellset), 1 + nf, nb, nb)
     scratch = zeros(T, 2nb, 2nb)
     fill_dofs = Vector{Int}(undef, nb)
@@ -296,34 +381,82 @@ function BlockRowAssemblyCache(cache, sdh::SubDofHandler, route, mass)
                                  Val((1 + nf) * nb), Val(nb), Val(nf))
 end
 
-# The topology-derived neighbour table and the gather window it lays out, built
-# once on the host. A facet whose neighbour is outside this subdomain is a
-# boundary HERE: the store has no row for that cell, so the coupling is not this
-# subdomain's to hold.
-function _cell_neighbour_tables(sdh::SubDofHandler, grid, slots, nb::Int, nf::Int)
+# The topology-derived neighbour table, built once on the host. A facet whose
+# neighbour is outside this subdomain is a boundary HERE: the store has no row
+# for that cell, so the coupling is not this subdomain's to hold.
+function _cell_neighbour_table(sdh::SubDofHandler, grid, slots, nf::Int)
     top        = Ferrite.ExclusiveTopology(grid)
-    nslots     = length(sdh.cellset)
-    neighbours = zeros(Int32, nslots, nf)
-    windows    = zeros(Int, nslots, (1 + nf) * nb)
-    own        = Vector{Int}(undef, nb)
-    other      = Vector{Int}(undef, nb)
+    neighbours = zeros(Int32, length(sdh.cellset), nf)
     for (slot, cellid) in enumerate(sdh.cellset)
-        celldofs!(own, sdh.dh, cellid)
-        windows[slot, 1:nb] .= own
         for f in 1:nf
             found = Ferrite.getneighborhood(top, grid, FacetIndex(cellid, f))
             length(found) <= 1 || throw(ArgumentError(
                 "Facet $f of cell $cellid has $(length(found)) neighbours. `BlockRowAssembly()` " *
                 "keeps ONE block per facet, so it covers conforming meshes only."))
-            c = (isempty(found) || slots[first(found)[1]] == 0) ? 0 : first(found)[1]
-            # A boundary facet's window repeats the own cell's dofs: the gather is
-            # fixed-width and reads it, the action skips the zero block it pairs with.
-            celldofs!(other, sdh.dh, c == 0 ? cellid : c)
-            neighbours[slot, f] = c
-            windows[slot, (f * nb + 1):((f + 1) * nb)] .= other
+            neighbours[slot, f] = (isempty(found) || slots[first(found)[1]] == 0) ? 0 : first(found)[1]
         end
     end
-    return neighbours, windows
+    return neighbours
+end
+
+"""
+    _dof_window_source(sdh, neighbours, nb, nf)
+
+Which of the two dof-window sources this subdomain's action reads, decided ONCE
+against the HOST `SubDofHandler`: a [`ContiguousCellDofs`](@ref) descriptor
+where every cell's dofs are `(c-1)Nb+1 : c·Nb`, the materialized `(slot, k)`
+table otherwise.
+
+The table is the fallback and not the default because it is the action's largest
+index stream — `(1 + Nf)·Nb` entries per cell, fetched and then chased into `u`
+— where the derivation reads only the neighbour cell id the action already
+loads to skip its boundary blocks.
+
+!!! warning "Experimental surface"
+    Internal to the block-row action; it may change in a minor release.
+"""
+function _dof_window_source(sdh::SubDofHandler, neighbours, nb::Int, nf::Int)
+    _cell_contiguous_dofs(sdh, nb) || return _dof_window_table(sdh, neighbours, nb, nf)
+    return ContiguousCellDofs(neighbours, Val(nb))
+end
+
+# The whole of the arithmetic derivation's premise, checked exhaustively over
+# the cells whose dofs the windows address — every cell of the subdomain, a
+# boundary facet repeating its own cell and every neighbour having a slot. It is
+# NOT the affine-offset test the device cell cursor's dof stride rests on: that
+# one reads `cell_dofs_offset` alone and a renumbered handler passes it.
+function _cell_contiguous_dofs(sdh::SubDofHandler, nb::Int)
+    dofs = Vector{Int}(undef, nb)
+    for cellid in sdh.cellset
+        celldofs!(dofs, sdh.dh, cellid)
+        base = (cellid - 1) * nb
+        for j in 1:nb
+            (@inbounds dofs[j]) == base + j || return false
+        end
+    end
+    return true
+end
+
+# The `(slot, k)` table the non-contiguous fallback reads, `slot` STRIDE-1 so a
+# warp of consecutive slots reads adjacent dofs. `Int32` wherever the dof count
+# fits it — the entries are the action's per-entry index stream, so their width
+# is DRAM traffic.
+function _dof_window_table(sdh::SubDofHandler, neighbours, nb::Int, nf::Int)
+    IT      = ndofs(sdh.dh) <= typemax(Int32) ? Int32 : Int
+    windows = zeros(IT, length(sdh.cellset), (1 + nf) * nb)
+    dofs    = Vector{Int}(undef, nb)
+    for (slot, cellid) in enumerate(sdh.cellset)
+        celldofs!(dofs, sdh.dh, cellid)
+        windows[slot, 1:nb] .= dofs
+        for f in 1:nf
+            c = Int(neighbours[slot, f])
+            # A boundary facet's window repeats the own cell's dofs: the gather is
+            # fixed-width and reads it, the action skips the zero block it pairs with.
+            celldofs!(dofs, sdh.dh, c == 0 ? cellid : c)
+            windows[slot, (f * nb + 1):((f + 1) * nb)] .= dofs
+        end
+    end
+    return windows
 end
 
 ####################################

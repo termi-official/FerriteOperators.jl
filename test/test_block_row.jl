@@ -68,6 +68,32 @@ action(op, u) = (y = zeros(length(u)); mul!(y, op, u); y)
         @test count(iszero, cache.neighbours) == 2 * (4 + 3)
     end
 
+    @testset "the arithmetic window and the table fallback address the same dofs" begin
+        # `DiscontinuousLagrange` over one `SubDofHandler`: `celldofs(c)` IS
+        # `(c-1)Nb+1 : cNb`, so the store derives every window entry and builds
+        # no `(slot, k)` table at all.
+        op = setup_operator(sequential_arm(BlockRowAssembly()), tb.integrator, tb.dh)
+        cache = first(get_subdomain_caches(op)).domain.element
+        @test cache.windows isa FerriteOperators.ContiguousCellDofs
+
+        # The SAME problem with the dofs permuted. `Ferrite.renumber!` rewrites
+        # `cell_dofs` and leaves `cell_dofs_offset` affine, so this is exactly
+        # the layout the device cursor's dof-stride test would still accept and
+        # the window derivation must not: the store keeps the table.
+        shuffled = block_row_testbed()
+        perm = collect(reverse(1:ndofs(shuffled.dh)))
+        Ferrite.renumber!(shuffled.dh, perm)
+        shuffled_op = setup_operator(sequential_arm(BlockRowAssembly()),
+                                     shuffled.integrator, shuffled.dh)
+        @test first(get_subdomain_caches(shuffled_op)).domain.element.windows isa AbstractMatrix
+
+        # Both sources on the same operator, the addresses permuted and the
+        # summation order untouched: BITWISE equality, not a tolerance.
+        u_shuffled = zeros(ndofs(shuffled.dh))
+        u_shuffled[perm] .= u
+        @test action(shuffled_op, u_shuffled)[perm] == action(op, u)
+    end
+
     @testset "the fill rides the element's two-sided items, the action the cells" begin
         Threads.atomic_xchg!(VISITED, 0)
         op = setup_operator(sequential_arm(BlockRowAssembly()), tb.integrator, tb.dh)

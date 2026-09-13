@@ -11,11 +11,12 @@
 #
 # Why it can. Over a discontinuous space the assembled matrix stores each cell's
 # diagonal block once and each interior facet's coupling TWICE (both triangles);
-# the block-row store keeps exactly those blocks and replaces the per-entry CSC row
-# index with one dof window per cell, so it touches fewer bytes per dof. What it
-# gives back is rate: cuSPARSE streams CSC/CSR faster than the block-row kernel
-# streams its four-dimensional store. The speedup is that byte ratio times that
-# rate ratio, and the table below reports both factors, so a result is
+# the block-row store keeps exactly those blocks and drops the per-entry CSC row
+# index entirely — a cell-contiguous dof layout lets it DERIVE each gathered dof
+# from the neighbour cell id it already reads — so it touches fewer bytes per dof.
+# What it gives back is rate: cuSPARSE streams CSC/CSR faster than the block-row
+# kernel streams its four-dimensional store. The speedup is that byte ratio times
+# that rate ratio, and the table below reports both factors, so a result is
 # attributable and not just a verdict.
 #
 # And why it is DETERMINISTIC. Every item scatters its own cell's `Nb` rows and
@@ -46,61 +47,74 @@
 # (see `measure`) so a cold measurement is visible rather than silent.
 #
 # MEASURED — RTX 2080, min of 3 burn+sample passes x 20 samples, distorted
-# hexahedra, launch policy `HOUSE_POLICY`. Every arm ran at 1725-1890 MHz SM (the
+# hexahedra, launch policy `HOUSE_POLICY`. Every arm ran at 1710-1890 MHz SM (the
 # card's rated boost is 1710) and 6800 MHz memory, and validated against the
-# host-assembled `A * u` to 5e-7 or better. Three full runs agreed within 1.3%.
+# host-assembled `A * u` to 6e-7 or better. Two full runs agreed within 2.6%.
 #
 #   hex p=1, Nb=8, 15 625 cells, 125 000 dofs, 45 000 interior facets
-#   assembled 53.0 MB (444 B/dof touched) | block-row 26.7 MB (283 B/dof touched)
+#   assembled 53.0 MB (444 B/dof touched) | block-row 26.7 MB (230 B/dof touched)
 #
 #   | arm                                | min time | vs CSC | model GB/s | bitwise      |
 #   |------------------------------------|---------:|-------:|-----------:|--------------|
 #   | assembled CSC SpMV (cuSPARSE)      | 0.157 ms |  1.00x |        355 | no           |
 #   | assembled CSR SpMV (cuSPARSE)      | 0.154 ms |  1.02x |        362 | yes          |
-#   | block-row, LanesPerElement         | 0.180 ms |  0.87x |        198 | yes          |
-#   | block-row, WorkerPerElement        | 0.254 ms |  0.62x |        139 | yes          |
+#   | block-row, LanesPerElement         | 0.125 ms |  1.26x |        231 | yes          |
+#   | block-row, WorkerPerElement        | 0.158 ms |  0.99x |        182 | yes          |
 #   | MatrixFreeAction[Recompute]        |        - |      - |          - | no route     |
-#   | ceiling: block-row stream [lanes]  | 0.128 ms |  1.23x |        272 | -            |
-#   | ceiling: block-row stream [worker] | 0.175 ms |  0.89x |        197 | -            |
+#   | ceiling: block-row stream [lanes]  | 0.092 ms |  1.70x |        305 | -            |
+#   | ceiling: block-row stream [worker] | 0.100 ms |  1.56x |        278 | -            |
 #
 #   hex p=2, Nb=27, 4 096 cells, 110 592 dofs, 11 520 interior facets
-#   assembled 152.2 MB (1443 B/dof touched) | block-row 79.7 MB (780 B/dof touched)
+#   assembled 152.2 MB (1443 B/dof touched) | block-row 79.7 MB (725 B/dof touched)
 #
 #   | arm                                | min time | vs CSC | model GB/s | bitwise      |
 #   |------------------------------------|---------:|-------:|-----------:|--------------|
-#   | assembled CSC SpMV (cuSPARSE)      | 0.423 ms |  1.00x |        378 | no           |
-#   | assembled CSR SpMV (cuSPARSE)      | 0.420 ms |  1.01x |        380 | yes          |
-#   | block-row, LanesPerElement         | 0.453 ms |  0.93x |        191 | yes          |
-#   | block-row, WorkerPerElement        | 0.560 ms |  0.76x |        154 | yes          |
+#   | assembled CSC SpMV (cuSPARSE)      | 0.416 ms |  1.00x |        384 | no           |
+#   | assembled CSR SpMV (cuSPARSE)      | 0.421 ms |  0.99x |        379 | yes          |
+#   | block-row, LanesPerElement         | 0.533 ms |  0.78x |        151 | yes          |
+#   | block-row, WorkerPerElement        | 0.739 ms |  0.56x |        109 | yes          |
 #   | MatrixFreeAction[Recompute]        |        - |      - |          - | no route     |
-#   | ceiling: block-row stream [lanes]  | 0.478 ms |  0.88x |        179 | not bounding |
-#   | ceiling: block-row stream [worker] | 1.349 ms |  0.31x |         63 | not bounding |
+#   | ceiling: block-row stream [lanes]  | 0.745 ms |  0.56x |        107 | not bounding |
+#   | ceiling: block-row stream [worker] | 0.427 ms |  0.97x |        186 | -            |
 #
-# THE BLOCK-ROW ACTION DOES NOT BEAT cuSPARSE HERE, at either order. The byte model
-# says where it went, and both of its factors are measured above:
+# THE BLOCK-ROW ACTION BEATS cuSPARSE AT p=1 AND NOT AT p=2, and neither number is
+# inside its band. Both factors of the byte model are measured above:
 #
 #   |      | byte ratio | rate ratio | product | measured |
-#   | p=1  |      1.57x |       0.56 |   0.87x |   0.87x  |
-#   | p=2  |      1.85x |       0.51 |   0.93x |   0.93x  |
+#   | p=1  |      1.93x |       0.65 |   1.26x |   1.26x  |
+#   | p=2  |      1.99x |       0.39 |   0.78x |   0.78x  |
 #
-# At p=1 BOTH factors fall short. The byte side: the shipped gather window is a
-# materialized `(slot, k)` table of `Int` — 15 625 x 56 x 8 B = 7.0 MB, 56 of the
-# 283 B/dof — where a store deriving the index arithmetically (the dofs of a
-# `DiscontinuousLagrange` cell ARE contiguous) would touch 227 B/dof and carry a
-# byte ratio of 1.96x rather than 1.57x. An `Int32` table alone would give 1.74x.
-# The rate side: the kernel reaches 198 GB/s against its OWN access pattern's
-# 272 GB/s, a distance of 1.37x, and what separates those two arms is exactly the
-# dependent load the ceiling omits — every `uₑ[j]` is an `Int` window entry fetched
-# from memory and then chased into `u`.
+# The gather window is no longer a materialized `(slot, k)` table: over a
+# cell-contiguous dof layout the store DERIVES entry `(f, j)` as
+# `(neighbour(f) - 1)·Nb + j` from the per-slot neighbour list it already reads to
+# skip its boundary blocks. At p=1 that moved BOTH factors — bytes 1.57x -> 1.93x
+# (283 -> 230 B/dof) and rate 0.56 -> 0.65, the rate because the `uₑ[j]` the
+# kernel chases into `u` is now computed rather than fetched — and the arm went
+# 0.180 -> 0.125 ms, 0.87x -> 1.26x.
 #
-# At p=2 the byte side is nearly intact (1.85x) and the kernel is at or past its
-# own pattern's measured rate — the lane ceiling does not bound it. That is the
-# layout limiter: the `(cell, facet, i, j)` store walks its inner `j` with a stride
-# of `ncells * (1 + Nf) * Nb`, 442 KB at `Nb`=27.
+# AT p=2 IT COST 18%, 0.453 -> 0.533 ms, 0.93x -> 0.78x, and that regression is
+# the round's real finding: THE p=2 LANE KERNEL IS NOT BYTE-BOUND. Three controls,
+# same harness, same session, headline arm, `vs CSC`:
+#
+#   |                        |    p=1    |    p=2    |
+#   | materialized `Int`     | 0.180 ms  | 0.453 ms  |  (slice 5, the baseline)
+#   | materialized `Int32`   | 0.168 ms  | 0.676 ms  |  strictly fewer bytes
+#   | derived (shipped here) | 0.125 ms  | 0.533 ms  |  no index stream at all
+#
+# Narrowing the table to `Int32` REMOVES 3.5 MB of p=2 traffic and costs 49%. A
+# store that touches strictly fewer bytes running half again slower is not a byte
+# model missing a term; it is a kernel whose time is set by how NVVM schedules it,
+# and at `Nb`=27 (189 gathers and 189 stored values per row) that kernel sits on a
+# cliff. Two further variants measured the same way: doing the derivation's
+# arithmetic in `Int32` moved p=1/p=2 by <1%/1%, and hoisting it to ONE base per
+# BLOCK instead of a `divrem` per ENTRY — strictly less work on every axis — gave
+# 0.145 ms / 0.872 ms, worse at both orders. The p=2 limiter remains RECORDED and
+# unaddressed: the `(cell, facet, i, j)` store walks its inner `j` with a stride of
+# `ncells * (1 + Nf) * Nb`, 442 KB at `Nb`=27.
 #
 # NOT occupancy. The launch-policy probe at the end of each case doubles the lane
-# blocks (one element slot per cell instead of two) and moves p=1 from 0.180 to
-# 0.176 ms — nothing. No policy measured reaches the acceptance band at either
+# blocks (one element slot per cell instead of two) and moves p=1 from 0.126 to
+# 0.123 ms — nothing. No policy measured reaches the acceptance band at either
 # order, so the verdict is a property of the route and not of the launch.
 #
 # `model GB/s` is each arm's own DRAM-REALISTIC byte count over its min time: the
@@ -274,22 +288,37 @@ end
 
 # `_block_row_dot`'s loads with the product, the `u` gather and the scatter
 # removed: the diagonal block, one block per facet that HAS a neighbour, and the
-# gather window's index stream. The window folds into an INTEGER accumulator and
-# is converted once per thread — a per-entry `Int`-to-`Float32` conversion made
-# the equivalent arm in `matrix_free_action.jl` slower than the kernel it bounds.
-@inline function _stream_block_row(K, neighbours, windows, slot, i, ::Val{NB}, ::Val{NF}) where {NB, NF}
+# INDEX stream the gather window costs. That stream is whichever one the store
+# actually reads — the `(slot, k)` table entry by entry where the layout forced
+# one, and the single neighbour cell id per facet block where the window is
+# derived arithmetically. `DERIVED` is a compile-time flag, so each arm compiles
+# to its own kernel and neither pays for the other's branch. The stream folds
+# into an INTEGER accumulator and is converted once per thread — a per-entry
+# `Int`-to-`Float32` conversion made the equivalent arm in
+# `matrix_free_action.jl` slower than the kernel it bounds.
+@inline function _stream_window_block(windows, slot, f, ::Val{NB}, ::Val{false}) where {NB}
+    s = 0
+    offset = f * NB
+    for j in 1:NB
+        s += Int(@inbounds windows[slot, offset + j])
+    end
+    return s
+end
+@inline _stream_window_block(windows, slot, f, ::Val{NB}, ::Val{true}) where {NB} =
+    f == 0 ? 0 : Int(@inbounds windows[slot, f])
+
+@inline function _stream_block_row(K, neighbours, windows, slot, i, ::Val{NB}, ::Val{NF},
+        derived::Val) where {NB, NF}
     row = zero(eltype(K))
-    idx = zero(eltype(windows))
+    idx = _stream_window_block(windows, slot, 0, Val(NB), derived)
     for j in 1:NB
         @inbounds row += K[slot, 1, i, j]
-        @inbounds idx += windows[slot, j]
     end
     for f in 1:NF
         (@inbounds neighbours[slot, f]) == 0 && continue
-        offset = f * NB
+        idx += _stream_window_block(windows, slot, f, Val(NB), derived)
         for j in 1:NB
             @inbounds row += K[slot, 1 + f, i, j]
-            @inbounds idx += windows[slot, offset + j]
         end
     end
     return row, idx
@@ -300,18 +329,18 @@ end
 # streams what the mapping's kernel streams.
 @kernel function _stream_block_row_lane!(sink, @Const(K), @Const(neighbours), @Const(windows),
         @Const(slots), @Const(items), ::Val{NB}, ::Val{NF}, ::Val{NLANES}, ::Val{PER},
-        n_slots, n_items) where {NB, NF, NLANES, PER}
+        derived::Val, n_slots, n_items) where {NB, NF, NLANES, PER}
     thread = @index(Global, Linear)
     group, local_index = divrem(Int(thread) - 1, NLANES * PER)
     lane, block = divrem(local_index, PER)
     first_slot = group * PER + block + 1
     acc = zero(eltype(K))
-    idx = zero(eltype(windows))
+    idx = 0
     if first_slot ≤ n_slots
         for s in first_slot:n_slots:n_items
             slot = Int(@inbounds slots[@inbounds items[s]])
             for i in (lane + 1):NLANES:NB
-                row, window = _stream_block_row(K, neighbours, windows, slot, i, Val(NB), Val(NF))
+                row, window = _stream_block_row(K, neighbours, windows, slot, i, Val(NB), Val(NF), derived)
                 acc += row
                 idx += window
             end
@@ -322,15 +351,15 @@ end
 
 # The WORKER launch: one grid-stride worker per cell, all `NB` rows of it.
 @kernel function _stream_block_row_worker!(sink, @Const(K), @Const(neighbours), @Const(windows),
-        @Const(slots), @Const(items), ::Val{NB}, ::Val{NF}, n_items) where {NB, NF}
+        @Const(slots), @Const(items), ::Val{NB}, ::Val{NF}, derived::Val, n_items) where {NB, NF}
     worker = @index(Global, Linear)
     stride = prod(KA.@ndrange())
     acc = zero(eltype(K))
-    idx = zero(eltype(windows))
+    idx = 0
     for s in worker:stride:n_items
         slot = Int(@inbounds slots[@inbounds items[s]])
         for i in 1:NB
-            row, window = _stream_block_row(K, neighbours, windows, slot, i, Val(NB), Val(NF))
+            row, window = _stream_block_row(K, neighbours, windows, slot, i, Val(NB), Val(NF), derived)
             acc += row
             idx += window
         end
@@ -365,11 +394,24 @@ _spmv_bytes(A, n_dofs) = nnz(A) * (sizeof(Tv) + sizeof(Ti)) +
     (size(A, 2) + 1) * sizeof(Ti) + 2 * n_dofs * sizeof(Tv)
 
 # The block-row action: the NON-ZERO blocks (a boundary facet's block is stored
-# but skipped), the gather window's index table, the neighbour table, the slot
-# map, and `u`/`y` once each.
-_block_row_bytes(n_blocks, nb, ncells, nf, window_bytes, n_dofs) =
-    n_blocks * nb * nb * sizeof(Tv) + ncells * (1 + nf) * nb * window_bytes +
+# but skipped), the index stream the gather window costs, the neighbour table the
+# action reads to skip its boundary blocks, the slot map, and `u`/`y` once each.
+_block_row_bytes(n_blocks, nb, ncells, nf, windows, n_dofs) =
+    n_blocks * nb * nb * sizeof(Tv) + _window_bytes(windows, ncells, nb, nf) +
     ncells * nf * sizeof(Int32) + ncells * sizeof(Int32) + 2 * n_dofs * sizeof(Tv)
+
+# A materialized table costs one entry per gather dof. The arithmetic window
+# costs the cursor's OWN copy of the neighbour table instead — the cache's and
+# the cursor's are adapted onto the device separately, so the kernel streams that
+# table twice and this model says so.
+_window_bytes(windows::AbstractMatrix, ncells, nb, nf) =
+    ncells * (1 + nf) * nb * sizeof(eltype(windows))
+_window_bytes(::Any, ncells, nb, nf) = ncells * nf * sizeof(Int32)
+
+# What the ceiling arms stream in place of the action's window reads, and the
+# compile-time flag that tells the two apart.
+_ceiling_windows(windows::AbstractMatrix) = (windows, Val(false))
+_ceiling_windows(windows) = (windows.neighbours, Val(true))
 
 _rate(bytes, time) = bytes / time / 1.0e9
 
@@ -470,14 +512,15 @@ function run_case(order, n)
         if store === nothing
             store = _block_row_store(op)
             n_blocks = ncells + count(!iszero, Array(store.neighbours))
-            @printf("  block-row: %.1f MB of blocks (%d of %d stored non-zero), %d B per dof\n",
+            @printf("  block-row: %.1f MB of blocks (%d of %d stored non-zero), %d B per dof, %s window\n",
                     length(store.K) * sizeof(Tv) / 2^20, n_blocks, ncells * (1 + nf),
-                    _block_row_bytes(n_blocks, nb, ncells, nf, sizeof(eltype(store.windows)), n_dofs) ÷ n_dofs)
+                    _block_row_bytes(n_blocks, nb, ncells, nf, store.windows, n_dofs) ÷ n_dofs,
+                    store.windows isa AbstractMatrix ?
+                        "materialized $(eltype(store.windows))" : "arithmetic")
         end
         n_blocks = ncells + count(!iszero, Array(store.neighbours))
         record!(name, () -> (mul!(yd, op, ud); CUDA.synchronize()),
-                byte_count = _block_row_bytes(n_blocks, nb, ncells, nf,
-                                              sizeof(eltype(store.windows)), n_dofs),
+                byte_count = _block_row_bytes(n_blocks, nb, ncells, nf, store.windows, n_dofs),
                 require_bitwise = true)
         op = nothing
         GC.gc(); CUDA.reclaim()
@@ -503,18 +546,19 @@ function run_case(order, n)
 
     # The ceilings, over the headline arm's own store.
     let backend = CUDABackend(), device = _device()
-        K, neighbours, windows, slots = store.K, store.neighbours, store.windows, store.slots
+        K, neighbours, slots = store.K, store.neighbours, store.slots
+        windows, derived = _ceiling_windows(store.windows)
         items = CuVector{Ti}(1:ncells)
         n_blocks = ncells + count(!iszero, Array(neighbours))
         ceiling_bytes = _block_row_bytes(n_blocks, nb, ncells, nf,
-                                         sizeof(eltype(windows)), n_dofs) - 2 * n_dofs * sizeof(Tv)
+                                         store.windows, n_dofs) - 2 * n_dofs * sizeof(Tv)
 
         nlanes = min(nb, device.max_workgroup_size)
         lane_wg, lane_blocks, n_slots = lane_launch_geometry(device, nlanes, ncells)
         sink_lane = CUDA.zeros(Tv, lane_wg * lane_blocks)
         lane_run!() = (_stream_block_row_lane!(backend, lane_wg)(
                            sink_lane, K, neighbours, windows, slots, items, Val(nb), Val(nf),
-                           Val(nlanes), Val(lane_wg ÷ nlanes), n_slots, ncells;
+                           Val(nlanes), Val(lane_wg ÷ nlanes), derived, n_slots, ncells;
                            ndrange = lane_wg * lane_blocks);
                        KA.synchronize(backend))
         fill!(sink_lane, 0); lane_run!(); _check_ceiling("ceiling [lanes]", sink_lane)
@@ -526,7 +570,8 @@ function run_case(order, n)
         workgroup, blocks = launch_geometry(device, ncells)
         sink_worker = CUDA.zeros(Tv, workgroup * blocks)
         worker_run!() = (_stream_block_row_worker!(backend, workgroup)(
-                             sink_worker, K, neighbours, windows, slots, items, Val(nb), Val(nf), ncells;
+                             sink_worker, K, neighbours, windows, slots, items, Val(nb), Val(nf),
+                             derived, ncells;
                              ndrange = workgroup * blocks);
                          KA.synchronize(backend))
         fill!(sink_worker, 0); worker_run!(); _check_ceiling("ceiling [worker]", sink_worker)
