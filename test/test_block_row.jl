@@ -118,6 +118,19 @@ action(op, u) = (y = zeros(length(u)); mul!(y, op, u); y)
         @test FerriteOperators.additional_iteration_kinds(MatrixFreeAction(), cache.inner) == ()
     end
 
+    # P2-2 (do/gpu-dg adversarial review): parameter queries are NOT routed
+    # through the block-row action. Without `BlockRowAssemblyCache`'s own
+    # method the decorator's blanket forward would hand the ACTION's item — a
+    # `CellNeighbourCursor` — to the wrapped element's `query_cell_parameters`,
+    # an item shape it never positions and never expects.
+    @testset "query_cell_parameters is a passthrough on the block-row action" begin
+        op = setup_operator(sequential_arm(BlockRowAssembly()), tb.integrator, tb.dh)
+        cache = first(get_subdomain_caches(op)).domain.element
+        p = (; whatever = 1.7)
+        @test FerriteOperators.query_cell_parameters(cache, nothing, p) === p
+        @test FerriteOperators.query_cell_parameters(cache, "not a real item", p) === p
+    end
+
     @testset "the fill runs engine-driven on a CPU-resident device" begin
         # `KA.CPU()` shares `AbstractGPUDevice`'s launch machinery but is
         # HOST-resident, so — like `SequentialCPUDevice` — its fill prefers the
@@ -149,6 +162,16 @@ action(op, u) = (y = zeros(length(u)); mul!(y, op, u); y)
         FerriteOperators.fill_block_rows!(reference_cache, nothing, nothing)
         @test cache.K ≈ reference_cache.K rtol = 1.0e-12
 
+        @test action(op, u) ≈ reference rtol = 1.0e-12
+
+        # P1-2 (do/gpu-dg adversarial review): a second and third refill must
+        # not double-accumulate. Correctness here no longer rests on
+        # `adapt(KA.CPU(), ::Array)` being the identity between `host.K` and
+        # the ALTERNATE kind's device store — both are zeroed explicitly before
+        # every fill sweep, so this holds even where that identity would not.
+        update_operator!(op, nothing)
+        @test action(op, u) ≈ reference rtol = 1.0e-12
+        update_operator!(op, nothing)
         @test action(op, u) ≈ reference rtol = 1.0e-12
     end
 
@@ -227,6 +250,47 @@ action(op, u) = (y = zeros(length(u)); mul!(y, op, u); y)
         err = @test_throws ArgumentError setup_operator(strategy, tb.integrator, tb.dh)
         @test occursin("BlockRowAssembly", err.value.msg)
         @test occursin("lattice", err.value.msg)
+    end
+
+    # P1-1 (do/gpu-dg adversarial review): `CellNeighbourItems`'s one-colour
+    # partition is injective only over a DISCONTINUOUS space — two
+    # face-neighbours of a CONTINUOUS space share the dofs on their common
+    # facet, so two different items' "own rows" would collide. Nothing checked
+    # this before; a continuous space must now be rejected at setup.
+    @testset "a continuous space is rejected — the cell-disjoint-dofs wall" begin
+        grid = generate_grid(Quadrilateral, (4, 3))
+        dh = DofHandler(grid)
+        add!(dh, :u, Lagrange{RefQuadrilateral, 1}())
+        close!(dh)
+        prs = horizontal_pairs(4, 3)
+        integrator = JumpPenaltyIntegrator(JUMP_η, JUMP_α, prs)
+        err = @test_throws ArgumentError setup_operator(sequential_arm(BlockRowAssembly()), integrator, dh)
+        @test occursin("DISCONTINUOUS", err.value.msg)
+
+        # The shipped DG testbed (discontinuous) is unaffected.
+        op = setup_operator(sequential_arm(BlockRowAssembly()), tb.integrator, tb.dh)
+        @test op isa MatrixFreeFerriteOperator
+    end
+
+    # P1-3 (do/gpu-dg adversarial review): on a device that is not
+    # `_engine_driven_fill`, the alternate kind's device cache is never read —
+    # the fill instead walks the host mirror (`fill_block_rows!`) and uploads
+    # the PRIMARY's copy alone. Materializing a device cache for the alternate
+    # kind there would be a second, permanently stale device copy of `K`.
+    # `KernelAbstractionsDevice(KA.CPU())` has no real GPU here to measure the
+    # footprint on, so this checks the SETUP DECISION directly.
+    @testset "the alternate device cache is skipped on a non-host-resident device" begin
+        struct _TestGPUDevice{V, I} <: FerriteOperators.AbstractGPUDevice{V, I} end
+        op = setup_operator(sequential_arm(BlockRowAssembly()), tb.integrator, tb.dh)
+        cache = first(get_subdomain_caches(op)).domain.element
+        @test FerriteOperators.device_needs_alternate_cache(
+            KernelAbstractionsDevice(KA.CPU()), QuadratureDataKind(), cache)
+        @test !FerriteOperators.device_needs_alternate_cache(
+            _TestGPUDevice{Float64, Int}(), QuadratureDataKind(), cache)
+        # An ordinary cache/kind pair is unaffected by BlockRowAssembly's
+        # override — the generic default keeps materializing it.
+        @test FerriteOperators.device_needs_alternate_cache(
+            _TestGPUDevice{Float64, Int}(), MatrixFreeActionKind(), cache)
     end
 
     @testset "a cell-square element cannot elect BlockRowAssembly" begin

@@ -31,6 +31,12 @@
         @test length(first(get_subdomain_caches(op)).partition) == 1
         @test length(first(get_subdomain_caches(op)).partition[1]) == getncells(tb.grid)
 
+        # P1-3 (do/gpu-dg adversarial review): CUDA is not `_engine_driven_fill`,
+        # so the fill's own alternate traversal is never read here — the refill
+        # walks the host mirror instead (below) — and must not hold a second,
+        # permanently stale device copy of the store.
+        @test first(get_subdomain_caches(op)).alternates === nothing
+
         y = CUDA.zeros(Float64, ndofs(tb.dh))
         mul!(y, op, CuVector(u))
         @test Array(y) ≈ expected rtol = 1.0e-5

@@ -122,19 +122,22 @@ _allocate_element_matrix_store(::SymmetricElementMatrix, T, ncells, nd) =
     (zeros(T, ncells, (nd * (nd + 1)) ÷ 2), zeros(T, nd, nd))
 
 """
-    element_matrix_fill_route(::Type{C}) -> MatrixKernelFill() or ActionKernelFill()
+    element_matrix_fill_route(::Type{C}, election_name = "ElementAssembly") -> MatrixKernelFill() or ActionKernelFill()
 
-Which route an [`ElementAssemblyCache`](@ref) over `C` fills its matrices
-through: the element's own element-matrix kernel where
-[`provides_analytic`](@ref) declares one, the action applied to the unit vectors
-where [`apply_element_action!`](@ref) exists, a rejection where neither does.
+Which route an [`ElementAssemblyCache`](@ref)/[`BlockRowAssemblyCache`](@ref)
+over `C` fills its matrices through: the element's own element-matrix kernel
+where [`provides_analytic`](@ref) declares one, the action applied to the unit
+vectors where [`apply_element_action!`](@ref) exists, a rejection where neither
+does. `election_name` names the CALLER's storage election in that rejection —
+`"ElementAssembly"` by default, `"BlockRowAssembly"` from that election's own
+setup — so the message names the level the user actually chose.
 """
-function element_matrix_fill_route(::Type{C}) where {C}
+function element_matrix_fill_route(::Type{C}, election_name = "ElementAssembly") where {C}
     provides_analytic(C, JacobianKind{:u}()) && return MatrixKernelFill()
     hasmethod(apply_element_action!, Tuple{AbstractVector, C, AbstractVector, CellArgs}) &&
         return ActionKernelFill()
     throw(ArgumentError(
-        "$(C) can serve neither route of the `ElementAssembly` storage level: it declares no " *
+        "$(C) can serve neither route of the `$(election_name)` storage level: it declares no " *
         "analytic `JacobianKind{:u}` kernel (`provides_analytic`), so its element matrix cannot " *
         "be assembled, and implements no `apply_element_action!`, so the matrix cannot be " *
         "filled column by column from the action either. Implement one of them, or elect " *

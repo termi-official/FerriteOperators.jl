@@ -253,8 +253,20 @@ allocate_element_residual_vector(c::BlockRowAssemblyCache, sdh) = zeros(element_
 # The wrapped cache's values objects are consumed by the FILL, which positions
 # the element's OWN two-sided iterator; the action visits no quadrature point.
 reinit_values!(::BlockRowAssemblyCache, cell, ::MatrixFreeActionKind) = nothing
+# `dofs = false`: `CellNeighbourCursor`'s `iterator_dofs` derives its window
+# from `c.windows`/`c.slots` (the block-row tables), never from the inner
+# cursor's own staged `celldofs` buffer — asking for it bought a `celldofs!`
+# per item per `mul!` and discarded the result.
 item_update_flags(::MatrixFreeActionKind, ::BlockRowAssemblyCache) =
-    Ferrite.UpdateFlags(nodes = false, coords = false, dofs = true)
+    Ferrite.UpdateFlags(nodes = false, coords = false, dofs = false)
+
+# Parameter queries are NOT routed through the block-row action: the decorator's
+# blanket forward would otherwise hand `cell` — a `CellNeighbourCursor`, the
+# action's own item shape — to the WRAPPED element's `query_cell_parameters`,
+# which expects the shape ITS traversal positions. Passthrough, always; the
+# fill queries the wrapped element directly, on its own two-sided item
+# (`fill_quadrature_data!`, `fill_block_rows!`).
+query_cell_parameters(::BlockRowAssemblyCache, cell, p) = p
 
 assembly_iterator(::MatrixFreeActionKind, c::BlockRowAssemblyCache, sdh) =
     CellNeighbourCursor(default_assembly_iterator(MatrixFreeActionKind(), sdh), c.windows, c.slots,
@@ -345,6 +357,14 @@ device_worker_view(c::BlockRowAssemblyCache, worker) =
 ## Setup
 ####################################
 
+# Cross-subdomain coupling is NOT supported. `_cell_neighbour_table` treats a
+# neighbour OUTSIDE this `SubDofHandler`'s cellset the same as a mesh boundary —
+# slot `0`, no block kept for it — so the store's SHAPE drops such a coupling
+# structurally, silently. An element whose fill still names that neighbour (a
+# pair item spanning the subdomain seam) has no slot to condense into and dies
+# at FILL time instead (`_condense_pair!`'s "not one of its facet neighbours
+# inside this subdomain"): this election only sees the subdomain's shape, not
+# the fill's item set, so it cannot refuse the coupling any earlier than that.
 function with_action_storage(cache, storage::BlockRowAssembly, sdh::SubDofHandler)
     nb = ndofs_per_cell(sdh)
     nl = length(allocate_element_residual_vector(cache, sdh))
@@ -354,8 +374,39 @@ function with_action_storage(cache, storage::BlockRowAssembly, sdh::SubDofHandle
         "reads the $(2nb) × $(2nb) matrix of an item spanning two cells and writes its four " *
         "blocks into the two cells' rows. Elect `storage = ElementAssembly()` for a cell-square " *
         "element, or declare `allocate_element_residual_vector` as `2 * ndofs_per_cell`."))
-    return BlockRowAssemblyCache(cache, sdh, element_matrix_fill_route(typeof(cache)),
+    _assert_cell_disjoint_dofs(sdh)
+    return BlockRowAssemblyCache(cache, sdh, element_matrix_fill_route(typeof(cache), "BlockRowAssembly"),
                                  storage.premultiply_inverse_mass)
+end
+
+# `CellNeighbourItems`'s one-colour partition is valid only because every item
+# scatters its OWN cell's dofs and no two cells of the subdomain share a dof
+# (its docstring's injectivity claim). That holds for a DISCONTINUOUS space by
+# construction and fails for a CONTINUOUS one, where two face-neighbours share
+# the dofs on their common facet: two different items would then scatter into
+# the same row through a plain, non-atomic `+=`, a silent lost-update race
+# under `PolyesterDevice`/`ColoredScheduling` (P1-1 of the do/gpu-dg
+# adversarial review). Checked once, at setup, over every cell of the
+# subdomain — cheap next to the topology walk `BlockRowAssemblyCache` already
+# does here.
+function _assert_cell_disjoint_dofs(sdh::SubDofHandler)
+    nb = ndofs_per_cell(sdh)
+    seen = falses(ndofs(sdh.dh))
+    dofs = Vector{Int}(undef, nb)
+    for cellid in sdh.cellset
+        celldofs!(dofs, sdh.dh, cellid)
+        for d in dofs
+            seen[d] && throw(ArgumentError(
+                "`BlockRowAssembly()` requires a DISCONTINUOUS space: dof $(d) is shared by two " *
+                "cells of this subdomain. Its one-colour partition scatters every item's OWN cell " *
+                "rows through a plain, non-atomic `+=`, which is injective only when every dof " *
+                "belongs to exactly one cell — the promise a discontinuous space keeps and a " *
+                "continuous one does not. Elect `storage = ElementAssembly()` for a continuous " *
+                "space."))
+            seen[d] = true
+        end
+    end
+    return nothing
 end
 
 function BlockRowAssemblyCache(cache, sdh::SubDofHandler, route, mass)
@@ -625,6 +676,11 @@ function _condense_pair!(cache::BlockRowAssemblyCache, Kₑ, cell, dofs)
         "coupling it has no column for cannot be condensed."))
     sr = Int(@inbounds cache.slots[right])
     fr = findfirst(f -> cache.neighbours[sr, f] == left, 1:nf)
+    fr === nothing && throw(ArgumentError(
+        "A `BlockRowAssembly()` fill item couples cell $(left) to cell $(right), which does not " *
+        "list $(left) among ITS OWN facet neighbours inside this subdomain — the neighbour table " *
+        "is not symmetric for this pair, so the coupling's second block has no column to condense " *
+        "into."))
     @views begin
         cache.K[sl, 1, :, :]      .+= Kₑ[1:nb, 1:nb]
         cache.K[sl, 1 + fl, :, :] .+= Kₑ[1:nb, (nb + 1):(2nb)]
@@ -663,6 +719,8 @@ _premultiply_inverse_mass!(::BlockRowAssemblyCache, ::Nothing) = nothing
 # `M` is block diagonal by cell over a discontinuous space, so `M⁻¹K` has the
 # SAME block-row sparsity: one cell's inverse mass block left-scales that cell's
 # whole row. The inverse is formed once per cell, here, and never at action time.
+# The mass integrator is queried with `p = nothing` — a PARAMETER-FREE mass is
+# assumed; a mass whose form genuinely needs `p` is fused wrong here, silently.
 function _premultiply_inverse_mass!(cache::BlockRowAssemblyCache, integrator)
     sdh  = cache.sdh
     nb   = _extent(cache.row_size)
@@ -705,6 +763,13 @@ end
 _engine_driven_fill(::AbstractCPUDevice) = true
 _engine_driven_fill(::AbstractGPUDevice) = false
 _engine_driven_fill(device::KernelAbstractionsDevice) = nameof(typeof(device.backend)) === :CPU
+
+# The fill's own pair-item traversal is read from the device only where the
+# fill itself runs through the engine; on any other device it fills through the
+# host mirror instead (`fill_block_rows!`) and never touches this alternate's
+# device cache at all (P1-3 — see `device_needs_alternate_cache`'s docstring).
+device_needs_alternate_cache(device, ::QuadratureDataKind, ::BlockRowAssemblyCache) =
+    _engine_driven_fill(device)
 
 # The element cache an ALTERNATE kind's resolved `device_cache` carries, its
 # shape depending on the device: a `Tuple`/`Vector` of per-worker duplicates

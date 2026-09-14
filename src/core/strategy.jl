@@ -203,6 +203,11 @@ bitwise repeatable with no atomics and no colouring algorithm.
 It costs `(1 + Nf)·Nb²` scalars per cell, so it is — like
 [`ElementAssembly`](@ref) — the LOW-order election.
 
+Neighbours OUTSIDE this subdomain are treated as a mesh BOUNDARY — slot `0`,
+no block kept for them — so cross-subdomain coupling is not supported: an
+element whose fill still names such a neighbour dies at FILL time, not at
+setup ([`with_action_storage`](@ref)).
+
 **The fill and the action visit different item shapes** — the action's items
 are CELLS and the fill's are two-sided — which one resolved traversal per sweep
 cannot serve both at once. `additional_iteration_kinds` is the cache's opt-in
@@ -224,6 +229,8 @@ diagonal by cell over a discontinuous space, so the fused store has the same
 block-row sparsity, the action is unchanged and no inverse is formed per `mul!`.
 Two costs, recorded: it forecloses a `K_IJ = K_JIᵀ` exploit between blocks, and
 every refill must re-fuse — which it does, the fusion being part of the fill.
+The mass integrator is queried with `p = nothing`: a PARAMETER-FREE mass is
+assumed, and a mass whose form genuinely needs `p` fuses wrong, silently.
 
 !!! warning "Experimental surface"
     This election, its cache and the host fill route may change in a minor

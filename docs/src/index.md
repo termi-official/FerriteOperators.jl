@@ -192,9 +192,10 @@ form = MatrixFreeAction(; storage = ElementAssembly())   # `Stored()` is the def
 - [`BlockRowAssembly`](@ref) is ELEMENT for an element whose local system spans
   TWO cells (a DG interface term): the cell's whole matrix ROW is kept in
   blocks, and every action gathers the cell's own and its neighbours' dofs and
-  scatters the cell's own rows alone. Those scatter addresses are disjoint
-  between items, so the action needs neither atomics nor a colouring algorithm
-  and repeats bit for bit. It optionally fuses `M⁻¹A` at fill time.
+  scatters the cell's own rows alone. Over a DISCONTINUOUS space those scatter
+  addresses are disjoint between items, so the action needs neither atomics
+  nor a colouring algorithm and repeats bit for bit. It optionally fuses `M⁻¹A`
+  at fill time.
 
 `ElementAssembly` is the cheapest matrix-free storage at `p = 1`–`2`;
 `ndofs_per_cell²` overtakes the assembled matrix's per-cell share above that,

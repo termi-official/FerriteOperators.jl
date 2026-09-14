@@ -974,8 +974,18 @@ struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
 
     @testset "a cache serving neither fill route is refused" begin
         err = @test_throws ArgumentError FerriteOperators.element_matrix_fill_route(NoRouteCache)
+        @test occursin("ElementAssembly", err.value.msg)
         @test occursin("provides_analytic", err.value.msg)
         @test occursin("apply_element_action!", err.value.msg)
+    end
+
+    # P2-1 (do/gpu-dg adversarial review): the rejection must name the CALLER's
+    # storage election — `BlockRowAssemblyCache` passes its own name rather than
+    # inheriting the `ElementAssembly` wording above.
+    @testset "the same rejection names BlockRowAssembly when that is the election" begin
+        err = @test_throws ArgumentError FerriteOperators.element_matrix_fill_route(NoRouteCache, "BlockRowAssembly")
+        @test occursin("BlockRowAssembly", err.value.msg)
+        @test !occursin("ElementAssembly", err.value.msg)
     end
 
     @testset "the cooperative kernel serves the action kind only" begin

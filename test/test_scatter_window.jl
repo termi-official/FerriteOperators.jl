@@ -208,6 +208,25 @@ reordered_reference(dh, K, n) = function (u)
 end
 
 ####################################
+## MismatchedScatterCache: `element_scatter_length` disagrees with the
+## residual buffer's own length — the silent `@inbounds` OOB class P2-3 (the
+## do/gpu-dg adversarial review) closes at setup instead
+####################################
+
+struct MismatchedScatterIntegrator <: AbstractBilinearIntegrator end
+struct MismatchedScatterCache{N} <: FerriteOperators.AbstractVolumetricElementCache end
+MismatchedScatterCache(n::Int) = MismatchedScatterCache{n}()
+setup_element_cache(::MismatchedScatterIntegrator, sdh::SubDofHandler) = MismatchedScatterCache(ndofs_per_cell(sdh))
+duplicate_for_device(device, c::MismatchedScatterCache) = c
+element_local_length(::MismatchedScatterCache{N}) where {N} = Val(N)
+element_scatter_length(::MismatchedScatterCache{N}) where {N} = Val(N)
+# One entry SHORT of what `element_scatter_length` declares.
+allocate_element_residual_vector(::MismatchedScatterCache{N}, sdh) where {N} = zeros(N - 1)
+assemble_cell!(::ResidualRequest, ::MismatchedScatterCache, ::CellArgs) = nothing
+reinit_values!(::MismatchedScatterCache, cell) = nothing
+apply_element_action!(yₑ, ::MismatchedScatterCache, uₑ, args::CellArgs) = nothing
+
+####################################
 ## Testbed
 ####################################
 
@@ -305,6 +324,14 @@ ka_cpu(mapping; storage = Stored()) = AssemblyStrategy(
             op = setup_operator(AssemblyStrategy(SequentialCPUDevice(); form = MatrixFreeAction()),
                                 PrefixIntegrator(), dh)
             @test op isa MatrixFreeFerriteOperator
+        end
+
+        @testset "element_scatter_length disagrees with the residual buffer → rejected" begin
+            strategy = AssemblyStrategy(MatrixFreeAction(), SequentialScheduling(), SequentialCPUDevice())
+            err = @test_throws ArgumentError setup_operator(strategy, MismatchedScatterIntegrator(), dh)
+            msg = err.value.msg
+            @test occursin("element_scatter_length", msg)
+            @test occursin("MismatchedScatterCache", msg)
         end
     end
 end

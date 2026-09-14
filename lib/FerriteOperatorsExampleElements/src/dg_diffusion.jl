@@ -36,7 +36,9 @@ The weights of a cell sum to one, so this is exact, not an approximation, and it
 is what lets the same element serve `FullAssembly` and
 [`BlockRowAssembly`](@ref) unchanged. A cell with NO interior facet has no item
 to carry its volume term, and `setup_element_cache` rejects such a subdomain by
-name.
+name. This element supports a SINGLE `SubDofHandler` covering the DG field:
+`setup_element_cache` rejects, by name, any interior facet whose neighbour
+lies outside it — subdomain-crossing facet terms are not implemented.
 
 `D` is a constant scalar diffusivity, `qrc` the volume rule and `fqrc` the facet
 rule (`FerriteOperators.FacetQuadratureRuleCollection`, which that package does
@@ -408,8 +410,17 @@ function _interior_facet_fill(sdh::SubDofHandler, cv_here, cv_there, iv)
             "Facet $facet of cell $cellid has $(length(found)) neighbours. " *
             "`SIPGDiffusionIntegrator` keeps one item per interior facet, so it covers " *
             "conforming meshes only."))
-        (isempty(found) || !inside[first(found)[1]]) && continue
+        isempty(found) && continue
         other, facet_other = first(found)
+        # A neighbour OUTSIDE this subdomain is NOT a boundary: silently treating
+        # it as one would drop the interior-facet term it carries while the
+        # operator stays symmetric and constant-annihilating — wrong and
+        # undetectable from the matrix alone (P0-1 of the do/gpu-dg adversarial
+        # review, found on a two-`SubDofHandler` DG mesh).
+        inside[other] || throw(ArgumentError(
+            "SIPGDiffusionIntegrator supports a single SubDofHandler covering the DG field; " *
+            "cell $cellid's neighbour $other lies outside the subdomain — subdomain-crossing " *
+            "facet terms are not implemented."))
         shares[cellid] += one(Int32)
         cellid < other && push!(items, (cellid, facet, other, facet_other))
     end

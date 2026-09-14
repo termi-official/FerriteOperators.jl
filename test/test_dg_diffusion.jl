@@ -208,6 +208,33 @@ dg_meshes() = (
         @test occursin("no interior facet", err.value.msg)
         @test occursin("VOLUME", err.value.msg)
     end
+
+    # P0-1 (do/gpu-dg adversarial review): a subdomain-crossing interior facet
+    # used to be silently treated as a boundary — dropped from BOTH sides, with
+    # the wrong operator still symmetric and constant-annihilating, undetectable
+    # from the matrix alone. Two `SubDofHandler`s over one DG field must now
+    # reject loudly at setup instead.
+    @testset "an interior facet whose neighbour lies outside the subdomain is rejected" begin
+        grid = generate_grid(Quadrilateral, (4, 2))
+        addcellset!(grid, "left",  x -> x[1] < 0.0)
+        addcellset!(grid, "right", x -> x[1] ≥ 0.0)
+        dh = DofHandler(grid)
+        sdh1 = SubDofHandler(dh, getcellset(grid, "left"))
+        add!(sdh1, :u, DiscontinuousLagrange{RefQuadrilateral, 1}())
+        sdh2 = SubDofHandler(dh, getcellset(grid, "right"))
+        add!(sdh2, :u, DiscontinuousLagrange{RefQuadrilateral, 1}())
+        close!(dh)
+
+        err = @test_throws ArgumentError setup_operator(dg_assembling_strategy(), dg_integrator(1), dh)
+        @test occursin("SubDofHandler", err.value.msg)
+        @test occursin("subdomain-crossing", err.value.msg)
+
+        # The single-subdomain case (every shipped test) is unaffected.
+        single = dg_handler(Quadrilateral, (4, 2), 1)
+        op = setup_operator(dg_assembling_strategy(), dg_integrator(1), single)
+        update_operator!(op, nothing)
+        @test op.A !== nothing
+    end
 end
 
 ####################################

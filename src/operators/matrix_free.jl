@@ -54,6 +54,13 @@ evaluate!(op::MatrixFreeFerriteOperator, y::AbstractVector, states::NamedTuple, 
 evaluate!(op::MatrixFreeFerriteOperator, y::AbstractVector, u::AbstractVector, p) =
     evaluate!(op, y, (u = u,), p, nothing)
 
+"""
+    mul!(y::AbstractVector, op::MatrixFreeFerriteOperator, u::AbstractVector)
+
+The operator's action `y = A·u` ([`evaluate!`](@ref)'s three-argument form).
+`y` and `u` must NOT ALIAS: [`MatrixFreeFerriteOperator`](@ref)'s docstring
+states why — `mul!(y, op, y)` silently returns a partly-updated mix, not `A·y`.
+"""
 mul!(y::AbstractVector, op::MatrixFreeFerriteOperator, u::AbstractVector) =
     evaluate!(op, y, (u = u,), nothing, nothing)
 
@@ -122,14 +129,18 @@ function _refill_action_storage!(::BlockRowAssembly, op::MatrixFreeFerriteOperat
         for sc in engine.subdomain_caches
             sc.contributes || continue
             host = _block_row_cache(sc.domain.element)
+            altdc, _ = _kind_caches(sc, QuadratureDataKind())
             fill!(host.K, zero(eltype(host.K)))
+            fill!(_block_row_cache(_alternate_fill_element(altdc)).K, zero(eltype(host.K)))
         end
         run_sweep!(QuadratureDataKind(), nothing, op, (;), p, ctx)
-        # The sweep wrote the ALTERNATE kind's device-resident store, which is a
-        # SEPARATE object from `host` on a device `adapt` moves data for
-        # (`KernelAbstractionsDevice`, even on its CPU backend — it shares
-        # `AbstractGPUDevice`'s layout); a plain CPU device's is the same array
-        # already and this is a harmless self-copy.
+        # The sweep accumulates into the ALTERNATE kind's store — zeroed just
+        # above, on its own, so the copy below is correct whether or not
+        # `_kind_caches`' device cache is the SAME object as `host` (true on a
+        # plain CPU device and on `KernelAbstractionsDevice(KA.CPU())`, where
+        # `adapt(KA.CPU(), ::Array)` is the identity) or a distinct one (any
+        # backend whose `adapt` copies). Do not rely on the identity to carry
+        # correctness — zeroing both explicitly does not.
         for sc in engine.subdomain_caches
             sc.contributes || continue
             host = _block_row_cache(sc.domain.element)
@@ -265,6 +276,33 @@ end
 # tells the two apart without positioning an iterator on an item.
 _declares_own_scatter_address(::Type{IT}) where {IT} =
     which(iterator_scatter_address, Tuple{IT}) !== which(iterator_scatter_address, Tuple{Any})
+
+"""
+    assert_scatter_length_matches_residual(form, cache, sdh)
+
+The setup wall for `element_scatter_length`'s OTHER promise: where `cache`
+names a compile-time `Val(R)`, `R` must equal the length of the residual
+buffer `allocate_element_residual_vector` allocates over `sdh` — the buffer
+[`matrix_free_cell_sweep!`](@ref)'s scatter reads `R` entries of
+(`scatter_local!` → Ferrite's `assemble!`). A declared `R` longer than that
+buffer is otherwise a silent `@inbounds` OUT-OF-BOUNDS read at action time,
+not a bounds error.
+"""
+assert_scatter_length_matches_residual(form, cache, sdh) = nothing
+function assert_scatter_length_matches_residual(::MatrixFreeAction, cache, sdh)
+    _assert_scatter_length_matches_residual(cache, sdh, element_scatter_length(cache))
+    return nothing
+end
+_assert_scatter_length_matches_residual(cache, sdh, ::Nothing) = nothing
+function _assert_scatter_length_matches_residual(cache, sdh, ::Val{R}) where {R}
+    r = length(allocate_element_residual_vector(cache, sdh))
+    R == r || throw(ArgumentError(
+        "$(typeof(cache)) declares `element_scatter_length(cache) = Val($R)`, which disagrees " *
+        "with the $(r)-entry residual buffer `allocate_element_residual_vector` allocates over " *
+        "this subdomain. The matrix-free action's scatter reads `element_scatter_length` entries " *
+        "of that buffer, so a mismatch is a silent out-of-bounds read, not a bounds error."))
+    return nothing
+end
 
 _assert_mapping_capability(::WorkerPerElement, ::StorageElection, cache) = nothing
 

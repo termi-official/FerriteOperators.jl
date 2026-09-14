@@ -193,6 +193,23 @@ seams as the primary and consulted by [`execute_on_subdomains!`](@ref) and
 """
 additional_iteration_kinds(form, element_cache) = ()
 
+"""
+    device_needs_alternate_cache(device, kind, element_cache) -> Bool
+
+Whether [`setup_family_caches`](@ref) instantiates `kind`'s `(device_cache,
+partition)` pair on `device` at all. `true` by default — every declared kind
+([`additional_iteration_kinds`](@ref)) gets device-resident state.
+
+[`BlockRowAssemblyCache`](@ref) answers `false` for `QuadratureDataKind` on a
+device that is not `_engine_driven_fill`: there, [`update_operator!`](@ref)
+refills through the HOST mirror ([`fill_block_rows!`](@ref)) and never reads the
+alternate kind's device cache, so materializing it would be a second,
+permanently stale device copy of the store — measured as a doubled memory
+footprint on CUDA with no correctness upside (P1-3 of the do/gpu-dg adversarial
+review).
+"""
+device_needs_alternate_cache(device, kind, element_cache) = true
+
 # The CELL family's `setup_family_caches` method — the only shipped family
 # needing a device-resident handler.
 function setup_family_caches(::CellFamily, strategy, integrator, dh, shared)
@@ -205,7 +222,8 @@ function setup_family_caches(::CellFamily, strategy, integrator, dh, shared)
     return [begin
         dc, partition = _resolve_kind_traversal(strategy, kind, element_cache, sdh, shared,
                                                 gdofs, device_dh, index)
-        alt_kinds = additional_iteration_kinds(strategy.form, element_cache)
+        alt_kinds = filter(altkind -> device_needs_alternate_cache(strategy.device, altkind, element_cache),
+                           additional_iteration_kinds(strategy.form, element_cache))
         alternates = isempty(alt_kinds) ? nothing : map(alt_kinds) do altkind
             altdc, altpartition = _resolve_kind_traversal(strategy, altkind, element_cache, sdh,
                                                            shared, gdofs, device_dh, index)
@@ -228,6 +246,7 @@ function _resolve_kind_traversal(strategy, kind, element_cache, sdh, shared, gdo
     dev_it  = _device_iterator(kind, element_cache, sdh, device_subdomain_handler(device_dh, index))
     assert_scatter_window_supported(strategy.form, element_cache, typeof(host_it))
     dev_it === nothing || assert_scatter_window_supported(strategy.form, element_cache, typeof(dev_it))
+    assert_scatter_length_matches_residual(strategy.form, element_cache, sdh)
     ws = create_assembly_workspace(element_cache, sdh, shared.ivh, shared.slots;
                                    needs_sensitivity = shared.needs_sensitivity, global_dofs = gdofs,
                                    iterator = host_it)
