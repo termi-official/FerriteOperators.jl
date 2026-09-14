@@ -657,5 +657,21 @@ end
         @test count_branches(ci) == 0
         # Family resolution folds to the singleton, so declarations are static.
         @test FerriteOperators.sweep_family(ScaledStiffnessKind) === FerriteOperators.NoFamily()
+
+        # `SubdomainCache.alternates` is `Nothing` for every shipped cache but
+        # `BlockRowAssemblyCache`. `_kind_caches` (introspection) must fold to
+        # the two plain field reads for that case rather than carry a runtime
+        # branch, and so must `_execute_kind!`/`_reduce_kind!` — the drivers
+        # `execute_on_subdomains!`/`reduce_on_subdomains` actually call.
+        sc = FerriteOperators.SubdomainCache(nothing, nothing, nothing)
+        @test sc.alternates === nothing
+        ci = code_typed(FerriteOperators._kind_caches, Tuple{typeof(sc), MatrixFreeActionKind})[1][1]
+        @test count_branches(ci) == 0
+        ci = code_typed(FerriteOperators._execute_kind!,
+            Tuple{Nothing, Nothing, Nothing, typeof(sc), MatrixFreeActionKind, Int})[1][1]
+        @test count_branches(ci) == 0
+        ci = code_typed(FerriteOperators._reduce_kind!,
+            Tuple{Nothing, Nothing, Nothing, typeof(sc), MatrixFreeActionKind, Int})[1][1]
+        @test count_branches(ci) == 0
     end
 end

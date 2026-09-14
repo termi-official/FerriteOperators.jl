@@ -3,7 +3,8 @@ Example elements for [FerriteOperators](https://github.com/termi-official/Ferrit
 
 Minimal, readable implementations of the element contract — one per feature it
 exposes: a bilinear form ([`SimpleBilinearDiffusionIntegrator`](@ref),
-[`SimpleBilinearMassIntegrator`](@ref)), a linear form
+[`SimpleBilinearMassIntegrator`](@ref)), a TWO-SIDED bilinear form whose item
+spans a pair of cells ([`SIPGDiffusionIntegrator`](@ref)), a linear form
 ([`SimpleLinearIntegrator`](@ref)), a nonlinear element with analytic
 tangent ([`SimpleHyperelasticityIntegrator`](@ref)), a condensed element with
 per-quadrature-point internal state
@@ -34,7 +35,14 @@ import Ferrite: getnquadpoints
 
 import FerriteOperators: AbstractBilinearIntegrator, AbstractLinearIntegrator,
     AbstractCondensedNonlinearIntegrator, AbstractNonlinearIntegrator,
-    AbstractVolumetricElementCache, AbstractGPUDevice
+    AbstractVolumetricElementCache, AbstractCPUDevice, AbstractGPUDevice
+import FerriteOperators: FacetQuadratureRuleCollection
+import FerriteOperators: assembly_iterator, device_assembly_iterator, item_provider,
+    compute_partition, iterator_dofs, iterator_handler, position_iterator,
+    allocate_element_matrix, allocate_element_unknown_vector, allocate_element_residual_vector
+# The predicate `update_operator!` routes the block-row fill on: a device that is
+# host-resident runs it through the engine, every other one through the host mirror.
+import FerriteOperators: _engine_driven_fill
 import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!, element_value_type,
     provides_analytic, has_internal_state, duplicate_for_device,
     setup_device_instances, device_worker_view,
@@ -49,6 +57,7 @@ import FerriteOperators: assemble_cell!, setup_element_cache, reinit_values!, el
     ItemStates, item_state, set_item_state!, has_item_state, invalidate_item_states!
 
 include("simple_diffusion.jl")             # Bilinear form + its induced residual
+include("dg_diffusion.jl")                 # Two-sided bilinear form over interior facets
 include("simple_mass.jl")                  # Linear form and mass bilinear form
 include("simple_hyperelasticity.jl")       # Nonlinear element with analytic tangent
 include("simple_linear_viscoelasticity.jl") # Condensed element with internal state
@@ -58,6 +67,7 @@ include("nested_homogenization.jl")         # Condensed element whose local prob
 # The integrators are the public handle; the caches they set up are internal,
 # reachable as `FerriteOperatorsExampleElements.Simple…ElementCache`.
 export SimpleBilinearDiffusionIntegrator
+export SIPGDiffusionIntegrator, interior_facet_entries!
 export SimpleLinearIntegrator
 export SimpleBilinearMassIntegrator
 export SimpleHyperelasticityIntegrator

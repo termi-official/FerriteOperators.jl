@@ -24,7 +24,9 @@ differ in the last bits. The sequential CPU device (one worker) and
 [`ColoredScheduling`](@ref) (no atomics) do repeat bit for bit. A Krylov method
 over this operator therefore sees an operator that is not a function of `u` to
 the last bit; treat run-to-run iteration counts accordingly, or elect a
-colouring.
+colouring. [`BlockRowAssembly`](@ref) is the exception that needs neither: every
+item owns its own scatter rows, so its ONE colour ([`CellNeighbourItems`](@ref))
+costs nothing and no colouring algorithm runs.
 
 !!! warning "Experimental surface"
     This operator, its entry points and the element hooks it calls may change
@@ -52,6 +54,13 @@ evaluate!(op::MatrixFreeFerriteOperator, y::AbstractVector, states::NamedTuple, 
 evaluate!(op::MatrixFreeFerriteOperator, y::AbstractVector, u::AbstractVector, p) =
     evaluate!(op, y, (u = u,), p, nothing)
 
+"""
+    mul!(y::AbstractVector, op::MatrixFreeFerriteOperator, u::AbstractVector)
+
+The operator's action `y = A·u` ([`evaluate!`](@ref)'s three-argument form).
+`y` and `u` must NOT ALIAS: [`MatrixFreeFerriteOperator`](@ref)'s docstring
+states why — `mul!(y, op, y)` silently returns a partly-updated mix, not `A·y`.
+"""
 mul!(y::AbstractVector, op::MatrixFreeFerriteOperator, u::AbstractVector) =
     evaluate!(op, y, (u = u,), nothing, nothing)
 
@@ -83,19 +92,75 @@ with one [`QuadratureDataKind`](@ref) sweep carrying `p` and `ctx` to
 [`fill_quadrature_data!`](@ref). Under [`Recompute`](@ref) nothing is kept and
 this does nothing.
 
+[`BlockRowAssembly`](@ref) fills differently: its fill and its action visit
+different item shapes, so on a HOST-resident device it runs its OWN
+`QuadratureDataKind` sweep over the pair items instead of the cell action's,
+and on a device with no host `InterfaceValues` it refills through the host
+mirror ([`fill_block_rows!`](@ref)) and copies the store down.
+
 FRESHNESS IS THE CALLER'S, exactly as for an assembled operator: the store holds
 what the last such call put there (`setup_operator` makes one with
 `p = nothing`), and an action evaluated after `p` or the context time changed
 reads stale factors until this is called again.
 """
 function update_operator!(op::MatrixFreeFerriteOperator, p, ctx = nothing)
-    _keeps_storage(op.engine.strategy.form.storage) || return nothing
-    run_sweep!(QuadratureDataKind(), nothing, op, (;), p, ctx)
+    storage = op.engine.strategy.form.storage
+    _keeps_storage(storage) || return nothing
+    _refill_action_storage!(storage, op, p, ctx)
     return nothing
 end
 
 _keeps_storage(::Recompute) = false
 _keeps_storage(::StorageElection) = true
+
+_refill_action_storage!(::StorageElection, op::MatrixFreeFerriteOperator, p, ctx) =
+    run_sweep!(QuadratureDataKind(), nothing, op, (;), p, ctx)
+
+# The two-sided fill and the cell-item action are different item shapes.
+# On a HOST-resident device the fill runs through the ENGINE's own
+# `QuadratureDataKind` sweep, over the pair-item `(device_cache, partition)`
+# `additional_iteration_kinds` resolved onto `alternates`; elsewhere (no host
+# `InterfaceValues`) it runs the HOST-mirror walk instead. Either way the store
+# is zeroed first (blocks ACCUMULATE) and the device copy refreshed after.
+function _refill_action_storage!(::BlockRowAssembly, op::MatrixFreeFerriteOperator, p, ctx)
+    engine = op.engine
+    device = engine.strategy.device
+    if _engine_driven_fill(device)
+        for sc in engine.subdomain_caches
+            sc.contributes || continue
+            host = _block_row_cache(sc.domain.element)
+            altdc, _ = _kind_caches(sc, QuadratureDataKind())
+            fill!(host.K, zero(eltype(host.K)))
+            fill!(_block_row_cache(_alternate_fill_element(altdc)).K, zero(eltype(host.K)))
+        end
+        run_sweep!(QuadratureDataKind(), nothing, op, (;), p, ctx)
+        # The sweep accumulates into the ALTERNATE kind's store — zeroed just
+        # above, on its own, so the copy below is correct whether or not
+        # `_kind_caches`' device cache is the SAME object as `host` (true on a
+        # plain CPU device and on `KernelAbstractionsDevice(KA.CPU())`, where
+        # `adapt(KA.CPU(), ::Array)` is the identity) or a distinct one (any
+        # backend whose `adapt` copies). Do not rely on the identity to carry
+        # correctness — zeroing both explicitly does not.
+        for sc in engine.subdomain_caches
+            sc.contributes || continue
+            host = _block_row_cache(sc.domain.element)
+            altdc, _ = _kind_caches(sc, QuadratureDataKind())
+            copyto!(host.K, _block_row_cache(_alternate_fill_element(altdc)).K)
+        end
+    else
+        for sc in engine.subdomain_caches
+            sc.contributes || continue
+            fill_block_rows!(_block_row_cache(sc.domain.element), p, ctx)
+        end
+    end
+    for sc in engine.subdomain_caches
+        sc.contributes || continue
+        host = _block_row_cache(sc.domain.element)
+        finalize_action_storage!(host, device)
+        _upload_action_storage!(device, host, sc.device_cache)
+    end
+    return nothing
+end
 
 update_linearization!(op::MatrixFreeFerriteOperator, residual::AbstractVector, u::AbstractVector, p) =
     evaluate!(op, residual, (u = u,), p, nothing)
@@ -160,6 +225,7 @@ end
 # The ELEMENT level needs no action entry point: `element_matrix_fill_route`
 # already refused a cache serving neither fill route.
 _assert_action_capability(::ElementAssembly, ::Type) = nothing
+_assert_action_capability(::BlockRowAssembly, ::Type) = nothing
 _assert_action_capability(::StorageElection, ::Type{C}) where {C} = _assert_element_action(C)
 
 function _assert_element_action(::Type{C}) where {C}
@@ -169,6 +235,72 @@ function _assert_element_action(::Type{C}) where {C}
         "operator. The action is a separate entry point from the mandatory residual kernel " *
         "because declaring it is the element's promise that `Kₑ·uₑ` is evaluated without " *
         "forming `Kₑ`. Assemble this integrator under `FullAssembly` instead."))
+    return nothing
+end
+
+"""
+    assert_scatter_window_supported(form, cache, ::Type{IT})
+
+The setup wall for the two-window scatter ([`element_scatter_length`](@ref)): a
+no-op for every form but [`MatrixFreeAction`](@ref), and for that form a no-op
+unless ALL THREE hold — `cache` names a compile-time
+[`element_local_length`](@ref) (the fixed-width gather that bypasses
+[`iterator_scatter_address`](@ref) when the seam agrees with
+[`iterator_dofs`](@ref)), the RESOLVED iterator type `IT` declares its own
+[`iterator_scatter_address`](@ref) (so it genuinely disagrees), and `cache`
+names no [`element_scatter_length`](@ref) — in which case the disagreement
+would otherwise be served silently through the wrong window.
+
+Called from the cell family's setup on both the HOST and the DEVICE iterator,
+since a family may decorate only one of the two types.
+"""
+assert_scatter_window_supported(form, cache, ::Type{IT}) where {IT} = nothing
+
+function assert_scatter_window_supported(::MatrixFreeAction, cache, ::Type{IT}) where {IT}
+    element_local_length(cache) isa Val || return nothing
+    element_scatter_length(cache) === nothing || return nothing
+    _declares_own_scatter_address(IT) || return nothing
+    C = typeof(cache)
+    throw(ArgumentError(
+        "$(C) names a compile-time `element_local_length`, and its resolved iterator " *
+        "$(nameof(IT)) declares its own `iterator_scatter_address`, distinct from " *
+        "`iterator_dofs`. The matrix-free action's fixed-width gather addresses the scatter " *
+        "through the GATHER window whenever `element_scatter_length` is absent, so this " *
+        "combination would be scattered silently through the wrong dofs. Declare " *
+        "`element_scatter_length(::$(nameof(C))) = Val(R)`, `R` the scatter row count — a " *
+        "PREFIX of the gather window `iterator_scatter_address` addresses."))
+end
+
+# `iterator_scatter_address(it) = iterator_dofs(it)` (src/core/iterators.jl) is
+# the catch-all; a downstream override is exactly a different method, so `which`
+# tells the two apart without positioning an iterator on an item.
+_declares_own_scatter_address(::Type{IT}) where {IT} =
+    which(iterator_scatter_address, Tuple{IT}) !== which(iterator_scatter_address, Tuple{Any})
+
+"""
+    assert_scatter_length_matches_residual(form, cache, sdh)
+
+The setup wall for `element_scatter_length`'s OTHER promise: where `cache`
+names a compile-time `Val(R)`, `R` must equal the length of the residual
+buffer `allocate_element_residual_vector` allocates over `sdh` — the buffer
+[`matrix_free_cell_sweep!`](@ref)'s scatter reads `R` entries of
+(`scatter_local!` → Ferrite's `assemble!`). A declared `R` longer than that
+buffer is otherwise a silent `@inbounds` OUT-OF-BOUNDS read at action time,
+not a bounds error.
+"""
+assert_scatter_length_matches_residual(form, cache, sdh) = nothing
+function assert_scatter_length_matches_residual(::MatrixFreeAction, cache, sdh)
+    _assert_scatter_length_matches_residual(cache, sdh, element_scatter_length(cache))
+    return nothing
+end
+_assert_scatter_length_matches_residual(cache, sdh, ::Nothing) = nothing
+function _assert_scatter_length_matches_residual(cache, sdh, ::Val{R}) where {R}
+    r = length(allocate_element_residual_vector(cache, sdh))
+    R == r || throw(ArgumentError(
+        "$(typeof(cache)) declares `element_scatter_length(cache) = Val($R)`, which disagrees " *
+        "with the $(r)-entry residual buffer `allocate_element_residual_vector` allocates over " *
+        "this subdomain. The matrix-free action's scatter reads `element_scatter_length` entries " *
+        "of that buffer, so a mismatch is a silent out-of-bounds read, not a bounds error."))
     return nothing
 end
 
@@ -183,6 +315,14 @@ _assert_mapping_capability(::CooperativeElement, ::ElementAssembly, cache) = thr
     "or `element_mapping = LanesPerElement()` for `storage = ElementAssembly()`, or keep the " *
     "cooperative mapping with `storage = Stored()`/`Recompute()`."))
 
+_assert_mapping_capability(::CooperativeElement, ::BlockRowAssembly, cache) = throw(ArgumentError(
+    "`CooperativeElement` cannot execute the `BlockRowAssembly` storage level: one workgroup per " *
+    "element exists to split the element's lattice between lanes, and the block-row level " *
+    "replaces that lattice with `1 + Nf` dense block products per cell. Elect " *
+    "`element_mapping = WorkerPerElement()` or `element_mapping = LanesPerElement()` for " *
+    "`storage = BlockRowAssembly()`, or keep the cooperative mapping with " *
+    "`storage = Stored()`/`Recompute()`."))
+
 _assert_mapping_capability(::LanesPerElement, storage::StorageElection, cache) = throw(ArgumentError(
     "`LanesPerElement` cannot execute the `$(nameof(typeof(storage)))` storage level: a lane owns " *
     "one ROW of a stored `Kₑ`, and a level that visits quadrature points instead re-derives one " *
@@ -196,8 +336,12 @@ _assert_mapping_capability(::LanesPerElement, storage::StorageElection, cache) =
 # inner. `ElementAssemblyCache` answers for itself.
 _declares_element_action_row(d::AbstractElementCacheDecorator) = _declares_element_action_row(d.inner)
 _declares_element_action_row(::ElementAssemblyCache) = true
+_declares_element_action_row(::BlockRowAssemblyCache) = true
 _declares_element_action_row(cache) =
     hasmethod(element_action_row, Tuple{typeof(cache), Any, CellArgs, Int})
+
+_assert_mapping_capability(mapping::LanesPerElement, ::BlockRowAssembly, cache) =
+    _assert_mapping_capability(mapping, ElementAssembly(), cache)
 
 function _assert_mapping_capability(::LanesPerElement, ::ElementAssembly, cache)
     C = typeof(cache)

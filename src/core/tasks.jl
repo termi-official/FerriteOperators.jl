@@ -609,9 +609,12 @@ it run on a device: the gather is FIXED-WIDTH instead of `load_slots!`'s
 resize-then-broadcast, which a per-worker view into a shared device batch cannot
 serve. Where the cache names that width as a compile-time constant
 ([`element_local_length`](@ref)) the gather targets an immutable static vector,
-which is also the dof window the scatter uses, so the window is read off the
-item ONCE. Without a static extent the scatter re-derives it through
-[`scatter_address`](@ref).
+which is also the dof window the scatter uses by default, so the window is read
+off the item ONCE. A cache whose scatter address is a PREFIX of that window
+([`element_scatter_length`](@ref)) instead re-reads
+[`iterator_scatter_address`](@ref) for the scatter — the one extra address read
+the two-window shape costs. Without a static extent the scatter re-derives it
+through [`scatter_address`](@ref).
 
 `@inline` and `@timeit_debug`-free for the same reasons
 [`primal_cell_sweep!`](@ref) is.
@@ -622,8 +625,19 @@ item ONCE. Without a static extent the scatter re-derives it through
     reinit_values!(ws.element, ws.cell, kind)
     pₑ = query_cell_parameters(ws.element, ws.cell, task.p)
     apply_element_action!(ws.re, ws.element, uₑ, _cell_args(ws, (u = uₑ,), pₑ, task.ctx))
-    scatter_local!(kind, task.inner_assembler, ws, dofs === nothing ? scatter_address(ws) : dofs)
+    scatter_local!(kind, task.inner_assembler, ws,
+                   _action_scatter_address(ws, dofs, element_scatter_length(ws.element)))
     return nothing
+end
+
+# `dofs` is `nothing` where the cache names no compile-time `element_local_length`
+# (the fixed-width gather never ran) — the character-for-character expression
+# `matrix_free_cell_sweep!` used before `element_scatter_length` existed, so
+# every shipped cache (which never names it) takes this method unchanged.
+@inline _action_scatter_address(ws, dofs, ::Nothing) = dofs === nothing ? scatter_address(ws) : dofs
+@inline function _action_scatter_address(ws, ::Any, ::Val{NS}) where {NS}
+    a = iterator_scatter_address(ws.cell)
+    return SVector{NS, Int}(ntuple(i -> (@inbounds a[i]), Val(NS)))
 end
 
 @inline _gather_element_unknowns(ws, src, ::Nothing) =

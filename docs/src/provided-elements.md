@@ -6,8 +6,9 @@ CurrentModule = FerriteOperators
 
 The integrators and element caches the package ships: composition over one
 domain, multi-domain routing, the automatic-differentiation decorator, the
-transfer prolongators, and the element-assembly decorator that gives any
-bilinear cache the ELEMENT storage level. Element authors implement the
+transfer prolongators, and the two decorators that give a bilinear cache the
+ELEMENT storage level — cell-square ([`ElementAssemblyCache`](@ref)) and
+two-sided ([`BlockRowAssemblyCache`](@ref)). Element authors implement the
 contracts on the [Element API reference](element-api.md) page; the types below
 are ready-made implementations of them.
 
@@ -19,6 +20,7 @@ Pages = [
     "elements/ad_element.jl",
     "elements/prolongators.jl",
     "elements/element_assembly.jl",
+    "elements/block_row_assembly.jl",
 ]
 ```
 

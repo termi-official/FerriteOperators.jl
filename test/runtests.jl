@@ -46,6 +46,7 @@ args = parse_args(argv)
 testsuite = find_tests(@__DIR__)
 # Shared element doubles and testbeds, `include`d by the files that need them.
 delete!(testsuite, "fixture_elements")
+delete!(testsuite, "custom_iterator_family")
 # `test/gpu/` is a separate environment (CUDA) needing an actual GPU, run by
 # hand through `julia --project=test/gpu test/gpu/runtests.jl`. The device
 # assembly path itself is covered here on the `KernelAbstractions.CPU()`

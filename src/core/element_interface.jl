@@ -72,6 +72,32 @@ immutable vector having no `setindex!`. Return a literal `Val`.
 element_local_length(element_cache) = nothing
 
 """
+    element_scatter_length(element_cache) -> Val{R} or nothing
+
+The length of `element_cache`'s SCATTER row window as a COMPILE-TIME constant,
+where it is a PREFIX of the gather window [`element_local_length`](@ref)
+names — an item that gathers `(1+Nf)·Nb` dofs (its own cell and its
+neighbours) but scatters only its own `Nb` rows, say.
+
+`nothing` (the default, and every shipped cache) means the gather window IS
+the scatter address: [`iterator_scatter_address`](@ref) and
+[`element_local_length`](@ref) agree, which is what lets the matrix-free
+action read the item's dof window ONCE and use it for both. A `Val(R)` means
+they differ, and the matrix-free action scatters through
+[`iterator_scatter_address`](@ref) instead, taking only its first `R` entries.
+
+Declaring `Val(R)` without [`element_local_length`](@ref) also being a `Val`
+is meaningless: the fixed-width gather it modifies never runs. Setup rejects
+an item family whose [`iterator_scatter_address`](@ref) differs from
+[`iterator_dofs`](@ref) while [`element_local_length`](@ref) is a `Val` and
+this declaration is absent — see the matrix-free setup wall.
+
+!!! warning "Experimental surface"
+    Internal to the matrix-free action; it may change in a minor release.
+"""
+element_scatter_length(element_cache) = nothing
+
+"""
     element_action_row(element_cache, uₑ, args::CellArgs, i::Int) -> yᵢ
 
 ONE row of the matrix-free element kernel: `yᵢ = (Kₑ·uₑ)[i]` for the current

@@ -104,6 +104,7 @@ abstract type AbstractLinearIntegrator end
 include("elements/composite_elements.jl")     # High-level composition of operators
 include("elements/ad_element.jl")             # ADElementCache: AD as an element cache decorator
 include("elements/element_assembly.jl")       # ElementAssemblyCache: the ELEMENT storage level of the matrix-free action
+include("elements/block_row_assembly.jl")     # BlockRowAssemblyCache: the ELEMENT level of a two-sided element
 
 include("operators/general.jl")         # Domain descriptors, NullOperator
 include("operators/nonlinear.jl")       # Assembly and action tasks
@@ -200,15 +201,18 @@ export AssemblyStrategy, AbstractAssemblyStrategy, AbstractAssemblyForm, FullAss
 export MatrixFreeAction, MatrixFreeFerriteOperator, MatrixFreeActionKind, apply_element_action!
 export QuadratureDataKind, fill_quadrature_data!, with_assembly_form, with_action_storage, adapt_shared
 export StorageElection, Stored, Recompute, ElementAssembly, ElementAssemblyCache, element_matrix_fill_route
+export BlockRowAssembly, BlockRowAssemblyCache, CellNeighbourItems, CellNeighbourCursor, BlockRowFillItems
+export fill_block_rows!, finalize_action_storage!
 export element_matrix_symmetry, GeneralElementMatrix, SymmetricElementMatrix
 export AbstractElementMapping, WorkerPerElement, CooperativeElement, LanesPerElement
-export with_element_mapping, element_action_row
+export with_element_mapping, element_action_row, element_scatter_length
 export cooperative_lattice_dim, cooperative_group_size, cooperative_scratch_shape
 export cooperative_load!, cooperative_stage!, cooperative_store!
 export AbstractSchedulingPolicy, SequentialScheduling, ColoredScheduling
 export StandardOperatorSpecification, BlockedOperatorSpecification
 
 export assembly_iterator, device_assembly_iterator, position_item, position_iterator
+export additional_iteration_kinds
 export item_update_flags, iterator_dofs, iterator_handler, iterator_scatter_address
 export item_provider, compute_partition, CellItems
 export item_families, setup_family_caches

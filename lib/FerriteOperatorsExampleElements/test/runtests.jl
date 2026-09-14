@@ -34,4 +34,26 @@ using Test
     # The diffusion stiffness is symmetric with a constant nullspace.
     @test K ≈ K'
     @test norm(K * ones(ndofs(dh))) < 1.0e-10
+
+    # The two-sided element assembles over a DISCONTINUOUS space, and its
+    # interior-facet coupling is declared rather than inferred.
+    dg_dh = let g = generate_grid(Quadrilateral, (2, 2))
+        handler = DofHandler(g)
+        add!(handler, :u, DiscontinuousLagrange{RefQuadrilateral, 1}())
+        close!(handler)
+    end
+    dg_op = setup_operator(
+        AssemblyStrategy(SequentialCPUDevice();
+            form = FullAssembly(StandardOperatorSpecification(;
+                sparsity_entries = interior_facet_entries!))),
+        SIPGDiffusionIntegrator(1.0, 4.0, QuadratureRuleCollection(2),
+                                FerriteOperators.FacetQuadratureRuleCollection(2), :u),
+        dg_dh,
+    )
+    update_operator!(dg_op, nothing)
+    A = dg_op.A
+    # SIPG is symmetric and annihilates constants: the jump of a constant is
+    # zero across every interface, and so is its gradient inside every cell.
+    @test A ≈ A'
+    @test norm(A * ones(ndofs(dg_dh))) < 1.0e-10 * norm(A)
 end

@@ -116,6 +116,13 @@ end
 FerriteOperators.setup_element_cache(m::DecoratedIntegrator, sdh::SubDofHandler) =
     PassthroughDecorator(FerriteOperators.setup_element_cache(m.inner, sdh))
 
+# A synthetic cache declaring a traversal of its own — `additional_iteration_kinds`'s
+# forward on `AbstractElementCacheDecorator` (`PassthroughDecorator` takes none
+# of its own) must reach it through the wrapper.
+struct MarkerIterationKind end
+struct DeclaringCache <: FerriteOperators.AbstractVolumetricElementCache end
+FerriteOperators.additional_iteration_kinds(form, ::DeclaringCache) = (MarkerIterationKind(),)
+
 ####################################
 ## An element whose store is allocated EAGERLY and filled only by the fill sweep
 ####################################
@@ -743,6 +750,21 @@ end
         end
     end
 
+    @testset "additional_iteration_kinds forwards through a decorator" begin
+        form = MatrixFreeAction()
+        # A plain cache declares none, and neither does a decorator wrapping it.
+        @test FerriteOperators.additional_iteration_kinds(form, EagerStoreCache(1.0, zeros(1))) == ()
+        @test FerriteOperators.additional_iteration_kinds(
+            form, PassthroughDecorator(EagerStoreCache(1.0, zeros(1)))) == ()
+        # A cache that DOES declare one reaches it through the decorator's
+        # blanket forward — the same forward the docstring on
+        # `AbstractElementCacheDecorator`'s method warns can silently hand back
+        # the wrong answer for a declaration a decorator needs to own itself.
+        @test FerriteOperators.additional_iteration_kinds(form, DeclaringCache()) == (MarkerIterationKind(),)
+        @test FerriteOperators.additional_iteration_kinds(form, PassthroughDecorator(DeclaringCache())) ==
+            (MarkerIterationKind(),)
+    end
+
     @testset "an anisotropic tensor gives a symmetric operator" begin
         dh = distorted_testbed(Hexahedron, o -> Lagrange{RefHexahedron, o}(), Float64, (3, 2, 2), 2)
         D = SymmetricTensor{2, 3}((2.0, 0.3, -0.2, 1.4, 0.1, 3.1))
@@ -952,8 +974,18 @@ struct NoRouteCache <: FerriteOperators.AbstractVolumetricElementCache end
 
     @testset "a cache serving neither fill route is refused" begin
         err = @test_throws ArgumentError FerriteOperators.element_matrix_fill_route(NoRouteCache)
+        @test occursin("ElementAssembly", err.value.msg)
         @test occursin("provides_analytic", err.value.msg)
         @test occursin("apply_element_action!", err.value.msg)
+    end
+
+    # P2-1 (do/gpu-dg adversarial review): the rejection must name the CALLER's
+    # storage election — `BlockRowAssemblyCache` passes its own name rather than
+    # inheriting the `ElementAssembly` wording above.
+    @testset "the same rejection names BlockRowAssembly when that is the election" begin
+        err = @test_throws ArgumentError FerriteOperators.element_matrix_fill_route(NoRouteCache, "BlockRowAssembly")
+        @test occursin("BlockRowAssembly", err.value.msg)
+        @test !occursin("ElementAssembly", err.value.msg)
     end
 
     @testset "the cooperative kernel serves the action kind only" begin

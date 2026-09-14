@@ -4,6 +4,45 @@ CurrentModule = FerriteOperatorsExampleElements
 
 # Example elements
 
+## A two-sided item: SIPG diffusion
+
+[`SIPGDiffusionIntegrator`](@ref) is the reference consumer of the three features
+a DG operator needs and a cell-square element does not: an item that spans TWO
+cells, the [`BlockRowAssembly`](@ref) storage election, and the two-window
+matrix-free scatter ([`element_scatter_length`](@ref)). Its item is an interior
+FACET, its local system the `2Nb × 2Nb` block over
+`[celldofs(here); celldofs(there)]`, and it reaches the framework through the
+ordinary `assemble_cell!(::JacobianRequest{:u}, …)` entry — the block-row
+condensation is the storage level's, not a second element entry point.
+
+**Two traversals, one per sweep kind.** The face terms want interior facets and
+the volume term wants cells, and an operator resolves one traversal per sweep
+kind. The element therefore APPORTIONS its volume term: cell `K`'s volume block
+goes into the own-side diagonal block of every item touching `K`, weighted
+`1 / n_interior_facets(K)`. The weights sum to one per cell, so the assembled
+matrix is the plain SIPG matrix — the element ships with a test comparing it
+against a reference assembled cell-by-cell and facet-by-facet. `FullAssembly`
+needs one declaration on top of that, because an interior-facet coupling is not
+in the `DofHandler`'s cell pattern:
+
+```julia
+spec = StandardOperatorSpecification(; sparsity_entries = interior_facet_entries!)
+```
+
+**The action contract.** Under `storage = `[`BlockRowAssembly`](@ref) the element's
+kernels run at FILL time only. What the action reads is the condensed store — for
+each cell, its diagonal block and one block per facet neighbour — so a `mul!`
+visits no quadrature point, gathers `(1 + Nf)·Nb` dofs and writes the `Nb` rows of
+its OWN cell alone. Those row sets are disjoint over a discontinuous space, which
+is why [`CellNeighbourItems`](@ref) is one colour: the scatter is a plain `+=`
+with no atomics and no colouring algorithm, and the action is bitwise repeatable.
+The fill is a separate, host-side sweep over the interior facets (there are no
+device `InterfaceValues`), and for a time-independent coefficient it runs ONCE —
+`setup_operator` does it, and `update_operator!` is needed only when `D`, the
+geometry or the penalty changes. `BlockRowAssembly(; premultiply_inverse_mass =
+mass_integrator)` folds `M⁻¹` into the same store at fill time, `M` being block
+diagonal by cell over a discontinuous space.
+
 ## Nesting the two-stage protocol
 
 [`SimpleNestedHomogenization`](@ref) is the two-stage protocol nested inside

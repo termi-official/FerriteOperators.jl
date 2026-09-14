@@ -70,24 +70,34 @@ _family_named(domain, kind) =
 
 """
     SubdomainCache(domain, device_cache, partition)
+    SubdomainCache(domain, device_cache, partition, alternates)
 
 One subdomain's traversal: its item-family domain descriptor (`AssemblyDomain`,
-[`FacetItemDomain`](@ref), [`AlgebraicDomain`](@ref)), the per-worker device
-scratch and the partition of its items.
+[`FacetItemDomain`](@ref), [`AlgebraicDomain`](@ref)), the PRIMARY kind's
+per-worker device scratch and partition.
 
 `contributes` is the structural verdict of whether an ASSEMBLY sweep can reach
 any kernel here, decided once from the caches' types (`_domain_assembles`) and
 skipped on by [`execute_on_subdomains!`](@ref). Reductions decide separately
 and per kind, through `_may_contribute`.
+
+`alternates` is `nothing` (every shipped cache but one) or a tuple of
+`(kind_type, device_cache, partition)` entries — one per kind
+[`additional_iteration_kinds`](@ref) declared for this subdomain's element
+cache, resolved the SAME way as the primary's. `_kind_caches` is where a sweep
+picks between them.
 """
 @concrete struct SubdomainCache
     domain
     device_cache
     partition
     contributes::Bool
+    alternates
 end
 SubdomainCache(domain, device_cache, partition) =
-    SubdomainCache(domain, device_cache, partition, _domain_assembles(domain))
+    SubdomainCache(domain, device_cache, partition, _domain_assembles(domain), nothing)
+SubdomainCache(domain, device_cache, partition, alternates) =
+    SubdomainCache(domain, device_cache, partition, _domain_assembles(domain), alternates)
 
 # A cell subdomain whose element cache is empty has nothing any assembly sweep
 # could reach: the kernel returns without writing and the scatter that follows
@@ -120,6 +130,36 @@ end
 
 _declared_slots(engine::AssemblyEngine) = engine.declared_slots
 
+# The sweep KIND a task carries, for the alternates lookup below —
+# `AssemblyTask`'s own field by default. A task type with no such concept (the
+# transfer operator's `AssembleTransferTerm`) answers `nothing`, which is what
+# every `SubdomainCache` built for it already carries as `alternates` too.
+_task_kind(task) = task.kind
+
+# The `(device_cache, partition)` pair a sweep of `kind` runs over: the
+# PRIMARY's where `alternates` is `nothing` (every shipped cache but one) or
+# names no entry for `kind`, else the matching entry's — read for TESTING and
+# introspection. `Nothing` is a type parameter of `sc` (`@concrete`), so the
+# common case constant-folds to the two field reads.
+#
+# NOT what the two drivers below call: an alternate's device cache and
+# partition are typed DIFFERENTLY from the primary's own (a different item
+# family), so a function returning "either" has a two-way UNION return type —
+# fine for a value nobody destructures further, but `execute_on_device!`'s own
+# two arguments would then box on every call. The drivers instead call it
+# INSIDE each branch (`_execute_kind!`/`_reduce_kind!` below), so every call
+# site sees its own branch's concrete types and only the call's `Nothing`
+# result needs to unify.
+@inline _kind_caches(sc, kind) = _kind_caches(sc.alternates, sc, kind)
+@inline _kind_caches(::Nothing, sc, kind) = (sc.device_cache, sc.partition)
+@inline _kind_caches(alternates::Tuple, sc, kind) = _match_alternate(alternates, kind, sc)
+
+@inline _match_alternate(::Tuple{}, kind, sc) = (sc.device_cache, sc.partition)
+@inline function _match_alternate(alternates::Tuple, kind, sc)
+    entry = first(alternates)
+    return kind isa entry[1] ? (entry[2], entry[3]) : _match_alternate(Base.tail(alternates), kind, sc)
+end
+
 """
     execute_on_subdomains!(task, engine)
 
@@ -129,13 +169,27 @@ skipping the ones whose caches make a contribution structurally impossible
 gather and zero scatter per item.
 """
 function execute_on_subdomains!(task, strategy, subdomain_caches)
+    kind = _task_kind(task)
     for (subdomain_id, sc) in enumerate(subdomain_caches)
         sc.contributes || continue
-        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, strategy.device, sc.device_cache, sc.partition)
+        _execute_kind!(sc.alternates, task, strategy.device, sc, kind, subdomain_id)
     end
 end
 execute_on_subdomains!(task, engine::AssemblyEngine) =
     execute_on_subdomains!(task, engine.strategy, engine.subdomain_caches)
+
+@inline _execute_kind!(::Nothing, task, device, sc, kind, subdomain_id) =
+    @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, device, sc.device_cache, sc.partition)
+@inline _execute_kind!(::Tuple{}, task, device, sc, kind, subdomain_id) =
+    @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, device, sc.device_cache, sc.partition)
+@inline function _execute_kind!(alternates::Tuple, task, device, sc, kind, subdomain_id)
+    entry = first(alternates)
+    if kind isa entry[1]
+        @timeit_debug "assemble subdomain $subdomain_id" execute_on_device!(task, device, entry[2], entry[3])
+    else
+        _execute_kind!(Base.tail(alternates), task, device, sc, kind, subdomain_id)
+    end
+end
 
 """
     reduce_on_subdomains(task, engine) -> value
@@ -153,16 +207,30 @@ the fold order among the contributing subdomains is untouched, so the value is
 the one an unskipped traversal computes.
 """
 function reduce_on_subdomains(task, strategy, subdomain_caches)
-    total = initial_partial(task.kind)
+    kind = _task_kind(task)
+    total = initial_partial(kind)
     for (subdomain_id, sc) in enumerate(subdomain_caches)
-        _may_contribute(sc.domain, task.kind) || continue
-        partial = @timeit_debug "reduce subdomain $subdomain_id" reduce_on_device(task, strategy.device, sc.device_cache, sc.partition)
+        _may_contribute(sc.domain, kind) || continue
+        partial = _reduce_kind!(sc.alternates, task, strategy.device, sc, kind, subdomain_id)
         total = _reduce_partials(total, partial)
     end
     return total
 end
 reduce_on_subdomains(task, engine::AssemblyEngine) =
     reduce_on_subdomains(task, engine.strategy, engine.subdomain_caches)
+
+@inline _reduce_kind!(::Nothing, task, device, sc, kind, subdomain_id) =
+    @timeit_debug "reduce subdomain $subdomain_id" reduce_on_device(task, device, sc.device_cache, sc.partition)
+@inline _reduce_kind!(::Tuple{}, task, device, sc, kind, subdomain_id) =
+    @timeit_debug "reduce subdomain $subdomain_id" reduce_on_device(task, device, sc.device_cache, sc.partition)
+@inline function _reduce_kind!(alternates::Tuple, task, device, sc, kind, subdomain_id)
+    entry = first(alternates)
+    if kind isa entry[1]
+        @timeit_debug "reduce subdomain $subdomain_id" reduce_on_device(task, device, entry[2], entry[3])
+    else
+        _reduce_kind!(Base.tail(alternates), task, device, sc, kind, subdomain_id)
+    end
+end
 
 """
     get_dof_handler(op) -> AbstractDofHandler
