@@ -69,7 +69,7 @@ end
         end
     end
 
-    @testset "premultiply_inverse_mass fuses M⁻¹K on the device" begin
+    @testset "a RateFormIntegrator fuses M⁻¹K on the device" begin
         dh  = dg_cuda_handler(Quadrilateral, (3, 3), 1)
         itg = dg_cuda_integrator(1)
         u   = Float64[sin(3.1i) + 0.2cos(i) for i in 1:ndofs(dh)]
@@ -80,14 +80,32 @@ end
             op.A
         end
         fused = M \ expected
+        strategy = AssemblyStrategy(MatrixFreeAction(; storage = BlockRowAssembly()),
+                                    ColoredScheduling(), device)
 
-        op = setup_operator(
-            AssemblyStrategy(MatrixFreeAction(; storage =
-                                 BlockRowAssembly(; premultiply_inverse_mass = mass)),
-                             ColoredScheduling(), device), itg, dh)
+        # The DENSE mass, block-inverted per cell into the store.
+        op = setup_operator(strategy, RateFormIntegrator(itg, mass), dh)
         y = CUDA.zeros(Float64, ndofs(dh))
         mul!(y, op, CuVector(u))
         @test Array(y) ≈ fused rtol = 1.0e-8
         @test !isapprox(Array(y), expected; rtol = 1.0e-3)
+
+        # The refill runs the HOST mirror and re-fuses before the upload.
+        update_operator!(op, nothing)
+        fill!(y, 0.0)
+        mul!(y, op, CuVector(u))
+        @test Array(y) ≈ fused rtol = 1.0e-8
+
+        # The LUMPED mass: a diagonal element matrix, so the same store is
+        # scaled row by row instead of block-solved.
+        lumped = let lop = setup_operator(AssemblyStrategy(SequentialCPUDevice()),
+                                          RowSumLumped(mass), dh)
+            update_operator!(lop, nothing)
+            get_matrix(lop) \ expected
+        end
+        oplumped = setup_operator(strategy, RateFormIntegrator(itg, RowSumLumped(mass)), dh)
+        z = CUDA.zeros(Float64, ndofs(dh))
+        mul!(z, oplumped, CuVector(u))
+        @test Array(z) ≈ lumped rtol = 1.0e-8
     end
 end

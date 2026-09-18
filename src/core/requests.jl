@@ -96,12 +96,17 @@ end
 Accumulate ∂F/∂slot into `K`, slot ∈ (:u, :du, :v, :a, :q, …), under
 correction mode `C` (see [`CorrectionMode`](@ref)). `JacobianRequest{slot}(K)`
 defaults `C` to [`Consistent`](@ref).
+
+`K` carries the SHAPE the cache's [`element_matrix_structure`](@ref) declares:
+the `ndofs_per_cell` square every kernel writes `K[i, j]` into, or — under
+[`DiagonalElementMatrix`](@ref) — the diagonal VECTOR, which is then the whole
+of the element matrix and is written `K[i]`.
 """
-struct JacobianRequest{slot, C <: CorrectionMode, M <: AbstractMatrix} <: AbstractAssemblyRequest
+struct JacobianRequest{slot, C <: CorrectionMode, M <: AbstractVecOrMat} <: AbstractAssemblyRequest
     K::M
 end
-JacobianRequest{slot}(K::M) where {slot, M <: AbstractMatrix} = JacobianRequest{slot, Consistent, M}(K)
-JacobianRequest{slot, C}(K::M) where {slot, C <: CorrectionMode, M <: AbstractMatrix} = JacobianRequest{slot, C, M}(K)
+JacobianRequest{slot}(K::M) where {slot, M <: AbstractVecOrMat} = JacobianRequest{slot, Consistent, M}(K)
+JacobianRequest{slot, C}(K::M) where {slot, C <: CorrectionMode, M <: AbstractVecOrMat} = JacobianRequest{slot, C, M}(K)
 
 """
     JacobianResidualRequest{C <: CorrectionMode}(K, r)

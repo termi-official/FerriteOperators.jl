@@ -147,6 +147,71 @@ into a blocked target just as a nonlinear one does. A *linear* operator holds no
 matrix at all, and a blocked specification on one is rejected at
 `setup_operator` rather than silently dropped.
 
+## The rate form: inverse-mass-weighted terms
+
+A semidiscretization in rate form is `du/dt = M⁻¹(−Ku + b)`, and `M⁻¹K` is a
+TERM, not a storage trick: [`RateFormIntegrator`](@ref)`(rhs, mass)` spells it,
+whatever `rhs` is and whatever storage the strategy elects.
+
+```julia
+rate   = RateFormIntegrator(diffusion, mass)        # action(u) = M⁻¹(K·u)
+source = RateFormIntegrator(stimulus, mass)         # payload   = M⁻¹b
+```
+
+The pair is the whole declaration. The right-hand side's family decides which
+operator comes out — a bilinear `rhs` gives one whose `mul!` is `M⁻¹(A·u)`, a
+linear one an operator whose `op.b` IS `M⁻¹b` — and the mass's STRUCTURE decides
+how `M⁻¹` is realized:
+
+| mass | space | `M⁻¹` |
+|---|---|---|
+| [`DiagonalElementMatrix`](@ref) | any | reciprocal of the assembled diagonal |
+| [`DenseElementMatrix`](@ref) | discontinuous | per-cell block inverse |
+| [`DenseElementMatrix`](@ref) | continuous | **refused at setup** |
+
+The refusal is the point: a consistent mass over a continuous space has no
+cell-local inverse, and this package will not quietly substitute one. The two
+escapes are named in the error and both are the caller's discretization
+choice — [`RowSumLumped`](@ref)`(mass)`, whose element matrix is its diagonal,
+or a collocated (spectral) mass element declaring
+[`DiagonalElementMatrix`](@ref) itself.
+
+Where `M⁻¹` is applied follows the storage, and never changes the answer:
+
+| form / storage | realization |
+|---|---|
+| [`FullAssembly`](@ref) | the rhs matrix, rows scaled (diagonal) or block-solved per cell (dense) — same sparsity, no second matrix |
+| [`MatrixFreeAction`](@ref) + [`BlockRowAssembly`](@ref) | fused into the block-row store at fill; no inverse at action time |
+| [`MatrixFreeAction`](@ref) + [`Stored`](@ref)/[`Recompute`](@ref)/[`ElementAssembly`](@ref) | the action, then the reciprocal scaling — a diagonal mass only |
+| a linear `rhs` | `b ← M⁻¹b` at every fill, under an ASSEMBLING form — a load vector has no action to evaluate, so there is no matrix-free realization |
+
+`M⁻¹` is as fresh as the operator's last fill: [`update_operator!`](@ref)
+re-derives it with that call's `(p, ctx)`, so a mass reading
+[`evaluation_time`](@ref) is evaluated where the right-hand side is. At setup
+that pair is `initial_parameters`/`initial_context`, which is also what a
+matrix-free store is first filled with:
+
+```julia
+op = setup_operator(strategy, rate, dh; initial_context = TimeIntegrationContext(t₀, Δt, 1.0))
+```
+
+### Element-matrix structure
+
+[`element_matrix_structure`](@ref) is the element-level declaration the rate
+form reads. `DenseElementMatrix()` is the default — the `ndofs_per_cell` square
+every kernel writes `K[i, j]` into. [`DiagonalElementMatrix`](@ref) declares
+that the element matrix IS its diagonal: [`allocate_element_matrix`](@ref) hands
+the kernel an `ndofs_per_cell` VECTOR written `K[i]`, and a `FullAssembly`
+operator over such an integrator holds a `Diagonal` rather than a sparse matrix.
+Like the symmetry election beside it the declaration is trusted unchecked, and
+the two ELEMENT storage levels refuse it by name — they keep dense per-cell
+matrices.
+
+[`RowSumLumped`](@ref)`(inner)` is the shipped consumer: `mᵢ = Σⱼ Mᵢⱼ` over the
+inner's element matrix. Lumping per element and then assembling gives exactly
+the global row sum, the scatter being linear — so it needs no global pass, and
+it is the same operator on a continuous space as on a discontinuous one.
+
 ## Slots and rate reconstruction
 
 Time discretization of the global unknowns is solver-owned: solvers pass slot

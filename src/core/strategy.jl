@@ -183,7 +183,7 @@ at FILL time only.
 struct ElementAssembly <: StorageElection end
 
 """
-    BlockRowAssembly(; premultiply_inverse_mass = nothing)
+    BlockRowAssembly()
 
 Keep the cell's whole matrix ROW, in blocks — the ELEMENT level for a term whose
 element-local system spans TWO cells (a DG interface term), where
@@ -222,24 +222,19 @@ That is the round trip a [`Stored`](@ref) operator does not pay, and it is paid
 per REFILL — none for a time-independent form, which is filled once at
 [`setup_operator`](@ref).
 
-`premultiply_inverse_mass` elects the fused operator `M⁻¹A`: pass a bilinear
-MASS integrator and each cell's row is left-multiplied by that cell's inverse
-mass block once at fill time ([`finalize_action_storage!`](@ref)). `M` is block
-diagonal by cell over a discontinuous space, so the fused store has the same
-block-row sparsity, the action is unchanged and no inverse is formed per `mul!`.
-Two costs, recorded: it forecloses a `K_IJ = K_JIᵀ` exploit between blocks, and
-every refill must re-fuse — which it does, the fusion being part of the fill.
-The mass integrator is queried with `p = nothing`: a PARAMETER-FREE mass is
-assumed, and a mass whose form genuinely needs `p` fuses wrong, silently.
+The INVERSE-MASS-WEIGHTED form `M⁻¹A` is not an election of this level: it is
+the term [`RateFormIntegrator`](@ref) spells. Under this storage that term fuses
+`M⁻¹` into the store once per fill ([`finalize_action_storage!`](@ref)) — `M` is
+block diagonal by cell over a discontinuous space, so the fused store has the
+same block-row sparsity, the action is unchanged and no inverse is formed per
+`mul!`. Two costs, recorded: it forecloses a `K_IJ = K_JIᵀ` exploit between
+blocks, and every refill must re-fuse.
 
 !!! warning "Experimental surface"
     This election, its cache and the host fill route may change in a minor
     release.
 """
-struct BlockRowAssembly{M} <: StorageElection
-    premultiply_inverse_mass::M
-end
-BlockRowAssembly(; premultiply_inverse_mass = nothing) = BlockRowAssembly(premultiply_inverse_mass)
+struct BlockRowAssembly <: StorageElection end
 
 @doc (@doc StorageElection) const CorrectorElection = StorageElection
 
@@ -284,6 +279,59 @@ Declares `Kₑ = Kₑᵀ` for every cell of the subdomain — see
 wrong declaration.
 """
 struct SymmetricElementMatrix end
+
+####################################
+## The ELEMENT matrix's structure election
+####################################
+
+"""
+    element_matrix_structure(cache) -> DenseElementMatrix()
+                                     -> DiagonalElementMatrix()
+
+WHAT SHAPE `cache`'s element matrix has — the second half of the element-matrix
+election family [`element_matrix_symmetry`](@ref) opens, and the one that
+changes the BUFFER a kernel writes.
+
+`DenseElementMatrix()` (the default) is the `ndofs_per_cell` square every
+element kernel writes today. [`DiagonalElementMatrix`](@ref) declares that the
+element matrix IS its diagonal: [`allocate_element_matrix`](@ref) then returns
+an `ndofs_per_cell` VECTOR, the kernel writes `req.K[i]` rather than
+`req.K[i, j]`, and a [`FullAssembly`](@ref) operator over such an integrator
+holds a `Diagonal` instead of a sparse matrix. The declaration is TRUSTED
+UNCHECKED, exactly as the symmetry election is: an element that writes
+`req.K[i, j]` into the vector this election allocates is a bounds error at
+best and a silently wrong operator at worst.
+
+It is a declaration about the FORM, not a storage election: a mass whose
+element matrix is diagonal by construction ([`RowSumLumped`](@ref), a
+collocated/spectral mass) declares it, and [`RateFormIntegrator`](@ref) reads
+it to decide whether `M⁻¹` is a reciprocal scaling or a per-cell block solve.
+The two ELEMENT storage levels ([`ElementAssembly`](@ref),
+[`BlockRowAssembly`](@ref)) keep dense per-cell matrices and refuse a
+diagonal-structured cache by name.
+
+!!! warning "Experimental surface"
+    This election and the two singletons below may change in a minor release.
+"""
+element_matrix_structure(cache) = DenseElementMatrix()
+
+"""
+    DenseElementMatrix()
+
+The default [`element_matrix_structure`](@ref) election: the element matrix is
+the `ndofs_per_cell` square every kernel writes `req.K[i, j]` into.
+"""
+struct DenseElementMatrix end
+
+"""
+    DiagonalElementMatrix()
+
+Declares that the element matrix is DIAGONAL, so that its diagonal is the whole
+of it: [`allocate_element_matrix`](@ref) returns an `ndofs_per_cell` vector and
+the kernel writes `req.K[i]`. See [`element_matrix_structure`](@ref) for the
+trust contract and for what consumes the declaration.
+"""
+struct DiagonalElementMatrix end
 
 """
 Which representation of the operator is produced — the MFEM assembly level.

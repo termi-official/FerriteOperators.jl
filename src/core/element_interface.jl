@@ -50,10 +50,22 @@ The element-local buffers of one item, sized in the FIELD SPACE — the
 [`element_value_type`](@ref). Where the integrator declares
 [`global_dofs`](@ref) the engine PADS what these return, so an override states
 the field-space size and never the augmented one.
+
+The element matrix's SHAPE follows [`element_matrix_structure`](@ref): the
+`ndofs_per_cell` square by default, and an `ndofs_per_cell` VECTOR — the
+diagonal, which is the whole matrix — under
+[`DiagonalElementMatrix`](@ref). Declaring the structure is therefore enough;
+overriding this hook beside it says something the election already says.
 """
-allocate_element_matrix(element_cache, sdh)          = zeros(element_value_type(element_cache), ndofs_per_cell(sdh), ndofs_per_cell(sdh))
+allocate_element_matrix(element_cache, sdh) =
+    _allocate_element_matrix(element_matrix_structure(element_cache), element_cache, sdh)
 @doc (@doc allocate_element_matrix) allocate_element_unknown_vector(element_cache, sdh)  = zeros(element_value_type(element_cache), ndofs_per_cell(sdh))
 @doc (@doc allocate_element_matrix) allocate_element_residual_vector(element_cache, sdh) = zeros(element_value_type(element_cache), ndofs_per_cell(sdh))
+
+_allocate_element_matrix(::DenseElementMatrix, element_cache, sdh) =
+    zeros(element_value_type(element_cache), ndofs_per_cell(sdh), ndofs_per_cell(sdh))
+_allocate_element_matrix(::DiagonalElementMatrix, element_cache, sdh) =
+    zeros(element_value_type(element_cache), ndofs_per_cell(sdh))
 
 """
     element_local_length(element_cache) -> Val{N} or nothing
@@ -131,11 +143,14 @@ Base.@propagate_inbounds Base.getindex(w::ElementUnknownWindow{T}, j::Int) where
     convert(T, w.u[w.dofs[j]])
 
 # The padding itself: `similar` keeps whatever array type the element chose.
-function pad_element_matrix(Ke, n::Int)
+# A DIAGONAL element matrix ([`element_matrix_structure`](@ref)) is a vector, so
+# its padding is a vector too — the augmented tail's own diagonal entries.
+function pad_element_matrix(Ke::AbstractMatrix, n::Int)
     n == 0 && return Ke
     m = size(Ke, 1) + n
     return fill!(similar(Ke, m, m), zero(eltype(Ke)))
 end
+pad_element_matrix(Ke::AbstractVector, n::Int) = pad_element_vector(Ke, n)
 function pad_element_vector(v, n::Int)
     n == 0 && return v
     return fill!(similar(v, length(v) + n), zero(eltype(v)))

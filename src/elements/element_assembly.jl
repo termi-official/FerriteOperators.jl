@@ -94,6 +94,7 @@ device_worker_view(c::ElementAssemblyCache, worker) =
 # `cellid`, which answers the item's FIRST cell and collides between items.
 function with_action_storage(cache, ::ElementAssembly, sdh::SubDofHandler)
     nd = ndofs_per_cell(sdh)
+    _assert_dense_element_matrix(cache, "ElementAssembly")
     nl = length(allocate_element_residual_vector(cache, sdh))
     nl == nd || throw(ArgumentError(
         "$(typeof(cache)) declares an element-local system of $(nl) rows over a subdomain with " *
@@ -103,6 +104,22 @@ function with_action_storage(cache, ::ElementAssembly, sdh::SubDofHandler)
         "same slot. Elect `storage = BlockRowAssembly()`, which keeps the cell's whole matrix " *
         "row in blocks, or `storage = Stored()`/`Recompute()`."))
     return ElementAssemblyCache(cache, sdh, element_matrix_fill_route(typeof(cache)), element_matrix_symmetry(cache))
+end
+
+# Both ELEMENT storage levels keep DENSE per-cell matrices and fill them through
+# the element's own `JacobianKind{:u}` kernel or its action. A cache declaring
+# [`DiagonalElementMatrix`](@ref) writes `req.K[i]` into the square view that
+# fill hands it — the first COLUMN of it — which is a silently wrong store and
+# not an error, hence the wall here.
+function _assert_dense_element_matrix(cache, election_name)
+    element_matrix_structure(cache) isa DenseElementMatrix || throw(ArgumentError(
+        "$(typeof(cache)) declares `element_matrix_structure(cache) = " *
+        "$(nameof(typeof(element_matrix_structure(cache))))()`, and `$(election_name)()` keeps " *
+        "DENSE per-cell matrices: its fill hands the element's kernel a square buffer, which a " *
+        "kernel writing the diagonal alone would fill in its first column. Assemble a " *
+        "diagonal-structured term under `FullAssembly` — where it holds a `Diagonal` and no " *
+        "sparse matrix — or elect `storage = Stored()`/`Recompute()`."))
+    return nothing
 end
 
 function ElementAssemblyCache(cache, sdh::SubDofHandler, route, symmetry)
