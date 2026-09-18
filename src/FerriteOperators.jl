@@ -9,7 +9,7 @@ import SparseArrays: AbstractSparseMatrixCSC, getcolptr
 
 using ConcreteStructs
 
-import LinearAlgebra: mul!, rmul!, ldiv!, qr, lu!, cholesky!, Symmetric, dot, norm
+import LinearAlgebra: mul!, rmul!, ldiv!, qr, lu!, cholesky!, Symmetric, Diagonal, dot, norm
 
 import ForwardDiff
 
@@ -105,6 +105,7 @@ include("elements/composite_elements.jl")     # High-level composition of operat
 include("elements/ad_element.jl")             # ADElementCache: AD as an element cache decorator
 include("elements/element_assembly.jl")       # ElementAssemblyCache: the ELEMENT storage level of the matrix-free action
 include("elements/block_row_assembly.jl")     # BlockRowAssemblyCache: the ELEMENT level of a two-sided element
+include("elements/row_sum_lumped.jl")         # RowSumLumped: a mass integrator's diagonal, as a decorator
 
 include("operators/general.jl")         # Domain descriptors, NullOperator
 include("operators/nonlinear.jl")       # Assembly and action tasks
@@ -116,6 +117,7 @@ include("elements/prolongators.jl")     # Mass-based prolongator integrators
 include("operators/ad_decoration.jl")   # Construction-time ADElementCache/FusedFromSplit wrapping policy
 include("operators/setup.jl")           # Operator setup, so callers need not poke into internals
 include("operators/matrix_free.jl")     # MatrixFreeAction: the operator's action without a matrix
+include("operators/rate_form.jl")       # RateFormIntegrator: the inverse-mass-weighted term
 include("elements/domain_elements.jl")  # Subdomain routing; specializes setup.jl's per-DofHandler cache seam
 include("operators/components.jl")      # Component bags over a shared sparsity pattern + combine!
 include("operators/stage_block.jl")     # Fully implicit Runge-Kutta stage blocks
@@ -186,7 +188,7 @@ export ADElementCache, AbstractElementCacheDecorator, unwrap, ForwardDiffAD, Fus
 export decorate_element_cache, needs_ad_decoration, fully_analytic
 
 export residual_size, unknown_size
-export get_dof_handler, get_strategy, get_subdomain_caches
+export get_dof_handler, get_strategy, get_subdomain_caches, get_matrix
 export get_first_cell, geometric_subdomain_interpolation
 
 export NullOperator, LinearNullOperator
@@ -204,6 +206,10 @@ export StorageElection, Stored, Recompute, ElementAssembly, ElementAssemblyCache
 export BlockRowAssembly, BlockRowAssemblyCache, CellNeighbourItems, CellNeighbourCursor, BlockRowFillItems
 export fill_block_rows!, finalize_action_storage!
 export element_matrix_symmetry, GeneralElementMatrix, SymmetricElementMatrix
+export element_matrix_structure, DenseElementMatrix, DiagonalElementMatrix
+export RowSumLumped
+export RateFormIntegrator, BilinearRateFormIntegrator, LinearRateFormIntegrator
+export RateFormFerriteOperator, LinearRateFormFerriteOperator, rate_form_rhs
 export AbstractElementMapping, WorkerPerElement, CooperativeElement, LanesPerElement
 export with_element_mapping, element_action_row, element_scatter_length
 export cooperative_lattice_dim, cooperative_group_size, cooperative_scratch_shape

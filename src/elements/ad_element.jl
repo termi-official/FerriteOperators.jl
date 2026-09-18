@@ -11,7 +11,8 @@ a field `inner`, and everything a decorator inherits is forwarded once here.
 
 A declaration about the wrapped ELEMENT is forwarded wholesale — the iteration
 seams, [`element_local_length`](@ref), [`element_scatter_length`](@ref),
-[`element_matrix_symmetry`](@ref), [`element_action_row`](@ref), and the
+[`element_matrix_symmetry`](@ref), [`element_matrix_structure`](@ref),
+[`element_action_row`](@ref), and the
 matrix-free storage
 ([`with_action_storage`](@ref), [`fill_quadrature_data!`](@ref)), which passes
 through and back via [`rewrap`](@ref). A decorator with its own explicit method
@@ -66,6 +67,7 @@ allocate_element_unknown_vector(d::AbstractElementCacheDecorator, sdh) = allocat
 allocate_element_residual_vector(d::AbstractElementCacheDecorator, sdh) = allocate_element_residual_vector(d.inner, sdh)
 element_value_type(d::AbstractElementCacheDecorator) = element_value_type(d.inner)
 element_matrix_symmetry(d::AbstractElementCacheDecorator) = element_matrix_symmetry(d.inner)
+element_matrix_structure(d::AbstractElementCacheDecorator) = element_matrix_structure(d.inner)
 assembly_iterator(kind, d::AbstractElementCacheDecorator, sdh) = assembly_iterator(kind, d.inner, sdh)
 device_assembly_iterator(kind, d::AbstractElementCacheDecorator, sdh, device_sdh) =
     device_assembly_iterator(kind, d.inner, sdh, device_sdh)

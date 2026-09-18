@@ -230,7 +230,7 @@ struct BlockRowAssemblyCache{Inner, KT, NT, ST, WT, R, SDH, MI, SCT, DT, ND, NB,
     windows::WT
     route::R
     sdh::SDH          # the HOST subdomain the fill walks; `nothing` on a device instance
-    mass::MI          # the fused mass integrator, or `nothing`
+    mass::MI          # `RateFormIntegrator`'s mass term, fused at finalize, or `nothing`
     scratch::SCT      # per-worker `2Nb × 2Nb` fill scratch (the engine-driven fill)
     fill_dofs::DT     # per-worker `Nb` fill scratch, `_condense_pair!`'s temp dof buffer
     local_size::Val{ND}
@@ -365,8 +365,14 @@ device_worker_view(c::BlockRowAssemblyCache, worker) =
 # at FILL time instead (`_condense_pair!`'s "not one of its facet neighbours
 # inside this subdomain"): this election only sees the subdomain's shape, not
 # the fill's item set, so it cannot refuse the coupling any earlier than that.
-function with_action_storage(cache, storage::BlockRowAssembly, sdh::SubDofHandler)
+with_action_storage(cache, storage::BlockRowAssembly, sdh::SubDofHandler) =
+    _block_row_storage(cache, sdh, nothing)
+
+# `mass` is [`RateFormIntegrator`](@ref)'s, handed over by the rate form's own
+# element cache; `nothing` for the bare store.
+function _block_row_storage(cache, sdh::SubDofHandler, mass)
     nb = ndofs_per_cell(sdh)
+    _assert_dense_element_matrix(cache, "BlockRowAssembly")
     nl = length(allocate_element_residual_vector(cache, sdh))
     nl == 2nb || throw(ArgumentError(
         "$(typeof(cache)) declares an element-local system of $(nl) rows over a subdomain with " *
@@ -376,37 +382,45 @@ function with_action_storage(cache, storage::BlockRowAssembly, sdh::SubDofHandle
         "element, or declare `allocate_element_residual_vector` as `2 * ndofs_per_cell`."))
     _assert_cell_disjoint_dofs(sdh)
     return BlockRowAssemblyCache(cache, sdh, element_matrix_fill_route(typeof(cache), "BlockRowAssembly"),
-                                 storage.premultiply_inverse_mass)
+                                 mass)
+end
+
+# The first dof two of `sdh`'s cells share, or `0` where none do — the promise a
+# DISCONTINUOUS space keeps by construction and a continuous one does not. One
+# walk over the subdomain's cells, cheap next to the topology walk
+# `BlockRowAssemblyCache` already does. `seen` is an ARGUMENT so that a caller
+# spanning several subdomains (a rate form's cell-block mass) can carry one
+# bitvector across them and catch a dof shared over a subdomain SEAM, which no
+# per-subdomain walk can see.
+function _shared_cell_dof(sdh::SubDofHandler, seen = falses(ndofs(sdh.dh)))
+    dofs = Vector{Int}(undef, ndofs_per_cell(sdh))
+    for cellid in sdh.cellset
+        celldofs!(dofs, sdh.dh, cellid)
+        for d in dofs
+            seen[d] && return d
+            seen[d] = true
+        end
+    end
+    return 0
 end
 
 # `CellNeighbourItems`'s one-colour partition is valid only because every item
 # scatters its OWN cell's dofs and no two cells of the subdomain share a dof
-# (its docstring's injectivity claim). That holds for a DISCONTINUOUS space by
-# construction and fails for a CONTINUOUS one, where two face-neighbours share
-# the dofs on their common facet: two different items would then scatter into
-# the same row through a plain, non-atomic `+=`, a silent lost-update race
-# under `PolyesterDevice`/`ColoredScheduling` (P1-1 of the do/gpu-dg
-# adversarial review). Checked once, at setup, over every cell of the
-# subdomain — cheap next to the topology walk `BlockRowAssemblyCache` already
-# does here.
+# (its docstring's injectivity claim). Over a CONTINUOUS space two
+# face-neighbours share the dofs on their common facet, so two different items
+# would scatter into the same row through a plain, non-atomic `+=` — a silent
+# lost-update race under `PolyesterDevice`/`ColoredScheduling` (P1-1 of the
+# do/gpu-dg adversarial review). Checked once, at setup.
 function _assert_cell_disjoint_dofs(sdh::SubDofHandler)
-    nb = ndofs_per_cell(sdh)
-    seen = falses(ndofs(sdh.dh))
-    dofs = Vector{Int}(undef, nb)
-    for cellid in sdh.cellset
-        celldofs!(dofs, sdh.dh, cellid)
-        for d in dofs
-            seen[d] && throw(ArgumentError(
-                "`BlockRowAssembly()` requires a DISCONTINUOUS space: dof $(d) is shared by two " *
-                "cells of this subdomain. Its one-colour partition scatters every item's OWN cell " *
-                "rows through a plain, non-atomic `+=`, which is injective only when every dof " *
-                "belongs to exactly one cell — the promise a discontinuous space keeps and a " *
-                "continuous one does not. Elect `storage = ElementAssembly()` for a continuous " *
-                "space."))
-            seen[d] = true
-        end
-    end
-    return nothing
+    d = _shared_cell_dof(sdh)
+    d == 0 && return nothing
+    throw(ArgumentError(
+        "`BlockRowAssembly()` requires a DISCONTINUOUS space: dof $(d) is shared by two " *
+        "cells of this subdomain. Its one-colour partition scatters every item's OWN cell " *
+        "rows through a plain, non-atomic `+=`, which is injective only when every dof " *
+        "belongs to exactly one cell — the promise a discontinuous space keeps and a " *
+        "continuous one does not. Elect `storage = ElementAssembly()` for a continuous " *
+        "space."))
 end
 
 function BlockRowAssemblyCache(cache, sdh::SubDofHandler, route, mass)
@@ -695,12 +709,16 @@ end
 ####################################
 
 """
-    finalize_action_storage!(cache, device)
+    finalize_action_storage!(cache, device, p, ctx)
 
 Transform what a matrix-free `storage` election keeps, once the fill sweep that
-wrote it has finished. A no-op for every shipped cache but
-[`BlockRowAssemblyCache`](@ref), whose `premultiply_inverse_mass` election is
-applied here.
+wrote it has finished. `p` and `ctx` are the refill's own — the pair
+[`update_operator!`](@ref) was called with, and the initial pair
+[`setup_operator`](@ref) fills with — so a transform reading a second term's
+kernels evaluates them at the same point the fill did.
+
+A no-op for every shipped cache but [`BlockRowAssemblyCache`](@ref), where it is
+where [`RateFormIntegrator`](@ref) fuses `M⁻¹` into the store.
 
 It is a POST-SWEEP hook and not a per-item one (the `_pack_symmetric!` route):
 the transform is per matrix ROW, and a row is complete only after every item
@@ -709,47 +727,65 @@ that contributes to it has run.
 !!! warning "Experimental surface"
     Internal to the matrix-free action; it may change in a minor release.
 """
-finalize_action_storage!(cache, device) = nothing
+finalize_action_storage!(cache, device, p, ctx) = nothing
 
-finalize_action_storage!(cache::BlockRowAssemblyCache, device) =
-    _premultiply_inverse_mass!(cache, cache.mass)
+finalize_action_storage!(cache::BlockRowAssemblyCache, device, p, ctx) =
+    _premultiply_inverse_mass!(cache, cache.mass, p, ctx)
 
-_premultiply_inverse_mass!(::BlockRowAssemblyCache, ::Nothing) = nothing
+_premultiply_inverse_mass!(::BlockRowAssemblyCache, ::Nothing, p, ctx) = nothing
 
-# `M` is block diagonal by cell over a discontinuous space, so `M⁻¹K` has the
-# SAME block-row sparsity: one cell's inverse mass block left-scales that cell's
-# whole row. The inverse is formed once per cell, here, and never at action time.
-# The mass integrator is queried with `p = nothing` — a PARAMETER-FREE mass is
-# assumed; a mass whose form genuinely needs `p` is fused wrong here, silently.
-function _premultiply_inverse_mass!(cache::BlockRowAssemblyCache, integrator)
-    sdh  = cache.sdh
-    nb   = _extent(cache.row_size)
-    nf   = _extent(cache.nfacets)
-    T    = eltype(cache.K)
-    mass  = setup_element_cache(integrator, sdh)
-    it    = assembly_iterator(nothing, mass, sdh)
-    flags = item_update_flags(nothing, mass)
-    Mₑ    = zeros(T, nb, nb)
-    B     = zeros(T, nb, nb)
-    C     = zeros(T, nb, nb)
-    for (slot, cellid) in enumerate(sdh.cellset)
-        cell = position_iterator(it, cellid, flags)
-        reinit_values!(mass, cell)
-        fill!(Mₑ, zero(T))
-        assemble_cell!(JacobianRequest{:u}(Mₑ), mass,
-                       CellArgs((;), cell, query_cell_parameters(mass, cell, nothing), nothing))
-        Minv = inv(Mₑ)
-        for f in 0:nf
-            (f == 0 || cache.neighbours[slot, f] != 0) || continue
-            # Through contiguous scratch: `K`'s block view is strided, not
-            # column-contiguous, so neither operand of the product may be it.
-            B .= @view cache.K[slot, 1 + f, :, :]
-            mul!(C, Minv, B)
-            (@view cache.K[slot, 1 + f, :, :]) .= C
+# `M` is block diagonal by cell over a discontinuous space — the space this
+# store already demands (`_assert_cell_disjoint_dofs`) — so `M⁻¹K` has the SAME
+# block-row sparsity: one cell's inverse mass left-scales that cell's whole row.
+# The inverse is formed once per cell, here, and never at action time. Over a
+# cell-disjoint space the cell's element mass IS its share of the global one, so
+# no assembly precedes the inversion.
+function _premultiply_inverse_mass!(cache::BlockRowAssemblyCache, integrator, p, ctx)
+    nb = _extent(cache.row_size)
+    T  = eltype(cache.K)
+    B  = zeros(T, nb, nb)
+    C  = zeros(T, nb, nb)
+    foreach_element_mass(integrator, cache.sdh, p, ctx) do slot, cellid, cell, Mₑ
+        _scale_block_row!(cache, slot, Mₑ, B, C)
+    end
+    return nothing
+end
+
+# One cell's block row, left-multiplied by its inverse mass. `Mₑ` is the mass's
+# element matrix in whatever shape its `element_matrix_structure` declares: a
+# DIAGONAL is a reciprocal scaling of the row's rows, a DENSE one a block solve.
+function _scale_block_row!(cache::BlockRowAssemblyCache, slot::Int, Mₑ::AbstractMatrix, B, C)
+    Minv = inv(Mₑ)
+    for f in _stored_facets(cache, slot)
+        # Through contiguous scratch: `K`'s block view is strided, not
+        # column-contiguous, so neither operand of the product may be it.
+        B .= @view cache.K[slot, 1 + f, :, :]
+        mul!(C, Minv, B)
+        (@view cache.K[slot, 1 + f, :, :]) .= C
+    end
+    return nothing
+end
+
+function _scale_block_row!(cache::BlockRowAssemblyCache, slot::Int, mₑ::AbstractVector, B, C)
+    for (i, m) in enumerate(mₑ)
+        iszero(m) && throw(ArgumentError(
+            "The lumped mass of cell slot $(slot) has a zero diagonal entry at local dof $(i), so " *
+            "`M⁻¹` does not exist. A rate form checks its mass STRUCTURALLY at setup; a diagonal " *
+            "that vanishes is a property of the mass's VALUES — check the density and the " *
+            "quadrature rule the mass integrator carries."))
+    end
+    for f in _stored_facets(cache, slot)
+        for j in axes(cache.K, 4), i in eachindex(mₑ)
+            @inbounds cache.K[slot, 1 + f, i, j] /= mₑ[i]
         end
     end
     return nothing
 end
+
+# The facet columns this slot keeps a block for: its own diagonal block and
+# every facet with a neighbour inside the subdomain.
+_stored_facets(cache::BlockRowAssemblyCache, slot::Int) =
+    Iterators.filter(f -> f == 0 || cache.neighbours[slot, f] != 0, 0:_extent(cache.nfacets))
 
 ####################################
 ## The host mirror
