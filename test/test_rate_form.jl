@@ -12,6 +12,8 @@ using FerriteOperatorsExampleElements
 using Test
 using LinearAlgebra
 using SparseArrays
+import Adapt, GPUArrays, GPUArraysCore
+import KernelAbstractions as KA
 
 const RF_D = 1.3
 const RF_ρ = 2.1
@@ -22,6 +24,8 @@ rf_probe(dh) = Float64[sin(0.9i) + 0.3cos(1.7i) for i in 1:ndofs(dh)]
 rf_seq() = AssemblyStrategy(SequentialCPUDevice())
 rf_element_arm() = AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()),
                                     SequentialScheduling(), SequentialCPUDevice())
+rf_ka_element_arm() = AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()), ColoredScheduling(),
+                                       KernelAbstractionsDevice(KA.CPU(); value_type = Float64, index_type = Int))
 
 function rf_assembled(strategy, integrator, dh)
     op = setup_operator(strategy, integrator, dh)
@@ -204,15 +208,18 @@ end
     reference = D \ (K * u)
     rate = RateFormIntegrator(rf_diffusion(), RowSumLumped(rf_mass()))
 
-    @testset "FullAssembly scales the rows of the assembled matrix" begin
+    @testset "FullAssembly composes the assembled rhs with the diagonal" begin
         op = rf_assembled(rf_seq(), rate, dh)
         @test op isa RateFormFerriteOperator
         @test rf_action(op, u) ≈ reference rtol = 1.0e-12
         # The weighting is not a no-op the tolerance would hide.
         @test !isapprox(rf_action(op, u), K * u; rtol = 1.0e-3)
-        # Same sparsity: the fusion is a row scaling, not a second matrix.
-        @test nnz(get_matrix(op)) == nnz(K)
-        @test get_matrix(op) ≈ D \ Matrix(K) rtol = 1.0e-12
+        # A composition: the rhs stays unweighted, `M⁻¹` is a `Diagonal` beside it,
+        # and there is no fused matrix to hand out.
+        @test get_matrix(rate_form_rhs(op)) ≈ K rtol = 1.0e-12
+        @test rate_form_inverse_mass(op) isa Diagonal
+        @test rate_form_inverse_mass(op) ≈ inv(D) rtol = 1.0e-12
+        @test_throws ArgumentError get_matrix(op)
     end
 
     @testset "a refill re-weights rather than weighting twice" begin
@@ -270,19 +277,79 @@ end
 
         op = rf_assembled(rf_seq(), RateFormIntegrator(rf_diffusion(), rf_mass()), dh)
         @test rf_action(op, u) ≈ reference rtol = 1.0e-10
-        @test nnz(get_matrix(op)) == nnz(K)
-        # A refill re-derives the mass and re-fuses.
+        # `M⁻¹` is the `ElementInverse` operator, composed with the assembled rhs.
+        @test rate_form_inverse_mass(op) isa MatrixFreeFerriteOperator
+        @test get_matrix(rate_form_rhs(op)) ≈ K rtol = 1.0e-12
+        @test_throws ArgumentError get_matrix(op)
+        # A refill re-derives the mass.
         update_operator!(op, nothing)
         @test rf_action(op, u) ≈ reference rtol = 1.0e-10
     end
 
-    @testset "a matrix-free level with no row to fuse into is refused" begin
-        dh  = rf_dg_handler((3, 2))
-        err = @test_throws ArgumentError setup_operator(
-            rf_element_arm(), RateFormIntegrator(rf_diffusion(), rf_mass()), dh)
-        msg = err.value.msg
-        @test occursin("BlockRowAssembly", msg)
-        @test occursin("RowSumLumped", msg)
+    @testset "the ELEMENT level composes the block inverse with the action — $label" for
+            (label, strategy) in ("SequentialCPUDevice" => rf_element_arm(), "KA.CPU" => rf_ka_element_arm())
+        dh = rf_dg_handler((3, 2))
+        u  = rf_probe(dh)
+        K  = get_matrix(rf_assembled(rf_seq(), rf_diffusion(), dh))
+        M  = get_matrix(rf_assembled(rf_seq(), rf_mass(), dh))
+        op = setup_operator(strategy, RateFormIntegrator(rf_diffusion(), rf_mass()), dh)
+        @test rf_action(op, u) ≈ M \ (K * u) rtol = 1.0e-10
+        y = fill(2.0, ndofs(dh))
+        mul!(y, op, u, 3.0, 0.5)
+        @test y ≈ 3.0 .* (M \ (K * u)) .+ 1.0 rtol = 1.0e-10
+    end
+end
+
+@testset "ElementInverse" begin
+    dh = rf_dg_handler((3, 2))
+    u  = rf_probe(dh)
+    M  = get_matrix(rf_assembled(rf_seq(), rf_mass(), dh))
+
+    @testset "assembled, it is M⁻¹ over a discontinuous space" begin
+        op = rf_assembled(rf_seq(), ElementInverse(rf_mass()), dh)
+        @test Matrix(get_matrix(op)) ≈ inv(Matrix(M)) rtol = 1.0e-10
+        r = zeros(ndofs(dh))
+        evaluate!(op, r, u, nothing)
+        @test r ≈ M \ u rtol = 1.0e-10
+    end
+
+    @testset "a diagonal inner inverts entry-wise" begin
+        D  = get_matrix(rf_assembled(rf_seq(), RowSumLumped(rf_mass()), dh))
+        op = rf_assembled(rf_seq(), ElementInverse(RowSumLumped(rf_mass())), dh)
+        @test get_matrix(op) isa Diagonal
+        @test get_matrix(op) ≈ inv(D) rtol = 1.0e-12
+    end
+
+    @testset "the ELEMENT level applies the inverse blocks — $label" for
+            (label, strategy) in ("SequentialCPUDevice" => rf_element_arm(), "KA.CPU" => rf_ka_element_arm())
+        op = setup_operator(strategy, ElementInverse(rf_mass()), dh)
+        @test rf_action(op, u) ≈ M \ u rtol = 1.0e-10
+    end
+
+    @testset "a continuous space is refused" begin
+        cg = scalar_quad_testbed((3, 2)).dh
+        err = @test_throws ArgumentError FerriteOperators.setup_element_cache(
+            ElementInverse(rf_mass()), cg.subdofhandlers[1])
+        @test occursin("DISCONTINUOUS", err.value.msg)
+    end
+
+    @testset "an inner without an element-matrix kernel is refused" begin
+        err = @test_throws ArgumentError FerriteOperators.setup_element_cache(
+            ElementInverse(NoMatrixKernelIntegrator(QuadratureRuleCollection(2), :u)), dh.subdofhandlers[1])
+        @test occursin("JacobianKind{:u}", err.value.msg)
+    end
+
+    @testset "an inner supported beyond the cells is refused" begin
+        err = @test_throws ArgumentError FerriteOperators.setup_element_cache(
+            ElementInverse(GlobalDofMassIntegrator()), dh.subdofhandlers[1])
+        @test occursin("global_dofs", err.value.msg)
+    end
+
+    @testset "a mass that is not positive definite is refused at fill" begin
+        negative = SimpleBilinearMassIntegrator(-RF_ρ, QuadratureRuleCollection(2), :u)
+        op = setup_operator(rf_seq(), ElementInverse(negative), dh)
+        err = @test_throws FerriteOperators.SingularElementMatrixError update_operator!(op, nothing)
+        @test occursin("positive definite", sprint(showerror, err.value))
     end
 end
 
@@ -375,5 +442,23 @@ end
         op = setup_operator(rf_element_arm(), rate, dh;
                             initial_context = TimeIntegrationContext(2.0, 1.0, 1.0))
         @test rf_action(op, u) ≈ at(2.0) rtol = 1.0e-12
+    end
+
+    @testset "the block inverse is filled with the initial pair and refilled" begin
+        dgh   = rf_dg_handler((3, 2))
+        udg   = rf_probe(dgh)
+        Kdg   = get_matrix(rf_assembled(rf_seq(), rf_diffusion(), dgh))
+        dense = TimeScaledMassIntegrator(QuadratureRuleCollection(2), :u)
+        M1 = let op = setup_operator(rf_seq(), dense, dgh)
+            update_operator!(op, nothing, TimeIntegrationContext(1.0, 1.0, 1.0))
+            get_matrix(op)
+        end
+        @test_throws ArgumentError setup_operator(rf_seq(), RateFormIntegrator(rf_diffusion(), dense), dgh)
+        op = setup_operator(rf_seq(), RateFormIntegrator(rf_diffusion(), dense), dgh;
+                            initial_context = TimeIntegrationContext(2.0, 1.0, 1.0))
+        update_operator!(op, nothing, TimeIntegrationContext(2.0, 1.0, 1.0))
+        @test rf_action(op, udg) ≈ (2.0 * M1) \ (Kdg * udg) rtol = 1.0e-10
+        update_operator!(op, nothing, TimeIntegrationContext(5.0, 1.0, 1.0))
+        @test rf_action(op, udg) ≈ (5.0 * M1) \ (Kdg * udg) rtol = 1.0e-10
     end
 end

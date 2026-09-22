@@ -106,6 +106,7 @@ include("elements/ad_element.jl")             # ADElementCache: AD as an element
 include("elements/element_assembly.jl")       # ElementAssemblyCache: the ELEMENT storage level of the matrix-free action
 include("elements/block_row_assembly.jl")     # BlockRowAssemblyCache: the ELEMENT level of a two-sided element
 include("elements/row_sum_lumped.jl")         # RowSumLumped: a mass integrator's diagonal, as a decorator
+include("elements/element_inverse.jl")        # ElementInverse: the per-cell inverse of a cell term, as a decorator
 
 include("operators/general.jl")         # Domain descriptors, NullOperator
 include("operators/nonlinear.jl")       # Assembly and action tasks
@@ -207,9 +208,9 @@ export BlockRowAssembly, BlockRowAssemblyCache, CellNeighbourItems, CellNeighbou
 export fill_block_rows!, finalize_action_storage!
 export element_matrix_symmetry, GeneralElementMatrix, SymmetricElementMatrix
 export element_matrix_structure, DenseElementMatrix, DiagonalElementMatrix
-export RowSumLumped
+export RowSumLumped, ElementInverse
 export RateFormIntegrator, BilinearRateFormIntegrator, LinearRateFormIntegrator
-export RateFormFerriteOperator, LinearRateFormFerriteOperator, rate_form_rhs
+export RateFormFerriteOperator, LinearRateFormFerriteOperator, rate_form_rhs, rate_form_inverse_mass
 export AbstractElementMapping, WorkerPerElement, CooperativeElement, LanesPerElement
 export with_element_mapping, element_action_row, element_scatter_length
 export cooperative_lattice_dim, cooperative_group_size, cooperative_scratch_shape

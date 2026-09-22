@@ -737,25 +737,20 @@ _premultiply_inverse_mass!(::BlockRowAssemblyCache, ::Nothing, p, ctx) = nothing
 # `M` is block diagonal by cell over a discontinuous space — the space this
 # store already demands (`_assert_cell_disjoint_dofs`) — so `M⁻¹K` has the SAME
 # block-row sparsity: one cell's inverse mass left-scales that cell's whole row.
-# The inverse is formed once per cell, here, and never at action time. Over a
-# cell-disjoint space the cell's element mass IS its share of the global one, so
-# no assembly precedes the inversion.
+# `ElementInverse` hands the inverse per cell, in the shape the mass's
+# `element_matrix_structure` declares; nothing is inverted at action time.
 function _premultiply_inverse_mass!(cache::BlockRowAssemblyCache, integrator, p, ctx)
     nb = _extent(cache.row_size)
     T  = eltype(cache.K)
     B  = zeros(T, nb, nb)
     C  = zeros(T, nb, nb)
-    foreach_element_mass(integrator, cache.sdh, p, ctx) do slot, cellid, cell, Mₑ
-        _scale_block_row!(cache, slot, Mₑ, B, C)
+    foreach_element_mass(ElementInverse(integrator), cache.sdh, p, ctx) do slot, cellid, cell, Minv
+        _scale_block_row!(cache, slot, Minv, B, C)
     end
     return nothing
 end
 
-# One cell's block row, left-multiplied by its inverse mass. `Mₑ` is the mass's
-# element matrix in whatever shape its `element_matrix_structure` declares: a
-# DIAGONAL is a reciprocal scaling of the row's rows, a DENSE one a block solve.
-function _scale_block_row!(cache::BlockRowAssemblyCache, slot::Int, Mₑ::AbstractMatrix, B, C)
-    Minv = inv(Mₑ)
+function _scale_block_row!(cache::BlockRowAssemblyCache, slot::Int, Minv::AbstractMatrix, B, C)
     for f in _stored_facets(cache, slot)
         # Through contiguous scratch: `K`'s block view is strided, not
         # column-contiguous, so neither operand of the product may be it.
@@ -766,17 +761,10 @@ function _scale_block_row!(cache::BlockRowAssemblyCache, slot::Int, Mₑ::Abstra
     return nothing
 end
 
-function _scale_block_row!(cache::BlockRowAssemblyCache, slot::Int, mₑ::AbstractVector, B, C)
-    for (i, m) in enumerate(mₑ)
-        iszero(m) && throw(ArgumentError(
-            "The lumped mass of cell slot $(slot) has a zero diagonal entry at local dof $(i), so " *
-            "`M⁻¹` does not exist. A rate form checks its mass STRUCTURALLY at setup; a diagonal " *
-            "that vanishes is a property of the mass's VALUES — check the density and the " *
-            "quadrature rule the mass integrator carries."))
-    end
+function _scale_block_row!(cache::BlockRowAssemblyCache, slot::Int, minv::AbstractVector, B, C)
     for f in _stored_facets(cache, slot)
-        for j in axes(cache.K, 4), i in eachindex(mₑ)
-            @inbounds cache.K[slot, 1 + f, i, j] /= mₑ[i]
+        for j in axes(cache.K, 4), i in eachindex(minv)
+            @inbounds cache.K[slot, 1 + f, i, j] *= minv[i]
         end
     end
     return nothing
