@@ -99,9 +99,9 @@ and on a device with no host `InterfaceValues` it refills through the host
 mirror ([`fill_block_rows!`](@ref)) and copies the store down.
 
 FRESHNESS IS THE CALLER'S, exactly as for an assembled operator: the store holds
-what the last such call put there (`setup_operator` makes one with
-`p = nothing`), and an action evaluated after `p` or the context time changed
-reads stale factors until this is called again.
+what the last such call put there (`setup_operator` makes one with its
+`initial_parameters`/`initial_context` pair), and an action evaluated after `p`
+or the context time changed reads stale factors until this is called again.
 """
 function update_operator!(op::MatrixFreeFerriteOperator, p, ctx = nothing)
     storage = op.engine.strategy.form.storage
@@ -156,7 +156,7 @@ function _refill_action_storage!(::BlockRowAssembly, op::MatrixFreeFerriteOperat
     for sc in engine.subdomain_caches
         sc.contributes || continue
         host = _block_row_cache(sc.domain.element)
-        finalize_action_storage!(host, device)
+        finalize_action_storage!(host, device, p, ctx)
         _upload_action_storage!(device, host, sc.device_cache)
     end
     return nothing
@@ -170,22 +170,33 @@ update_linearization!(op::MatrixFreeFerriteOperator, residual::AbstractVector, u
 ####################################
 
 """
-    setup_operator(strategy::AssemblyStrategy{<:MatrixFreeAction}, integrator, dh; …)
+    setup_operator(strategy::AssemblyStrategy{<:MatrixFreeAction}, integrator, dh;
+                   initial_parameters = nothing, initial_context = nothing, …)
 
 Build the [`MatrixFreeFerriteOperator`](@ref) for a bilinear `integrator`: the
 same [`AssemblyEngine`](@ref) every other form builds, with no global matrix.
 
 The form's [`AbstractElementMapping`](@ref) is resolved onto the device here
 ([`with_element_mapping`](@ref)); the `storage` election reaches the element
-caches through [`with_assembly_form`](@ref), and what it keeps is FILLED here
-with `p = nothing`, so an operator is usable the moment it is set up.
+caches through [`with_assembly_form`](@ref), and what it keeps is FILLED here,
+so an operator is usable the moment it is set up.
+
+`initial_parameters`/`initial_context` are the pair that fill runs with —
+`(nothing, nothing)` by default, which is what every element whose factors
+depend on neither needs. They are evaluation DATA and not part of the term: an
+element reading `evaluation_time(ctx)` is what makes them necessary, since the
+setup fill would otherwise reach its kernel with no context at all and fail
+where the first [`update_operator!`](@ref) would have succeeded. The store holds
+what the last fill put there, initial or not
+([`update_operator!`](@ref)'s freshness contract).
 
 Only the bilinear family takes this form: a nonlinear residual is not the
 action of a stored operator, and a linear form has no `u` to act on.
 """
 function setup_operator(strategy::AssemblyStrategy{<:MatrixFreeAction},
         integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler;
-        slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD())
+        slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD(),
+        initial_parameters = nothing, initial_context = nothing)
     :u in slots || throw(ArgumentError(
         "A `MatrixFreeAction` operator acts on the `:u` slot, which the declared slots " *
         "$(Tuple(slots)) do not carry."))
@@ -194,7 +205,7 @@ function setup_operator(strategy::AssemblyStrategy{<:MatrixFreeAction},
     engine = setup_engine(execution, integrator, dh; slots, requests, ad_backend)
     assert_matrix_free_supported(execution.form, engine)
     op = MatrixFreeFerriteOperator(engine, integrator, ndofs(dh))
-    update_operator!(op, nothing, nothing)
+    update_operator!(op, initial_parameters, initial_context)
     return op
 end
 

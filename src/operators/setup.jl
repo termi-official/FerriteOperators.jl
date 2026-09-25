@@ -654,8 +654,46 @@ through [`foreach_patch`](@ref).
 function setup_operator(strategy::AbstractAssemblyStrategy, integrator::AbstractBilinearIntegrator, dh::AbstractDofHandler;
         slots = (:u,), requests::Tuple = (), ad_backend = ForwardDiffAD())
     engine = setup_engine(strategy, integrator, dh; slots, requests, ad_backend)
-    A      = create_system_matrix(engine.strategy, dh)
+    A      = bilinear_operator_matrix(engine, dh)
     return BilinearFerriteOperator(A, engine, integrator)
+end
+
+"""
+    bilinear_operator_matrix(engine, dh)
+
+The MATRIX a bilinear operator holds, which the resolved element caches'
+[`element_matrix_structure`](@ref) decides: the sparse matrix over the declared
+pattern ([`create_system_matrix`](@ref)) for the dense default, and a `Diagonal`
+over the operator's own vector where every element matrix IS its diagonal
+([`DiagonalElementMatrix`](@ref)) — the global matrix is then that vector, and
+the dof scatter fills it exactly as it fills a residual.
+
+One operator holds ONE matrix, so subdomains declaring different structures are
+refused here rather than silently assembling a diagonal term into a sparse
+matrix (or losing the off-diagonal of a dense one).
+"""
+function bilinear_operator_matrix(engine::AssemblyEngine, dh::AbstractDofHandler)
+    structures = [element_matrix_structure(sc.domain.element)
+                  for sc in engine.subdomain_caches if sc.contributes]
+    isempty(structures) && return create_system_matrix(engine.strategy, dh)
+    allequal(map(typeof, structures)) || throw(ArgumentError(
+        "The subdomains of this operator declare " *
+        "$(join(unique(map(s -> string(nameof(typeof(s)), "()"), structures)), " and ")) " *
+        "through `element_matrix_structure`. One operator holds ONE matrix, and a diagonal store " *
+        "has no room for a dense term's off-diagonal — assemble the terms as separate operators."))
+    return _bilinear_operator_matrix(first(structures), engine, dh)
+end
+
+_bilinear_operator_matrix(::DenseElementMatrix, engine, dh) = create_system_matrix(engine.strategy, dh)
+
+function _bilinear_operator_matrix(::DiagonalElementMatrix, engine, dh)
+    spec = operator_specification(engine.strategy.form)
+    spec isa BlockedOperatorSpecification && throw(ArgumentError(
+        "A `DiagonalElementMatrix` operator's matrix IS its diagonal vector, so a " *
+        "`BlockedOperatorSpecification` has no pattern to lay out. Use a " *
+        "`StandardOperatorSpecification`, or assemble the unlumped term this one is the diagonal " *
+        "of."))
+    return Diagonal(create_system_vector(engine.strategy, dh))
 end
 
 # A matrix specification on an operator that holds no matrix is a

@@ -181,7 +181,7 @@ dg_meshes() = (
         @test y1 == y2
     end
 
-    @testset "premultiply_inverse_mass fuses M⁻¹K into the store" begin
+    @testset "a RateFormIntegrator fuses M⁻¹K into the store" begin
         _, dh, order, qorder = first(meshes)
         u = dg_probe(dh)
         reference = reference_sipg(dh, order, qorder) * u
@@ -191,14 +191,23 @@ dg_meshes() = (
             op.A
         end
         fused = M \ reference
+        rate  = RateFormIntegrator(dg_integrator(order), mass)
 
-        @testset "$arm" for (arm, strategy) in
-                dg_arms(BlockRowAssembly(; premultiply_inverse_mass = mass))
-            op = setup_operator(strategy, dg_integrator(order), dh)
+        @testset "$arm" for (arm, strategy) in dg_arms(BlockRowAssembly())
+            op = setup_operator(strategy, rate, dh)
             @test dg_action(op, u) ≈ fused rtol = 1.0e-9
             # The unfused store is a different operator — the fusion is not a
             # no-op the tolerance above would hide.
             @test !isapprox(dg_action(op, u), reference; rtol = 1.0e-3)
+        end
+
+        # The DENSE mass is invertible cell by cell over this discontinuous
+        # space, so the assembled arm block-solves the same rows and lands on
+        # the same operator — a different realization, not a different term.
+        @testset "FullAssembly block-solves the same rows" begin
+            op = setup_operator(dg_assembling_strategy(), rate, dh)
+            update_operator!(op, nothing)
+            @test get_matrix(op) * u ≈ fused rtol = 1.0e-9
         end
     end
 

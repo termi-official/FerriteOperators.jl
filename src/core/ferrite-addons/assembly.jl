@@ -34,6 +34,12 @@ _start_matrix_assemble(::AbstractDevice, strategy, args...; fillzero::Bool) =
 # `ColoredScheduling`.
 _start_matrix_assemble(::AbstractGPUDevice, strategy, args...; fillzero::Bool) =
     start_assemble(args...; fillzero)
+# A DIAGONAL system matrix ([`element_matrix_structure`](@ref)) is its diagonal
+# VECTOR, and a diagonal element matrix is the `ndofs_per_cell` vector the
+# kernel wrote: the dof scatter of the one into the other is exactly
+# `VectorAssembler`'s, atomicity election included.
+Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, D::Diagonal; fillzero::Bool=true) =
+    start_assemble(strategy, D.diag; fillzero)
 function Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, residual::AbstractVector{T}; fillzero::Bool=true) where T
     fillzero && fill!(residual, zero(T))
     return VectorAssembler{T, typeof(residual), dof_scatter_needs_atomic(strategy)}(residual)

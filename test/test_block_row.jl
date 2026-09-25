@@ -209,17 +209,17 @@ action(op, u) = (y = zeros(length(u)); mul!(y, op, u); y)
         @test measure(op, y, u) == 0
     end
 
-    @testset "premultiply_inverse_mass fuses M⁻¹A into the store" begin
+    @testset "a RateFormIntegrator fuses M⁻¹A into the store" begin
         mass = SimpleBilinearMassIntegrator(BLOCK_ROW_ρ, QuadratureRuleCollection(2), :u)
         M = let op = setup_operator(AssemblyStrategy(SequentialCPUDevice()), mass, tb.dh)
             update_operator!(op, nothing)
             op.A
         end
         fused = M \ reference
+        rate  = RateFormIntegrator(tb.integrator, mass)
 
-        @testset "$label" for (label, strategy) in
-                block_row_arms(BlockRowAssembly(; premultiply_inverse_mass = mass))
-            op = setup_operator(strategy, tb.integrator, tb.dh)
+        @testset "$label" for (label, strategy) in block_row_arms(BlockRowAssembly())
+            op = setup_operator(strategy, rate, tb.dh)
             @test action(op, u) ≈ fused rtol = 1.0e-10
             # The unfused store is a different operator — the fusion is not a
             # no-op that the tolerance above would hide.
@@ -227,10 +227,16 @@ action(op, u) = (y = zeros(length(u)); mul!(y, op, u); y)
         end
 
         @testset "a refill re-fuses rather than fusing twice" begin
-            op = setup_operator(sequential_arm(
-                BlockRowAssembly(; premultiply_inverse_mass = mass)), tb.integrator, tb.dh)
+            op = setup_operator(sequential_arm(BlockRowAssembly()), rate, tb.dh)
             update_operator!(op, nothing)
             @test action(op, u) ≈ fused rtol = 1.0e-10
+        end
+
+        # The rhs operator is the fused one: a rate form keeps no unweighted copy.
+        @testset "the rhs operator is reachable and already weighted" begin
+            op = setup_operator(sequential_arm(BlockRowAssembly()), rate, tb.dh)
+            @test action(rate_form_rhs(op), u) ≈ fused rtol = 1.0e-10
+            @test get_dof_handler(op) === tb.dh
         end
     end
 

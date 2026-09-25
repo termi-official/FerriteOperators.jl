@@ -39,9 +39,10 @@ with no atomics and no colouring algorithm, and the action is bitwise repeatable
 The fill is a separate, host-side sweep over the interior facets (there are no
 device `InterfaceValues`), and for a time-independent coefficient it runs ONCE —
 `setup_operator` does it, and `update_operator!` is needed only when `D`, the
-geometry or the penalty changes. `BlockRowAssembly(; premultiply_inverse_mass =
-mass_integrator)` folds `M⁻¹` into the same store at fill time, `M` being block
-diagonal by cell over a discontinuous space.
+geometry or the penalty changes. `RateFormIntegrator(integrator, mass)` under
+this same storage folds `M⁻¹` into that store at fill time, `M` being block
+diagonal by cell over a discontinuous space — the rate form, documented under
+[Operators and entry points](operators.md).
 
 ## Nesting the two-stage protocol
 
