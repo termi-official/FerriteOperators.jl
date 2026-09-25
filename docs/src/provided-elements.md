@@ -6,7 +6,8 @@ CurrentModule = FerriteOperators
 
 The integrators and element caches the package ships: composition over one
 domain, multi-domain routing, the automatic-differentiation decorator, the
-transfer prolongators, the row-sum lumping of a mass ([`RowSumLumped`](@ref)),
+transfer prolongators, the row-sum lumping of a mass ([`RowSumLumped`](@ref))
+and its per-cell inverse ([`ElementInverse`](@ref)),
 and the two decorators that give a bilinear cache the ELEMENT storage level —
 cell-square ([`ElementAssemblyCache`](@ref)) and
 two-sided ([`BlockRowAssemblyCache`](@ref)). Element authors implement the
@@ -23,6 +24,7 @@ Pages = [
     "elements/element_assembly.jl",
     "elements/block_row_assembly.jl",
     "elements/row_sum_lumped.jl",
+    "elements/element_inverse.jl",
 ]
 ```
 

@@ -166,7 +166,7 @@ how `M⁻¹` is realized:
 | mass | space | `M⁻¹` |
 |---|---|---|
 | [`DiagonalElementMatrix`](@ref) | any | reciprocal of the assembled diagonal |
-| [`DenseElementMatrix`](@ref) | discontinuous | per-cell block inverse |
+| [`DenseElementMatrix`](@ref) | discontinuous | the per-cell inverse blocks: [`ElementInverse`](@ref)`(mass)` under [`ElementAssembly`](@ref) |
 | [`DenseElementMatrix`](@ref) | continuous | **refused at setup** |
 
 The refusal is the point: a consistent mass over a continuous space has no
@@ -176,13 +176,16 @@ choice — [`RowSumLumped`](@ref)`(mass)`, whose element matrix is its diagonal,
 or a collocated (spectral) mass element declaring
 [`DiagonalElementMatrix`](@ref) itself.
 
-Where `M⁻¹` is applied follows the storage, and never changes the answer:
+The operator is a composition: the rhs is assembled under the caller's
+strategy exactly as it would be alone, and `M⁻¹` is applied to its result.
+No fused matrix is formed — `get_matrix` of the rate operator is an error;
+[`rate_form_rhs`](@ref) is the rhs's operator and
+[`rate_form_inverse_mass`](@ref) is `M⁻¹`.
 
 | form / storage | realization |
 |---|---|
-| [`FullAssembly`](@ref) | the rhs matrix, rows scaled (diagonal) or block-solved per cell (dense) — same sparsity, no second matrix |
-| [`MatrixFreeAction`](@ref) + [`BlockRowAssembly`](@ref) | fused into the block-row store at fill; no inverse at action time |
-| [`MatrixFreeAction`](@ref) + [`Stored`](@ref)/[`Recompute`](@ref)/[`ElementAssembly`](@ref) | the action, then the reciprocal scaling — a diagonal mass only |
+| [`FullAssembly`](@ref), [`MatrixFreeAction`](@ref) + [`Stored`](@ref)/[`Recompute`](@ref)/[`ElementAssembly`](@ref) | `A·u`, then the reciprocal scaling (diagonal mass) or the block-inverse action (dense mass) |
+| [`MatrixFreeAction`](@ref) + [`BlockRowAssembly`](@ref) | fused into the block-row store at fill; nothing applied at action time |
 | a linear `rhs` | `b ← M⁻¹b` at every fill, under an ASSEMBLING form — a load vector has no action to evaluate, so there is no matrix-free realization |
 
 `M⁻¹` is as fresh as the operator's last fill: [`update_operator!`](@ref)
@@ -211,6 +214,10 @@ matrices.
 inner's element matrix. Lumping per element and then assembling gives exactly
 the global row sum, the scatter being linear — so it needs no global pass, and
 it is the same operator on a continuous space as on a discontinuous one.
+[`ElementInverse`](@ref)`(inner)` is its sibling: the element matrix `Mₑ⁻¹`,
+which assembles to `M⁻¹` on a discontinuous space and is refused on a
+continuous one. A tensor-product element can implement its own factored
+inverse action for it under [`Stored`](@ref)/[`Recompute`](@ref).
 
 ## Slots and rate reconstruction
 

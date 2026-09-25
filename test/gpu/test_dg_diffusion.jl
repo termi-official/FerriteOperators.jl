@@ -107,5 +107,24 @@ end
         z = CUDA.zeros(Float64, ndofs(dh))
         mul!(z, oplumped, CuVector(u))
         @test Array(z) ≈ lumped rtol = 1.0e-8
+
+        # The per-cell inverse blocks as a device operator of their own — the
+        # Cholesky inverse runs inside the fill kernel.
+        element_arm = AssemblyStrategy(MatrixFreeAction(; storage = ElementAssembly()), ColoredScheduling(), device)
+        minv = setup_operator(element_arm, ElementInverse(mass), dh)
+        w = CUDA.zeros(Float64, ndofs(dh))
+        mul!(w, minv, CuVector(u))
+        @test Array(w) ≈ M \ u rtol = 1.0e-8
+
+        # A dense mass composed with a cell-local rhs, both at the ELEMENT level.
+        cell_rhs = SimpleBilinearDiffusionIntegrator(1.3, QuadratureRuleCollection(2), :u)
+        Kcell = let op = setup_operator(AssemblyStrategy(SequentialCPUDevice()), cell_rhs, dh)
+            update_operator!(op, nothing)
+            get_matrix(op)
+        end
+        composed = setup_operator(element_arm, RateFormIntegrator(cell_rhs, mass), dh)
+        fill!(w, 0.0)
+        mul!(w, composed, CuVector(u))
+        @test Array(w) ≈ M \ (Kcell * u) rtol = 1.0e-8
     end
 end

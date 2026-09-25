@@ -202,12 +202,15 @@ dg_meshes() = (
         end
 
         # The DENSE mass is invertible cell by cell over this discontinuous
-        # space, so the assembled arm block-solves the same rows and lands on
-        # the same operator — a different realization, not a different term.
-        @testset "FullAssembly block-solves the same rows" begin
+        # space, so the assembled arm composes the same operator out of the
+        # assembled rhs and the per-cell inverse blocks — a different
+        # realization, not a different term.
+        @testset "FullAssembly composes the assembled rhs with the block inverse" begin
             op = setup_operator(dg_assembling_strategy(), rate, dh)
             update_operator!(op, nothing)
-            @test get_matrix(op) * u ≈ fused rtol = 1.0e-9
+            @test dg_action(op, u) ≈ fused rtol = 1.0e-9
+            @test get_matrix(rate_form_rhs(op)) * u ≈ reference rtol = 1.0e-9
+            @test_throws ArgumentError get_matrix(op)
         end
     end
 

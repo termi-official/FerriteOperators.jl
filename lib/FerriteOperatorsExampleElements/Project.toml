@@ -12,7 +12,7 @@ Tensors = "48a634ad-e948-5137-8d70-aa71f2a747f4"
 
 [compat]
 Ferrite = "1.6"
-FerriteOperators = "0.4"
+FerriteOperators = "0.5"
 LinearAlgebra = "1.10.0"
 Pkg = "1.10"
 StaticArrays = "1.9.13"
