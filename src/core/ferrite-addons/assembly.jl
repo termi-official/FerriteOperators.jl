@@ -27,13 +27,13 @@ Ferrite.start_assemble(strategy::AbstractAssemblyStrategy, J::AbstractMatrix, re
     _start_matrix_assemble(strategy.device, strategy, J, residual; fillzero)
 _start_matrix_assemble(::AbstractDevice, strategy, args...; fillzero::Bool) =
     start_assemble(args..., atomic = dof_scatter_needs_atomic(strategy); fillzero)
-# Ferrite's device `start_assemble` takes no `atomic` keyword and there is
-# nothing to pass: its `DeviceCSCAssembler` accumulates with a plain `+=`.
-# `AbstractThreadSafeAssembler` means "safe to alias across workers GIVEN a
-# valid coloring", NOT race-free — which is why a GPU device requires
-# `ColoredScheduling`.
-_start_matrix_assemble(::AbstractGPUDevice, strategy, args...; fillzero::Bool) =
-    start_assemble(args...; fillzero)
+# Ferrite's device `start_assemble` takes no `atomic` keyword: its
+# `DeviceCSCAssembler` accumulates with a plain `+=`, which is race-free only
+# under a coloring. An uncolored sweep scatters into the same targets atomically.
+function _start_matrix_assemble(::AbstractGPUDevice, strategy, args...; fillzero::Bool)
+    assembler = start_assemble(args...; fillzero)
+    return dof_scatter_needs_atomic(strategy) ? AtomicCSCAssembler(assembler.K, assembler.f) : assembler
+end
 # A DIAGONAL system matrix ([`element_matrix_structure`](@ref)) is its diagonal
 # VECTOR, and a diagonal element matrix is the `ndofs_per_cell` vector the
 # kernel wrote: the dof scatter of the one into the other is exactly
@@ -73,6 +73,49 @@ end
 @inline function Ferrite.assemble!(assembler::VectorAssembler{<:Any, <:Any, atomic},
         dof::Integer, value::Number) where {atomic}
     @inbounds _accum!(Val(atomic), assembler.f, value, dof)
+    return
+end
+
+# A CSC matrix, and optionally a vector, scattered into atomically: the device
+# counterpart of Ferrite's `atomic = true` CSC assembler. Like `VectorAssembler`
+# it carries no per-worker scratch and is shared by all workers.
+struct AtomicCSCAssembler{T, KT <: AbstractMatrix{T}, FT <: AbstractVector{T}} <: Ferrite.AbstractAssembler{T}
+    K::KT
+    f::FT
+end
+Ferrite.get_substruct(a::AtomicCSCAssembler, worker) = a
+
+@inline function Ferrite.assemble!(A::AtomicCSCAssembler, dofs::AbstractVector{<:Integer}, Ke::AbstractMatrix, fe::AbstractVector)
+    assemble!(A, dofs, Ke)
+    assemble!(A, dofs, fe)
+    return
+end
+
+@inline function Ferrite.assemble!(A::AtomicCSCAssembler{T}, dofs::AbstractVector{<:Integer}, fe::AbstractVector) where {T}
+    for i in eachindex(dofs)
+        @inbounds _accum!(Val(true), A.f, T(fe[i]), dofs[i])
+    end
+    return
+end
+
+@inline function Ferrite.assemble!(A::AtomicCSCAssembler{T}, dofs::AbstractVector{<:Integer}, Ke::AbstractMatrix) where {T}
+    colptr = getcolptr(A.K)
+    rowval = rowvals(A.K)
+    nzval  = nonzeros(A.K)
+    for (j, col) in enumerate(dofs)
+        for (i, row) in enumerate(dofs)
+            val = Ke[i, j]
+            iszero(val) && continue
+            # Linear search over the column's sorted rows.
+            idx = zero(eltype(colptr))
+            for k in colptr[col]:(colptr[col + 1] - 1)
+                rowval[k] == row && (idx = k; break)
+                rowval[k] > row && break
+            end
+            iszero(idx) && Ferrite._missing_sparsity_pattern_error(row, col)
+            @inbounds _accum!(Val(true), nzval, T(val), idx)
+        end
+    end
     return
 end
 # Sensitivity scatter targets. Deliberately not Ferrite.AbstractAssembler:

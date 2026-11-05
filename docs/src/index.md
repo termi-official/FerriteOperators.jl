@@ -108,9 +108,10 @@ the scatter converts. Build the grid with `Float32` coordinates too: a
 mapping computes in. The vector and the assembled matrix both stay on the
 device; a sweep transfers nothing.
 
-What the device covers is CELL items under [`ColoredScheduling`](@ref), which
-is REQUIRED: Ferrite's device matrix assembler accumulates without atomics.
-Everything outside that slice — other schedulings, other item families,
+What the device covers is CELL items, under either scheduling.
+[`SequentialScheduling`](@ref) scatters atomically and needs no coloring, but
+its accumulation order varies between runs; [`ColoredScheduling`](@ref) repeats
+bit for bit. Everything outside that slice — other item families,
 condensed state, nonlinear integrators, blocked or constrained specifications,
 and so on — is rejected at setup with a message naming the limitation;
 [`KernelAbstractionsDevice`](@ref) lists them.
