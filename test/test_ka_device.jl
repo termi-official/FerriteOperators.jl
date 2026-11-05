@@ -14,7 +14,7 @@ import KernelAbstractions as KA
 ka_device(::Type{T} = Float64, ::Type{I} = Int) where {T, I} =
     KernelAbstractionsDevice(KA.CPU(); value_type = T, index_type = I,
                              items_per_worker = 2, max_workgroup_size = 8)
-ka_strategy(args...) = AssemblyStrategy(ka_device(args...); scheduling = ColoredScheduling())
+ka_strategy(args...; scheduling = ColoredScheduling()) = AssemblyStrategy(ka_device(args...); scheduling)
 
 function quad_testbed(::Type{T} = Float64; dims = (6, 5)) where {T}
     grid = generate_grid(Quadrilateral, dims,
@@ -36,9 +36,10 @@ end
 
 @testset "KernelAbstractionsDevice" begin
     # Both elections are `T` here.
-    @testset "matches the sequential result ($name, $T, $label)" for
+    @testset "matches the sequential result ($name, $T, $label, $(nameof(typeof(scheduling))))" for
             (label, testbed) in (("quad", quad_testbed), ("hex", hex_testbed)),
             T in (Float64, Float32),
+            scheduling in (ColoredScheduling(), SequentialScheduling()),
             (name, build) in (("diffusion", q -> SimpleBilinearDiffusionIntegrator(2.5, q, :u)),
                               ("mass",      q -> SimpleBilinearMassIntegrator(1.7, q, :u)),
                               ("linear",    q -> SimpleLinearIntegrator(3.1, q, :u)))
@@ -53,28 +54,34 @@ end
 
         reference = setup_operator(AssemblyStrategy(SequentialCPUDevice{T, I}()), integrator, dh)
         update_operator!(reference, nothing)
-        device = setup_operator(ka_strategy(T, I), integrator, dh)
+        device = setup_operator(ka_strategy(T, I; scheduling), integrator, dh)
         update_operator!(device, nothing)
 
         target = FerriteOperators.operator_payload(device)
         @test eltype(target) === T
         @test target ≈ FerriteOperators.operator_payload(reference) rtol = rtol
 
-        # Coloring fixes the accumulation order, so a repeat is exact.
+        # Coloring fixes the accumulation order, so a repeat is exact; the
+        # atomic scatter does not, so it is compared within a tolerance.
         first_run = copy(target)
         update_operator!(device, nothing)
-        @test first_run == FerriteOperators.operator_payload(device)
+        if scheduling isa ColoredScheduling
+            @test first_run == FerriteOperators.operator_payload(device)
+        else
+            @test first_run ≈ FerriteOperators.operator_payload(device) rtol = rtol
+        end
     end
 
     @testset "mixed local and global precision" begin
         # The element evaluates in its collection's scalar, the device
         # accumulates in its `value_type`, and the scatter converts entry-wise.
         dh = quad_testbed(Float64)
-        for (Te, Tg, Ig) in ((Float64, Float32, Int32), (Float32, Float64, Int))
+        for (Te, Tg, Ig) in ((Float64, Float32, Int32), (Float32, Float64, Int)),
+                scheduling in (ColoredScheduling(), SequentialScheduling())
             integrator = SimpleBilinearDiffusionIntegrator(2.5, QuadratureRuleCollection(Te, 2), :u)
             reference  = setup_operator(AssemblyStrategy(SequentialCPUDevice{Tg, Ig}()), integrator, dh)
             update_operator!(reference, nothing)
-            op = setup_operator(ka_strategy(Tg, Ig), integrator, dh)
+            op = setup_operator(ka_strategy(Tg, Ig; scheduling), integrator, dh)
             update_operator!(op, nothing)
 
             payload = FerriteOperators.operator_payload(op)
@@ -168,13 +175,6 @@ struct FakeGPUBackend end
     qrc = QuadratureRuleCollection(2)
     dh  = quad_testbed()
     bilinear = SimpleBilinearDiffusionIntegrator(1.0, qrc, :u)
-
-    @testset "requires ColoredScheduling" begin
-        strategy = AssemblyStrategy(ka_device())   # SequentialScheduling by default
-        err = @test_throws ArgumentError setup_operator(strategy, bilinear, dh)
-        @test occursin("ColoredScheduling", err.value.msg)
-        @test occursin("race", err.value.msg)
-    end
 
     @testset "rejects a blocked specification" begin
         strategy = AssemblyStrategy(

@@ -52,9 +52,9 @@ end
 cuda_device() = KernelAbstractionsDevice(CUDABackend(); value_type = Tv, index_type = Ti,
                                          items_per_worker = 2, max_workgroup_size = 256)
 
-function cuda_strategy(; matrix_type = nothing)
+function cuda_strategy(; matrix_type = nothing, scheduling = ColoredScheduling())
     return AssemblyStrategy(FullAssembly(StandardOperatorSpecification(; matrix_type)),
-                            ColoredScheduling(), cuda_device())
+                            scheduling, cuda_device())
 end
 
 sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
@@ -64,14 +64,15 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
     # The two precision elections agree here.
     qrc = QuadratureRuleCollection(Tv, 2)
 
-    @testset "bilinear $(nameof(typeof(integrator)))" for integrator in (
-            SimpleBilinearDiffusionIntegrator(2.5, qrc, :u),
-            SimpleBilinearMassIntegrator(1.7, qrc, :u))
+    @testset "bilinear $(nameof(typeof(integrator))), $(nameof(typeof(scheduling)))" for
+            integrator in (SimpleBilinearDiffusionIntegrator(2.5, qrc, :u),
+                           SimpleBilinearMassIntegrator(1.7, qrc, :u)),
+            scheduling in (ColoredScheduling(), SequentialScheduling())
 
         reference = setup_operator(sequential_strategy(), integrator, dh)
         update_operator!(reference, nothing)
 
-        strategy = cuda_strategy(; matrix_type = CuSparseMatrixCSC{Tv, Ti})
+        strategy = cuda_strategy(; matrix_type = CuSparseMatrixCSC{Tv, Ti}, scheduling)
         device   = setup_operator(strategy, integrator, dh)
         @test device.A isa CuSparseMatrixCSC
         update_operator!(device, nothing)
@@ -79,26 +80,31 @@ sequential_strategy() = AssemblyStrategy(SequentialCPUDevice{Tv, Ti}())
         @test SparseMatrixCSC(device.A) ≈ reference.A rtol = 1.0f-4
 
         # Coloring fixes the accumulation order, so a repeat is exact.
-        first_run = Array(nonzeros(device.A))
-        update_operator!(device, nothing)
-        @test first_run == Array(nonzeros(device.A))
+        if scheduling isa ColoredScheduling
+            first_run = Array(nonzeros(device.A))
+            update_operator!(device, nothing)
+            @test first_run == Array(nonzeros(device.A))
+        end
     end
 
-    @testset "linear form" begin
+    @testset "linear form, $(nameof(typeof(scheduling)))" for
+            scheduling in (ColoredScheduling(), SequentialScheduling())
         integrator = SimpleLinearIntegrator(3.1, qrc, :u)
 
         reference = setup_operator(sequential_strategy(), integrator, dh)
         update_operator!(reference, nothing)
 
-        device = setup_operator(cuda_strategy(), integrator, dh)
+        device = setup_operator(cuda_strategy(; scheduling), integrator, dh)
         @test device.b isa CuVector{Tv}
         update_operator!(device, nothing)
 
         @test Array(device.b) ≈ reference.b rtol = 1.0f-4
 
-        first_run = Array(device.b)
-        update_operator!(device, nothing)
-        @test first_run == Array(device.b)
+        if scheduling isa ColoredScheduling
+            first_run = Array(device.b)
+            update_operator!(device, nothing)
+            @test first_run == Array(device.b)
+        end
     end
 
     @testset "per-sweep host allocations stay O(1)" begin
