@@ -6,7 +6,8 @@ import Adapt: Adapt, adapt
 import KernelAbstractions as KA
 import KernelAbstractions: @kernel, @index, @Const, @localmem, @synchronize, @uniform, @groupsize
 
-import FerriteOperators: KernelAbstractionsDevice, AssemblyWorkspace, AssemblyTask, VectorAssembler
+import FerriteOperators: KernelAbstractionsDevice, AssemblyWorkspace, AssemblyTask, VectorAssembler,
+    AtomicCSCAssembler
 import FerriteOperators: CooperativeElement, WorkerPerElement, LanesPerElement, QVector,
     MatrixFreeActionKind
 import FerriteOperators: device_worker_view, launch_geometry, lane_launch_geometry, n_workers,
@@ -43,6 +44,7 @@ Adapt.@adapt_structure QVector
 # `Val` stride of the arithmetic source rides `adapt`'s identity fallback.
 Adapt.@adapt_structure CellNeighbourCursor
 Adapt.@adapt_structure ContiguousCellDofs
+Adapt.@adapt_structure AtomicCSCAssembler
 
 # The `atomic` parameter is a compile-time constant, not a field, so the
 # generated rule's positional constructor would drop it.
@@ -237,8 +239,9 @@ _batch_iterator(device::KernelAbstractionsDevice{<:Any, <:Any, <:Any, Cooperativ
     end
 end
 
-# `VectorAssembler` owns no per-worker scratch and is shared across workers.
-_worker_assemblers(backend, assembler::VectorAssembler, n) = Ferrite.SoAContainer(assembler, n)
+# These assemblers own no per-worker scratch and are shared across workers.
+_worker_assemblers(backend, assembler::Union{VectorAssembler, AtomicCSCAssembler}, n) =
+    Ferrite.SoAContainer(assembler, n)
 _worker_assemblers(backend, assembler, n) = Ferrite.distribute_to_workers(backend, assembler, n)
 _worker_assemblers(backend, ::Nothing, n) = nothing
 @inline _worker_assembler(assemblers, worker) = assemblers[worker]

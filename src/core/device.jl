@@ -428,9 +428,9 @@ sized by the worker count) against that parallelism.
 [`MatrixFreeAction`](@ref) one elects between that and
 [`CooperativeElement`](@ref).
 
-An ASSEMBLING sweep requires [`ColoredScheduling`](@ref) and covers CELL items
-only. What is rejected at setup, each with a message naming the limitation:
-[`SequentialScheduling`](@ref) under [`FullAssembly`](@ref), facet items,
+An ASSEMBLING sweep covers CELL items only, under [`ColoredScheduling`](@ref)
+or the atomic scatter of [`SequentialScheduling`](@ref). What is rejected at
+setup, each with a message naming the limitation: facet items,
 algebraic items, patch and transfer operators, condensed internal state,
 nonlinear (AD-decorated) integrators, a
 [`BlockedOperatorSpecification`](@ref), constraints declared on the operator

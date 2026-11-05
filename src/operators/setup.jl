@@ -288,9 +288,8 @@ function _reject_unsupported_global_dof_strategy(strategy::AssemblyStrategy, dec
         "back as zero. Assemble this operator under `FullAssembly`."))
     strategy.device isa AbstractGPUDevice && throw(ArgumentError(
         "A subdomain declaring `$declaration` cannot be assembled on " *
-        "$(nameof(typeof(strategy.device))): a GPU device assembles under `ColoredScheduling` " *
-        "only, and a dof shared by every item of a subdomain admits no coloring. Assemble this " *
-        "operator on a CPU device."))
+        "$(nameof(typeof(strategy.device))): the device sweep does not support declared global " *
+        "dofs. Assemble this operator on a CPU device."))
     strategy.scheduling isa ColoredScheduling && throw(ArgumentError(
         "A subdomain declaring `$declaration` cannot be assembled under `ColoredScheduling`: " *
         "coloring makes a scatter race-free by giving no two items of a color a shared dof, " *
@@ -335,17 +334,6 @@ assert_device_supported(::AbstractDevice, strategy, integrator, dh) = nothing
 
 function assert_device_supported(device::AbstractGPUDevice, strategy::AssemblyStrategy, integrator, dh)
     dev = nameof(typeof(device))
-    # The coloring requirement is the MATRIX assembler's: Ferrite's device one
-    # accumulates with a plain `+=`, so an uncolored device sweep into a matrix
-    # is a silent data race. A form that assembles no matrix scatters through
-    # this package's own `VectorAssembler`, which IS atomic-capable on device
-    # and takes either scheduling.
-    (operator_specification(strategy.form) === nothing || strategy.scheduling isa ColoredScheduling) || throw(ArgumentError(
-        "$dev requires `ColoredScheduling` for an assembling form (got " *
-        "$(nameof(typeof(strategy.scheduling)))). Ferrite's device matrix assembler accumulates " *
-        "with a plain `+=` — its `AbstractThreadSafeAssembler` supertype means \"safe to alias " *
-        "across workers given a valid coloring\", not race-free — so an uncolored device sweep " *
-        "is a silent data race. Pass `scheduling = ColoredScheduling()`."))
     (operator_specification(strategy.form) === nothing || element_mapping(device) isa WorkerPerElement) ||
         throw(ArgumentError(
             "$dev carries `$(nameof(typeof(element_mapping(device))))`, which executes the " *
